@@ -1,0 +1,498 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /INIT:INIPFX/
+TITLE	LOAD,<RSTS/E INIT - LOAD OPTION>,0A,10-MAY-91,ABC/MHB/MND/FEK
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR INILOA
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	MND/JHC  07-JAN-83  Modified to work with V8.0 bootstraps
+;  002  JHC  16-FEB-83	Added FILL option to this module
+;  003  JHC  03-Mar-83  bug fix to handle DCNs correctly.
+;  004	FEK  07-Dec-85	Add Speed for MXV/DLV11E/F's
+;
+;-
+
+.SBTTL	MACROS FOR LOAD
+
+.MACRO	I.MESS
+	TMPORG	LOATXT
+.NLIST	BEX
+.ENDM	I.MESS
+
+.EQUATE	UNAM,2			;OFFSET TO FILE NAME
+.EQUATE	USTAT,10		;OFFSET TO STATUS BYTE
+
+.EQUATE	US.UFD,100		;STATUS BYTE - THIS IS A UFD
+.EQUATE	US.DEL,200		;STATUS BYTE - MARKED FOR DELETE
+
+.EQUATE	UAR,16			;OFFSET TO RETRIEVAL ENTRY POINTER
+
+.SBTTL	ORDERING THE CSECTS
+
+	DEFORG	LOA
+	DEFORG	LOACTL
+	DEFORG	LOATXT
+	DEFORG	FILL
+	ORG	LOA
+
+.SBTTL	LOAD OPTION DRIVER
+
+.ENABL	LSB
+
+LOAD::	CALLX	CKOPT		;CHECK IF THIS OPTION IS LEGAL
+	TSTB	(R1)		;IS THERE A PRESET ANSWER?
+	SEC			;(C=1 IF SO)
+	BNE	50$		;YES, GO SET FLAG
+	CALL	SAVSCN		;CALL SCANNER TO FIND ANY SAV IMAGE
+	BCC	20$		;THERE IS AT LEAST ONE
+	MESSAG	<"Sorry, but there are no programs to load.">
+10$:	EXIT
+
+20$:	ASR	(SP)+		;CAME IN WITH PRESET? (REMOVE SAVSCN)
+	BCS	10$		;YES, GET OUT AFTER ERROR MESSAGE
+	MESSAG	<<177>"Load program: ">
+30$:	CALLX	GETIN		;GET AN ANSWER
+	CMPB	(R1),#'Z-100	;^Z ?
+	BEQ	10$		;YES, GET OUT
+	CMPB	(R1),#'?	;MAYBE HE'S CONFUSED?
+	BEQ	40$		;YES, GO HELP HIM
+	TSTB	(R1)		;DID HE TYPE <CR> ?
+	BNE	50$		;NO, GO TRY TO PARSE A NAME (C=0)
+40$:	CALL	DIRSAV		;YES, GIVE HIM A DIRECTORY OF SAV IMAGES
+	BR	30$		;AND RETRY
+
+50$:	ROL	-(SP)		;SET ODD/EVEN WORD ON STACK
+	CALLX	RADINP		;CONVERT THE REPLY TO RADIX 50
+	TSTB	(R1)		;IS IT OK?
+	BEQ	60$		;YES
+	MESSAG	<"Illegal program name."<200>>
+	BR	20$		;TRY AGAIN
+
+60$:	MOV	#FQ...+FQNAM1,R1 ;POINT TO FIRQB FOR LOOKING UP FILE
+	MOV	R0,(R1)+	;INSERT FILE NAME
+	MOV	R3,(R1)+	;BOTH WORDS
+	MOV	#^RSAV,(R1)+	;EXTENSION IS .SAV
+	CALL	LOKRB0		;LOOK UP, READ BLK 0, GET SIZE & START
+	BCC	70$		;NO ERROR, WE GOT IT
+	MESSAG	<"Program not found."<200>>
+	BR	20$		;TRY AGAIN
+
+GLOBAL	<FQ...>
+
+70$:	BIT	#1,R3		;DID HE GIVE AN ODD START ADDRESS?
+	BNE	80$		;YES, HE'S IN TROUBLE
+	CMP	R3,R4		;NO, BUT DOES HE START HIGHER THAN LOAD?
+	BLO	90$		;HE'S OK
+80$:	CALLX	ASKER,R5	;GET A REAL START ADDRESS
+	 GENTXT	<"Odd transfer address? ">
+	 GENTXT
+	  .ASCII "The transfer address of the specified program is odd"<200>
+	  .ASCII "Please enter a new (even) transfer address or type"<200>
+	  .ASCIZ "CONTROL/C to abort the load.  "<177>"New transfer address? "
+	 UNORG
+	CALLX	OCTINP		;DECODE THE ANSWER
+	BNE	80$		;NOT AN OCTAL NUMBER
+	MOV	R0,R3		;COPY IS AS NEW TRANSFER ADDRESS
+	BR	70$		;AND CHECK THE NEW ONE
+
+90$:	MOV	SYSNDX,R0	;GET THE CURRENT DISK INDEX
+	MOV	SYSUNT,R1	;Get unit number
+	ASL	R1		; times 2
+	ADD	DSKMID(R0),R1	;Point to massbus ID value
+	MOV	(R1),MSBSID	;Save it for the bootstrap setup code
+	CLC			;Clear for rotate
+	ROR	R4		;Convert top limit to word count
+	MOV	R3,XFERAD	;Tell boot builder the transfer address
+	CALL	LOABOT, R5	;get bootstrap together for load
+	BEQ	100$		;No bootstrap, error
+	CALL	BLDLOA		;Construct the loader for this program
+	MOV	#B.DATE, R1	;set up R1 for entry to bootstrap
+	CLR	@LKSCSR		;TURN OFF L CLOCK IF ITS RUNNING
+	CLR	@MMUSR0		;turn off memory management
+	MOV	BEGLOD, PC	;and jump into the bootstrap mainline....
+100$:	ERF	<"Bootstrap not found">
+
+.DSABL	LSB
+
+GLOBAL	<FQ...,DCS,MSBSID,LKSCSR,XFERAD>
+
+.SBTTL	Construct special bootstrap for Loader
+
+
+;+
+; Entry:
+;	R0 =	Device index (IDX$xx) of device to boot
+;
+; Assumptions:
+;	XXBPTR = Address (doubleword) of boot pointer table in INIT
+;	MSBSID = Massbus ID of device (if needed)
+;	DCS    = Clustersize of device
+;	XFERAD = Transfer address
+;	INIWRD = A routine to return a word from INIT on the stack
+;		 given an address in R2,R3
+; Exit:
+;	R0 ->	End of area used
+;		0 if no bootstrap found
+;-
+
+.EQUATE B.END, B.BOOT+1000	;set B.END to 160000
+
+.ENABL 	LSB
+
+LOABOT:	REGSAV			;Save all the registers
+	MOV	XXBPTR,R3	;Get table pointer
+	MOV	XXBPTR+2,R2	; and high order
+	MOV	R0,R4		;Copy the device index
+	SXT	R1		;For double precision work
+	ADD	R0,R3		;Form address of table entry for this boot
+	ADC	R2		; double precision
+	ADD	R1,R2		;  and high order
+	CALLX	INIWRD		;Get that data
+	MOV	(SP)+,R0	;Get the offset from here to the boot
+	BEQ	20$		;There is no boot, get out of here
+	SXT	R1		;For double precision
+	ADD	R0,R3		;Form the actual address
+	ADC	R2		; again double precision
+	ADD	R1,R2		;  ...
+	MOV	(R5),R0		;Get the pointer again
+	ADD	#B.TWC-B.BOOT,R3 ;Point to boot size
+	ADC	R2
+	CALLX	INIWRD		;Get the size
+	MOV	(SP)+,R0	;Get the size in bytes
+	ADD	#B.BOOT, R0	;and make it actual address for buffer
+	MOV	R0, BEGLOD	;save this address to BEGin LOaD boot code
+	CALLX	IMOVER,R5, <BODVR,DSKIOE> ;put in mainline with no relocation
+	MOV	R0, EOBOOT	;save actual end of bootstrap code (cluster limit)
+	MOV	#B.END, R1	;get the end of the boot block
+	SUB	R0, R1		;and difference to end of bootstrap
+	ASR	R1		;in words....
+10$:	CLR	(R0)+		;and clear it, one word
+	SOB	R1, 10$		;at a time....
+	MOV	XFERAD, @#B.XFER ;Set tranfer address
+	CLR	@#B.MEML	;Ensure initial load address is correct
+	CLR	@#B.MEMH	; all of it
+	REGRES			;Restore registers
+20$:	TST	(R5)+		;Bump the return address
+	RETURN	R5		; and exit
+
+.DSABL LSB
+
+GLOBAL	<BODVR,DSKIOE,XXBPTR,MSBSID,DCS,XFERAD>
+
+.SBTTL	Construct the bootstrap loader
+
+.ENABL	LSB
+
+BLDLOA:	
+	MOV	R0,-(SP)	;Save top of boot pointer
+
+; INSERT DEVICE CLUSTERS FOR THE .SAV file
+
+	MOV	#FQ...+FQFCB,R1	;R1 points to the .SAV's FCB
+	CALLX	RNB		;READ NAME ENTRY FOR the .SAV
+	MOV	UAR(R5),-(SP)	;SAVE RETRIEVAL ENTRY POINTER
+	BNE	20$		;IF ANY
+	ERF	<"Program is empty">
+
+20$:	MOV	UAA(R5),R3	;POINT TO ACCOUNTING ENTRY
+	CALLX	RDB		;READ THE ENTRY
+	MOV	UCLUS(R5),R5	;GET FILE CLUSTER SIZE
+	MOV	R5,FCS		;Save that
+	MOV	R4,R2		;copy the load limit in words <calc. earlier>
+	CLR	R4		;CLEAR MSB FOR DIVIDE
+	DIV	DCS,R4		;R4 = DEVICE CLUSTERS PER FILE CLUSTER
+	MOV	R4,FCLRAT	;Save file cluster ratio
+	MOV	(SP)+,R3	;RESTORE POINTER TO FIRST RETRIEVAL ENTRY
+	MOV	R2,-(SP)	;Save that
+	MOV	R2,R4		;Copy size
+	ADD	#377,R4		;Round up
+	CLRB	R4		; to a block multiple
+	SWAB	R4		;Now compute size in blocks
+	CLR	R1		;Initialize # device clusters in segment
+	CLR	-(SP)		; and starting DCN
+	MOV	#B.DATE, R2	;Point to block map area
+30$:	CALLX	RDB		;R5 -> RETRIEVAL ENTRY
+	TST	(R5)+		;SKIP LINK TO NEXT RETRIEVAL ENTRY
+40$:	MOV	(R5)+,R0	;COPY A FILE CLUSTER
+	BEQ	60$		;ZERO MARKS END OF LIST
+	SUB	R1,R0		;See if this one is adjacent
+	CMP	R0,(SP)		;Well?
+	BEQ	50$		;Yes, add it to current chunk
+	MUL	DCS,R1		;Get blocks from DCNs			;003
+	CALLX	EXPAND		;Expand this chunk out into the block map
+	MOV	-2(R5),-(SP)	;Set starting DCN of next chunk
+	CLR	R1		; and initialize size
+50$:	ADD	FCLRAT,R1	;Increase the size of this chunk
+	SUB	FCS,R4		;And another file cluster bites the dust
+	BLOS	60$		;Branch if we're done
+	BIT	R5,#17		;END OF THIS RETRIEVAL ENTRY?
+	BNE	40$		;NO, REPEAT
+	MOV	-20(R5),R3	;YES, GET LINK TO NEXT
+	BIC	#17,R3		;CLEAR FLAG BITS
+	BNE	30$		;LOOP IF NOT END OF LIST
+
+60$:	MUL	DCS,R1		;convert DCN count to blocks.
+	ADD	R4,R1		;Cut last chunk to only as much as needed
+	BEQ	70$		;Nothing needed, skip ahead
+	CALLX	EXPAND		;Expand the last chunk
+	MOV	(SP)+,R0	;Get actual word count to use
+	BIC	#^C<377>,R0	;Isolate last partial block's count
+	BEQ	70$		;Was a full block, skip
+	MOVB	R0,4(R2)	;Update last word count
+	DECB	5(R2)		; one less block
+70$:	CLR	-(R2)		;Store the end marker
+	TST	(SP)+		;clean up the stack to exit
+	CMP	R2,EOBOOT	;Does the boot fit?
+	BLO	90$		;No, error
+	RETURN
+
+
+90$:	ERF	<"Program is too fragmented to load with bootstrap">
+
+
+.DSABL	LSB
+
+	TMPORG	LOACTL
+
+EOBOOT:	.BLKW			;end of bootstrap code, for limiting cluster map
+BEGLOD:	.BLKW			;start address or bootstrap for program to load
+FCS:	.BLKW			;Clustersize of file being hooked
+FCLRAT:	.BLKW			;FCS/DCS for file
+
+	UNORG
+
+GLOBAL	<SYSNDX,SYSUNT,XFERAD,DSKMID,MSBSID,BACKUP,SATBUF,FCINIT,DCS,I.DSQ>
+
+
+.SBTTL	PRINT DIRECTORY OF [0,1]SY0:*.SAV
+
+.ENABL	LSB
+
+DIRSAV:	MESSAG
+	 .ASCII	"  Directory of loadable programs"<200><12>
+	 .ASCIZ	" Name"<11>"Size"<11>"Transfer"<200>
+	 UNORG
+	CLR	-(SP)		;DIRECTORY INDEX
+10$:	MOV	(SP)+,R4	;GET DIRECTORY INDEX
+	INC	R4		;ONE DEEPER NEXT TIME
+	CALL	SAVSCN		;SCAN THE DIRECTORY
+	MOV	R4,R1		;COPY INDEX
+20$:	DEC	R1		;FAR ENOUGH ALONG YET?
+	BEQ	30$		;YUP
+	CALL	@(SP)+		;NO, LOOK FURTHER
+	BCC	20$		;IF THERE ARE ANY
+	MESSAG	<<177><12>"Please enter name of program to load: ">
+	RETURN			;DONE WITH DIRECTORY
+
+30$:	CMP	(SP)+,(R5)+	;BUMP R5 TO NAME, DUMP COROUTINE CALL
+	MOV	R4,-(SP)	;SAVE INDEX FOR NEXT TIME
+	MOV	#FQ...+FQNAM1,R0 ;R0 -> NAME IN FIRQB FOR LOOKUP
+	MOV	R0,R2		;COPY FOR LATER
+	MOV	(R5)+,(R0)+	;MOVE PROGRAM NAME INTO FIRQB
+	MOV	(R5)+,(R0)+
+	MOV	(R5)+,(R0)+	;^RSAV
+	CALL	LOKRB0		;DO A LOOKUP & READ BLOCK 0
+	BVS	10$		;NULL FILES ARE IGNORED
+	BCC	40$		;GOT IT
+	ERF	<"Directory error - file not found">
+
+40$:	MOV	(R2)+,R0	;GET FILE NAME
+	CALLX	RADZER		;PRINT 1ST WORD
+	MOV	(R2)+,R0	;GET THE REST
+	CALLX	RADZER
+	TYPE	<11>		;TYPE A TAB
+	MOV	R4,R0		;START ADDRESS
+	CALLX	OCTWRD		;TYPE AN OCTAL WORD
+	TYPE	<11>
+	MOV	R3,R0		;PROGRAM SIZE
+	CALLX	OCTWRD
+	CALLX	TYPECR		;<CR><LF>
+	BR	10$		;AND DO MORE
+
+.DSABL	LSB
+
+GLOBAL	<FQ...>
+
+.SBTTL	COROUTINE TO SCAN [0,1] FOR .SAV FILES
+
+.ENABL	LSB
+
+SAVSCN:	MOV	#FQ...+FQPPN,R0	;POINT TO PPN [0,1]
+	CALLX	RUF		;READ THE [0,1] UFD
+	BCS	30$		;THIS IS A REALLY BAD DISK
+	CLR	R3		;START AT LINK 0
+10$:	CALLX	RDB		;READ NEXT NAME ENTRY
+	CMP	UNAM+4(R5),#^RSAV ;IS IT A SAV FILE?
+	BNE	20$		;NO
+	BITB	#US.DEL!US.UFD,USTAT(R5) ;YES, DIRECTORY OR MARKED DEL?
+	BNE	20$		;YUP, SKIP IT
+	CALL	@(SP)+		;IT'S A FILE, DO A COROUTINE CALL
+20$:	MOV	(R5),R3		;GET LINK TO NEXT NAME ENTRY
+	BNE	10$		;IF ANY
+	SEC			;TELL HIM NO MORE
+	RETURN			;AND GO BACK WITH CLEAN STACK
+
+30$:	ERF	<"[0,1] directory not found">
+
+.DSABL	LSB
+
+GLOBAL	<FQ...>
+
+.SBTTL	LOOK UP A FILE AND READ BLOCK 0
+
+;+
+; LOKRB0 - LOOK UP FILE IN FQ... AND READ BLOCK 0
+;
+;	FQ...	SET UP WITH FILE NAME
+;
+;	CALL	LOKRB0
+;
+;	R0 =  RANDOM
+;	R1 -> FC...
+;
+;	C=0, V=0	FOUND. R3=START ADDRESS, R4=SIZE
+;	C=1, V=1	FOUND, BUT NULL FILE
+;	C=1, V=0	NOT FOUND
+;-
+
+LOKRB0:	MOV	#FQ...,R4	;POINT TO FIRQB FOR LOOKUP
+	CALLX	LOKFIL		;DO IT
+	BCS	10$		;NOT FOUND, GO CLV AND EXIT
+	MOV	#256.,R0	;TRANSFER ONE BLOCK
+	MOV	#FQ...+FQFCB,R1	;POINT TO THE FCB
+	CLR	FCNVB(R1)	;READ BLOCK 0
+	CALLX 	READ.,R5,SATBUF	;INTO SATBUF
+	SEV			;(IF EOF ERROR, V=1)
+	BCS	20$		;OOPS
+	MOV	SATBUF+40,R3	;R3 = START ADDRESS
+10$:	MOV	SATBUF+50,R4	;R4 = LENGTH IN BYTES
+20$:	RETURN
+
+GLOBAL	<FQ...,SATBUF>
+
+
+	ORG	FILL
+
+.SBTTL	FILL OPTION
+
+;+
+;
+;	This is the FILL suboption code.  It is being put here
+;	because support for the FILL option, and the LOAD option,
+;	neither of which is due to last long, will be dropped at the
+;	same time.  This code is lifted straight out of V7.2, and I
+;	hope that it works....
+;
+;-
+.ENABL	LSB
+
+FILL::	TSTB	(R1)		;ANSWER IN LINE?
+	BNE	30$		;YES, USE IT
+10$:	CALLX	ASKER,R5	;NO, ASK FOR ANSWER
+	 .WORD	20$		;SHORT TEXT
+	 GENTXT
+	  .ASCII "  Type the console terminal fill count value."<200>
+20$:	  .ASCIZ <177><12>"  Fill count? "
+	 UNORG
+30$:	MOV	#<377*400>+15,R2;ASSUME LA30S (SPECIAL FILL AFTER CR)
+	CMP	(R1),#"LA	;IS IT?
+	BEQ	70$		;YES
+	MOV	#-1,R2		;ASSUME THIS IS SPECIAL SCOPE FILL WORD
+	CMP	(R1),#"SC	;IS IT?
+	BEQ	70$		;YES
+	CMP	(R1),#"SP	;HOW ABOUT THE NEW SPEED COMMAND?
+	BEQ	100$		;YES, SO HIT IT...
+	CALLX	DECINP		;NO, GET NUMBER
+	BCS	40$		;ERROR
+	CMP	R0,#7		;TOO BIG?
+	BLOS	50$		;NO, OK
+40$:	MESSAGE	<"  Invalid response"<200>>
+	BR	10$		;ASK AGAIN
+
+50$:	MOV	#12*400,R2	;FILL IS NORMALLY AFTER LF
+	BISB	FILTBL(R0),R2	;GET FILL COUNT
+	BNE	60$		;NON-0, SO DO FILL
+	CLR	R2		;0, NEVER FILL
+60$:	SWAB	R2		;COUNT TO HIGH BYTE, FILL TO LOW
+70$:	MOV	R2,TTFILL	;SET UP THE FILL
+	TST	SYSNDX		;DISK RUNNING?
+	BMI	80$		;NO, JUST LOCAL SETTING
+	CALLX	INSTAO		;PUT IT OUT
+80$:	EXIT
+
+GLOBAL	<TTFILL>
+
+100$:	TST	(R1)+		;SKIP THE "SP
+	CMP	(R1)+,#"EE	;CHECK FOR "EE"
+	BNE	10$		;NO, SO TRY AGAIN.
+	CMP	(R1)+,#"D 	;HOW ABOUT THE "D "
+	BNE	10$		;NO, SO IGNORE IT, AND ASK ABOUT THE FILL
+	CALL	DECINP		;GET A NUMBER
+	BCS	40$		;WHAT ARE THEY DOING?????
+	MOV	#SPDTBL,R2	;GET OUR SPEED TABLE VALUES
+110$:	TST	(R2)		;ALL DONE?
+	BEQ	40$		;SORRY, NO MATCH.
+	CMP	R0,(R2)+	;IS IT THIS SPEED
+	BNE	110$		;NO, NOT THIS ONE TRY AGAIN.
+	MOV	@#CSRTBL+TT.CSO,R0	;GET THE CONSOLE CSR
+	ADD	#4,R0			;POINT TO CSR+4
+	BIS	#2,(R0)			;TRY THE MXV BIT?
+	BIT	#2,(R0)			;IS IT AN MXV
+	BEQ	130$			;NO
+	MOV	MXVAL-SPDTBL-2(R2),(R0)	;SET THE SPEED
+	BR	150$			;AND QUIT
+
+130$:	BIS	#4000,(R0)		;IS IT A DL
+	BIT	#4000,(R0)		;?
+	BEQ	140$			;NO
+	MOV	DLVAL-SPDTBL-2(R2),(R0)	;HANDLE THE DLV
+	BR	150$			;AND QUIT	
+
+140$:	MESSAGE	<"Speed not settable">	;sorry
+150$:	MOV	#-1,R2			;GIVE THEM A CHANCE TO
+160$:	SOB	R2,160$			;CHANGE THE TERMINAL WHILE WE WAIT
+	EXIT
+
+;	FILL TABLE.  
+
+FILTBL:	.BYTE	0,1,2,4,8.,16.,32.,64. ;FOR 0 TO 7
+
+;	SPEED TABLES
+;		The word immediatly prior to SPDTBL must <> 0.
+
+SPDTBL:	.WORD	300.,600.,1200.,2400.,4800.,9600.,0.
+
+MXVAL:	.WORD	2,12,22,32,42,52
+
+DLVAL:	.WORD	54000,64000,74000,124000,144000,164000
+
+.DSABL	LSB
+
+GLOBAL	<CSRTBL,TT.CSO>
+
+	UNORG
+
+ENDOVL	<LOA,LOACTL,LOATXT,FILL>,100
+
+.END

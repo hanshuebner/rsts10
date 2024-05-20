@@ -1,0 +1,499 @@
+1	SUB URTS							      &
+\	ON ERROR GOTO 19000						      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   t i t l e				      &
+	!								      &
+	!	  subprogram : URTS					      &
+	!	     version : V10.1					      &
+	!	        edit : A					      &
+	!	   edit date : 10-MAY-91				      &
+	!	   author(s) : JJT/JAC/JFM				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!		  C O P Y R I G H T				      &
+	!								      &
+	!								      &
+	!		      Copyright (C) 1984, 1991 by		      &
+	!	Digital Equipment Corporation, Maynard, Mass.		      &
+	!								      &
+	!								      &
+	! This software is furnished under a license and may be used and      &
+	! copied  only  in accordance with the terms of such license and      &
+	! with the  inclusion  of  the  above  copyright  notice.   This      &
+	! software  or  any  other copies thereof may not be provided or      &
+	! otherwise made available to any other person.  No title to and      &
+	! ownership of the software is hereby transferred.		      &
+	!								      &
+	! The information in this software is subject to change  without      &
+	! notice  and should not be construed as a commitment by Digital      &
+	! Equipment Corporation.					      &
+	!								      &
+	! DIGITAL assumes no responsibility for the use  or  reliability      &
+	! of its software on equipment that is not supplied by DIGITAL.	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   c a l l   f o r m a t		      &
+	!								      &
+	!	CALL URTS						      &
+	!								      &
+	!	Argument	I/O	Usage				      &
+	!	========	===	=====				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m o d i f i c a t i o n   h i s t o r y   l o g		      &
+	!								      &
+	!								      &
+	! VER/ED	EDIT DATE	REASON				      &
+	!								      &
+	! V9.1-04	11-Jun-85	(JJT) Fix /ADDRESS error handling     &
+	! V9.3-03	15-Apr-86	(JJT) Check for correct filetype      &
+	! V9.5-01	26-Jun-87	(JJT) Add /NOADDRESS=[UN]RESTRICTED   &
+	! V9.7-04	24-Jan-89	(JFM/JJT) Add Virtual disk support    &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   d e s c r i p t i o n		      &
+	!								      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	v a r i a b l e s  /  a r r a y s   u s e d		      &
+	!								      &
+	!	name		description				      &
+	!	====		===========				      &
+	!								      &
+	!******************************************************************** &
+
+
+700	!	i n c l u d e   r e q u i r e d   M A P s , C O M M O N s     &
+	!								      &
+	!								      &
+	%INCLUDE "CUI:CUICMN.B2S"		!include CUI data section     &
+	%INCLUDE "SYSTEM:UTYKEY.B2S"		!include CUI common data      &
+
+750	COMMON	(DSPCMN)	INDENT.COLUMN%				      &
+									      &
+
+910	DIM	FIRQB%(30%)			!SYScall array		      &
+
+912	DIM #1%, V%(112%,255%)			!Access RTS File	      &
+
+1000	!	m a i n   s u b p r o g r a m   l o g i c		      &
+	!								      &
+	!								      &
+									      &
+
+3999	!	p r o c e s s    c o m m a n d				      &
+									      &
+
+5200	!INSTALL RUNTIME_SYSTEM						      &
+	!REMOVE RUNTIME_SYSTEM						      &
+	!UNLOAD RUNTIME_SYSTEM						      &
+	!INSTALL LIBRARY						      &
+	!REMOVE LIBRARY							      &
+	!UNLOAD LIBRARY							      &
+	!CREATE/VIRTUAL_DISK						      &
+	!DELETE/VIRTUAL_DISK						      &
+									      &
+	PRIV.NEED$ = "INSTAL"			!WE NEED INSTAL PRIV	      &
+\	IF ASCII(SEG$(SYS(CHR$(6%)+CHR$(32%)+CHR$(1%)+ !IF WE DON'T HAVE      &
+		 STRING$(3%,0%)+PRIV.NEED$),3%,3%)) THEN !THE RIGHT PRIV      &
+		PRINT "?"+PRIV.NEED$+ " privilege required" ! PRINT ERROR MSG &
+\		SUBEXIT				!		AND EXIT      &
+\	END IF								      &
+\	HWCFG.PRIV% = (ASCII(SEG$(SYS(CHR$(6%)+CHR$(32%)+!Check for HWCFG PRIV &
+		    CHR$(1%)+STRING$(3%,0%)+	!			      &
+		    "HWCFG"),3%,3%)) = 0%)				      &
+\	REGAIN.PRIV$ = CHR$(6%)+CHR$(-21%)+CHR$(0%) !Define regain priv string &
+\	DROP.PRIV$ = CHR$(6%)+CHR$(-21%)+CHR$(255%) !Define drop priv string  &
+\	V$ = SYS(REGAIN.PRIV$)			!REGAIN TEMP PRIVS	      &
+\	SELECT	U.CMDC%				!SELECT THE COMMAND AGAIN     &
+\	  CASE	DRS.K%,				!INSTALL RUNTIME_SYSTEM	      &
+		DLB.K%				!INSTALL LIBRARY	      &
+									      &
+\	CALL FET$P BY REF (NAM.T%)		!GET THE PARAMETER	      &
+\	FILE.POS% = U.POS%			!SAVE THE POSITION	      &
+\	Z$ = SEG$(U.STR$,1%,U.LEN%)		!EXTRACT THE FILENAME	      &
+\	CHANGE FSS$(Z$,1%) TO FIRQB%		!DO THE FILENAME SCAN	      &
+\	FIRQB%(5%) = 1% IF (FIRQB%(5%) OR FIRQB%(6%)) = 0% ! DEFAULT TO [0,1] &
+\	ADDR.FLAG% = 0%				! DEFAULT TO NO /[NO]ADDRESS  &
+\	IF (FIRQB%(29%) AND 8%) <> 0% THEN	!IF A FILETYPE WAS SPECIFIED  &
+		RAD50.TYPE% = 29619%		!  SET RAD-50 OF "RTS"	      &
+\		RAD50.TYPE% = 19562%		!  SET RAD-50 OF "LIB"	      &
+			IF U.CMDC% = DLB.K%	!   IF INSTALL LIBRARY COMMAND &
+\		THIS.TYPE% = FIRQB%(11%)+SWAP%(FIRQB%(12%)) !GET THIS FILETYPE &
+\		IF THIS.TYPE% <> RAD50.TYPE% THEN !   IF FILETYPES DON'T MATCH &
+			CALL DISPLY ("?Filetype must be ."+RAD$(RAD50.TYPE%)) &
+\			SUBEXIT			!       PRINT ERROR AND EXIT  &
+\		END IF							      &
+\	END IF								      &
+\	FIRQB%(I%) = 0% FOR I% = 11% TO 20%	!START SETTING UP THE ARRAY   &
+									      &
+\	SELECT	U.CMDC%				!SELECT THE COMMAND ONCE AGAIN &
+\	  CASE	DRS.K%				!INSTALL RUNTIME_SYSTEM	      &
+									      &
+\	FILE.TYPE$ = "Run-time System"		!FLAG THAT THIS IS A RTS      &
+\	FIRQB%(3%) = 0%				!SUBFUNCTION TO FIP	      &
+\	FIRQB%(I%) = 0% FOR I% = 21% TO 22%	!CLEAR OUT MORE OF THE ARRAY  &
+\	D$ = ":["+NUM1$(FIRQB%(6%))+","+NUM1$(FIRQB%(5%))+"]"+ !FORM FILENAME &
+		RAD$(FIRQB%(7%)+SWAP%(FIRQB%(8%))) +			      &
+		RAD$(FIRQB%(9%)+SWAP%(FIRQB%(10%)))+ ".RTS"		      &
+\	D$ = NUM1$(FIRQB%(25%))+D$ IF FIRQB%(26%) <> 0% !ADD UNIT NUMBER      &
+\	D$ = "_"+CHR$(FIRQB%(23%))+CHR$(FIRQB%(24%))+D$ IF FIRQB%(23%)<>0%    &
+						! ADD DEVICE NAME, IF THERE   &
+\	ON ERROR GOTO 5250			!SET LOCAL ERROR TRAP	      &
+\	OPEN D$ FOR INPUT AS FILE 1%		!OPEN THE FILE		      &
+\	I%=(SWAP%(V%(0%,9%)+511%) AND 255%)/2%	!GET DEFAULT INFO	      &
+\	FIRQB%(13%) = V%(I%,254%)		!MAXIMUM ALLOWED SIZE	      &
+\	FIRQB%(15%) = V%(I%,240%)		!MINIMUM ALLOWED SIZE	      &
+\	FIRQB%(17%) = 255%			!PLACE AT END OF LIST	      &
+\	FIRQB%(19%) = V%(I%,237%)		!EMT CODE (LOW BYTE OF R.FLAG) &
+\	FIRQB%(20%) = SWAP%(FIRQB%(19%))	!HIGH BYTE OF R.FLAG	      &
+									      &
+			!THE BITS IN R.FLAG HAVE THE FOLLOWING MEANING:	      &
+			!  BIT		MEANING				      &
+			!  0-7		EMT CODE IF BIT 15 IS SET	      &
+			!  8		KEYBOARD MONITOR		      &
+			!  9		SINGLE USER RATHER THAN SHARED CODE   &
+			!  10		READ/WRITE RATHER THAN READ ONLY      &
+			!  11		ERRORS SHOULD NOT BE LOGGED TO	      &
+			!		THE SYSTEM ERROR LOG		      &
+			!  12		RTS SHOULD BE REMOVED FROM MEMORY     &
+			!		WHEN NO USERS ARE USING IT	      &
+			!  13		RUN SIZE COMPUTED FROM FILE SIZE      &
+			!  14		RESERVED			      &
+			!  15		SPECIAL EMT PREFIX BIT.  IF THIS BIT  &
+			!		IS ON THEN BITS 0-7 CONTAIN THE EMT   &
+			!		CODE FOR THE SPECIAL EMT PREFIX EMT.  &
+									      &
+\	FIRQB%(21%) = V%(I%,238%)		!FIRST HALF OF FILE TYPE      &
+\	FIRQB%(22%) = SWAP%(FIRQB%(21%))	!SECOND HALF OF FILE TYPE     &
+\	CLOSE 1%				!CLOSE THE RTS FILE	      &
+\	FIRQB%(11%),FIRQB%(12%) = 0%		!DEFAULT TO FLOATING ADDRESS  &
+\	CALL FET$CQ BY REF (ADD.Q%)		!/ADDRESS SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT (U.NO%) THEN		!  IF /ADDRESS		      &
+			ADDR.FLAG% = U.POS%		!SAVE THE POSITION    &
+\			CALL FET$A BY REF		!GET THE ARGUMENT     &
+\			IF U.PRES% THEN			!IF PRESENT	      &
+\				Z% = U.LOW%		!  GET THE NUMBER     &
+\				FIRQB%(11%) = Z%	!  PUT IT IN THE ARRAY &
+\				FIRQB%(12%) = SWAP%(Z%)	!  SECOND HALF	      &
+\				ADDR.FLAG% = U.POS%	!  FLAG IT	      &
+			ELSE				!IF NOT PRESENT	      &
+				FIRQB%(11%),FIRQB%(12%) = -1% !SET TO HIGHEST &
+\			END IF						      &
+\		END IF							      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (PRE.Q%)		!/PREFIX SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		PRE.FIX% = 255%			!  SET DEFAULT EMT CODE TO 255 &
+\		CALL FET$A BY REF		!  GET THE ARGUMENT IF ANY    &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			Z% = U.LOW%		!   GET THE NUMBER	      &
+\			PRE.FIX% = Z%		!   STORE IT		      &
+\		END IF							      &
+\		FIRQB%(19%) = PRE.FIX%		!  PUT IT IN THE ARRAY	      &
+\		FIRQB%(20%) = FIRQB%(20%) OR 128% !SET SPECIAL EMT PREFIX BIT &
+\	END IF								      &
+\	CALL FET$CQ BY REF (TYP.Q%)		!/TYPE SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		CALL FET$A BY REF		!  GET THE ARGUMENT	      &
+\		Z$ = SEG$(U.STR$,1%,U.LEN%)	!  EXTRACT THE FILE TYPE      &
+\		Z$ = "." + Z$ UNLESS POS(Z$,".",1%) !  PUT ON "." IF NOT THERE &
+\	      FIRQB%(21%) = SWAP%(CVT$%(SEG$(FSS$(Z$,1%),11%,12%)))!GET RAD-50 &
+\	      FIRQB%(22%) = SWAP%(FIRQB%(21%))!  SECOND HALF OF RAD-50	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (MIN.Q%)		!/MINIMUM_SIZE SPECIFIED?     &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		CALL FET$A BY REF		!  GET THE ARGUMENT	      &
+\		Z% = U.LOW%			!  GET THE NUMBER	      &
+\		FIRQB%(15%) = Z%		!  PUT IT IN THE ARRAY	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (MXS.Q%)		!/MAXIMUM_SIZE SPECIFIED?     &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		CALL FET$A BY REF		!  GET THE ARGUMENT	      &
+\		Z% = U.LOW%			!  GET THE NUMBER	      &
+\		FIRQB%(13%) = Z%		!  PUT IT IN THE ARRAY	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (POS.Q%)		!/POSITION SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		CALL FET$A BY REF		!  GET THE ARGUMENT	      &
+\		Z% = U.LOW%			!  GET THE NUMBER	      &
+\		FIRQB%(17%) = Z%		!  PUT IT IN THE ARRAY	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (KBM.Q%)		!/[NO]KEYBOARD_MONITOR?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+	     FIRQB%(20%) = FIRQB%(20%) OR 1% IF NOT U.NO% !IF KEYBOARD_MONITOR &
+\	     FIRQB%(20%) = FIRQB%(20%) AND NOT (1%) IF U.NO% !IF NOKBM	      &
+\	END IF								      &
+									      &
+\	  CASE DLB.K%				!INSTALL LIBRARY	      &
+									      &
+\	FILE.TYPE$ = "Library"			!FLAG THAT THIS IS A LIBRARY  &
+\	FIRQB%(3%) = 16%			!SUBFUNCTION TO FIP	      &
+\	FIRQB%(21%) = 0%			!USE DEFAULT PROT CODE	      &
+\	CALL FET$CQ BY REF (PTC.Q%)		!/PROTECTION SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		CALL FET$A BY REF		!  GET THE ARGUMENT	      &
+\		Z% = U.LOW%			!  GET THE NUMBER	      &
+\		FIRQB%(22%) = Z%		!  PUT IT IN THE ARRAY	      &
+\		FIRQB%(21%) = 255%		!  SET 'CHANGE PROT' FLAG     &
+\	END IF								      &
+\	FIRQB%(11%),FIRQB%(12%) = -1%		!DEFAULT TO HIGHEST POINT     &
+\	ADDR.FLAG% = -1%			!FLAG THE DEFAULT	      &
+\	CALL FET$CQ BY REF (ADD.Q%)		!/ADDRESS SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		ADDR.FLAG% = U.POS%		!SAVE THE POSITION	      &
+\		CALL FET$A BY REF		!GET THE ARGUMENT	      &
+\		IF U.PRES% THEN			!IF PRESENT		      &
+\			Z% = U.LOW%		!  GET THE NUMBER	      &
+\			FIRQB%(11%) = Z%	!  PUT IT IN THE ARRAY	      &
+\			FIRQB%(12%) = SWAP%(Z%)	!  SECOND HALF		      &
+\			ADDR.FLAG% = U.POS%	!  FLAG IT		      &
+\		END IF							      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (NAD.Q%)		!/NOADDRESS SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		ADDR.FLAG% = U.POS%		! SAVE THE POSITION	      &
+\		FIRQB%(11%),FIRQB%(12%) = 0%	! DEFAULT TO RESTRICTED	      &
+\		CALL FET$KA BY REF (URT.K%)	! =UNRESTRICTED SPECIFIED?    &
+\		IF U.PRES% THEN			! IF PRESENT		      &
+			FIRQB%(11%) = -2% 	!  SET IT TO UNRESTRICTED     &
+\			FIRQB%(12%) = SWAP%(-2%)!  HIGH BYTE, TOO	      &
+\		END IF							      &
+\	END IF								      &
+\	END SELECT							      &
+									      &
+\	CALL FET$CQ BY REF (SIN.Q%)		!/[NO]SHAREABLE SPECIFIED?    &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+	     FIRQB%(20%) = FIRQB%(20%) OR 2% IF U.NO% !IF NOSHAREABLE	      &
+\	     FIRQB%(20%) = FIRQB%(20%) AND NOT (2%) IF NOT U.NO%	      &
+						      !IF SHAREABLE	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (RO.Q%)		!/[NO]READ_ONLY		      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+	     FIRQB%(20%) = FIRQB%(20%) OR 4% IF U.NO% !IF NOREAD_ONLY	      &
+\	     FIRQB%(20%) = FIRQB%(20%) AND NOT (4%) IF NOT U.NO% !IF READ_ONLY &
+\	END IF								      &
+\	CALL FET$CQ BY REF (LGE.Q%)		!/[NO]LOG_ERROR		      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+	     FIRQB%(20%) = FIRQB%(20%) OR 8% IF U.NO% !IF NOLOG_ERROR	      &
+\	     FIRQB%(20%) = FIRQB%(20%) AND NOT (8%) IF NOT U.NO% !IF LOG_ERROR &
+\	END IF								      &
+\	CALL FET$CQ BY REF (REM.Q%)		!/[NO]REMOVE		      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+	     FIRQB%(20%) = FIRQB%(20%) OR 16% IF NOT U.NO% !IF REMOVE	      &
+\	     FIRQB%(20%) = FIRQB%(20%) AND NOT (16%) IF U.NO% !IF NOREMOVE    &
+\	END IF								      &
+\	CALL FET$CQ BY REF (LOK.Q%)		!/[NO]LOCK		      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+	     FIRQB%(18%) = 128% IF NOT U.NO%	!  IF LOCK		      &
+\	     FIRQB%(18%) = 0% IF U.NO%		!  IF NOLOCK		      &
+\	END IF								      &
+									      &
+\	FIRQB%(0%) = 30%			!30 BYTES		      &
+\	FIRQB%(1%) = 6%				!SYS CALL TO FIP	      &
+\	FIRQB%(2%) = -18%			!SUBFUNCTION CODE	      &
+\	CHANGE FIRQB% TO FIRQB$			!MAKE A STRING FROM THE ARRAY &
+\	ON ERROR GOTO 5250			!SET LOCAL ERROR TRAP	      &
+\	V$ = SYS(FIRQB$)			!DO THE SYS CALL	      &
+\	V$ = SYS(DROP.PRIV$)			!DROP TEMP PRIVS	      &
+\	ON ERROR GOTO 19000			!RESET THE ERROR TRAP	      &
+									      &
+\	  CASE	KRS.K%,				!REMOVE RUNTIME_SYSTEM	      &
+		URS.K%,				!UNLOAD RUNTIME_SYSTEM	      &
+		KLB.K%,				!REMOVE LIBRARY		      &
+		ULB.K%				!UNLOAD LIBRARY		      &
+									      &
+\	CALL FET$P BY REF (NAM.N%)		!GET THE PARAMETER	      &
+\	FILE.POS% = U.POS%			!SAVE THE POSITION	      &
+\	FILE.TYPE$ = "Run-time System"		!FLAG THAT THIS IS A RTS      &
+		IF (U.CMDC% = KRS.K%) OR	! IF IT IS		      &
+		   (U.CMDC% = URS.K%)					      &
+\	FILE.TYPE$ = "Library"			!FLAG THAT THIS IS A LIBRARY  &
+		IF (U.CMDC% = KLB.K%) OR	! IF IT IS		      &
+		   (U.CMDC% = ULB.K%)					      &
+\	Z$ = SEG$(U.STR$,1%,U.LEN%)		!EXTRACT THE FILENAME	      &
+\	CHANGE FSS$(Z$,1%) TO FIRQB%		!DO THE FILENAME SCAN	      &
+\	FIRQB%(0%) = 30%			!30 BYTES		      &
+\	FIRQB%(1%) = 6%				!SYS CALL TO FIP	      &
+\	FIRQB%(2%) = -18%			!SUBFUNCTION CODE	      &
+\	FIRQB%(3%) = 4% IF U.CMDC% = KRS.K%	!REMOVE RUNTIME_SYSTEM CODE   &
+\	FIRQB%(3%) = 6% IF U.CMDC% = URS.K%	!UNLOAD RUNTIME_SYSTEM CODE   &
+\	FIRQB%(3%) = 20% IF U.CMDC% = KLB.K%	!REMOVE LIBRARY CODE	      &
+\	FIRQB%(3%) = 22% IF U.CMDC% = ULB.K%	!UNLOAD LIBRARY CODE	      &
+\	CHANGE FIRQB% TO FIRQB$			!MAKE A STRING FROM THE ARRAY &
+\	ON ERROR GOTO 5250			!SET LOCAL ERROR TRAP	      &
+\	V$ = SYS(FIRQB$)			!DO THE SYS CALL	      &
+									      &
+
+	!								      &
+	! Process CREATE/VIRTUAL_DISK command				      &
+	!								      &
+\	  CASE	CVD.K%				!If CREATE/VIRTUAL_DISK	      &
+\	IF NOT HWCFG.PRIV% THEN			!If we don't have HWCFG priv  &
+		PRINT "?HWCFG privilege required" !  Print error message      &
+\		SUBEXIT				!  and exit		      &
+\	END IF					!Endif			      &
+									      &
+\	CALL FET$P BY REF (SIZ.T%)		!Fetch the parameter	      &
+\	SIZE.POS% = U.POS%			!Save position of parameter   &
+\	DISK.SIZE% = U.LOW%			!Get specified disk size      &
+\	DISK.SIZE% = INT((DISK.SIZE%+3%)/4%)	!Round to multiple of 4 to    &
+						! translate blocks to Kwords  &
+									      &
+\	ADDR.LOC% = -1%				!Assume no /ADDRESS qualifier &
+\	CALL FET$CQ BY REF (ADD.Q%)		!Fetch the address	      &
+\	IF U.PRES% THEN				!If /ADDRESS specified then   &
+		CALL FET$A BY REF		!  Get the argument	      &
+\		ADDR.LOC% = U.LOW%		!  Save location	      &
+\		ADDR.POS% = U.POS%		!  Save position of argument  &
+\	END IF					!End if			      &
+									      &
+\	ON ERROR GOTO 5230			!Set local error trap	      &
+\	JUNK$ = SYS(CHR$(6%)+			! FIP syscall		      &
+		    CHR$(-18%)+			!  UU.RTS function	      &
+		    CHR$(26%)+			!  Create/delete virtual_disk &
+		    STRING$(7%,0%)+		!  Reserved		      &
+		    CHR$(ADDR.LOC%)+		!  Address		      &
+		    CHR$(SWAP%(ADDR.LOC%))+	!   ...			      &
+		    CHR$(DISK.SIZE%)+		!  Size			      &
+		    CHR$(SWAP%(DISK.SIZE%))+	!   ...			      &
+		    STRING$(16%,0%))		!  Reserved		      &
+									      &
+\	CALL FET$CQ BY REF (LOG.Q%)		!User want to be notified?    &
+\	IF NOT U.NO% THEN			!If /LOG then		      &
+	  PRINT "Virtual Disk created with size of ";			      &
+		NUM1$(DISK.SIZE%*4%);" blocks"	!    Notify user	      &
+\	END IF					!Endif			      &
+\	V$ = SYS(DROP.PRIV$)			!Drop temp privs	      &
+\	SUBEXIT					!Exit if no errors	      &
+
+5230	U.POS% = 1%				!Assume we'll point to command &
+\	SELECT ERR				!Select the error	      &
+\	CASE 4					!NOROOM (No room for user)    &
+\		U.POS% = SIZE.POS%		!Set the position	      &
+\		CALL DISPLY ("?Not enough available contiguous memory")	      &
+\	CASE 31					!BADCNT (Illegal byte count)  &
+\		IF ADDR.LOC% > 0% THEN 		!If address specified then    &
+		  U.POS% = ADDR.POS%		!  Set the position	      &
+\		  CALL DISPLY ("?"+NUM1$(DISK.SIZE%)			      &
+			+"K section of memory not available")		      &
+						!  Print the error message    &
+\		ELSE				!Else			      &
+		  CALL DISPLY ("?Memory not available")	!Print different msg  &
+\		END IF				!End if			      &
+\	CASE 32					!NOBUFS (No buff space avail) &
+\		CALL DISPLY ("?No buffer space to create virtual disk")	      &
+\	CASE 16					!FIEXT (Name already exists)  &
+\		CALL DISPLY ("?Virtual disk already exists")		      &
+\	CASE ELSE				!Anything else ...	      &
+\		CALL DISPLY ("??Unexpected error in UTLMGR")		      &
+\		PRINT ERT$(ERR)			!Print the odd error	      &
+\	END SELECT							      &
+\	RESUME 5245							      &
+									      &
+
+	!								      &
+	! Process DELETE/VIRTUAL_DISK command				      &
+	!								      &
+\	  CASE	DVT.K%				!If DELETE/VIRTUAL_DISK	      &
+\	IF NOT HWCFG.PRIV% THEN			!If we don't have HWCFG priv  &
+		PRINT "?HWCFG privilege required" !  Print error message      &
+\		SUBEXIT				!  and exit		      &
+\	END IF					!Endif			      &
+									      &
+\	ON ERROR GOTO 5240			!Set local error trap	      &
+\	JUNK$ = SYS(CHR$(6%)+			! FIP syscall		      &
+		    CHR$(-18%)+			!  UU.RTS function	      &
+		    CHR$(26%)+			!  Create/delete virtual_disk &
+		    STRING$(9%,0%)+		!  Reserved		      &
+		    CHR$(0%)+			!  Size of 0 indicates delete &
+		    CHR$(SWAP%(0%))+		!   ...			      &
+		    STRING$(16%,0%))		!  Reserved		      &
+						!			      &
+\	CALL FET$CQ BY REF (LOG.Q%)		!User want to be notified?    &
+\	IF NOT U.NO% THEN			!If /LOG then		      &
+	  PRINT "Virtual disk deleted"		!  Print confirmation message &
+\	END IF					!Endif			      &
+\	V$ = SYS(DROP.PRIV$)			!Drop temp privs	      &
+\	SUBEXIT					!Exit if no errors	      &
+
+5240	U.POS% = 1%				!Point to command	      &
+\	SELECT ERR				!Select the error	      &
+\	CASE 3					!INUSE (Acct or device in use) &
+\		CALL DISPLY ("?Virtual disk is mounted or has open files")    &
+\	CASE 6					!NODEVC (Not a valid device)  &
+\		CALL DISPLY ("?Virtual disk does not exist")		      &
+\	CASE ELSE				!Anything else ...	      &
+\		CALL DISPLY ("??Unexpected error in UTLMGR")		      &
+\		PRINT ERT$(ERR)			!Some other error, print that &
+\	END SELECT							      &
+\	RESUME 5245							      &
+
+5245	END SELECT				!End of the commands	      &
+\	V$ = SYS(DROP.PRIV$)			!Drop temp privs	      &
+\	SUBEXIT					! and exit		      &
+
+5250	V$ = SYS(DROP.PRIV$)			!Drop temp privs	      &
+\	RESUME 5260				!CLEAR THE ERROR FLAG AND CONT &
+		IF (ERR = 31%) OR		! IF ?Illegal byte count ERROR &
+		   (ERR =  4%)			! OR ?No room for user	      &
+\	IF ERR = 2% THEN			!IF /TYPE is invalid	      &
+		CALL DISPLY ("?Invalid filetype") !PRINT ERROR		      &
+\		RESUME 32767			!  AND EXIT		      &
+\	END IF								      &
+\	U.POS% = FILE.POS%			!RESTORE THE POSITION	      &
+\	IF ERR = 3% THEN			!IF RTS OR LIB IN USE	      &
+		CALL DISPLY ("?"+FILE.TYPE$+" in use") !PRINT ERROR	      &
+\		RESUME 32767			! AND EXIT		      &
+\	END IF								      &
+\	IF ERR = 5% THEN			!IF RTS OR LIB NOT THERE      &
+		CALL DISPLY ("?"+FILE.TYPE$+" not found") !PRINT ERROR	      &
+\		RESUME 32767			! AND EXIT		      &
+\	END IF								      &
+\	IF ERR = 10% THEN			!IF SOME PROTECTION VIOLATION &
+		CALL DISPLY ("?"+FILE.TYPE$+" is in invalid format")	      &
+			IF (U.CMDC% = DRS.K%) OR ! IF ADDING RTS OR	      &
+			   (U.CMDC% = DLB.K%)	!   LIBRARY		      &
+\		CALL DISPLY ("?Run-time System cannot be removed")	      &
+			IF U.CMDC% = KRS.K%	!  IF REMOVING RTS	      &
+\		RESUME 32767			! AND EXIT		      &
+\	END IF								      &
+\	IF ERR = 16% THEN			!IF RTS OR LIB ALREADY THERE  &
+		CALL DISPLY ("?"+FILE.TYPE$+" already installed") !PRINT ERROR &
+\		RESUME 32767			! AND EXIT		      &
+\	END IF								      &
+\	GOTO 19000				!GOTO STANDARD ERROR TRAP     &
+
+5260	IF ADDR.FLAG% THEN			!IF /ADDRESS WAS SPECIFIED    &
+		ADDR.FLAG% = 0% IF ADDR.FLAG% = -1% !MAKE POS 0 IF NOT REAL   &
+\		U.POS% = ADDR.FLAG%		!  RESET THE POSITION	      &
+\		CALL DISPLY ("?Memory not available")!  PRINT ERROR MESSAGE   &
+			IF ERR = 31%		! IF ?Illegal byte count      &
+\		CALL DISPLY ("?Memory would be fragmented")		      &
+			IF ERR = 4%		! IF ?No room for user	      &
+	ELSE					!IF IT WASN'T SPECIFIED	      &
+		PRINT "?/ADDRESS qualifier required" !SAY IT WAS SUPPOSED TO  &
+\	END IF								      &
+\	SUBEXIT								      &
+
+
+19000	!	s t a n d a r d   e r r o r   h a n d l i n g		      &
+	!								      &
+	!								      &
+	ON ERROR GO BACK			!Let the Root error	      &
+						! handler handle it	      &
+
+									      &
+
+32767	!	e n d   o f   s u b p r o g r a m			      &
+	!								      &
+	!								      &
+	SUBEND

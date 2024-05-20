@@ -1,0 +1,785 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+	.INCLUDE /CMN:EMLDEF/
+	.LIBRARY /CMN:NETDEF.SML/
+TITLE	SND,<MESSAGE SEND/RECEIVE>,0A,10-MAY-91,MHB/JDM/ABC/SJK/RTW/GPK/JTC/AWL/WJS/KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR SND
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	RTW  02-Jul-80	Major rewrite for Multiple ribs
+;  002	RTW  09-Aug-80	Fix bug in remove keeping ERRLOG
+;  003	GPK  10-Apr-81	Changes for DECnet event logging and
+;			receiver name validation
+;  004	GPK  15-May-81	Bugfix to multiRIB declaration
+;  005	GPK  05-Aug-81	Allow nulls as synonyms for blanks in receiver names
+;  006	JTC  11-Oct-81	Add "SGNRES" to FQFSRT
+;  007  AWL  03-AUG-82  Add non-privileged declare message receiver
+;  008	WJS  04-OCT-82	EMT logging (local object types) added
+;  009  AWL  15-DEC-82  Removed unused global hook (..OLNP) added in 
+;			non-priv declare
+;  010	WJS  19-Dec-82	BL4+ changes for EMT Logger
+;  011	WJS  21-Dec-82	SEND by Local Object Type
+;
+;				[RSTS V9.0]
+;  012	GPK  06-May-83	Multiple privileges
+;  013	WJS  05-May-83	Fix Message Router's stumble over zero S.ACCS
+;  014	GPK  07-Jun-83	Change .PRIV to .BPRIV
+;  015	GPK  22-Sep-83	Add send-with-mask function
+;  016	GPK  29-Dec-83	Rename ACNT to WACNT
+;  017	GPK  14-Feb-84	Move send and receive subfunctions to MSG
+;  018	GPK  17-Apr-84	Privilege changes; bugfix in REMFQ
+;  019	KPH  25-Jun-84	Bugfix in REMFQ
+;  020	KPH  12-Jul-84	Set function code to 1 on V6A declares
+;			Preserve error code around NSPCHK for V6A declares
+;  021	GPK  18-Jul-84	Allow DECnet servers to declare as such even
+;			when not privileged
+;  022	GPK  08-Feb-85	Bugfix in declare when logged-out, issue QUOTA
+;			error rather than PRVIOL if quota exceeded
+;			Remove MONPOL limit (make reserved, store 0)
+;
+;			[RSTS V9.2]
+;  023  KPH  09-Aug-85	Add job control region
+;
+;			[RSTS V9.3]
+;  024  KPH  01-Oct-85	Changes for DECnet/E V4.0
+;  025  KPH  27-May-86	Force SA.SLB clear on receiver declare
+;  026  KPH  30-May-86	Fix remove of other jobs
+;- 
+
+.MCALL	$MSGFUN			;Define message send/receive codes	;017
+	$MSGFUN								;017
+
+FQFSRT	SND								;017
+
+.ENABL	LSB
+
+	FQFENT	DCL		;Message receiver declare		;017
+
+	MOV	R4,R3		;COPY FIRQB POINTER
+	CMP	(R3)+,(R3)+	;INDEX TO PARAMETERS IN WORK BLOCK
+	CALL	GETRB3		;GET POINTER TO RIB OR SUB RIB
+	MOVB	(R3),-(SP)	;Save function code			;020
+	MOV	#SR$DCL,(R3)+	;And set it to a declare, R3 -> ID	;020
+	DECB	(SP)+		;Subtract one				;017
+	BEQ	10$		;Was just a declare, go do it		;017
+	SETERR	NOSUCH,JDIOST(R1) ;Declare + receive, pretend no data	;017
+	.BR	10$		; and do it				;017
+
+; ON DISPATCH:
+;
+;	R0 =  JOB NUMBER TIMES 2
+;	R1 -> JOB DATA BLOCK
+;	R2 -> JCR @ JCMPTR
+;	R3 -> ID WORDS IN WORK BLOCK
+;	R4 -> FIRQB
+;	R5 -> RIB OR 0 IF NO SUCH RIB
+;
+;	Job's JCR entry is mapped through DPAR6
+
+10$:	TST	R5		; Job already a declared receiver ?
+	BNE	160$		; Yes - return an error
+	TSTB	15(R4)		; Anything at all for S.ACCS field ?	;013
+	BNE	20$		; Yes => continue			;013
+	CLRB	14(R4)		; No:  ignore object type, per doc 	;013
+20$:	MOV	R4,-(SP)	; Save the FIRQB address
+	MOV	R2,-(SP)	;  and JCR @ JCMPTR address
+	TSTPRV	EXQTA,@#FIPRVM	; Have privilege to ignore quotas?	;018
+	BNE	50$		; Yes, so skip				;012
+	CLR	R5		; No, initialize count of message max's	;017
+	BISB	FQBUFL(R4),R5	; Begin with requested max		;017
+	CLR	R4		;  and initialize # RIBs being used
+30$:	MOV	(R2),R2		; Get next pointer.  Does it point to a RIB?
+	BEQ	40$		; No, done
+	CMP	S.JBNO(R2),R0	; Is this RIB for this job?
+	BNE	40$		; No, done
+	INC	R4		; Yes, count it
+	CLR	-(SP)		; Clear a stack cell			;017
+	MOVB	S.MMAX(R2),(SP)	; Get message limit			;017
+	ADD	(SP)+,R5	; Sum it into the total			;017
+	BR	30$
+40$:	MAP	FIPPOL		; Re-map FIP for calls below		;023
+	REGSAV			; Save our registers			;018
+	MOV	#FIUSER,R0	; Point to caller's PPN			;018
+	TST	(R0)		; Are they logged in?			;023
+	BEQ	45$		; No, quotas don't apply then		;022
+	CALLX	SDM		; Find account entry			;018
+	BCS	175$		; Can't find self, that's weird		;018
+	MOVB	#AA.QT2,R0	; Type to find				;018
+	CALLX	SAA		; Search for quota block		;018
+	BCS	177$		; Treat as over quota if not found	;022
+	CMP	R4,A2.RIB(R5)	; RIB quota ok?				;018
+	BHIS	177$		; No (BHIS because new RIB not counted)	;022
+	CMP	TOS.R5(SP),A2.MSG(R5) ; Message quota OK?		;018
+	BHI	177$		; No (BHI because new RIB counted here)	;022
+45$:	REGRES			; Restore registers			;022
+50$:	MOV	#6,R2		; Six characters to validate
+	ADD	R2,R3		; Point to the end of the string
+	MOV	#40,R4		; Initially lowest legal char is space (40)
+60$:	TSTB	-(R3)		; Null?
+	BNE	70$		; No
+	MOVB	#40,(R3)	; Yes, make it a blank
+70$:	CMPB	(R3),R4		; Is this character legal?
+	BLO	170$		; No, it's too low
+	BEQ	80$		; Branch if it might be a space
+	MOV	#41,R4		; Otherwise change limit to prohibit spaces
+80$:	CMPB	(R3),#376	; Is it printable?			;017
+	BHI	170$		; Not if it's too high			;017
+	CMPB	(R3),#241	; Is it in GR range?			;017
+	BHIS	90$		; Yes, ok				;017
+	CMPB	(R3),#176	; Is it printable?
+	BHI	170$		; Not if it's too high
+90$:	SOB	R2,60$		; Loop through all characters		;017
+	CMPB	(R3),#40	; Is first char a space (i.e. all blank name)?
+	BEQ	150$		; Yes, then no uniqueness check
+	TSTPRV	SYSIO,@#FIPRVM	; Privileged to use any name?		;018
+	BNE	120$		; Yes, skip the name check		;012
+; Verify that non-privileged name contains job no. in 5th and 6th digits
+	MOV	R0,R4		; Get job no
+	ASR	R4
+100$:	CMPB	R4,#9.		; Is units digit <= 9?
+	BLOS	110$		; Yes, done
+	ADD	#400-10.,R4	; No, count tens digit & reduce units digit
+	BR	100$
+110$:	ADD	#"00,R4		; Convert two digits to ascii
+	SWAB	R4		; Position ascii char for comparison
+	CMP	R4,4(R3)	; Does name include job no?
+	BNE	170$		; No, error
+
+; End of verify non-privileged name
+
+120$:	MOV	#SNDLST,R4	; Check for ID already in use
+130$:	MOV	(R4),R4		; Get next in current receiver list
+	BEQ	150$		; End of list, so do the declare
+	MOV	R3,R2		; Copy new ID pointer
+	CMP	(R2)+,S.RCID(R4) ; ID's match?
+	BNE	130$		; Nope, keep checking
+	CMP	(R2)+,S.RCID+2(R4) ; Really match??
+	BNE	130$		; Nope
+	CMP	(R2)+,S.RCID+4(R4) ; Totally match???
+	BNE	130$		; Nope, loop it...
+	CMP	R4,#ERLRIB	; Is it ERRLOG ?
+	BNE	140$		; No - return "ID in use" error
+	TSTPRV	SYSIO,@#FIPRVM	; Privileged to declare that way?	;018
+	BEQ	170$		; No, so call it a bad name		;012
+	MOV	#SNDLST,R2	; Yes - preset list pointer for de-linking
+	TSTB	S.JBNO(R4)	; O.K. to make an error logger (no job now)?
+	BEQ	190$		; Yes - so do it
+140$:	ERROR	FIEXST		; This ID already in use
+
+150$:	BUFFER	GETSML,0,40.	; Get a small buffer (not zeroed) for the RIB
+	BVC	200$		; Buffer obtained, go fill it in
+	ERROR	NOBUFS		; No buffer available for RIB
+
+160$:	ERROR	INUSE		; Job already a declared receiver
+
+170$:	ERROR	BADNAM		; Illegal receiver name
+
+175$:	ERROR	ABORT		; Can't find myself			;018
+
+177$:	ERROR	QUOTA		; RIB or message quota exceeded		;022
+
+NOPRVR:	BIC	#40-1,R4	; Insure pointing to the nascent RIB	;008
+	BUFFER	RETSML		; Return RIB we won't be using		;008
+NOPRV2:	ERROR	PRVIOL		; Not privileged for certain functions
+
+180$:	MOV	(R2),R2		; Find previous RIB position in list
+190$:	CMP	R4,(R2)		; Does link match error logger's RIB?
+	BNE	180$		; No, continue search
+	MOV	(R4),(R2)	; Yes, link previous to next
+200$:	CLR	(R4)+		; Clear the link word
+	MOV	(R3)+,(R4)+	; Store the receiver ID in the RIB
+.ASSUME	S.RCID EQ S.LINK+2
+	MOV	(R3)+,(R4)+	;  which is 6
+	MOV	(R3)+,(R4)+	;   ascii characters
+	MOVB	R0,(R4)+	; The caller is the owning job
+.ASSUME S.JBNO EQ S.RCID+6
+	MOVB	FQDEVN-14(R3),S.SRBN-S.OBJT(R4) ; Store subRIB number
+	CMP	R4,#ERLRIB+S.OBJT ; Is this the error log declare?	;012
+	BEQ	290$		; Yes, don't mess up the RIB then	;012
+	MOVB	(R3)+,(R4)+	; Get S.OBJT.				;012
+.ASSUME S.OBJT EQ S.JBNO+1
+	BICB	#SA.XOF!SA.SLB,(R3) ; Prevent wrong initial condition
+	BITB	#SA.EVT,(R3)	; Trying to be the event logger?	;025
+	BNE	220$		; Yes					;012
+	TSTB	S.LMAX-S.ACCS(R3) ; No, but inbound links?		;018
+	BEQ	230$		; No network stuff			;012
+	MOV	@#FIJBDA,R2	; Get caller's JDB pointer		;023
+	MOV	#J2NET!J2BAT,-(SP) ; Push flags				;021
+	BIC	JDFLG3(R2),(SP)+ ; Check for "network server" case	;023
+	BEQ	230$		; Both set means server, skip priv test	;021
+220$:	TSTPRV	SYSIO,@#FIPRVM	; Allowed to be a network server?	;018
+	BEQ	NOPRVR		; Error if not				;012
+230$:	MOVB	(R3)+,(R4)+	; Get access control byte (S.ACCS)	;012
+.ASSUME S.ACCS EQ S.OBJT+1
+	TSTB	(R4)+		; Skip subRIB number
+.ASSUME S.SRBN EQ S.ACCS+1
+	TSTPRV	EXQTA,@#FIPRVM	; Do we have to check quotas?		;018
+	BNE	270$		; No, skip				;012
+	TSTB	S.OMAX-S.BMAX(R3) ; Defaulted S.OMAX?			;012
+	BNE	260$		; No					;012
+	MOVB	#1,S.OMAX-S.BMAX(R3) ; Yes, set the default value	;012
+260$:	CMPB	S.OMAX-S.BMAX(R3),#1 ; Is S.OMAX in spec?		;012
+	BHI	NOPRVR		; No, error				;012
+270$:	TST	(R3)+		; Skip obsolete S.BMAX in FIRQB		;022
+	CLR	(R4)+		;  and clear it in RIB			;022
+;;;	MOV	(R3)+,(R4)+	; Get S.BMAX.  				;012
+.ASSUME S.BMAX EQ S.SRBN+1
+	MOVB	(R3)+,(R4)+	; Store S.MMAX
+.ASSUME S.MMAX EQ S.BMAX+2
+	CLRB	(R4)+		; Ensure no pending messages
+.ASSUME S.MCNT EQ S.MMAX+1
+	MOV	R4,2(R4)	; End ptr points to root (S.MEND)
+	CLR	(R4)		; Ensure no pending message list
+.ASSUME S.MLST EQ S.MCNT+1
+	CMP	(R4)+,(R4)+	; Skip over the list pointers
+	MOVB	(R3)+,(R4)+	; Get # inbound links.			;012
+.ASSUME	S.LMAX EQ S.MLST+4
+	CLRB	(R4)+		; Ensure no links (S.LCNT)
+.ASSUME	S.LCNT EQ S.LMAX+1
+	MOV	R4,2(R4)	; End ptr points to root (S.LLST)
+	CLR	(R4)+		; Ensure no links
+.ASSUME	S.LLST EQ S.LCNT+1
+	CMP	(R3)+,(R4)+	; Skip timer in FIRQB and end ptr in RIB
+	MOVB	(R3)+,(R4)+	; Get # outbound links.  Default and EXQTA? ;012
+	BNE	280$		; No
+.ASSUME S.OMAX EQ S.LLST+4
+	MOVB	#255.,-1(R4)	; Yes, set max # links			;012
+280$:	MOVB	(R3)+,(R4)+	; Store S.PQTA byte			;010
+.ASSUME S.PQTA EQ S.OMAX+1
+	MOV	(R3)+,(R4)+	;  Store next two words passed
+	MOV	(R3),(R4)	;   for possible future use		;010
+290$:	MAP	FIPPOL		; Be sure FIP pool is mapped		;023
+	FJMP	DECLR2		; Continue in next overlay		;012
+
+.DSABL	LSB
+
+GLOBAL	<FIPRVM,FIUSER,SNDLST,ERLRIB,FIJBDA>				;023
+
+;+
+; GETRB3 - GET RECEIVER ID BLOCK FROM JOB NUMBER AND SUB RIB NUMBER
+;
+;	R0 =  JOB NUMBER TIMES 2
+;	R4 -> FIRQB
+;		32+FIRQB = SUB RIB NUMBER
+;
+;	CALL	GETRB3
+;
+;	R5 -> RECEIVER ID BLOCK (RIB) OR 0 IF NONE
+;	R2 -> JCR @ JCMPTR
+;
+;	JCR will be mapped through DPAR6
+;-
+
+GETRB3:	MAP	@#FIPJC6,APR=6,DATA,PIC,R=2 ;Map job's JCR entry	;023
+	MOV	@#FIPJCR,R2		;And point to it		;023
+	ADD	#JCMPTR,R2		;POINT TO RIB LIST POINTER	;023
+	MOV	R2,R5			;COPY JCR @ JCMPTR POINTER	;023
+10$:	MOV	(R5),R5			;POINT TO NEXT RIB
+	BEQ	20$			;NOT FOUND EXIT
+	CMPB	R0,S.JBNO(R5)		;THIS RIB FOR THIS JOB?
+	BNE	10$			;NO GO ON
+	CMPB	FQDEVN(R4),S.SRBN(R5)	;THIS THE RIGHT SUB RIB?
+	BNE	10$			;NO KEEP LOOKING
+20$:	RETURN				;AND GO BACK
+
+GLOBAL	<FIPJC6,FIPJCR>							;023
+
+FQFEND									;012
+
+FQFSRT									;012
+
+DECLR2:	BIC	#40-1,R4	; Back to top of RIB			;008
+	BIC	#40-1,R3	;   and to top of FIRQB			;010
+	MOVB	S.OBJT(R4),R5	; Get declared object type
+	BEQ	230$		; None => link RIB and do network checks
+	BITB	#SA.NLC,S.ACCS(R4) ; Any access bits indicate "non-local-ness" ? ;010
+	BEQ	240$		; No => go process Local Object Type
+
+; Final processing, network-ish or no Object Type
+
+230$:	CALL	LNKRIB		; Link the new RIB into Monitor's list
+	CMP	(SP)+,(R1)+	; Trash JCMPTR(JCR), point @ JDFLG in JDB ;012
+.ASSUME	JDFLG EQ 2
+	POP	R4		; Restore the FIRQB pointer		;008
+
+;	R1 -> JDB @ JDFLG
+;	R4 -> FIRQB
+;		+4 (BYTE) = 1
+
+	CLC			; Mark as not a "redo"			;023
+	MOVB	JDIOST-JDFLG(R1),-(SP) ; Save any present error code	;020
+	MOV	@#NETSER,-(SP)	; Get address of network service entry	;024
+	CALL	@(SP)+		; And go there in a PIC way...		;024
+	BCC	250$		; NSP liked it -> go exit		;008
+	MOVB	JDIOST-JDFLG(R1),(SP) ; Replace error code with one from NETSER ;020
+	CLRB	FQDEVN(R4)	; Make sure it's not "remove all"
+	CLR	R2		; Remove ourselves
+	MOVB	FQJOB(R4),R0	; Pick up job number
+	FCALL	REMRCV		; Remove the RIB
+	MOV	(SP)+,R0	; Retrieve error code
+	JMPX	ERROR		; Exit to error handler
+
+
+; Final processing, Local Object Type being declared
+
+240$:	CALL	LOTDCL		; Process declaration of Local Object Type ;012
+	CALL	LNKRIB		; Link the new RIB into Monitor's list
+	POP			; Trash JCMPTR(JCR)			;010
+	POP	R4		; Restore FIRQB pointer			;010
+	BR	260$		; And we're done			;020
+
+250$:	MOVB	(SP)+,JDIOST-JDFLG(R1) ; Restore previous error code	;020
+260$:	RETURN			; And we're done			;020
+
+GLOBAL	<NETSER>							;024
+
+;+
+; LNKRIB - link newly-built RIB into Monitor's list			;008
+;
+;	R0  =	Job number * 2
+;	R4 ->	newly-built RIB
+;	SP ->	RTSaddr, JCR @ JCMPTR, FIRQB address,...
+;
+;	CALL	LNKRIB
+;
+;	R2,R3  ..munged
+;-
+
+LNKRIB:	MOV	#SNDLST,R2		; Get root of receiver ID list
+10$:	MOV	R2,R3			; Save a previous pointer
+	MOV	(R2),R2			;   then get next RIB in list
+	BEQ	20$			; End of list => enter new RIB at end
+	CMPB	R0,S.JBNO(R2)		; Is new job no above this one?
+	BHI	10$			; Not there yet -> keep looking
+	BNE	20$			; Above now => enter new RIB here
+	CMPB	S.SRBN(R4),S.SRBN(R2)	; Same job: this subRIB higher?
+	BHIS	10$			; No, not there yet => keep looking
+20$:	MOV	R4,(R3)			; Point previous RIB to new RIB
+	MOV	R2,(R4)			;   and point new RIB to rest of list
+	CMP	#SNDLST,R3		; Is there a "previous" RIB ?
+	BEQ	30$			; None => set this one in JDB2
+	CMPB	R0,S.JBNO(R3)		; Yes: "previous" RIB for same job ?
+	BEQ	40$			; Yes => leave JCR's RIB ptr alone
+30$:	MAP	@#FIPJC6,APR=6,DATA,PIC,R=2 ; No, map this job's JCR entry ;023
+	MOV	R4,@2(SP)		; Set up the RIB address	;023
+	MAP	FIPPOL			; Restore FIP pool mapping	;023
+40$:	RETURN				; And exit
+
+GLOBAL	<SNDLST,FIPJC6>							;008
+
+;+									;008
+; LOTDCL - Verify and process a DECLARE which includes a local Object Type
+;
+;	R0  =	Job Number times two
+;	R3  ->	FIRQB
+;	R4  ->	new RIB
+;	R5  =	S.OBJT code for new RIB
+;
+;	FCALL	LOTDCL
+;
+;	R2,R3,R4  ..munged
+;-
+
+
+LOTDCL:	CMP	R5,#SO.MMX	; Inspect Local Object Type ("LOT")
+	BHI	ER.NAM		; Out of range => release RIB;  BADNAM error
+	CMP	R5,#SO.MMN	; In range for multiple-instance, then ?
+	BHIS	20$		; Yes => just exit (no entry in LOTTBL)
+	CMP	R5,#SO.1MX	; No:  in range for one-instance, then ?
+	BHI	ER.NAM		; No => release RIB;  BADNAM error
+	MOV	R5,-(SP)	; Save the LOT				;012
+	TSTPRV	SYSIO,@#FIPRVM	; Allowed to use local objects?		;018
+	BEQ	ER.PRV		; Error if not				;012
+	MOV	(SP)+,R5	; Restore R5				;012
+	MOV	R5,R2		; In range:  copy the S.OBJT code
+	ASL	R2		;   Now, times two for word offset
+	ADD	#LOTTBL-2,R2	; R2 -> LOT vector cell (bias: no cell for 0)
+	TST	(R2)		; Receiver declared for this Object Type already ?
+	BNE	ER.XST		; Yes, not available => release RIB;  FIEXST error
+	CMP	R5,#SO.EML	; Available:  is it EMT logger, then ?
+	BNE	10$		; No => continue
+	CALL	EMLDCL		; Yes: do EMTLOG checks and setup
+10$:	MOV	R4,(R2)		; Record RIB address in LOT table
+	ADD	#LOTFLG-LOTTBL,R2   ; Now R2 -> corresponding LOTFLG entry
+	MOVB	R0,(R2)		; Load job number in LOTFLG
+	BIT	#EMLNVR,(R2)	; This kind of job "never EMT-logged" ?
+	BEQ	20$		; No => go exit
+	MOV	JOBTBL(R0),R2	; Yes:  point R2 -> job's JDB		;010
+	CALL	EMLPFX		;   and fix up JCEMLP (or PADI) as required
+20$:	RETURN
+
+ER.NAM:	BUFFER	RETSML		; Return the unborn RIB
+	ERROR	BADNAM		; Flag bad receiver ID
+
+ER.PRV:	BUFFER	RETSML		; Return the unborn RIB			;012
+	ERROR	PRVIOL		; Flag not privileged enough		;012
+
+ER.XST:	BUFFER	RETSML		; Return the unborn RIB
+	ERROR	FIEXST		; Flag Object Type duplication
+
+GLOBAL	<EMLCTL,LOTTBL,LOTFLG,JOBTBL>
+
+;+
+; EMLDCL - do consistency checks and set-up for EMT Logger
+;
+;	R0  =	Job Number times two
+;	R3  ->	FIRQB
+;	R4  ->	new RIB
+;
+;	CALL	EMLDCL
+;
+;	All registers preserved
+;-
+
+EMLDCL:	REGSCR			; Save registers
+	MOV	#EMLTBL,R2	; Point R2 -> EMT logging control table	;010
+	CMP	R2,#N$G$$D	; Was EMT Logging selected @ Sysgen time ?
+	BEQ	ER.ERR		; No => release RIB, error "Missing special feature"
+	ADD	#S.PQTA,R4	; Point R4 -> RIB @ packet-per-message quota
+	CMPB	(R4),#64.	; Is packet-per-message quota in range ?
+	BHI	ER.CNT		; Too high => release rib, error BADCNT
+	ADD	#22,R3		; Point R3 -> FIRQB @ "sleep" word's low byte
+	CMPB	(R3),(R4)	; Is EMLRPQ at least as great as packet-per-message quota ?
+	BLO	ER.CNT		; No => give BADCNT error
+	MOVB	(R3),(R2)+	; Yes:  load EMLRPQ
+	CLRB	(R2)+		;    ..zeroing the high byte
+.ASSUME EMLRPQ EQ 0
+	CLR	(R3)		; Clear "sleep" word (in case of a combined call) ;010
+
+; Scan Local Object table, disabling EMT Logging for any jobs which
+; are so flagged
+
+	MOV	#LOTFLG,R0	; Point R0 -> table of "1-only" Local Objects' flags
+10$:	MOV	(R0)+,R1	; Get contents of LOTFLG cell
+	BIT	#EMLNVR,R1	; Is this a "never-EMT-log" type of object ?
+	BEQ	20$		; No => continue
+	BIC	#^C<377>,R1	; Mask out high byte (leaving job no * 2)
+	BEQ	20$		; Cell is vacant => continue
+	MOV	JOBTBL(R1),R2	; There is such a local object:  get its JDB address ;010
+	CALL	EMLPFX		; Fix up this job's JCEMLP, or PADI, as required
+20$:	CMP	R0,#LOTFLG+<2*SO.1MX>   ; Have we inspected last LOTFLG cell ?
+	BLO	10$		; No => continue to next one
+	RETURN
+
+ER.ERR:	BUFFER	RETSML		; Return the unborn RIB
+	ERROR	ERRERR		; Flag missing-special-feature error
+
+ER.CNT:	BIC	#40-1,R4	; Restore R4 -> beginning of RIB	;010
+	BUFFER	RETSML		; Return the unborn RIB			;010
+	ERROR	BADCNT		; Flag invalid packet-per-message quota	;010
+
+	GLOBAL	<EMLTBL,LOTFLG,JOBTBL>
+
+;+
+; EMLPFX - Set a job to "no EMT logging"
+;
+;	R2  ->	JDB of the subject job
+;
+;	CALL	EMLPFX
+;
+;	R2,R3,R4   ..munged
+;
+; The indicated job has been determined to be "never-EMT-logged".
+; If EMT logging was selected at SYSGEN time, and there is nothing
+; hanging on JCEMLP at the moment, we load JCEMLP with a flag value
+; of EMLNLG.  In the case where a packet IS hanging on JCEMLP, we
+; mark that packet @ PADI with the ADINLG bit -- EMLSND will then
+; know to mark JCEMLP after delivering that (the last!) packet to
+; the receiver's queue.
+;-
+
+EMLPFX:	CMP	#EMLTBL,#N$G$$D	; Was EMT logging selected at sysgen time ?
+	BEQ	30$		; No (and there aren't any JCEMLP's) => quick exit
+	MAP	@#FIPJC6,APR=6,DATA,PIC,R=2 ; Yes, map the JCR entry for job ;023
+	MOV	@#FIPJCR,R2	; And point to it			;023
+	ADD	#JCEMLP,R2	; Now offset to JCEMLP			;023
+	TST	(R2)		; Anything currently in JCEMLP ?
+	BNE	20$		; Yes => go have a closer look
+	MOV	#EMLNLG,(R2)	; No:  set "never log" directly
+20$:	CMP	(R2),#ABFLGS	; Is JCEMLP a "flag" value ?		;010
+	BHIS	30$		; Yes => we're done			;010
+	MOV	(R2),R4		; Point mapper to this JCEMLP's packet
+	CALLX	MAPBUF		;    and map it
+	BIS	#ADINLG,PADI(R3) ; Set bit saying "no more logging"
+30$:	MAP	FIPPOL		; Restore FIP pool mapping		;023
+	RETURN
+
+GLOBAL	<EMLTBL,JCEMLP,FIPJC6,FIPJCR>					;023
+
+FQFEND									;008
+
+FQFSRT
+
+.SBTTL	Entry for REMOVE						;017
+
+; Remove a message receiver
+
+;+
+; REMALL Loop removing all the RIBs for a job
+;
+;	R0 =  Job number of job running
+;	R1 -> JDB @ JDFLG
+;	R2 =  Job number of job that remove is for
+;	R4 -> FIRQB
+;-
+
+.ENABL	LSB								;017
+
+REMALL:	TSTB	5(R4)		; Specified conditional remove?		;026
+	BMI	30$		; Yes, not valid for remove-all		;017
+	TST	R2		; Is this a remove for someone else
+	BNE	10$		; Yes then get JDBwhat is in R2
+	MOV	R0,R2		; No so copy job number for JDB get
+				; (R2 is checked in SEND front end)
+10$:	MOV	R0,-(SP)	;Save our job number
+	CALL	GETRB2		;Get RIB pointer			;023
+	MOV	(R0),R3		;And point to the first RIB		;023
+	BEQ	20$		;No more, that's easy			;023
+	MOV	(SP),R0		;Got one, get back our job number	;023
+	MOV	R2,-(SP)	;Save R2
+	MOV	R4,-(SP)	;Save R4
+	MOV	JOBTBL(R2),R1	; Get pointer to JDB
+	TST	(R1)+		; Point R1 at JDFLG in JDB
+.ASSUME	JDFLG	EQ	2
+	MOVB	S.SRBN(R3),FQDEVN(R4) ; Set FIRQB to say do this sub RIB
+	CLRB	FQDEVN+1(R4)	; Make sure we won't loop
+	CALL	REMRCV		; Do the remove for this sub RIB
+	MOV	(SP)+,R4	; Get  back	    R4
+	MOV	(SP)+,R2	;		and R2
+	MOV	(SP)+,R0	;		and R0
+	BR	10$		; Do this till all my RIBs is gone
+
+20$:	TST	(SP)+		; Clean the stack			;023
+	MAP	FIPPOL		; Restore FIP pool mapping		;023
+	RETURN			; Now that all is done go back
+
+30$:	ERROR	PRVIOL		; Not privileged for certain functions
+
+GLOBAL	<FIPJC6,FIPJCR>							;023
+
+;+
+; REMFQ - Message REMOVE						;017
+;
+;	R0 =  Job number times 2
+;	R1 -> Job data block
+;	R4 -> FIRQB
+;		 +4  =	0 => REMOVE
+;		 +5  =	0 => REMOVE self				;017
+;			Job # *2 => REMOVE job				;017
+;			Sign bit set means remove only if no messages	;017
+;		+32  =	Sub RIB number					;017
+;		+33  =	Remove all RIBs if <> 0				;017
+;-
+
+	FQFENT	REM		; Message remove			;017
+
+	TST	(R1)+		; Index to JDFLG in JDB
+.ASSUME JDFLG EQ 2
+	MOVB	5(R4),R2	; Pick up job# *2 (if any)		;026
+	BIC	#^C<177>,R2	; Clear off sign extension and flag	;017
+	BEQ	35$		; Remove-self; skip checks		;019
+	BIT	R2,#^C<63.*2>	; Is the job# *2 legal at all ?
+	BNE	30$		; No => error right away		;011
+	CMP	R2,#JOBMX2	; Within JOBMAX range?			;018
+	BHI	30$		; No, error				;018
+	TST	JOBTBL(R2)	; Yes, but is there a job?		;018
+	BEQ	30$		; Error if not				;018
+35$:	TSTB	FQDEVN+1(R4)	; Is this a REMOVE ALL?			;019
+	BNE	REMALL		; Go loop through all the RIBs for this job
+REMRCV:	TST	R2		; Was there a specified job to remove ?
+	BNE	40$		; One specified
+	MOV	R0,R2		; None specified - remove self
+40$:	CMP	R0,R2		; Is this a remove of caller (self) ?
+	BEQ	50$		; Yes, anyone can do that
+	TSTPRV	JOBCTL,@#FIPRVM	; Allowed to diddle jobs?		;018
+	BEQ	30$		; Error if not				;012
+50$:	CALL	GETRB2		; Get that job's RIB
+	BCS	190$		; None - just exit
+	TSTB	5(R4)		; Specified conditional remove?		;017
+	BPL	60$		; No, skip check			;017
+	TSTB	S.MCNT(R5)	; Yes -- are there messages?		;017
+	BNE	210$		; Yes, so return error			;017
+60$:	MOV	R2,-(SP)	; Save job#*2 of owner of RIB
+	CLRB	S.JBNO(R5)	; Zero owning job number
+
+;	R0 -> JCR @ JCMPTR
+;	R1 -> JDB @ JDFLG
+;	R4 -> FIRQB
+;		+4 (byte) = 0
+;	R5 -> RIB
+
+	;CLC			; Mark as not a "redo" (C=0 from CLR above)
+	MOV	@#NETSER,-(SP)	; Pick up address of network service routine ;024
+	CALL	@(SP)+		; And go there in a PIC way		;024
+70$:	MOV	#SNDLST,R1	; Preset for RIB de-linking later
+	CMP	R5,#ERLRIB	; Is this ERRLOG ?
+	BEQ	130$		; Yes, so don't clear message chain
+	MOV	S.MLST(R5),R2	; Get address of first PMB in chain
+80$:	BEQ	130$		; None left - delink & deallocate RIB
+	MOV	(R2),-(SP)	; Save address of next PMB		;017
+	MOV	@#NETPMB,-(SP)	; Get address of network buffer return	;024
+	CALL	@(SP)+		; And go there				;024
+	BCS	110$		; Buffer returned, all set		;024
+90$:	MOV	P$BUFA(R2),R4	; Get large buffer address if any
+	BEQ	100$		; Which there isn't
+	BUFFER	RETCHN		; Else return the whole buffer chain	;008
+100$:	MOV	R2,R4		; PMB address to R4 for deallocation
+	BUFFER	RETSML		; Return the current PMB buffer
+110$:	MOV	(SP)+,R2	; Pick up address of next PMB		;017
+	BR	80$		; Loop for whole chain
+
+120$:	MOV	(R1),R1		; Find previous RIB position in list
+130$:	CMP	R5,(R1)		; Does link match the RIB we're removing 
+	BNE	120$		; No, continue search
+	MOV	(R5),(R1)	; Yes, link previous to next
+	MOV	R5,R4		; Now move RIB block here to give back sb.
+140$:	MOV	#SNDLST,R5	; Point to root of list
+	MOV	(SP)+,R2	; Get back job#*2 of job doing remove for
+150$:	MOV	(R5),R5		; Get next RIB
+	BEQ	160$		; End of list so no longer a receiver
+	CMPB	R2,S.JBNO(R5)	; Is this RIB owned by the job losing a RIB?
+	BNE	150$		; No keep looking
+160$:	MOV	R5,(R0)		; Set lowest sub RIB or 0 if no longer a ;023
+				;  receiver (0 comes from end of send list)
+	MOV	#LOTTBL+<2*SO.1MX>,R2 ; Point to Local Obj RIB vector	;008
+	MOV	#SO.1MX,R1	; Set count of one-instance Local Object types
+170$:	CMP	-(R2),R4	; This RIB belong to a Local Object ?
+	BNE	180$		; No -> look at next Local Object
+	CLR	(R2)		; Yes:  clear its vector cell
+	CLRB	LOTFLG-LOTTBL(R2)  ; and clear its job number
+	CMP	R1,#SO.EML	; Is this the EMT Logger ?
+	BNE	180$		; No -> continue
+	CALL	EMLRMV		; Yes:  tear down the EML structures
+180$:	SOB	R1,170$		; Go check next vector cell		;008
+	CMP	R4,#ERLRIB	; Is this the error logger RIB?
+	BNE	185$		; No, not this time			;023
+	CLRB	S.JBNO(R4)	; Set error log job back to 0
+	MOV	#SNDLST,R5	; Get pointer to root of send list
+	MOV	(R5),(R4)	; Link error log RIB to front of snd list
+	MOV	R4,(R5)		; Point the root of the send list
+				;  to error logger's RIB
+	BR	190$		; And get out
+
+185$:	BUFFER	RETSML		; Return RIB buffer to pool		;023
+190$:	MAP	FIPPOL		; Restore FIP pool mapping		;023
+	RETURN			;  and exit
+
+210$:	ERROR	INUSE		; Messages present on conditional remove ;017
+
+.DSABL	LSB
+
+GLOBAL	<ERLRIB,SNDLST,LOTTBL,LOTFLG,JOBMX2,NETSER,NETPMB>		;018
+
+;+									;008
+; EMLRMV - Receiver removal processing for EMT Logger
+;
+;	CALL	EMLRMV
+;
+;	All registers preserved
+;
+;	DPAR6 mapping is undefined
+;-
+
+
+
+EMLRMV:	REGSCR			; Save registers
+
+;  Return any pending EML packets hanging on Job Table structure
+
+	MOV	#JOBTBL+2,R2	;Pick up pointer to job 1's JDB		;023
+10$:	MOV	(R2)+,R4	;Pick up JDB pointer			;023
+	BEQ	10$		;None, nothing to do			;023
+	CMP	R4,#-1		;Are we done?				;023
+	BEQ	20$		;Yes, sure are				;023
+	MOV	R2,R0		;No, so copy JDB pointer + 2		;023
+	SUB	#JOBTBL+2,R0	;And get job # * 2			;023
+	CALLX	MAPJCR		;Map the JCR entry for job		;023
+	MOV	JCEMLP(R1),R4	;Pick up possible EML packet pointer	;023
+	BEQ	10$		;Nothing there -> skip any returning	;023
+	CLR	JCEMLP(R1)	;Insure packet pointer is now clear	;023
+	CMP	R4,#ABFLGS	;Is this a "flag", instead of a packet address ??
+	BHIS	10$		;Yes -> skip returning a FLAG		;023
+	BUFFER	RETCHN		;No, it's a packet:  return it
+	BR	10$		;And loop				;023
+
+;  Return any packets currently in EML's "pending" chain		;010
+
+20$:	MOV	#EMLTBL,R1	; Point R1 -> EMLCTL table		;023
+	CMP	R1,#N$G$$D	; Was EMT Logging selected @ sysgen time ? ;023
+	BNE	25$		; Yes => continue			;023
+	CRASH								;023
+
+25$:	MOV	EMLLST(R1),R4	; Get pointer to EML's "pending" packet chain ;023
+	BEQ	30$		; No pending packets => continue
+	BUFFER	RETCHN		; Return pending packets to the pool
+
+;  Clear out the EMLCTL table
+
+30$:	MOV	#EMLTSZ/2,R0	; Set count of words to clear
+40$:	CLR	(R1)+		; Clear EMLCTL table,
+	SOB	R0,40$		;    one word at a time
+	RETURN
+
+GLOBAL	<EMLTBL,JOBTBL,JCEMLP>						;023
+
+;+
+; GETRB2 - get receiver ID block from job number and sub RIB number
+;
+;	R2 =  Job number times 2
+;	R4 -> FIRQB
+;		32+FIRQB = sub RIB number
+;
+;	CALL	GETRB2
+;
+;	R0 -> JCR of owner of RIB @ JCMPTR
+;	R5 -> Receiver ID block (RIB) or 0 if none
+;
+;	JCR entry for job mapped through DPAR6
+;
+;	If C=0 then RIB exists
+;	If C=1 then no RIB exists
+;-
+
+GETRB2:	MOV	R2,R0		;Get job # * 2 in correct register	;023
+	MOV	R1,-(SP)	;Get a work register			;023
+	CALLX	MAPJCR		;And map the JCR entry			;023
+	MOV	R1,R0		;Copy pointer to JCR entry		;023
+	MOV	(SP)+,R1	;And restore caller's R1		;023
+	ADD	#JCMPTR,R0	;Point to caller's RIB pointer		;023
+	MOV	R0,R5		;Copy RIB Pointer			;023
+10$:	MOV	(R5),R5		;Point to next RIB
+	BEQ	20$		;Not found set C and exit
+	CMPB	R2,S.JBNO(R5)	;This RIB for this job?
+	BNE	10$		;No go on
+	CMPB	FQDEVN(R4),S.SRBN(R5) ;This the right sub RIB?
+	BNE	10$		;No keep looking
+	TST	(PC)+		;Clear carry and skip next
+20$:	SEC			;Set carry
+	RETURN			;and go back
+
+FQFEND
+
+.END

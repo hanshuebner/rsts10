@@ -1,0 +1,1612 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:FLDEF/
+.INCLUDE /CMN:PFBDEF/
+.INCLUDE /CMN:KBDEF/
+.INCLUDE /CMN:PKDEF/
+TITLE	PFBIO,<PERMANENT FILE I/O>,0J,27-MAR-92,GPK/MNB/KPH/FEK/DRP/GMB/DBM
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for PFBIO
+
+;+
+;
+;  000	GPK  27-Sep-83	Creation
+;  001	GPK  13-Dec-83	Additions for ICF/Log file I/O
+;  002  MNB  09-Mar-84  W$PT is now W$PR (pending requests)
+;  003	GPK  01-Apr-84	Finish up changes for asynch I/O
+;  004	GPK  20-Apr-84	Move PFBIO to EM2 phase
+;  005  MNB  24-Apr-84	Assure synchronicity after MOVXRB call
+;  006	KPH  09-Jul-84	Make call to MOVXRB a CALLM
+;  007	GPK  10-Jul-84	Bugfix in PUTLOG
+;  008	GPK  07-Aug-84	Change "noon" to be 12:00 PM
+;  009	GPK  31-Aug-84	Add missing L3QSET in logfile flush
+;  010	KPH  29-Aug-84	Changes for APR5 FIP pool
+;			Turn on posting in PFBRW
+;  011	GPK  17-Oct-84	Changes for SET [NO]ECHO, add block I/O (BLK.PF)
+;  012	GPK  01-Nov-84	Change BLK.PF to look more like .READ/.WRITE
+;  013	FEK  06-Nov-84	Add Stardate support
+;  014	KPH  07-Dec-84	Pass flag to terser to not log error sequence
+;			Bugfix in BLDTIM
+;  015	KPH  27-Feb-85	Move job flag subcode here from PFB
+;  016	GPK  29-Mar-85	Disallow .PFB directive except from DEFKBM
+;
+;			[RSTS/E V9.1]
+;  017	DRP  08-Aug-85	Include form feed as a delimiter in GETSTM
+;
+;			[RSTS/E V9.2]
+;  018  KPH  13-Aug-85	Add job control region
+;
+;			[RSTS/E V9.3]
+;  019  KPH  03-Jan-86	Add DCL context word
+;			Don't return EOF on zero-length records
+;  020  KPH  22-Feb-86	Move SYDVR out of RSTS phase
+;  021  KPH  02-May-86	Don't change context word on zero writes
+;  022  KPH  12-Sep-86	Terminate reads in progress with a control/Z
+;			before starting error sequence.
+;  023  KPH  19-Nov-86	Implement checking of RMS-11 style EOF
+;			Fix output/timestamp misordering problem
+;
+;			[RSTS/E V9.4]
+;  024  GMB  26-Feb-87	Removed code.  Now we save ICF position even
+;			after an error (like EOF) and also keep the ICF
+;			active after an error (like EOF).
+;  025	DRP  15-May-87	Due to changes in 024, we no longer need to
+;			increment the delimiter count.
+;
+;			[RSTS V9.5]
+;  026	JFM  23-Jul-87	Move call to FLOVER before outputting timestamp to
+;			prevent timestamp from being output before characters
+;			in overflow buffer.
+;  027	JFM  04-Sep-87	Fix "last record in block" computation problem
+;
+;			[RSTS V9.6]
+;  028  KPH  13-Oct-87	Change PK DDB lookup to use CSR.KB
+;			Change PKMODE references to be symbolic
+;			Remove TTPK11 global reference
+;
+;			[RSTS V9.7]
+;  029	JFM  22-Aug-88	Fix test of "span block boundary".  Don't test bit in
+;			PF.FLG, test in PF.RFM.
+;  030  KPH  16-Dec-88	Add "gimme privileges" subfunction
+;
+;			[RSTS V10.0]
+;  031	DBM  23-Oct-89	Change worst error status to current $_EXIT status
+;  032	FEK  02-Nov-89	Make CNVTIM only use valid bits from time word
+;  033	FEK  04-Apr-90	Fix Stardates.
+;
+;			[RSTS V10.1]
+;  034	FEK  17-Mar-92	Fix leap years in Stardates and year 2000+
+;  035	JFM  20-Mar-92	Get rid of extra CRLF at end of logfile
+;-
+
+.SBTTL	Handle the job flag subfunction code
+
+	DEFORG	PFBIO
+
+.SBTTL	JOBFLG - Read/set/clear job global flags
+
+;+
+; JOBFLG - Read/set/clear job global flags
+;
+;	R1 -> Caller's JDB @ JOBF
+;		FQSIZ  = DCL context word
+;		FQFLAG = bits to set
+;		FQBUFL = bits to clear
+;		FQPROT = exit status to set
+;
+; Exit:
+;		FQSIZ  = DCL context word (before setting new one)
+;		FQBUFL = Job flags (J2FLAG contents)
+;		FQPROT = Exit status (before setting new one)
+;
+; Calling job is JOB.
+;-
+
+JOBFLG:	MOVB	@#140000+FIRQB+FQPROT,R3 ;Pick up desired exit status	;018
+	BICB	#^C<7>,R3	;And save only the program part		;015
+	MOV	@#140000+FIRQB+FQSIZ,R4 ;Pick up new context word	;019
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;018
+	MOV	JOBJCR,R0	;And point to it			;018
+
+; R0 -> Job' JCR entry
+; R3 =  New current status to set (Low byte)
+; R3 =  Change exit status flag (High byte, 0 = no change, -1 = change)	;031
+; R4 =  New context word to set
+;
+; JCR is mapped through DPAR6
+
+	MOV	JCDCLW(R0),R2	;Pick up old context word		;019
+	TST	R4		;Changing context word?			;021
+	BEQ	5$		;No, not this time			;021
+	MOV	R4,JCDCLW(R0)	;Yes, so set the new one		;019
+5$:	ADD	#JCEXST,R0	;Advance to JCEXST			;018
+	MOVB	(R0),R4		;Save exit status for later		;018
+	BICB	#7,(R0)		;Clear the low part			;018
+	MOV	R3,R5		;Copy desired exit status		;015
+	BPL	20$		;Set current status only		;031
+	ASH	#4,R5		;And move it to high nybble		;015
+	MOVB	R5,(R0)		;Set the new job exit status		;031
+20$:	BISB	R3,(R0)		;Now set the program exit status	;018
+
+; New context word and exit status have been set for job.
+;
+;	R0 -> Job's JCR entry @ JCEXST
+;	R1 -> JDB @ JOBF
+;	R2 =  DCL context word before new one was set
+;	R4 =  Exit status before new one was set
+
+	MAP	FIPPOL		;Map FIP pool for the IOB		;018
+	MOV	@-(R1),R3	;Get console pointer			;018
+.ASSUME	JDIOB	EQ	0
+	MAP	@UDPAR0,APR=6,DATA ;Map user's first 4K			;018
+	MOV	R2,@#140000+FIRQB+FQSIZ ;Return old context word	;019
+	MOVB	R4,@#140000+FIRQB+FQPROT ;And return exit status	;018
+	MOV	#140000+FIRQB+FQBUFL,R4	;Point to bits to clear in FIRQB ;018
+	BIC	#^C<J2VFY!J2NDAT!J2NCHO!J2NERR>,FQFLAG-FQBUFL(R4)	;015
+	BIC	#^C<J2VFY!J2NDAT!J2NCHO!J2NERR>,(R4)			;015
+	CMPB	TTINTF(R3),#TTPK11 ;PK type device?			;018
+	BNE	30$		;No, skip				;015
+	MOVB	DDUNT(R3),R3	;Yes, get KB unit number		;018
+	ASL	R3		;Now get unit number times two		;028
+	MOV	CSR.KB(R3),R3	;Now get PK DDB pointer			;028
+	BIT	#PKNOUT,PKMODE(R3) ;Trash output?			;028
+	BEQ	30$		;No, skip				;015
+	BIC	#J2NCHO!J2NERR,(R4) ;Yes, can't clear these 2 then	;015
+30$:	ADD	#JDFLG3,R1	;Advance to flags in JDB		;018
+	BIC	(R4),(R1)	;Clear some bits			;018
+	BIS	FQFLAG-FQBUFL(R4),(R1) ; then set some			;018
+	MOV	(R1),(R4)	;Now return the result			;018
+	RETURN			;Done					;015
+
+GLOBAL	<CSR.KB,UDPAR0>							;028
+
+.SBTTL	Handle the .PFB Monitor Calls
+
+.ENABL	LSB								;004
+
+;+									;004
+; 									;004
+;	R0 =  EMT CODE							;004
+;	R1 -> JOBDA @JOBF						;004
+;	R2 -> JDB2							;004
+;	R3 -> MAPPED XRB						;004
+;	R4 -> MAPPED FIRQB						;004
+;	R5 -> RTS BLOCK							;004
+;									;004
+;	This routine will take the .PFB call and make sure that		;004
+;	the call was issued from the HISEG. If it is a valid		;004
+;	call, the following will be setup for a synchronous		;004
+;	FIP entry to actually perform the function, for positive	;004
+;	subfunction codes:						;004
+;									;004
+;	R0 -> JDB2							;004
+;	R1 - JDB							;004
+;	R2 = FQFUN							;004
+;	R3 = .PFB Subfunction code					;004
+;	R4 -> Mapped FIRQB						;004
+;	R5 =  Dispatch "Address" of the Fip Function			;004
+;	SP -> "RTI3",R0,R1,...						;004
+;-									;004
+	
+10$:	ERROR	PRVIOL		; HISEG calls only			;004
+
+	EMTENT	.PFB,,EM2	; All PFB work comes here		;004
+
+	CMP	JOBRTS,DEFKBM	; Issued by DCL?			;016
+	BNE	10$		; Nope, not allowed to perform the call	;016
+	MOV	R2,R0		; Save the JDB2 pointer			;004
+	MOVB	FQFIL(R4),R5	; Get the .PFB subfunction code		;030
+	BMI	PFBRES		; Negative code, go do the resident function ;030
+.ASSUME	RES.PF LT 0
+	CMPB	FQFIL(R4),#JBF.PF ; Get job flags?			;015
+	BEQ	JOBFLG		; Yes, so go get them			;015
+	MOV	#PFBFQ,R2	; Get FIP Function code			;004
+	MOVB	R2,FQFUN(R4)	; Store it in the FIRQB			;004
+	MOV	$FIPTBL(R2),R5	; Get the FIP dispatch Address		;004
+	MOV	R5,FQADDR(R4)	; Set the dispatch address		;004
+	CMPB	FQFIL(R4),#P2I.PF ; Closing a PFB channel?		;004
+	BNE	20$		; No					;004
+	TSTB	FQNAM1(R4)	; Yes, but doing it to the log?		;004
+	BNE	20$		; No, so it's synch			;004
+.ASSUME	PF$LOG EQ 0							;004
+	CALLMR	ASYNCP,EMTAP5	; Log closes are done as asych		;004
+
+20$:	CALLMR	SYNCP,EMTAP5	; Go dispatch the call to the FIP Overlay ;004
+
+.DSABL	LSB								;004
+
+GLOBAL	<MAXHGH,$FIPTBL,DEFKBM>						;016
+
+.SBTTL	PFBRES	Dispatch a resident .PFB function
+
+;+
+; PFBRES - Dispatch a resident .PFB function
+;
+;	R1 -> JDB @ JDFLG
+;	R2 -> JDB2
+;	R3 -> XRB (mapped through DPAR6)
+;	R4 -> FIRQB (mapped through DPAR6)
+;	R5 =  .PFB subfunction code
+;
+;	Calling job is "JOB"
+;
+; This routine takes a resident (negative) .PFB subfunction code, and
+; dispatches it to the proper service routine.
+;-
+
+PFBRES:	CMPB	R5,#PRV.PF	;Is this the get privileges function?	;030
+	BNE	PFBRW		;No, must be an I/O function		;030
+	.BR	PFBPRV		;Yes, go enable privileges		;030
+
+.SBTTL	PFBPRV	Gain temporary privileges
+
+;+
+; PFBPRV - Gain temporary privileges
+;
+;	R1 -> JDB @ JDFLG
+;	R2 -> JDB2
+;	R3 -> XRB (mapped through DPAR6)
+;	R4 -> FIRQB (mapped through DPAR6)
+;
+;	Calling job is "JOB"
+;
+; This routine grants temporary privileges to a job. The routine does the
+; following:
+;
+;	1. Removes job's current temporary privileges, if any.
+;	2. Clears the privilege active and privilege possible flag
+;	3. Jumps to routine which grants ALL,NOTMPPRV,NOSYSMOD privilege.
+;
+; Note that the J2PRVP flag does not get set for the job; the consequence
+; of this is that privileged program rundown will not be executed when
+; the program exits. Since the intent of this function is to grant privileges
+; to DCL, and there is nothing in the DCL lowcore context that is sensitive
+; information, the extra rundown processing would cause unnecessary overhead.
+;-
+
+PFBPRV:	BIT	#JFSYS,(R1)	;Does job have temporary privileges? 	;030
+	BEQ	20$		;No, not this time			;030
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;030
+	MOV	JOBJCR,R3	;And point to the JCR entry		;030
+	ADD	#JCPRIV,R3	;And point to privilege mask		;030
+	MOV	#PRIVSZ/2,R4	;Get size of privilege mask in words	;030
+10$:	MOV	JCSPRV-JCPRIV(R3),(R3)+ ;Restore save privs to current	;030
+	SOB	R4,10$		;And loop				;030
+20$:	BIC	#JFSYS!JFSYST,(R1) ;Indicate that we removed privs	;030
+	JMPM	SETPRV,GENAP5	;Give the job privileges and exit	;030
+
+.SBTTL	PFB file I/O
+
+;+
+; PFBRW -- Do I/O to/from permanent file; entry here from initial
+;   processing in CAL
+; PFREDO -- ditto but skip argument validation, used for Redo entry
+;
+;	R1 -> JDB	(PFBRW only)
+;	R2 -> JDB2	(PFBRW only)
+;	R3 -> XRB (in work block)
+;		XRLEN	Record buffer length
+;		XRBC	0 (read) or record length (write)
+;		XRLOC	Record buffer address
+;		XRCI	PFB channel number * 2
+;		XRMOD	Control/block buffer address			;003
+;		XRTIME	Operation: 0 for read, 1 for write		;003
+;-
+
+.ENABL	LSB
+
+10$:	ERROR	PRVIOL		;Read or write not allowed on this file
+
+20$:	ERROR	BADCNT		;Bad buffer descriptor
+
+30$:	ERROR	NOTOPN		;That PFB channel isn't open
+
+PFBRW:	CALLM	MOVXRB,EMTAP5	; Move the XRB to the work block	;006
+	BIC	#1,XRBCRA(R3)	; Assure we're a synch request		;005
+	MOV	#PFBRDO,XRBSAV(R3) ;Set up Redo dispatch code
+	BIS	#JFPOST,@JOBF	;And be sure we do XRB posting		;010
+	MAP	@UDPAR0,DATA,APR=6 ;Map user's FIRQB			;011
+	CMPB	@#FIRQB+FQFIL+140000,#BLK.PF ;Validate function code	;011
+	BLO	10$		;Error if bad				;011
+	TST	XRTIME(R3)	;Read or write?				;003
+	BNE	40$		;Write (C=0)
+	SEC			;Set C=1 to indicate read
+40$:	CALLX	CHKXRB		;Validate the record buffer descriptor
+	CMPB	@#FIRQB+FQFIL+140000,#BLK.PF ;Doing block I/O?		;012
+	BNE	45$		;No					;012
+	JMP	BLKIO		;Block I/O, go do it			;012
+.ASSUME	IO.PF GT BLK.PF							;011
+
+45$:	MOV	(R3)+,-(SP)	;Save XRLEN
+.ASSUME	XRLEN EQ 0
+	MOV	(R3)+,-(SP)	;Stack XRBC
+.ASSUME	XRBC EQ XRLEN+2
+	MOV	(R3),-(SP)	; and XRLOC
+.ASSUME	XRLOC EQ XRBC+2
+	MOV	XRMOD-XRLOC(R3),(R3) ;Put control/block buffer pointer in ;003
+	BIT	#1,(R3)		;Odd address?
+	BNE	20$		;Yes, that's illegal
+	CLR	-(R3)		;Set up for read checking
+.ASSUME	XRBC EQ XRLOC-2
+	MOV	#CBB$SZ,-(R3)	;Set up control/block buffersize
+.ASSUME	XRLEN EQ XRBC-2
+	SEC			;Do Read checking
+	CALLX	CHKXRB		;Go do it
+	CMP	(R3)+,(R3)+	;Point to XRLOC
+.ASSUME	XRLOC EQ 4
+	MOV	(SP)+,(R3)	;Restore things
+	MOV	(SP)+,-(R3)
+	MOV	(SP)+,-(R3)
+60$:	MOVB	XRCI(R3),R1	;Get channel number * 2
+	BIT	#^C<15.*2>,R1	;Valid?
+	BNE	20$		;No
+	CMP	R1,#PF$DAT*2	;Trying one of the reserved channels?
+	BLO	10$		;Yes, that's illegal
+	MAP	JOBJC6,APR=6,DATA ;Map the job's JCR entry		;018
+	ADD	JOBJCR,R1	;Bias channel # for JCR mapping		;018
+	MOV	JCPFB(R1),R1	;Now get WCB/DDB pointer		;018
+	BEQ	30$		;Not open, error
+	MAP	FIPPOL		;Now map FIP pool for the WCB/DDB	;018
+	MOV	#DDRLO,R0	;Assume we'll read
+	TST	XRTIME(R3)	;Right?					;003
+	BEQ	70$		;Yes
+	ASL	R0		;Change assumption
+.ASSUME	DDWLO EQ DDRLO*2
+70$:	BIS	#DDNFS!WC$UPD!WC$UFD!377,R0 ;Check for disk and bad modes
+	BIT	R0,(R1)		;Access disallowed?
+	BNE	10$		;Yes, error
+	MOV	XRMOD(R3),R5	;Get the CBB pointer			;003
+	CALLX	SCRUMP		;Map CBB
+	TST	XRTIME(R3)	;Reading?				;003
+	BNE	90$		;No
+	MOV	#RFUN,R2	;Set function in case of invalid buffer
+	BIT	#PF.INV,PF.FLG(R5) ;Is buffer contents invalidated?
+	BNE	BUFIO		;Yes, go refill it
+	TST	PF.VBL(R5)	;Is current VBN zero (i.e. initial entry)
+	BNE	90$		;No
+	TSTB	PF.VBH(R5)	;Perhaps, make sure
+	BNE	90$		;No
+	MOV	#PF$BSZ,PF.BYT(R5) ;Yes, force initial buffer read
+	MOV	#PF$BSZ,PF.BCT(R5) ; by setting us to the end of block zero ;023
+	BIS	#PF.BOR,PF.FLG(R5) ;  and indicate BOR initially	;011
+90$:	MOV	R5,-(SP)	; and save the virtual address
+	MAP	PUSH,DATA,APR=6	;  and the mapping
+	CALLX	SCRUMX		;Map the record buffer
+	MOV	R5,-(SP)	; and the virtual address
+	MAP	PUSH,DATA,APR=6	;  and save that mapping
+	TST	XRTIME(R3)	;Reading or writing?			;003
+	BNE	120$		;Writing, do that
+
+; Read processing
+
+100$:	CMP	(R3)+,(R3)+	;Point at XRLOC
+.ASSUME	XRLOC EQ 4
+	MAP	4(SP),DATA,APR=6 ;Set CBB mapping
+	MOV	6(SP),R5	; and get CBB pointer
+	CALL	GETCHR		;Get a character from the input file
+	BCS	GETBUF		;End of block, get another
+	MAP	POP,DATA,APR=6	;Restore record buffer mapping
+	MOV	(SP)+,R5	; and pointer
+	PUTUSR			;Store the byte
+	MOV	R5,-(SP)	;Save updated pointer
+	MAP	PUSH,DATA,APR=6	; and possibly updated mapping
+	INC	(R3)		;Advance pointer in XRLOC
+	INC	-(R3)		;Advance byte count in XRBC
+.ASSUME	XRBC EQ XRLOC-2
+	CMP	(R3),-(R3)	;Done?
+	BHIS	110$		;Yes, reached buffersize
+	BIT	#CF.EOR,R2	;No, but was this end of record character?
+	BEQ	100$		;No, so continue move loop
+110$:	MOV	#SYSTAK-<8.*2>,SP ;Reset the stack
+	JMPX	RTI3		; and exit
+
+	TMPORG	EM2DSP,0						;004
+	.WORD	PFREDO							;004
+	UNORG								;004
+
+PFREDO:	TST	(SP)+		;Dump the "redo" flag			;004
+	MOV	JOBDA,R1	;Get JDB pointer			;004
+	MOV	JOBJD2,R2	; and JDB2 pointer
+	TSTB	JDIOST(R1)	;Did I/O fail?
+	BNE	110$		;Yes, so leave
+	MAP	@UDPAR0,DATA,APR=6 ;Make sure FIRQB is mapped		;011
+	CMPB	@#FIRQB+FQFIL+140000,#BLK.PF ;Block I/O redo?		;011
+	BEQ	BLKIO		;Yes, must have been buffer shortage	;012
+	MOV	XRMOD(R3),R5	;Get CBB pointer			;003
+	CALLX	SCRUMP		;Map CBB
+	BIC	#PF.INV,PF.FLG(R5) ;Buffer is valid now
+	MOV	PF.BC(R5),XRBC(R3) ;Restore correct byte count
+	MOV	PF.XTM(R5),XRTIME(R3) ; and operation code		;003
+	JMP	60$		;Continue in common code
+
+GLOBAL	<SYSTAK,UDPAR0>							;011
+
+; Write processing
+
+120$:	TST	(R3)+		;Point to XRBC
+.ASSUME	XRBC EQ 2
+130$:	TST	(R3)+		;Point to XRLOC
+.ASSUME	XRLOC EQ XRBC+2
+	MAP	POP,DATA,APR=6	;Restore record buffer mapping
+	MOV	(SP)+,R5	; and pointer
+	GETUSR			;Fetch a byte
+	MOV	R5,-(SP)	;Save updated pointer
+	MAP	PUSH,DATA,APR=6	; and possibly updated mapping
+	MAP	4(SP),DATA,APR=6 ;Set CBB mapping
+	MOV	6(SP),R5	; and get CBB pointer
+	CALL	PUTCHR		;Store the character into output buffer
+	BCS	PUTBUF		;No room, go write the full buffer
+	INC	(R3)		;Advance pointer in XRLOC
+	DEC	-(R3)		;Count down bytes to do in XRBC
+.ASSUME	XRBC EQ XRLOC-2
+	BNE	130$		;Loop until done
+	BR	110$		; and leave
+
+140$:	ERROR	NORACS		;Not a disk or not a proper file
+
+.DSABL	LSB
+
+.SBTTL	Buffer read/write
+
+.ENABL	LSB
+
+;+
+; Read/Write current buffer
+;
+;	R1 ->	WCB
+;	R3 ->	XRB @ XRLOC
+;	SP ->	??, ??, CBB MMU address, CBB virtual address
+;
+;	JMP	PUTBUF	to write buffer
+;	JMP	GETBUF	to read buffer
+;-
+
+PUTBUF:	MOV	#WFUN,R2	;Set function code
+	BR	20$		; and merge into common code
+
+.SBTTL	Read another bufferload
+
+GETBUF:	MOV	#RFUN,R2	;Set function code
+20$:	CMP	(SP)+,(SP)+	;Pop the buffer descriptor
+	MAP	POP,DATA,APR=6	;Map CBB
+	MOV	(SP)+,R5	; and point to it
+	CMP	-(R3),-(R3)	;Fix XRB pointer
+	ADD	#1,PF.VBL(R5)	;Increment the low order
+	ADCB	PF.VBH(R5)	; and carry to high order VBN
+	CLR	PF.BYT(R5)	;Reset the byte pointer
+	.BR	BUFIO							;003
+
+BUFIO:	JMP	SETXFR		;Set up the transfer			;023
+
+.DSABL	LSB
+
+.SBTTL	Block level PFB I/O
+
+.ENABL	LSB								;012
+
+10$:	ERROR	PRVIOL							;012
+20$:	ERROR	BADCNT							;012
+30$:	ERROR	NOTOPN							;012
+
+BLKIO:	MOVB	XRCI(R3),R1	;Get channel number * 2
+	BIT	#^C<15.*2>,R1	;Valid?
+	BNE	20$		;No
+	CMP	R1,#PF$DAT*2	;Trying one of the reserved channels?
+	BLO	10$		;Yes, that's illegal
+	MAP	JOBJC6,APR=6,DATA ;Map job's JCR entry			;018
+	ADD	JOBJCR,R1	;Bias channel # for JCR			;018
+	MOV	JCPFB(R1),R1	;Now get WCB/DDB pointer		;018
+	BEQ	30$		;Not open, error
+	MAP	FIPPOL		;Set up FIP pool mapping for WCB/DDB	;018
+	MOV	#DDRLO,R0	;Assume we'll read
+	MOV	XRTIME(R3),R2	;Get read/write toggle			;012
+	CMP	R2,#1		;Check if it's legal			;012
+	BHI	20$		;Fine					;012
+	BNE	40$		;Read, skip				;012
+	ASL	R0		;Write, check different flag		;012
+.ASSUME	DDWLO EQ DDRLO*2
+40$:	BIS	#DDNFS!WC$UPD!WC$UFD!377,R0 ;Check for disk and bad modes
+	BIT	R0,(R1)		;Access disallowed?
+	BNE	10$		;Yes, error
+	INC	R2		;Form function code			;012
+	ASL	R2		; as .READ or .WRITE			;012
+.ASSUME	0+1*2 EQ .READ&377						;012
+.ASSUME	1+1*2 EQ .WRITE&377						;012
+	MOVB	JOB,R4		;Set up R4 for SYDVR			;012
+	CLR	JBSTAT(R4)	;Indicate job is not runnable		;012
+	MOV	#JS.SY,JBWAIT(R4) ; and waiting on disk I/O		;012
+	CALLX	JMPM,R5,<SYDAP5,SYSRW> ;And go to SYDVR to do it	;020
+
+.DSABL	LSB
+
+GLOBAL	<JBSTAT,JBWAIT,SYDAP5,SYSRW>					;012
+
+.SBTTL	Log file buffer flush
+
+;+
+; LFLUSH -- Flush out the log file buffer
+;
+; Entry:
+;	R0 =	Job number * 2
+;
+; Exit:
+;	Control will return to the caller in two cases:
+;
+;	1. Nothing to flush (no log open, or already flushed)
+;	   (C = 0 in this case)
+;
+;	2. Flush needed but no small buffer available for DSQ
+;	   (C = 1 in this case)
+;
+;	Otherwise, this routine exits via FIEXIX. On
+;	completion of the flush, the job's work block
+;	will be requeued into FIQUE.
+;-
+
+LFLUSH::REGSCR
+	CALLX	MAPJCR		;Map caller's JCR entry			;018
+	MOV	JCPFB+<PF$LOG*2>(R1),R4 ;Get log file CBB pointer	;018
+	BEQ	40$		;None, exit
+	CALLX	MAPBUF		;Map the CBB
+	MOV	R3,R5		;Move the virtual pointer
+	BIC	#PF.ACT,PF.FLG(R5) ;Mark logfile as inactive		;023
+				; (the above will avoid race conditions
+				;  as PUTLOG will filter out all TTDVR
+				;  callers. Therefore, we don't need
+				;  to do any of the code below at PR5.)
+	BIT	#PF.CR,PF.FLG(R5) ;Sent out the trailing CRLF yet?	;011
+	BNE	10$		;Yes, skip				;011
+	MOV	PF.BYT(R5),R2	;Get byte offset for next character	;035
+	ADD	R5,R2		;Get pointer to next char to insert	;035
+	CMPB	-(R2),-(R2)	;Back up two characters			;035
+	CMPB	(R2)+,#15	;2nd-to-last char a RETURN?		;035
+	BNE	5$		;No, so insert the CRLF			;035
+	CMPB	(R2)+,#12	;last character a LINEFEED?		;035
+	BEQ	7$		;Yes, so no need for CRLF at end of log	;035	
+5$:	MOV	#15,R2		;Set up CR				;035
+	CALL	PUTLG2		;Store it				;011
+	MOV	#12,R2		; and LF				;011
+	CALL	PUTLG2		;Store that too				;011
+7$:	BIS	#PF.CR,PF.FLG(R5) ;Indicate it has been sent out	;035
+10$:	CALL	FLOVER		;Flush out overflow buffers		;023
+	MOV	PF.BYT(R5),R3	;Get current byte pointer
+	BEQ	40$		;Buffer is already clean, leave
+	BUFFER	GETSML,0	;Try to get a DSQ
+	BVS	50$		;Can't, error
+	ADD	#1,PF.VBL(R5)	;Advance the VBN
+	ADCB	PF.VBH(R5)	; in 24 bits
+	NEG	PF.BYT(R5)	;Get negative byte count
+	ADD	#PF$BSZ,PF.BYT(R5) ; and get count to clear
+	BEQ	30$		;None to be cleared
+	ADD	R5,R3		;Point to byte to clear
+20$:	CLRB	(R3)+		;Clear out another byte
+	DEC	PF.BYT(R5)	;Count down
+	BNE	20$		; until buffer is clean
+30$:	MOVB	TOS.R0(SP),R0	;Pick up caller's job #			;018
+	MOV	JOBTBL(R0),R1	;Now get JDB pointer			;018
+	MOV	JDWORK(R1),R3	;  and work block pointer
+	MOV	PF.WCB(R5),R1	;Get WCB pointer
+	MOV	#WFUN,R2	;Supply function code
+	CALL	SETDS2		;Go set up the DSQ
+	MOVB	TOS.R0(SP),R0	;Restore job number			;018
+	MOV	R0,-(R4)	;Set in DSQ
+	TST	-(R4)		;Point to top of DSQ
+.ASSUME	DSQJOB EQ 2
+	INC	DSQMSC(R4)	;Set bottom bit as a signal for L3Q code
+	MOV	JOBTBL(R0),R3	;Get JDB pointer
+	MOV	JDWORK(R3),R3	; now work block pointer
+	ADD	#XRCI,R3	;Add in XRCI offset
+	MOV	R3,DSQPTO(R4)	;Save that out of the way, for later
+	CALLX	QUEL3Q		;Link it into our queue
+	JMP	@$FIEXIX	;Go exit FIP without setting JSFIP
+
+; The reason behind this convoluted flow is that we can't invoke the
+; SY driver from the FIP stack and in any event we have to exit via
+; FIEXIX to get the requestor out of the FIP queue.  So we'll set the
+; bottom bit in DSQMSC (WORK pointer) to make it recognizable, and link it ;003
+; into the level 3 queue for ourselves.  At level 3 time we're in
+; just the right place to give the request to SYDVR.
+
+40$:	TST	(PC)+		;Clear carry, skip next line
+50$:	SEC			;Indicate failure
+	RETURN			;Done
+
+GLOBAL	<$FIEXIX>
+
+.SBTTL	CHKLBF	Check log buffer
+
+;+
+; CHKLBF -- Check if log buffer needs to be written, and error check
+;
+;	Does not return if log buffer needs writing
+;	Exits to ERROR if there was an error on the last I/O
+;
+;	Registers and mapping are preserved
+;-
+
+	TMPORG	EM2DSP,6						;004
+	.WORD	CHKLBF							;004
+	UNORG								;004
+
+CHKLBF:	REGSCR			;Save all registers			;004
+	MAP	PUSH,DATA,APR=6	; and mapping
+	MAP	JOBJC6,APR=6,DATA ;Map JCR entry			;018
+	MOV	JOBJCR,R4	;And point to it			;018
+	MOV	JCPFB+<PF$LOG*2>(R4),R4	;Get log file CBB pointer	;018
+.ASSUME	PF$LOG EQ 0
+	CALLX	MAPBUF		;Map it
+	MOV	R3,R5		;Copy the pointer
+	MOVB	PF.ERR(R5),R0	;Get error code if any from last I/O
+	BEQ	10$		;No error, skip
+	BIC	#PF.ACT,PF.FLG(R5) ;Error, make file inactive
+	CLRB	PF.ERR(R5)	;No more error next time
+	JMPX	ERROR		; and exit
+
+10$:	CMP	PF.BYT(R5),#PF$BSZ ;Buffer full?
+	BHIS	20$		;Yes, go write it
+	MAP	POP,DATA,APR=6	;Restore mapping
+	RETURN			;Done
+
+20$:	MOV	#WFUN,R2	;Set function code = write
+	CALLR	SBUFIO		;Go do the I/O
+
+.SBTTL	SETXFR	Set up a transfer and issue it to SYDVR
+
+;+
+; SETXFR -- Set up a transfer and issue it to SYDVR
+;
+;	R1 ->	WCB
+;	R2 =	RFUN/WFUN
+;	R3 ->	XRB
+;	R5 ->	CBB (mapped via APR6)
+;
+;	Calling job is JOB
+;
+;	JMP	SETXFR
+;
+; This routine will attempt to get a DSQ. If none are available, the
+; job will be stalled waiting for buffers. If one is available, the
+; DSQ will be set up for the transfer, and control will be passed
+; to SYDVR to issue the request.
+;-
+
+SETXFR:	MOVB	JOB,R0		;Get current job number			;023
+	CLR	JBSTAT(R0)	;Make job not runnable
+	MOV	#JS.SY,JBWAIT(R0) ;Flag as waiting on disk I/O
+	BIS	#JFREDO,@JOBF	;Flag that redo is required
+	BUFFER	GETSML,0	;Get DSQ, nothing cleared
+	BVS	10$		;Can't get one, wait for it
+	CALL	SETDS2		;Do some more DSQ setup
+	TSTB	-(R4)		;Skip DSQERR in the DSQ			;023
+.ASSUME	DSQERR	EQ	DSQL3Q-1
+	MOVB	JOB,-(R4)	;And set the job number in DSQJOB	;023
+.ASSUME	DSQJOB	EQ	DSQERR-1
+	CALLX	SAVJQX,R5	;Dump job saving the quantum
+	MOVB	(R4),R0		;Restore job number times 2		;023
+	MOV	JOBTBL(R0),R5	;Get JDB pointer			;023
+	MOV	JDWORK(R5),R3	; now work block pointer		;023
+	CMPB	XRBSAV(R3),#PFBRDO ;Doing user level PFB I/O?		;023
+	BNE	5$		;No, so I/O is to XBUF			;023
+	ADD	#MC.LCK*400,M.CTRL-1+JDMCTL(R5) ;User I/O, lock the job	;023
+5$:	ADD	#XRCI,R3	;Point into the middle of the work block ;023
+	MOV	R3,-(R4)	;Set XRB @ XRCI into DSQ for SYDVR	;023
+.ASSUME	DSQJOB	EQ	2
+	MOV	XRTIME-XRCI(R3),R1 ;Restore WCB pointer now		;003
+	MOVB	DSQERR(R4),R5	;Pick up any preset error code		;023
+	BEQ	7$		;None, good				;023
+	JMP	PFIODN		;Got one, go process it			;023
+
+7$:	JMPM	SYSFIO,SYDAP5	;Go do this I/O request now		;023
+
+10$:	MOV	#JSBUF,JBWAIT(R0) ;Flag as waiting for buffers
+	JMPX	IOREDO		;And wait for them			;023
+
+GLOBAL	<JBSTAT,JBWAIT>
+
+SETDS2:	CLR	XRBUSE+10(R3)	;Indicate no partial transfer
+	MOV	XRBC(R3),PF.BC(R5) ;Save a work block (really FIRQB) word
+	MOV	XRBLK(R3),PF.BLK(R5) ;Ditto for XRBLK
+	MOVB	XRBLKM(R3),PF.BLM(R5) ; and XRBLKM
+	MOV	XRTIME(R3),PF.XTM(R5) ;  and XRTIME			;003
+	BIS	#PF.INV,PF.FLG(R5) ;Buffer is invalid until I/O is done
+	ADD	#DSQTOT,R4	;Index down into the new found DSQ
+	MOV	#PF$BSZ/512.,(R4) ;Set block count
+	MOV	R1,XRTIME(R3)	;Link WCB to work block			;003
+	MOV	R3,-(R4)	;Save work block pointer @ DSQMSC	;003
+	MOV	R2,-(R4)	;Set function, clear fairness count
+.ASSUME	DSQFAR EQ DSQFUN+1
+	TST	-(R4)		;Back up DSQ pointer
+	MOV	@DPAR6,R3	;Get MMU address of CBB
+	CLR	R2		;Clear out high order
+	ASHC	#6,R2		;Convert to physical address
+	MOV	R5,R0		;Copy virtual address of CBB
+	BIC	#^C<77>,R0	;Get offset within sliver
+	ADD	R0,R3		;Add it in (no carry possible)
+	MOV	R3,-(R4)	;Now set block buffer address
+.ASSUME	DSQMAL EQ DSQFUN-4
+	MOVB	R2,-(R4)	; and high order
+.ASSUME	DSQMAM EQ DSQMAL-1
+	DEC	R4		;Back up DSQ pointer
+	MOV	PF.VBL(R5),-(R4) ;Copy specified block number lsb
+.ASSUME DSQFBL EQ DSQMAM-3
+	MOVB	PF.VBH(R5),-(R4) ;Now move msb block number
+.ASSUME	DSQFBM EQ DSQFBL-1
+	BMI	50$		;Error if no good msb
+	CLRB	DSQERR-DSQFBM(R4) ;Be sure we don't have a preset error	;023
+	CMPB	DSQFUN-DSQFBM(R4),#RFUN	;Is this a read operation?	;023
+	BNE	40$		;No, so no RMS EOF setup		;023
+	CMPB	(R4),PF.EBM(R5)	;Is this transfer for the last block?	;023
+	BNE	10$		;Definitly not this time		;023
+	CMP	PF.VBL(R5),PF.EBL(R5) ;Can't tell, check LSB		;023
+10$:	BLO	30$		;Not at the end block yet		;023
+	BEQ	20$		;At end block, set up the EOF byte	;023
+	SETERR	EOF,DSQERR-DSQFBM(R4) ;Beyond the end, set the error	;023
+	BR	40$		;And join up				;023
+
+20$:	MOV	PF.EOF(R5),PF.BCT(R5) ;Set the count for this block	;023
+	CMP	PF.BCT(R5),#PF$BSZ ;Is this a reasonable value?		;023
+	BLOS	40$		;Yes, it sure is			;023
+30$:	MOV	#PF$BSZ,PF.BCT(R5) ;Indicate entire block is good	;023
+40$:	MAP	FIPPOL		;Re-map WCB				;023
+	MOV	W$FCB(R1),R5	;Get FCB pointer @ FQCLUS
+	MOVB	F$UNT-F$CLUS(R5),-(R4)
+.ASSUME	DSQUNT EQ DSQFBM-1
+	MOV	#PFDNE,-(R4)	;Set completion queue/L3Q bit @ DSQL3Q
+	RETURN
+
+50$:	ERROR	ABORT		;Bad VBN in CBB
+
+GLOBAL	<PFDNE>
+
+.ENABL	LSB
+
+;	R0	R1	R2	R3	R4	R5
+;	??	->WCB	??	??	->DSQ	Error code
+
+	TMPORG	EM2DSP,10						;004
+	.WORD	PFIODN							;004
+	UNORG								;004
+
+PFIODN:	MAP	FIPPOL		;Be sure FIP pool is mapped		;010
+	MOV	#SYSTAK,SP	;Clean up the stack			;004
+	MOVB	DSQJOB(R4),R0	;Get the job number from the DSQ	;004
+	MOV	JOBTBL(R0),R3	; and get the JDB pointer from that
+	MOVB	R5,JDIOST(R3)	;Set the error code
+10$:	CLRB	W$PR(R1)	;No more pending transfer		;003
+	BIC	#WC$LCK,(R1)	;Unlock the record like this
+	BUFFER	RETSML		;Release DSQ
+	MOV	R0,R4		;Put job number times 2 here
+	CALLX	IOSYD4		;Say disk I/O is all done		;010
+	MOV	JOBTBL(R0),R2	;Get JDB pointer
+	MOV	JDWORK(R2),R5	;Get work block (XRB) pointer
+	CMP	JBWAIT(R0),#JSFIP ;Waiting for FIP?
+	BEQ	90$		;Yes, must be a flush in progress
+	CMPB	XRBSAV(R5),#PFBRDO ;Is this job doing PFB I/O?
+	BEQ	40$		;Yes, so do the unlock
+	MOV	R1,-(SP)	;No, save WCB pointer			;018
+	CALLX	MAPJCR		;Map the JCR for the job		;018
+	MOV	JCPFB+<PF$LOG*2>(R1),R4  ;Get log file CBB pointer	;018
+	BEQ	20$		;No log, so must be ICF			;004
+	CALLX	MAPBUF		;Map the CBB				;004
+	CLR	R4		;Assume we're using log file channel	;004
+.ASSUME	PF$LOG EQ 0							;004
+	CMP	PF.WCB(R3),(SP)	;Match on WCB?				;018
+	BEQ	30$		;Yes, so assumption checks		;004
+20$:	TST	(R4)+		;No, use ICF channel instead		;004
+.ASSUME	PF$ICF*2 EQ 2							;004
+30$:	CALLX	MAPJCR		;Map the JCR again			;018
+	ADD	R1,R4		;Offset for the correct channel		;018
+	MOV	JCPFB(R4),R4	;Now pick up CBB pointer		;018
+	MOV	(SP)+,R1	;Restore WCB pointer			;018
+	CALL	100$		;Map CBB and restore things		;003
+	BIC	#PF.INV,PF.FLG(R3) ;Buffer is now valid
+	MOVB	JDIOST(R2),R4	; unless an error occurred
+	BEQ	50$		;No error, proceed
+	CLRB	JDIOST(R2)	;Don't pass it to the caller as error
+	BIS	#PF.INV,PF.FLG(R3) ;Buffer is unconditionally invalid
+	SWAB	R4		;Error code to high byte
+	MOV	R4,PF.ERS(R3)	;Set error code and sequence counter = 0
+.ASSUME	PF.ERS&1 EQ 0
+.ASSUME	PF.ERR EQ PF.ERS+1
+	BR	50$		; and continue
+
+40$:	CALLX	UNLOCK		;Unlock user job like this...
+
+	L3QENT	QPFB,,EM2AP5	;Completions come here			;004
+
+50$:	MAP	FIPPOL		;Map the FIP pool for WCBs
+	MOV	PFDONQ,R4	;Get top item from queue
+	BEQ	70$		;It no more, then quit
+	MOV	(R4),PFDONQ	; else dequeue and continue
+	MOV	DSQMSC(R4),R1	;Restore work block pointer		;003
+	BIT	#1,R1		;Is this a flush I/O to be issued?
+	BNE	80$		;Yes, issue it
+	MOV	XRTIME(R1),R1	;Get WCB pointer			;003
+	MOVB	DSQJOB(R4),R0	; and the job number times 2
+	MOV	JOBTBL(R0),R3	;  and, from that, the job data pointer
+	MOVB	JDIOST(R3),R5	;Get error before this, if any
+	BNE	10$		;If there was one, don't override it
+	MOVB	DSQERR(R4),R5	;Get error code if any
+	BMI	10$		;No error this time
+	BNE	60$		;Error, and it is explicit
+	SETERR	DATERR,R5	;Error but non-explicit, so data error
+60$:	MOVB	R5,JDIOST(R3)	;No, now there is an error
+	BR	10$		; and go process it
+
+70$:	JMPX	RTI3		;Exit from level 3 processing
+
+80$:	L3QSET	QPFB		;Make sure we come back to check for more ;009
+	MOV	XRTIME-1(R1),R1	;Get WCB pointer			;003
+	DEC	DSQMSC(R4)	;Fix pointer in DSQ
+	MOVB	DSQJOB(R4),R0	;Get job number * 2
+	MOV	DSQPTO(R4),R3	;Get biased XRB pointer
+	MOV	R3,(R4)		; and set it up for SYDVR
+	CALLX	JMPM,R5,<SYDAP5,SYSFIO>	;Dispatch to SYSFIO		;020
+
+90$:	L3QSET	QPFB		;Make sure we come back to look for more
+	CALLX	MAPJCR		;Map the JCR entry			;018
+	MOV	JCPFB+<PF$LOG*2>(R1),R4 ;Get CBB pointer for log	;018
+	CALL	100$		;Map CBB and restore things		;003
+	MOV	R5,R4		;Put work block pointer in R4
+	JMPX	FIPSYS		;Now continue the logout or whatever
+
+100$:	CALLX	MAPBUF		;Map it
+	MOV	PF.BC(R3),XRBC(R5) ;Restore XRBC in work block
+	MOV	PF.BLK(R3),XRBLK(R5) ; and XRBLK
+	MOVB	PF.BLM(R3),XRBLKM(R5) ;  and XRBLKM
+	MOV	PF.XTM(R3),XRTIME(R5) ;   and XRTIME			;003
+	RETURN			;Done					;003
+
+.DSABL	LSB
+
+GLOBAL	<PFDONQ,EM2AP5,JBWAIT,JOBTBL,SYSFIO,SYDAP5>			;020
+
+.SBTTL	ICF read for terminal service
+
+;+
+; GETICF -- Get a character from the ICF
+;
+; Entry:
+;	R1 -->	DDB of job's console
+;	JOB =	Requestor's job
+;
+; Exit:
+;	Registers preserved (except R2)
+;	Mapping preserved
+;
+;	C = 0	Have character
+;	R2 =	Character read
+;
+;	C = 1	Command line detected, force exit
+;	R2 =	Exit dispatch code (even number 0 .. 16.)
+;
+;	If the buffer is empty, another read is queued up,
+;	and no return to the caller is done
+;-
+
+.ENABL	LSB
+
+	TMPORG	EM2DSP,2						;004
+	.WORD	GETICF							;004
+	UNORG								;004
+
+GETICF:	REGSCR			;Save all registers			;004
+	MAP	PUSH,DATA,APR=6	;Save useful mapping
+	MAP	JOBJC6,APR=6,DATA ;Map JCR for current job		;018
+	MOV	JOBJCR,R4	;Point to JCR entry			;018
+	MOV	JCPFB+<PF$ICF*2>(R4),R4 ;Pick up ICF CBB pointer	;018
+	CALLX	MAPBUF		;Map that
+	MOV	R3,R5		;Point R5 to CBB
+	TSTB	PF.ERR(R5)	;Is there an error pending?
+	BEQ	10$		;No
+	MOVB	PF.ERS(R5),R2	;Yes, get sequencer
+	ADD	#2,PF.ERS(R5)	; and advance it
+.ASSUME	PF.ERS&1 EQ 0
+	CALL	140$		;Find out what to return		;010
+	BR	20$		; and skip GETCHR call
+
+10$:	MOV	#RFUN,R2	;Pre-set "read" function code
+	BIT	#PF.INV,PF.FLG(R5) ;Does buffer need filling
+	BNE	120$		;Yes, so do that
+	CALL	GETCHR		;Get a character from the file
+	BCS	110$		;None to be had
+20$:	TST	R2		;First in record?
+	BPL	90$		;No, just exit
+.ASSUME	CF.BOR LT 0
+	MOV	JOBWRK,R3	;Point to work block for job
+	TST	XRTIME(R3)	;^C read?
+	BPL	30$		;No, skip saving position
+	MOV	PF.VBL(R5),PF.SVL(R5) ;Save low order VBN
+	MOVB	PF.VBH(R5),PF.SVH(R5) ; and high order
+	MOV	PF.BYT(R5),PF.SBY(R5) ;  and byte position
+	MOV	PF.CNT(R5),PF.SCN(R5) ;    and byte count remaining
+30$:	CMPB	R2,PF.CLF(R5)	;Is it the command line flag code?
+	BNE	90$		;No, so normal case
+	TST	XRTIME(R3)	;Editor mode (^C) read?
+	BPL	40$		;No, set up the exit sequence
+	CMP	JOBRTS,DEFKBM	;Is this the default KBM (DCL)?
+	BEQ	80$		;Yes, so accept this
+	MOVB	#22,PF.SEQ(R5)	;No, so force exit to DCL		;011
+
+GLOBAL	<DEFKBM>
+
+; If a command line is read but this is not a ^C (KBM style) read, or
+; a KBM read from some KBM other than the system default (which should be DCL)
+; then we back up over the command line flag character and return instead
+; a carry set to indicate exit to be forced, plus an exit sequence counter.
+; The counter goes from 0 to 16. ((5+2+1+1)*2-2).  The actions taken by
+; TTDVR are: EOF for the first 5 (simulate ^Z); set JFCC for the next 2
+; (simulate ^C); set JF2CC for the next one (simulate double ^C); and
+; finally just get out of this RTS and into DCL.  If we get here because
+; of a ^C read from some RTS other than DCL, then the exit sequence counter
+; is forced to 16. because the "graceful exit" serves no purpose when
+; trying to get out of some other RTS's command line read (nor is it likely
+; to do anything).
+;
+; To back up the input stream is a little messy because the CLF might have
+; come either from the buffer or from the error reporting string generator.
+; For an error report, we know that the CLF is always the first thing
+; generated, so the error sequence pointer is simply set to zero.  If an
+; error sequence is in effect (indicated by non-zero error code) then this
+; completes the operation.  Otherwise we have to back up the input record
+; (and the clearing of the error sequence pointer was irrelevant).  The
+; pointer is backed up, and the "byte count remaining" incremented (which
+; is irrelevant for stream files, but necessary for RMS files).  Finally,
+; the BOR flag is set because by definition the CLF occurs at the
+; beginning of record.
+
+40$:	CLRB	PF.ERS(R5)	;Reset error sequence pointer
+	TSTB	PF.ERR(R5)	;Were we posting an error back?
+	BNE	50$		;Yes, don't back up the buffer
+	DEC	PF.BYT(R5)	;Back up buffer pointer
+	INC	PF.CNT(R5)	; and one more byte left in record
+	BIS	#PF.BOR,PF.FLG(R5) ; and next time is BOR again
+50$:	MOVB	PF.SEQ(R5),R2	;Return exit sequence counter
+	ADD	#2,PF.SEQ(R5)	; and advance it			;011
+.ASSUME	PF.SEQ&1 EQ 0							;011
+	CMP	R2,#24		;Reached the last value?
+	BLO	70$		;Not yet
+	CLRB	PF.SEQ(R5)	;Yes, start over next time
+70$:	SEC			;Indicate force exit needed
+	BR	100$		;Now leave
+
+80$:	CLRB	R2		;CLF, so dump the old one		;014
+	BISB	#'$,R2		;And set the standard one		;014
+	MOVB	R2,PF.CLF(R5)	; and reset the flag to standard
+90$:	CLRB	PF.SEQ(R5)	;Reset exit sequencer (C=0 now)
+100$:	MAP	POP,DATA,APR=6	;Restore mapping
+	MOV	R2,TOS.R2(SP)	;Return the character or exit counter
+	RETURN			; and done
+
+110$:	MOV	#RFUN,R2	;Set function code = read
+SBUFIO:	ADD	#1,PF.VBL(R5)	;Increment the low order
+	ADCB	PF.VBH(R5)	; and carry to high order VBN
+	CLR	PF.BYT(R5)	;Reset the byte pointer
+120$:	MOV	JOBWRK,R3	;Get the XRB pointer
+	MOV	PF.WCB(R5),R1	;Get WCB pointer
+	JMP	SETXFR		;Now exit setting up the transfer	;023
+
+; Table for generating the error notification string:
+;	[Control/Z] $ <NUL> <Error code> <LF>
+
+140$:	ADD	R2,PC		; Dispatch on the sequencer		;010
+	 BR	147$		; Possible control/Z			;022
+	 BR	150$		; $					;010
+	 BR	160$		; NUL					;010
+	 BR	170$		; Error code				;010
+	 .BR	145$		; LF					;010
+
+145$:	CLR	PF.ERS(R5)	;Clear sequencer and error code
+.ASSUME	PF.ERS&1 EQ 0
+.ASSUME	PF.ERR EQ PF.ERS+1
+	MOV	JOBDA,R2	;Point to JDB				;004
+	MAP	PUSH,APR=6,DATA	;Save CBB mapping			;018
+	MAP	FIPPOL		;Set up FIP pool mapping		;018
+	MOV	@(R2)+,R2	;Get console DDB pointer		;004
+.ASSUME	JDIOB	EQ	0
+	MOV	#12!CF.NOL,R2	;Return a line feed			;014
+	MAP	POP,APR=6,DATA	;Restore CBB mapping			;018
+	RETURN			;Done
+
+147$:	MOV	JOBWRK,R3	;Get caller's work block pointer	;022
+	TST	XRBC(R3)	;Is there data in the user's buffer?	;022
+	BEQ	149$		;No, we can send the CLF right now	;022
+	MOV	#'Z-100,R2	;Yes, so return a control/Z		;022
+	RETURN			;And get out				;022
+
+149$:	ADD	#2,PF.ERS(R5)	;No data in buffer, advance sequencer	;022
+.ASSUME	PF.ERS&1 EQ 0
+
+150$:	MOV	#CF.BOR!CF.NOL,R2 ;Get start of line flag and no log flag ;014
+	BISB	PF.CLF(R5),R2	; and put in current CLF
+	RETURN
+
+160$:	MOV	#CF.NOL!0,R2	;Set up a null (don't log it)		;014
+	RETURN
+
+170$:	MOV	#CF.NOL,R2	;Get flag for no logging		;014
+	BISB	PF.ERR(R5),R2	;And set up error code			;014
+	RETURN			;Done
+
+.DSABL	LSB
+
+.SBTTL	Get next data character from the current record
+
+;+
+; GETCHR -- Get next character from current record
+;
+; Entry:
+;	R5 ->	Control/block buffer (mapped)
+;
+; Exit:
+;	C = 0	Got a byte
+;	R2 =	Byte obtained
+;		Flags (CF.EOR, CF.BOR) in high byte
+;
+;	C = 1	No byte available (read to be queued)
+;	R2	Random
+;-
+
+.ENABL	LSB
+
+GETCHR:	BIT	#PF.C1P,PF.FLG(R5) ;C1 control pending?
+	BEQ	10$		;No, skip
+	CALL	10$		;Yes, get the current character
+	BCS	100$		;Exit if none available
+	BIC	#PF.C1P,PF.FLG(R5) ;No more C1 control in progress
+	SUB	#200-100,R2	;Convert it to the right second char
+	;CLC			;C=0 from SUB
+	RETURN			;Done
+
+10$:	BITB	#RF.FIX!RF.VAR,PF.RFM(R5) ;Fixed or variable format?
+	BEQ	GETSTM		;No, just get next stream byte
+	BIT	#PF.CR,PF.FLG(R5) ;CR to be issued next?
+	BEQ	20$		;No
+	MOVB	#15,R2		;Yes, supply it
+	INC	PF.FLG(R5)	; and mark LF next time
+.ASSUME	PF.LF EQ PF.CR+1
+	BR	90$		;Exit
+
+20$:	BIT	#PF.LF,PF.FLG(R5) ;LF to be issued next?
+	BEQ	30$		;No
+	MOV	#12!CF.EOR,R2	;Yes, supply it with EOR indication
+	BIC	#PF.LF,PF.FLG(R5) ; and no special action next time
+	BR	100$		;Now exit
+
+30$:	TST	PF.CNT(R5)	;Any bytes left in current record?
+	BNE	50$		;Yes, just return next byte
+	MOV	PF.RSZ(R5),PF.CNT(R5) ;Reset count in case it was RF.FIX
+	BIS	#PF.BOR,PF.FLG(R5) ; and indicate start of record
+	BITB	#RF.FIX,PF.RFM(R5) ;Was it RF.FIX?
+	BEQ	40$		;No
+	BITB	#RF.SPN,PF.RFM(R5) ;Spanning block boundaries?		;029
+	BNE	50$		;Yes, that's easier
+	MOV	PF.BYT(R5),R0	;Get current byte pointer
+	ADD	PF.CNT(R5),R0	;Compute where next record would end +1	;027
+	CMP	R0,PF.BCT(R5)	;Is the next record in this block?	;023
+	BLOS	50$		;Yes, go process it			;027
+35$:	SEC			;No, indicate failure			;023
+	BR	100$		;And exit				;023
+
+40$:	MOV	PF.BYT(R5),R0	;Get current byte pointer
+	INC	R0		;Advance it
+	BIC	#1,R0		; and force it even
+	CLR	PF.CNT(R5)	;Indicate no record size found yet
+	CMP	R0,PF.BCT(R5)	;Reached end of buffer?			;023
+	BHIS	35$		;Yes, get the next bufferload		;023
+	TST	(R0)+		;Advance a word
+	MOV	R0,PF.BYT(R5)	; and store that back into CBB
+	ADD	R5,R0		;Add in CBB address
+	;ADD	#PF.BUF,R5	;Point to buffer
+.ASSUME	PF.BUF EQ 0
+	CLR	R2		;Set up a null (in case record is null) ;019
+	SEC			;Assume no more data
+	MOV	-(R0),PF.CNT(R5) ;Get next recordsize
+	BMI	100$		;End of block marker, get next block
+	BR	65$		;Not end of block, see if null record	;019
+
+50$:	CALL	GETBYT		;Get the next byte from the buffer
+	BCS	100$		;Exit if buffer empty
+	BIT	#PF.C1P,PF.FLG(R5) ;Working on a C1 control?
+	BNE	60$		;Yes, skip C1 check
+	CMPB	R2,#237		;Is this a C1 control?
+	BLE	110$		;Yes, exit
+60$:	DEC	PF.CNT(R5)	;One less byte in record
+65$:	BNE	70$		;Not EOR yet				;019
+	BITB	#RF.IMP,PF.RFM(R5) ;Implied CR?
+	BEQ	80$		;No, so EOR now
+	INC	PF.FLG(R5)	;Supply CR next time
+.ASSUME	PF.CR EQ 1
+70$:	TSTB	R2		;Null?
+	BEQ	GETCHR		;Yes, ignore those
+	BR	90$		;Set BOR flag if needed, and exit
+
+80$:	BIS	#CF.EOR,R2	;Flag end of record
+90$:	TSTB	PF.FLG(R5)	;Are we at start of record?
+	BPL	100$		;No
+.ASSUME	PF.BOR EQ 200
+	BIS	#CF.BOR,R2	;Yes, flag it
+	BIC	#PF.BOR,PF.FLG(R5) ; but clear it for next time
+	;CLC			;Indicate success (C=0 from TSTB)
+100$:	RETURN			;Done (C=0)
+
+110$:	BIS	#PF.C1P,PF.FLG(R5) ;Flag C1 control pending
+	DEC	PF.BYT(R5)	;Back up buffer offset
+	CLRB	R2		;Clear out the control code
+	BISB	#33,R2		; and return <ESC> instead
+	;CLC			;C=0 from CLRB
+	RETURN			;Done
+
+.SBTTL	Get a character from a stream file
+
+;+
+; GETSTM -- Get next byte from the buffer (for stream file)
+;
+; Entry:
+;	R5 ->	Control/block buffer (mapped)
+;
+; Exit:
+;	C = 0	Got a byte
+;	R2 =	Byte obtained
+;		Flags (CF.EOR, CF.BOR) in high byte
+;
+;	C = 1	No byte available (read to be queued)
+;	R2	Random
+;+
+
+GETSTM:	CALL	GETBYT		;Get another character
+	BCS	100$		;None left in buffer, leave
+	TSTB	R2		;Null?
+	BEQ	GETSTM		;Yes, those we ignore
+	BIT	#PF.C1P,PF.FLG(R5) ;Working on a C1 control?
+	BNE	120$		;Yes, skip C1 check			;017
+	CMPB	R2,#237		;Is this a C1 control?
+	BLE	110$		;Yes, exit
+120$:	CMPB	R2,#14		;Form feed?				;017
+	BEQ	130$		;Yes, then set EOR			;017
+	CMPB	R2,#12		;Line feed?
+	BNE	90$		;No, check BOR flag and exit
+130$:	CALL	80$		;First set EOR and possible BOR		;017
+	BIS	#PF.BOR,PF.FLG(R5) ; and flag that next time will be BOR
+	RETURN			;Exit C=0
+
+.DSABL	LSB
+
+.SBTTL	Get next byte from the buffer
+
+;+
+; GETBYT -- Get next byte from the buffer
+;
+; Entry:
+;	R5 ->	Control/block buffer (mapped)
+;
+; Exit:
+;	C = 0	Got a byte
+;	R2 =	Byte obtained
+;
+;	C = 1	No byte available (read to be queued)
+;	R2	Random
+;+
+
+GETBYT:	MOV	PF.BYT(R5),R0	;Get current byte offset
+	CMP	R0,PF.BCT(R5)	;End of buffer?				;023
+	BHIS	10$		;Yes, get out in error			;023
+	ADD	R5,R0		;Add in CBB pointer
+	;ADD	#PF.BUF,R0	;Now point to buffer
+.ASSUME	PF.BUF EQ 0
+	CLR	R2		;Avoid sign extension (C=0)
+	BISB	(R0),R2		;Get that byte
+	INC	PF.BYT(R5)	;Advance buffer offset
+	RETURN			;Done
+
+10$:	SEC			;Indicate failure			;023
+	RETURN			;And exit				;023
+
+.SBTTL	PUTLOG	Write a byte to the log file for TTDVR
+
+;+
+; PUTLOG -- Write a byte to the log file
+;
+; Entry:
+;	R1 ->	DDB
+;	R2 =	Byte to write
+;
+; Exit:
+;	Registers and mapping preserved
+;-
+
+	TMPORG	EM2DSP,4						;004
+	.WORD	PUTLOG							;004
+	UNORG								;004
+
+PUTLOG:	TSTB	R2		;Trying to send a null?			;004
+	BEQ	30$		;Yes, don't output it (C=0)
+	REGSCR			;Save registers
+	MAP	PUSH,DATA,APR=6	; and mapping
+	MOVB	DDJBNO(R1),R0	;Get job number * 2			;018
+	CALLX	MAPJCR		;Map JCR entry for job			;018
+	MOV	JCPFB+<PF$LOG*2>(R1),R4 ;Get log file CBB pointer	;018
+	MOV	TOS.R1+2(SP),R1	;Get back DDB pointer			;018
+	CALLX	MAPBUF		;Map the CBB
+	MOV	R3,R5		;Copy pointer
+	BIT	#PF.ACT,PF.FLG(R5) ;Logfile active?			;023
+	BEQ	25$		;No, just exit				;023
+
+10$:	MOV	@#PS,-(SP)	;Save calling priority			;023
+	SPLC	5		;And lock out interrupts		;023
+	CALL	FLOVER		;;Flush out the overflow buffer		;026
+	BITB	#TTCRO!TTLFO,DDFLG2(R1) ;;At start of line?
+	BNE	20$		;;No					;007
+	BIT	#PF.TIM,PF.FLG(R5) ;;Time stamp turned on?
+	BEQ	20$		;;No, skip time stamp output		;007
+	CMPB	R2,#12		;;Yes, but is this a line feed?
+	BEQ	20$		;;Yes, skip				;007
+	CMPB	R2,#14		;;Or a form feed?
+	BEQ	20$		;;Skip too				;007
+	CMPB	R2,#15		;;Or a carriage return?
+	BEQ	20$		;;Yes, skip it too			;007
+	CALL	LOGTIM		;;Set up the time stamp			;023
+20$:	CALL	PUTLG2		;;Store the character in log or overflow ;011
+	MOV	(SP)+,@#PS	;;Restore calling priority		;023
+25$:	MAP	POP,DATA,APR=6	;Restore mapping			;023
+30$:	RETURN			; and leave
+
+GLOBAL	<JOBTBL>
+
+.SBTTL	PUTLG2	Store a byte in the log
+
+;+									;011
+; Entry:								;011
+;	R2 =	Character to write					;011
+;	R5 ->	CBB (mapped)						;011
+;									;011
+; Uses:	R0								;011
+;
+; Priority is PR5
+;-									;011
+
+PUTLG2:	CALL	PUTCHR		;;Store character away			;007
+	BCC	10$		;;It worked, good
+	MOV	PF.OBS(R5),R0	;;Get overflow "store" buffer offset
+	CMP	R0,#OBF$SZ	;;Is it full?
+	BHIS	10$		;;Yes, exit
+	INC	PF.OBS(R5)	;;No, so bump pointer
+	ADD	R5,R0		;;Add CBB address
+	MOVB	R2,PF.OBF(R0)	;;Store the character as overflow
+10$:	RETURN			;;Done					;011
+
+.SBTTL	FLOVER	Flush the overflow buffer
+
+;+
+; FLOVER -- Flush out the overflow buffer
+;
+; Entry:
+;	R5 ->	CBB	(mapped)
+;
+; Priority is PR5
+;-
+
+FLOVER:	MOV	R2,-(SP)	;;Save supplied character		;023
+20$:	CMP	PF.OBE(R5),PF.OBS(R5) ;;Anything stored in the buffer?
+	BHIS	30$		;;No, exit
+	MOV	R5,R2		;;Copy CBB pointer
+	ADD	#PF.OBF,R2	;;Point to overflow buffer
+	ADD	PF.OBE(R5),R2	;;Now point to current byte
+	MOVB	(R2),R2		;;Get the byte in R2
+	CALL	PUTCHR		;;Try to output it
+	BCS	40$		;;Didn't work, try next time
+	INC	PF.OBE(R5)	;;Advance pointer
+	BR	20$		;; and repeat
+
+30$:	CLR	PF.OBS(R5)	;;Clear the "store" offset for next go-around
+	CLR	PF.OBE(R5)	;; and the "empty" pointer too
+40$:	MOV	(SP)+,R2	;;Restore character to be output
+	RETURN			;;Done
+
+.SBTTL	PUTCHR	Store a character in an output buffer
+
+;+
+; PUTCHR -- Store a character in an output buffer
+;
+; Entry:
+;	R2 =	Byte to store
+;	R5 ->	Control/block buffer (mapped)
+;
+; Exit:
+;	R0,2,4	Random
+;	C = 0	Byte stored
+;	C = 1	Byte not stored (write should be queued)
+;
+; Note:	If we are being called for the logfile, priority is PR5
+;-
+
+PUTCHR:	TSTB	R2		;Null being output?
+	BEQ	10$		;Yes, ignore it
+	CMP	#PF$BSZ-1,PF.BYT(R5) ;Buffer full?
+	BLO	10$		;Yes, leave (C=1 because BLO = BCS)
+	MOV	PF.BYT(R5),R0	;Get byte offset
+	ADD	R5,R0		;Point into buffer
+	;ADD	#PF.BUF,R0
+.ASSUME	PF.BUF EQ 0
+	MOVB	R2,(R0)		;Store the byte
+	INC	PF.BYT(R5)	;Advance the byte pointer
+	CLC			;Indicate success
+10$:	RETURN			; and leave
+
+.SBTTL	Put the time stamp together
+
+;+
+; LOGTIM - Write the timestamp out to the logfile
+;
+; Entry:
+;	R5 ->	CBB (mapped)
+;
+; Exit:
+;	All registers preserved
+;	Time stamp set up and written to logfile
+;
+; Priority is PR5
+;-
+
+TSBSIZ	=:	30.		;Length of timestamp: dd-mmm-yy_hh:mm:ss_am_ ;023
+
+LOGTIM:	REGSCR			;;Save all registers			;023
+	SUB	#TSBSIZ,SP	;;Get stack space to build timestamp	;023
+	MOV	SP,R4		;;And point to it			;023
+	SPLC	6		;;Lock out the clock
+	MOV	@#TIMSEC,-(SP)	;;;Save current seconds
+	MOV	@#TIME,-(SP)	;;; and minutes
+	MOV	@#DATE,-(SP)	;;;  and date
+	SPLC	5		;;;Let the clock go again		;023
+	MOV	DATCNV,R5	;;Get system standard date format flag
+	BNE	10$		;;NOT STARDATE FORMAT			;013
+	MOV	#"St,(R4)+	;;STARDATE TEXT				;013
+	MOV	#"ar,(R4)+	;;					;013
+	MOV	#"da,(R4)+	;;					;013
+	MOV	#"te,(R4)+	;;					;013
+10$:	MOV	(SP)+,R3	;;Get date to convert
+	MAP	@#KISAR5,APR=5,DATA ;;Set up mapping for CNVDAT		;010
+	CALL	CNVDAT		;;Convert the date
+	MOV	OVRBUF,@DPAR5J	;;Restore FIP pool mapping		;014
+	MOVB	#40,(R4)+	;;Insert the separator space
+	MOV	TIMCNV,R5	;;Get system standard time format flag
+	MOV	(SP)+,R1	;;Get time to convert
+	CALL	CNVTIM		;;Convert the time
+	MOVB	#':,(R4)+	;;Put in seconds separator
+	MOVB	(SP)+,R3	;;Get seconds until next minute
+	SUB	#60.,R3		;; now -(seconds from last minute)
+	NEG	R3		;;  now true seconds
+	CALL	CNV2D		;;Convert to 2 digits
+	MOVB	#40,(R4)+	;;Store the separator
+	MOVB	R0,(R4)+	;;Put in first half of AM/PM or spaces
+	SWAB	R0		;;Get high order down
+	MOVB	R0,(R4)+	;;Store it also
+	MOVB	#40,(R4)+	;; and finally the ending blank
+	TST	DATCNV		;;Stardate?				;013
+	BEQ	20$		;;Yes, so exit now			;013
+	CLRB	(R4)+		;;LEAVE A 0 BYTE IF <> STARDATE		;013
+20$:	MOV	SP,R3		;;Point to start of timestamp		;023
+	MOV	TOS.R5+TSBSIZ(SP),R5 ;;Get back the CBB pointer		;023
+30$:	MOVB	(R3)+,R2	;;Get the character to log		;023
+	BEQ	40$		;;Null, must be non-stardate ending	;023
+	CALL	PUTLG2		;;Non-null, output it to the log	;023
+	CMP	R3,R4		;;Done yet?				;023
+	BNE	30$		;;No, loop				;023
+40$:	ADD	#TSBSIZ,SP	;;Yes, reset the stack			;023
+	RETURN			;;Done
+
+GLOBAL	<TIMCNV,DATCNV,OVRBUF,DPAR5J>					;010
+
+.SBTTL	Date conversion routine
+
+;+
+; CNVDAT -- Convert binary to ASCII date
+;
+; Entry:
+;	R3 =	Date to convert (RSTS format)
+;	R4 ->	Text buffer
+;	R5 =	Conversion format flag
+;		<0 = alpha
+;		 0 = Stardate
+;		>0 = Numeric
+;
+; Exit:
+;	R4 ->	End of date string
+;	R0-3	Random
+;
+; Note: This code must be mapped with overmapped I&D. When we are
+; called from other phases, this is accomplished with a CALLM. When
+; we are called from this phase, however, it is the caller's responsibility
+; to be sure that mapping is correct.
+;-
+
+CNVDAT::MOV	R3,R1		;COPY DATE FOR THE STARDATE ROUTINE	;013
+	CLR	R2		;CLEAR A HIGH ORDER
+	DIV	#1000.,R2	; AND DIVIDE FOR THE YEAR
+	ADD	#70.+100.,R2	;MAKE IT TRUE YEAR IN LAST 2 DIGITS
+10$:	SUB	#100.,R2	;CORRECT BY 100 YEARS
+	CMP	R2,#100.	;YEAR STILL TOO BIG?
+	BHIS	10$		;YES, LOOP...
+				; R3=DAY, R2=YEAR, R1=Internal format	;013
+	TST	R5		;STARDATE FORMAT			;013
+	BEQ	70$		;YES					;013
+	MOV	#DATTBL-4,R1	;GET MONTH TABLE (BIASED) POINTER
+20$:	CMP	(R1)+,(R1)+	;SKIP TO THE NEXT MONTH
+	MOVB	(R1),R0		;GET NUMBER OF DAY IN THIS MONTH
+	BEQ	40$		;WHOOPS! OFF THE END OF THE TABLE
+	CMP	R0,#28.		;IS THIS FEBRUARY?
+	BNE	30$		;NOPE
+	BIT	R2,#3		;YEP, ALSO A LEAP YEAR??
+	BNE	30$		;NOT THIS TIME
+	INC	R0		;FEB AND LEAPING, MAKE IT 29 DAYS
+30$:	SUB	R0,R3		;PUNISH NUMBER OF DAYS BY THIS MONTH'S
+	BHI	20$		;LOOP IF STILL MORE TO COME...
+	ADD	R0,R3		;ELSE CORRECT FOR TRUE DAY
+	BNE	50$		;VALID DAY, GO PROCESS IT
+	ADD	#DATINV-DATTBL,R1 ;INVALID DAY, CORRECT THE MONTH POINTER
+40$:	CLR	R2		;SET YEAR=0
+	CLR	R3		;SET DAY=0
+50$:	TST	R5		;WHAT FORMAT TO USE?
+	BMI	130$		;FORMAT IS ALPHABETIC MONTH		;013
+	CALL	CNV2D2		;OUTPUT YEAR AS "YY"
+	INCB	(R4)+		; THEN A "."
+	MOVB	(R1),R2		;VALID MONTH?
+	BEQ	60$		;NO, PRINT MONTH AS 0'S
+	SUB	#DATTBL-4,R1	;FIND THE MONTH NUMBER *4
+	ASR	R1		;NOW TIMES 2
+	ASR	R1		;NOW TIMES 1
+	MOV	R1,R2		;SET THE MONTH
+60$:	CALL	CNV2D2		;OUTPUT MONTH AS "MM"
+	INCB	(R4)+		; THEN A "."
+	CALL	CNV2D		;OUTPUT DAY AS "DD"
+	MOVB	#40,(R4)+	;Store final space
+	RETURN			;Done
+
+70$:	MOVB	#40,(R4)+	;MOVE OVER JUST IN CASE			;013
+	MOVB	#40,(R4)+	;MOVE OVER JUST IN CASE			;013
+	CMP	R1,#<0*1000.+31.+28.+31.+30.+31.+9.> ; 10-JUN-70	;013
+	BHI	80$		; No, it is mostly OK			;033
+	CLR	R2		;ILLEGAL, SO MAKE IT 0			;013
+	CLR	R3		; ALL OF IT = 0				;013
+	BR	110$		;AND GO DO IT.				;013
+
+80$:	MOV	R2,R1		;COPY THE YEAR AGAIN			;013
+	SUB	#68.,R1		;MAKE IT 1968 BASED FOR LEAPYEAR CHECK	;013
+	SUB	#70.,R2		;MAKE YEAR SINCE 1970			;013
+	BGT	85$		; and before 2000			;033
+	ADD	#100.,R1	; but if 2000 or later, readjust	;034
+	ADD	#100.,R2	; but if 2000 or later, readjust	;033
+85$:	MOV	R2,R5		;COPY THE YEAR				;013
+	MUL	#365.,R5	;# DAYS SINCE 1970 (-LEAP YEARS)	;013
+	SUB	#<31.+28.+31.+30.+31.+10.>,R5 ; BACKUP TO 10-JUN-70	;013
+	CLR	R0		;GET SET FOR THE DIVIDE			;013
+	DIV	#4,R0		;CHECK FOR LEAP YEARS			;013
+	ADD	R0,R5		;ADD IN THE RIGHT NUMBER OF LEAPYEARS	;013
+	TST	R1		;DID WE HIT A LEAP YEAR EXACTLY		;013
+	BNE	90$		;NO					;013
+	DEC	R5		;SO DON'T COUNT THIS YEARS DAY		;013
+90$:	ADD	R5,R3		;ADD IN THE DAYS OF THE CURRENT YEAR	;013
+	CLR	R2		;CLEAR OUT THE HIGH PART		;013
+	DIV	#10000.,R2	;GET THE HIGH TWO DIGITS AND THE LOW 2	;013
+	BEQ	100$		;SKIP THE '00' IF IT'S SMALL		;013
+	SUB	#2,R4		;BACKUP FOR THE 2 NEW CHARS.		;013
+	CALL	CNV2D2		;PUT THE 2 HIGH DIGITS INTO THE BUFFER	;013
+	CLR	R2		;CLEAR OUT THE HIGH PART		;013
+100$:	DIV	#100.,R2	;NOW, GET THE LAST DIGITS		;013
+110$:	CALL	CNV2D2		;AND PUT THE FIRST 2 INTO THE BUFFER	;013
+	CALL	CNV2D		;NOW ADD IN THE 2 LOW DIGITS		;013
+	INCB	(R4)+		;NOW THE '.'				;013
+	MOV	@#TIME,R3	;GET MINUTES TILL MIDNIGHT		;013
+	SUB	#24.*60.,R3	;MINUTES SINCE MIDNIGHT			;013
+	NEG	R3		;AND MAKE IT +				;013
+	CLR	R2		;CLEAR THE HIGH PART			;013
+	DIV	#<<24.*60.>/10.>,R2 ;GET IN RANGE 0-9 WITH REMAINDER	;013
+	MOV	R2,R5		;SAVE THE FIRST DIGIT			;013
+	MUL	#10.,R5		;MOVE TO THE HIGHER DIGIT		;013
+	CLR	R2		;CLEAR THE HIGH PART			;013
+	MUL	#10.,R3		;MAKE REMAINDER * 10.			;013
+	BEQ	120$		;NONE, SO SKIP THE DIV, LEAVE THE 0	;013
+	DIV	#<<24.*60.>/10.>,R2 ;GET REMAINDER IN 0-9 RANGE		;013
+120$:	ADD	R5,R2		;ADD THE HIGHER DIGIT TO THE FIRST	;013
+	BR	140$		;AND PUT IT INTO THE BUFFER		;013
+
+130$:	MOV	R2,R5		;SAVE THE YEAR
+	CALL	CNV2D		;OUTPUT DAY AS "DD"
+	INC	R4		; THEN A "-"
+	INC	R1		;SKIP TO MONTH CHARACTERS
+	MOVB	(R1)+,(R4)+	;OUTPUT
+	MOVB	(R1)+,(R4)+	; MONTH AS
+	MOVB	(R1)+,(R4)+	;  "MMM"
+	MOVB	#'-,(R4)+	;   THEN A "-"
+	MOV	R5,R2		;DO THE YEAR LAST
+140$:	CALLR	CNV2D2		;OUTPUT YEAR AS "YY"
+
+.SBTTL	Time conversion
+
+;+
+; CNVTIM -- Convert binary to ASCII time
+;
+; Entry:
+;	R1 =	Time to convert (RSTS format)
+;	R4 ->	String buffer
+;	R5 =	Conversion format flag
+;
+; Exit:
+;	R0 =	Time trailer characters ("AM, "PM, or two spaces)	;008
+;	R4 ->	End of converted time (right after minutes)
+;	R1-3	Random
+;-
+
+CNVTIM::BIC	#^C<UTC.TM>,R1	;Use only valid bits from the time	;032
+	CLR	R2		;PRE-CLEAR A HIGH ORDER
+	MOV	#12.*60.,R3	;PRE-SET NUMBER OF MINUTES AT NOON
+	TST	R5		;What is the format?
+	BMI	10$		;USE AM/PM TIME
+	ASL	R3		;NUMBER OF MINUTES AT MIDNIGHT
+	SUB	R1,R3		; MINUS NUMBER UNTIL MIDNIGHT
+	MOV	(PC)+,R0	;SET TRAILING <SPACE><SPACE>
+	 .BYTE	40,40
+	DIV	#60.,R2		;FIND HOURS AND MINUTES
+	BR	30$		;NOW GO DO IT
+
+10$:	MOV	#"PM,R0		;Assume PM				;008
+	SUB	R1,R3		;NOON MINUS MINUTES UNTIL MIDNIGHT
+	BHIS	20$		;Branch if noon or later		;008
+	MOV	#"AM,R0		;BEFORE NOON, SET "AM"
+	ADD	#12.*60.,R3	;FIX TIME TO POSITIVE
+20$:	DIV	#60.,R2		;FIND HOURS, MINUTES
+	BNE	30$		;HOUR IS NON-ZERO
+	MOV	#12.,R2		;ELSE USE TWELVE
+30$:	CALL	CNV2D2		;OUTPUT HOUR AS "HH"
+	MOVB	#':,(R4)+	; THEN A ":"
+	.CALLR	CNV2D		;OUTPUT MINUTES AS "MM"
+
+; Numeric conversion; date translation tables
+
+CNV2D:	MOV	R3,R2		;USE WHAT'S IN R3
+CNV2D2:	SWAB	R2		;PUT NUMBER IN HIGH BYTE
+10$:	ADD	#-10.*400+1,R2	;DO A "DIVISION"
+	BPL	10$		; UNTIL MEDIUM WELL...
+	ADD	#10.*400-1+"00,R2 ;MAKE THE ASCII CORRECTION
+	MOVB	R2,(R4)+	;OUTPUT ONE DIGIT
+	SWAB	R2		;SWITCH DIGITS
+	MOVB	R2,(R4)+	;OUTPUT NEXT DIGIT
+	MOVB	#'-,(R4)	;PRESET A HYPHEN
+.ASSUME	<'.>	EQ	<'-+1>	; OR A DOT CAN BE GOT
+	RETURN			;EXIT
+
+DATTBL:	.ASCII	<31.>"Jan"
+	.ASCII	<28.>"Feb"
+	.ASCII	<31.>"Mar"
+	.ASCII	<30.>"Apr"
+	.ASCII	<31.>"May"
+	.ASCII	<30.>"Jun"
+	.ASCII	<31.>"Jul"
+	.ASCII	<31.>"Aug"
+	.ASCII	<30.>"Sep"
+	.ASCII	<31.>"Oct"
+	.ASCII	<30.>"Nov"
+	.ASCII	<31.>"Dec"
+DATINV:	.ASCII	<000>"XXX"
+	.EVEN
+
+.END

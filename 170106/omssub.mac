@@ -1,0 +1,370 @@
+.INCLUDE	%CMN:COMMON%
+TITLE	OMSSUB,<OMS interface routines>,0A,10-MAY-91,DBM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	OMSSUB Edit History
+;+
+; EDIT	BY	DATE		REASON
+; 000	DBM	05-Jan-89	Creation (Design of calling convention)
+;		27-Feb-89	Actual coding
+;		02-Apr-89	Added CTRL/C checking
+; 001	DBM	09-Apr-90	Don't pre-clear ERRFLD/SEQNUM field in OMSRCV
+; 002	DBM	17-Apr-90	Return job # of OMS after send with no rcv
+;-
+
+.SBTTL	Description
+;+
+;
+; There are two routines in this module.  They are used to perform
+; message send/receive calls to communicate with the operator/message
+; services package.
+;
+; The routines are:
+;
+;	OMSSND	- Sends an operator request packet to OMS
+;	OMSRCV	- Waits for a response from the operator services package
+;
+; CALLS:
+; BP2:	CALL OMSSND (RSPBUF$ BY DESC,
+;			PARBUF$ BY REF,
+;			WAIT_TIME% BY VALUE,
+;			CMDBUF$ BY DESC
+;			[, JOB% BY VALUE])
+;
+;	CALL OMSRCV (RSPBUF$ BY DESC,
+;			PARBUF$ BY REF,
+;			WAIT% BY VALUE)
+;
+; MACRO:CALBX OMSSND,<#RSPDSC, #PARBUF, WAIT, #CMDDSC [, JOB]>
+;	CALBX OMSRCV,<#RSPDSC, #PARBUF, WAIT>
+;
+; PARAMETER LIST:
+;	 (R5) =			number of parameters (3, 4 or 5)
+;	2(R5) = RSPBUF$		-> Input buffer descriptor for response
+;	4(R5) = PARBUF$		-> Parameter buffer for command
+;	6(R5) = WAIT_TIME%	Maximum wait time (n seconds)
+;				    0     No wait
+;				 1-32767  Wait time
+;				 32768+n  Leave receiver declared if ERR=15
+;	8(R5) =	CMDBUF$		-> Operator request command packet descriptor
+;	10(R5)= JOB%		Job number of caller.  When present,
+;				tells OMSSND declare the receiver-ID
+;-
+
+.SBTTL	Parameter area description
+;+
+;
+; The layout of the parameter area is as follows:
+;
+;	Bytes	Meaning
+;	 1-2	Input:	Command value to be sent to OMS
+;	 3-8	Input:	Receiver ID to use for confirmation
+;			If first byte is null, no confirmation msesage is sent.
+;	 9-10	Input:	Context value to be returned in confirmation message
+;	11-12		Reserved for use by the subroutines (Context storage)
+;	13-14	Output:	Length of text placed in RSPBUF$
+;	15-16	Output:	Error status of command
+;	17-18	Output:	Field # in error, or request # if successful REQUEST
+;	19-20	Output: Status of REQUEST/REPLY command
+;	 21	Output:	KB number of operator that replied to request
+;	 22	Output:	Job # of operator that replied to request
+;	23-24	Output:	PPN of operator that replied to request
+;
+;-
+
+.SBTTL	Use of the WAIT TIME value
+;+
+;
+; The value passed in WAIT_TIME% is the amount of time the routine should
+; wait for a message from OMS.  A value of zero means that no waiting is
+; done.  A value of n from 1 to 32767 means wait up to n seconds for a
+; message.
+;
+; The sign bit of this value can be used to operate the routines in an
+; asynchronous manner.  When the sign bit is set, the routines will leave
+; the receiver declared when returning if no message was received during
+; the specified wait period.  You can then make further calls to OMSRCV to
+; check on the progress of the command.
+;
+; An error status of 15 (?Keyboard wait exhausted) is returned when the
+; wait time has expired.
+;
+;-
+
+.SBTTL	Use of the JOB% parameter
+;+
+;
+; If a fifth argument is passed to OMSSND, this tells OMSSND that it must
+; declare the receiver specified in the parameter block.  The value passed
+; should be the job number, since OMSSND will convert it to two ASCII chars
+; and place them in the last two characters of the receiver name.  This allows
+; programs to set up the first four characters of the recevier name as they
+; wish (e.g., BACK, TEMP, USER, etc.) but still make OMSSND do the work of
+; the actual declare.  A value of zero can be passed as the job number to
+; make OMSSND declare the receiver name found in the parameter block without
+; storing the job number as the last two digits.
+;
+; If only four arguments are passed, OMSSND assumes that the caller has
+; already delcared the receiver specified in the parameter block.
+;
+;-
+
+.SBTTL	CTRL/C trapping
+;+
+;
+; OMSSUB defines a global cell CCFLAG.  The CTRL/C handling in BP2 is such
+; that a ^C will interrupt the OMSSUB routines, but will returns back into
+; them.  The caller won't know about the CTRL/C until the subroutine exits,
+; which may take a while depending on the WAIT_TIME value passed to OMSRCV.
+;
+; If such a delay is undesireable, then the user should implement their own
+; CTRL/C trapping routine.  This routine should save the old interrupt handler,
+; and install theirs.  This new routine should set the flag CCFLAG to a non-zero
+; value when called.  The OMSSUB routines will stop retrying when this flag
+; has been set.
+;
+; The old CTRL/C interrupt routine can then be restored so that BP2 will work
+; once again.  After the routine has been restored, the program should then
+; check the CCFLAG variable to see if the routines were aborted due to a ^C.
+;
+;-
+
+.SBTTL	Parameter block offset definitions
+.DSECT
+
+OMSCMD:	.BLKW				; Command to send to OMS
+RCVRID:	.BLKB	6			; Receiver ID for confirmation message
+RCVCTX:	.BLKW				; Context value to be returned
+OMSCTX:	.BLKB				; Reserved for use by the subroutines
+	.BLKB				; Reserved
+RCVLEN:	.BLKW				; Length of message received
+ERRSTS:	.BLKW				; Error status of request packet
+ERRFLD:					; Field # of packet that caused error
+SEQNUM:	.BLKW				; Sequence # assigned to REQUEST
+REQSTS:	.BLKW				; Status of REQUEST/REPLY command
+REPJOB:	.BLKB				; Operator job # that made reply
+REPKBN:	.BLKB				; Operator KB # that made reply
+REPPPN:	.BLKW				; Operator PPN that made reply
+
+.SBTTL	OMSSUD	Data space parameters for OMSSUB
+
+.PSECT	OMSSUD	RW,D,GBL,REL,OVR
+
+OMS$LO::.WORD	200+13			; Local object type for OMS
+OMS$MM::.WORD	5			; Default message max
+OMS$PD::.WORD	-1			; Flag to raise privs on Declare
+OMS$PS::.WORD	-1			; Flag to raise privs on Send
+CCFLAG::.WORD	0			; Made non-zero by CTRL/C trap routine
+
+.SBTTL	OMSSND	Send an operator request packet to OMS
+
+.PSECT	OMSSUB	RW,I,GBL,REL,OVR
+
+.ENABL	LSB
+
+OMSSND::NOP
+	MOV	4(R5),R4		; Get pointer to parameter buffer
+	CLR	ERRFLD(R4)		; Preset error field to command
+	CLRB	OMSCTX(R4)		; Assume we're not declaring the rcvr
+	CMPB	(R5),#5			; Job number specified?
+	BLO	30$			; No, receiver declared for us
+	INCB	OMSCTX(R4)		; Flag that we need to remove receiver
+	MOV	10.(R5),R3		; Get job number
+	BEQ	10$			; Zero means declare name passed to us
+	CLR	R2			; Set up for divide
+	DIV	#10.,R2			; Get tens and unit digits in R2/R3
+	ADD	#'0,R2			; Convert tens digit to ASCII
+	MOVB	R2,RCVRID+4(R4)		; Store tens digit
+	ADD	#'0,R3			; Convert unit digit to ASCII
+	MOVB	R3,RCVRID+5(R4)		; Store unit digit
+10$:	CALL	CLRFQX			; Clear FIRQB and XRB.  Get R1 -> FIRQB
+	.MESAG				; Remove RIB zero
+	MOV	#30.,R2			; Retry up to thirty times
+20$:	TST	OMS$PD			; Do we need privs for this?
+	BEQ	24$			; Nope.
+	MOV	#JFSYS,@#XRB		; Raise temp privs bit
+	.SET				; Try to get 'em
+24$:	CALL	CLRFQX			; Clear FIRQB and XRB (again...)
+	INCB	FQFIL(R1)		; Declare receiver subfunction
+	MOV	RCVRID(R4),FQPPN(R1)	; Copy receiver name
+	MOV	RCVRID+2(R4),FQPPN+2(R1); Copy receiver name
+	MOV	RCVRID+4(R4),FQPPN+4(R1); Copy receiver name
+	INCB	FQEXT+1(R1)		; Local, non-priv'd senders
+	MOVB	OMS$MM,FQBUFL(R1)	; Up to five pending messages
+	.MESAG				; Declare the receiver
+	MOVB	(R1),R0			; Save error code
+	TST	OMS$PD			; Did we raise privs?
+	BEQ	28$			; Nope.
+	MOV	#JFSYS,@#XRB		; We no longer need privs
+	.CLEAR				; So drop 'em
+28$:	TST	R0			; Any error on declare?
+	BEQ	30$			; No, proceed with send
+	CMP	R0,#NOBUFS		; Was the error "?No buffers"?
+	BNE	90$			; No, return the error to the caller
+	TST	CCFLAG			; Yes, should we retry?
+	BNE	90$			; Nope, a CTRL/C was typed
+	CLR	@#XRB			; Sleep time of zero means...
+	.SLEEP				; Get ourself re-scheduled
+	SOB	R2,20$			; Try again, maybe things are better now
+	BR	90$			; Retries exhausted, return error
+
+; Receiver declared, now do the send
+
+30$:	MOV	#30.,R2			; Retry up to thirty times
+40$:	TST	OMS$PS			; Do we need privs for this?
+	BEQ	45$			; Nope.
+	MOV	#JFSYS,@#XRB		; Raise temp privs for the send
+	.SET				; (If we have them)
+45$:	CALL	CLRFQX			; Clear out FIRQB and XRB
+	MOVB	#-11.,FQFIL(R1)		; Send local message w/privs subfunction
+	MOVB	OMS$LO,FQSIZM(R1)	; Send to local object for OMS
+	MOV	#FIRQB+FQFLAG,R3	; Get pointer to parameter area
+	MOV	R4,R0			; Copy PARBUF$ pointer
+50$:	MOV	(R0)+,(R3)+		; Move a word from PARBUF$
+	CMP	R3,#FIRQB+FQBSIZ	; Done copying parameters?
+	BNE	50$			; No... keep moving
+	MOV	8.(R5),R0		; Get pointer to CMDBUF$ descriptor
+	MOV	(R0)+,XRLOC(R3)		; Set starting address of buffer
+.ASSUME	XRB EQ <FIRQB+FQBSIZ>
+	MOV	(R0),(R3)+		; Set length of output buffer
+	MOV	(R0),(R3)+		; Set number of bytes to send
+	.MESAG				; Do the send
+	MOVB	(R1),R0			; Save error if any
+	MOVB	FQSIZM(R1),R1		; Save job # * 2 of OMS		;002
+	TST	OMS$PS			; Did we raise privs?
+	BEQ	55$			; Nope.
+	MOV	#JFSYS,@#XRB		; We no longer need privs
+	.CLEAR				; So drop 'em
+55$:	TST	R0			; Any error on send?
+	BNE	60$			; Yes, check it out
+	TSTB	RCVRID(R4)		; Are we expecting a confirmation?
+	BEQ	90$			; Nope, all done
+	TST	6(R5)			; Yes, but are we waiting for it?
+	BNE	OMSRCV			; Yes, proceed with confirmation wait
+	BR	90$			; Return immediately to caller
+
+60$:	CMP	R0,#NOROOM		; Was the error "?No room"?
+	BEQ	70$			; Yes, OMS is busy.  Try again...
+	CMP	R0,#NOBUFS		; Was the error "?No buffers"?
+	BNE	80$			; No, see if we need to remove receiver
+70$:	TST	CCFLAG			; Yes, should we retry?
+	BNE	80$			; Nope, a CTRL/C was typed
+	CLR	@#XRB			; Sleep time of zero means...
+	.SLEEP				; Get ourself re-scheduled
+	SOB	R2,40$			; Try again, maybe things are better now
+80$:	RORB	OMSCTX(R4)		; Who declared the receiver?
+	BCC	90$			; Caller, just return the error
+	CALL	CLRFQX			; Us, clear FIRQB and XRB one last time
+	.MESAG				; Remove the receiver on RIB #0
+	.BR	90$			; Now return error to caller	
+
+90$:	MOV	R0,ERRSTS(R4)		; Error in R0 (CALB) and ERRSTS (BP2)
+	ASR	R1			; Make OMS job # be times 1	;002
+	MOVB	R1,REPJOB(R4)		; Return OMS job # to caller	;002
+					; If error occured, R1 is junk	;002
+	RETURN
+
+GLOBAL	<NOBUFS,NOROOM>			; Get these defintions from ERR.STB
+
+.DSABL	LSB
+
+.SBTTL	OMSRCV	Wait for a response from the operator services package
+
+.ENABL	LSB
+
+OMSRCV::NOP
+	MOV	4(R5),R4		; Get pointer to parameter buffer
+	MOV	#1,R3			; Assume we will be sleeping
+	MOV	6(R5),R2		; Get sleep time
+	BIC	#100000,R2		; Without sign-bit
+	BNE	10$			; Non-zero means we'll be sleeping
+5$:	CLR	R3			; Zero means don't sleep
+10$:	CALL	CLRFQX			; Clear FIRQB and XRB, get R1 -> FIRQB
+	MOVB	#2,FQFIL(R1)		; Receive subfunction
+	MOVB	#2+4,FQSIZM(R1)		; Truncate local message
+	MOV	R3,FQMODE(R1)		; Set sleep time
+	BEQ	20$			; Zero means don't sleep
+	INCB	FQSIZM(R1)		; Non-zero means sleep
+20$:	MOV	2(R5),R0		; Get RCVBUF$ descriptor
+	MOV	(R0)+,@#XRB+XRLOC	; Set address of buffer
+	MOV	(R0),@#XRB+XRLEN	; Set buffer size
+	.MESAG				; Do the receive
+	MOVB	(R1),R0			; Any error?
+	BNE	40$			; Yes.  Check it out...
+	ADD	#FQFLAG,R1		; Offset to parameter area
+	MOVB	#WRGPAK,R0		; Set "?PACKIDs don't match" error
+	CMP	(R1)+,RCVCTX(R4)	; Do the context values match?
+OMS$CC::BNE	10$			; No.  Try again (Patch to NOP for err)
+	BNE	70$			; No.  Return error, don't remove rcvr
+	MOV	(R1)+,R0		; Get the confirmation error status
+	BNE	30$			; Error occured, don't change it.
+	TST	@#FIRQB+FQNAM1+2	; Was the message truncated?
+	BEQ	30$			; No.  Return success
+	MOVB	#157.,R0		; Set "?Record on file too big" error
+30$:	MOV	@#XRB+XRBC,RCVLEN(R4)	; Return length of message received
+	MOV	(R1)+,SEQNUM(R4)	; Return error field/sequence number
+	MOV	(R1)+,REQSTS(R4)	; Return the request status
+	MOV	(R1)+,REPJOB(R4)	; Return JOB/KB of operator
+.ASSUME	REPKBN EQ <REPJOB+1>
+	MOV	(R1)+,REPPPN(R4)	; Return PPN of operator
+	CMPB	REQSTS(R4),#1		; Is the request still pending?
+	BNE	60$			; No, remove receiver and return
+	BR	70$			; Yes, leave the receiver declared
+
+; Process error on receive
+
+40$:	CMPB	R0,#NOSUCH		; Was the error "?Can't find"?
+	BNE	60$			; No, remove receiver and return
+	TST	CCFLAG			; Has a CTRL/C been typed?
+	BNE	60$			; Yes, get out now
+	TST	R3			; No message yet.  Do we wait for one?
+	BEQ	50$			; No.
+	SOB	R2,10$			; Yes, but only if there's still time
+	BR	5$			; No time left, see if message is there
+
+50$:	MOVB	#HNGTTY,R0		; Set "?Keyboard wait exhausted" error
+	TST	6(R5)			; Leave receiver declared?
+	BMI	70$			; Yes.
+	.BR	60$			; No.
+
+60$:	RORB	OMSCTX(R4)		; Who declared the receiver?
+	BCC	70$			; Caller did, so leave it
+	CALL	CLRFQX			; Clear FIRQB and XRB one last time
+	.MESAG				; Remove the receiver on RIB #0
+	.BR	70$			; And return
+
+70$:	MOV	R0,ERRSTS(R4)		; Error in R0 (CALB) or ERRSTS (BP2)
+	RETURN
+
+GLOBAL	<WRGPAK,NOSUCH,HNGTTY>		; Get these defintions from ERR.STB
+
+.DSABL	LSB
+
+.SBTTL	CLRFQX - Clear out FIRQB and XRB
+
+CLRFQX:	MOV	#FIRQB+FQBSIZ+XRBSIZ,R1	; Point past FIRQB and XRB
+.ASSUME	XRB EQ <FIRQB+FQBSIZ>
+10$:	CLR	-(R1)			; Clear out a word
+	CMP	R1,#FIRQB		; Done yet?
+	BNE	10$			; Nope.
+	RETURN				; Yep.  Return with R1 -> FIRQB
+
+.END

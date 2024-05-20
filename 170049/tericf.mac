@@ -1,0 +1,488 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+TITLE	TERICF,<Command file subroutines>,0J,27-MAR-92,KPH/DRP/DBM/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	TERICF EDIT HISTORY
+
+;+
+;
+;			[RSTS/E V9.6]
+;  000  KPH  03-Jun-87	Creation - extract from TTDVR.MAC
+;  001	DRP  25-Nov-87	Merge correction to multiple timestamp problem
+;			(Seq. # 3.3.14M)
+;  002	DRP  06-Jan-87	Source clear Jim's correction for lost line
+;			feed in RSX-to-normal mode transition.
+;
+;			[RSTS/E V9.7]
+;  003  KPH  17-Dec-88	Improve performance of command file reads
+;
+;			[RSTS/E V10.0]
+;  004	DBM  23-Oct-89	Change worst error status to current $_EXIT status
+;  005	JFM  24-May-90	Check TO.ERM in TSTOUT.  Save some code here and there
+;
+;			[RSTS/E V10.1]
+;  006	JFM  27-Mar-92	Set one-shot suppression if not a .WRITE in CHRLG4
+;-
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	TERICF		;All our code goes here
+
+.SBTTL	TTIICF	Read a byte from a command file
+
+;+
+; TTIICF - Read a byte from a command file
+;
+;	R1 -> DDB
+;
+;	CALL	TTIICF
+;
+;	R2 =  Data read
+;-
+
+.ENABL	LSB								
+
+TTIICF::CALL	50$		;Are we going to log this to KB:?	
+	BNE	10$		;No					;005
+	CALLX	CHKFRE		;Are we short on output buffers?	
+	BCS	70$		;Yes, go into output stall		
+10$:	CALLX	TTGICF		;Read from ICF, exit if buffer empty	;003
+	BCS	80$		;Branch if exit being forced ($ line)	
+20$:	BITB	#TTSKLF,DDFLG2(R1) ;Need to skip <LF> for RSX mode read? 
+	BNE	40$		;Yes, so just return it, no logging	
+	BIT	#CF.NOL,R2	;Should this character be logged?	
+	BNE	40$		;No, not this time			
+	CALL	50$		;Are we logging right now?		
+	BNE	40$		;No, so go store it			;005
+	MOV	#CHOUT,XRBUSE-XRBC(R3) ;Set up output routine		
+	CMPB	R2,#'Z&77	;Is this a control/Z?			
+	BNE	30$		;No, not this time			
+	CALL	LOGCTZ		;Yes, go log Control/Z			
+	BR	40$		;And join up				
+                                             
+30$:	CALL	CHRLG2		; Go output the character		
+40$:	CMPB	R2,#15		;Is character a CR?			;002
+	BNE	45$		;Branch if not				;002
+	BIT	#TTRSX1!TTRSX2,DDFLAG(R1) ;Are we in any RSX mode?	;002
+	BEQ	45$		;Branch if not				;002
+	BIS	#TTRSX1!TTRSX2,DDFLAG(R1) ;Set RSX mode of needing LF	;002
+45$:	CLC			;Indicate character available		
+	RETURN			;Done					
+
+50$:	BIT	#NOECHO!TAPE,DDFLAG(R1) ;Reading password or the like?	
+	BNE	60$		;Yes, so no logging to console		
+	BIT	#TI.NCH,XRMOD-XRBC(R3) ;ICF data echo suppressed?	
+60$:	RETURN			;Return with Z=0 (BNE) if no logging	;005
+
+70$:	SPLC	5		;Lock out terminal interrupts
+	CALLX	CHKLIN		;;Start up the output
+	SPLC	3		;;Enable interrupts
+	MOVB	JOB,R4		;Get job number * 2			
+	MOV	#JSTEL,JBWAIT(R4) ;Put it in TT wait			
+	JMPX	IOREDO		; and stall it				
+
+GLOBAL	<UDPAR0,DEFKBM,CHOUT>
+
+; Exit sequencing (command line not read by DCL's ^C read)		
+
+80$:	ADD	R2,PC		;Dispatch using exit sequence counter	
+	 BR	ICFEOF		;Do ^Z					
+	 BR	ICFEOF		;Do ^Z					
+	 BR	ICFEOF		;Do ^Z					
+	 BR	ICFEOF		;Do ^Z					
+	 BR	ICFEOF		;Do ^Z					
+	 BR	ICFCC		;Do single ^C				
+	 BR	ICFCC		;Do single ^C				
+	 BR	ICF2CC		;Do double ^C				
+	 BR	ICFNEW		;Go to P.NEW in DCL			
+	 BR	ICFDCL		;Check for special DCL exit from RT11	
+	 .BR	ICFNEW		;Go to P.NEW in DCL			
+.ASSUME	<.-80$-2> EQ 24							
+
+ICFNEW:	MOV	JOBWRK,R3	;R3 -> Caller's work block		
+	MOV	#EXIRDO,XRBSAV(R3) ;Set up for exit redo		
+	CLR	XRBUSE(R3)	;And be sure it is a real switch	
+	MOVB	JOB,R0		;Pick up job # * 2			
+	MOV	JBWAIT(R0),JBSTAT(R0) ;Make the job runnable		
+	JMPX	IOREDO		;Now go and do the .EXIT		
+
+ICFDCL:	MOV	JOBRTS,R4	;Point to caller's RTS block		
+	TST	R.FLAG(R4)	;Could this be RT11?			
+	BPL	ICFNEW		;No, skip this hack			
+.ASSUME	PF.EMT LT 0							
+	CMPB	R.FLAG(R4),#377	;RT11 uses EMT 377 prefix		
+	BNE	ICFNEW		;No chance				
+
+;+									
+; The strange hack going on here is to account for the fact that	
+; RT11 keeps the user logicals etc. in a strange place, and therefore	
+; doesn't appreciate just being switched out of.  So we check for	
+; RT11 (rule: if it uses Prefix 377, it must be RT11).  If it is, we	
+; go to the P.BAD entry point with an error code of zero, which tells	
+; the RTS to issue a .RTS directive using the name supplied to it	
+; in the FIRQB -- which is the RTS name of DEFKBM.  JFPRTY is used	
+; in this code because it triggers entry to P.BAD and uses the current	
+; JDIOST contents as the error code.					
+;-									
+
+	MOV	DEFKBM,R4	;Point to DCL's RTS block		
+	TST	(R4)+		;Point to name				
+.ASSUME	R.NAME EQ 2							
+	ADD	#FQNAM1-XRBC,R3	;We'll post FIRQB from work block now	
+	MOV	(R4)+,(R3)+	;Pass name to user			
+	MOV	(R4)+,(R3)+						
+	MOV	JOBF,R0		;Point to caller's JDB at JDFLG		
+	BIS	#JFSPCL!JFPOST!JFIOKY,(R0)+ ;Set spec condition and post 
+	MOV	#UUOFQ*400,(R0)	;Set UUOFQ posting and no error		
+.ASSUME	JDIOST EQ JDPOST-1						
+.ASSUME	JDIOST EQ JDFLG+2						
+	BISB	#JFPRTY,JDFLG2-JDIOST(R0) ; and "parity error"		
+	MOVB	JOB,R0		;Get job number				
+	MOV	JBWAIT(R0),JBSTAT(R0) ;Make job runnable		
+	JMPX	DMPJOB		; and dump it				
+
+ICFEOF:	MOVB	#'Z&77,R2	;Set up a control/Z			
+	BR	20$		;And check on logging it		
+
+ICFCC:	MOV	#JFCC,R2	;Set the single ^C flag			
+	BR	90$		; and merge				
+
+ICF2CC:	MOV	#JFCC!JF2CC,R2	;Set the double ^C flag			
+90$:	BIS	R2,@JOBF	;Set that flag				
+100$:	SEC			;Indicate forced exit			
+	RETURN			; and leave				
+        
+.DSABL	LSB								
+
+GLOBAL	<DEFKBM,JBSTAT,JBWAIT>						
+
+.SBTTL	Go and log a Control/Z
+
+;+      
+; LOGCTZ - Go and log a control/Z
+;
+;	R1 -> DDB
+;	R2 = Ctrl/Z
+;	R3 -> Work block @ XRBC
+;
+;	CALL	LOGCTZ
+;
+;	R4 = Undefined
+;-
+
+LOGCTZ::MOV	#TTICZC,R4	;R4 -> Control/Z string			
+	MOV	#CHRLG2,-(SP)	;Guess at the output routine to use	
+	CMP	#CHOUT,XRBUSE-XRBC(R3) ;Good guess?			
+	BEQ	10$		;Yes, sure is				
+	MOV	#CHRLG3,(SP)	;No, use the other one			
+10$:	MOVB	(R4)+,R2	;Pick up a character			
+	BLE	20$		;No more, done				
+	MOV	R4,-(SP)	;Save the string pointer		
+	CALL	@2(SP)		;Call the output routine		
+	MOV	(SP)+,R4	;Restore the output pointer		
+	BR	10$		;And loop				
+
+20$:	TST	(SP)+		;Dump the output routine		
+	BIT	#TTRSX2!TTRSX1,DDFLAG(R1) ;Are we in an RSX mode?	
+	BEQ	30$		;No, not this time			
+	BIS	#TTRSX2!TTRSX1,DDFLAG(R1) ;Yes, so indicate that we've	
+	BIC	#TTRSX1,DDFLAG(R1) ;Output an extra <LF>		
+30$:	MOV	#'Z&77,R2	;Restore the Control/Z			
+	RETURN			;Now we're done				
+
+GLOBAL	<CHOUT,TTICZC>
+
+.SBTTL	Check for ICF or log file reference
+        
+.ENABL	LSB								
+
+TSTICF::BIT	#DDCONS,DDCNT(R1) ;Is this our console?			
+	BEQ	10$		;No, so no ICF read			
+	BIT	#TI.INT,XRMOD-XRBC(R3) ;Forced interactive mode?	
+	BNE	10$		;Yes, so skip ICFP check		
+	TSTB	@JOBF3		;ICFP active?				
+	BPL	10$		;No, so indicate KB read		
+.ASSUME	J2ICF EQ 200							
+	CMP	JOBRTS,DEFKBM	;Is this DCL reading?			
+	BEQ	20$		;Yes, so use file (C=0 from CMP)	
+	TST	XRTIME-XRBC(R3)	;No, but is it a KBM read?		
+	BMI	20$		;Yes, so use the file (C=0 from TST)	
+	BIT	#TI.CUI,XRMOD-XRBC(R3) ;No, but a CUI-style read?	
+	BNE	20$		;Yes, use file (C=0 from TST)		
+	BIT	#J2NDAT,@JOBF3	 ;Is "no-data" set?			
+	BEQ	20$		;No, so it's ICF anyhow (C=0 from TST)	
+10$:	SEC			;Indicate no ICF read this time		
+20$:	RETURN			;Done					
+
+.DSABL	LSB								
+
+GLOBAL	<DEFKBM>							
+
+.ENABL	LSB								
+
+;+									
+; CHRLOG -- Write a character to the log and do other sundry things	
+;									
+; Entry:								
+;	R1 ->	DDB							
+;-									
+
+	TMPORG	KBDDSP,24
+	 .WORD	CHRLOG
+	UNORG
+
+CHRLOG:	BIT	#DDCONS,DDCNT(R1) ;Is this our console?			
+	BEQ	NTCNSL		;No					
+	TSTB	@JOBF3		;ICFP active?				
+	BPL	NOSCAN		;No, then no scanning			
+.ASSUME	J2ICF EQ 200
+	BR	DOSCAN		;Yes, do fancy processing		
+
+NTCNSL::MOV	R3,-(SP)	;Save R3				
+	MOV	JOBWRK,R3	;Get XRB pointer			
+	MOV	@#PS,-(SP)	;Save the current priority		
+	SPLC	5		;;Lock out terminal interrupts		
+	CALL	@XRBUSE(R3)	;;Do output				
+	MOV	(SP)+,@#PS	;Restore the correct priority		
+	MOV	(SP)+,R3	;Restore R3				
+	RETURN			;Done					
+
+NOSCAN::MOV	R3,-(SP)	;Save R3				
+	MOV	JOBWRK,R3	;Get XRB pointer			
+	TST	(R1)		;Control/O in effect?			
+	BPL	10$		;No					
+.ASSUME	DDSTAT EQ 100000
+	BIS	#TTNOUT,TTMODE(R1) ;Yes, one-shot output suppression	
+10$:	MOV	R2,-(SP)	;Save the character			
+	MOV	@#PS,-(SP)	;Save the current priority		
+	SPLC	5		;;Lock out terminal interrupts		
+	CALL	@XRBUSE(R3)	;;Do output				
+	MOV	(SP)+,@#PS	;Restore the correct priority		
+	MOV	(SP)+,R2	; and the saved character		
+	BIC	#TTNOUT,TTMODE(R1) ;Cancel one-shot suppression		
+	MOV	(SP)+,R3	;Restore R3				
+	TST	@JOBF3		;Log active?				
+	BMI	105$		;Yes, then do logfile output		;001
+.ASSUME	J2LOG LT 0
+	RETURN			;No, then we're done			;001
+
+DOSCAN::BITB	#TTLFO!TTCRO,DDFLG2(R1) ;At start of line		
+	BNE	40$		;No, skip error flag check		
+	CMPB	R2,#'%		;Warning message?			
+	BNE	30$		;No					
+	BISB	#TTERMS,DDFLG2(R1) ;Yes, mark error message going out	
+	CALL	200$,R5,<0>	;Set severity level to "warning"	
+30$:	CMPB	R2,#'?		;Possible error message?		
+	BNE	80$		;No, skip				
+	BISB	#TTQMP,DDFLG2(R1) ;Yes, mark one is pending		
+	BR	80$		; and proceed				
+									
+40$:	BITB	#TTQMP,DDFLG2(R1) ;Question mark pending?		
+	BEQ	80$		;No, skip ahead				
+	BICB	#TTQMP,DDFLG2(R1) ;Yes, but no longer			
+	CMPB	R2,#40		;Space?					
+	BEQ	80$		;Yes, so no error, but send the "?"	
+	CALL	200$,R5,<2>	;Set severity level to "error"		
+	CMPB	R2,#'?		;Is this a "??" (severe error)?		
+	BNE	50$		;No					
+	CALL	200$,R5,<4>	;Yes, set "severe error"		
+50$:	CALL	TSTOUT		;No, were we discarding output?		
+	BISB	#TTERMS,DDFLG2(R1) ;Set "error message" flag now	
+	BCS	60$		;Yes, so output "?" now			
+	CALL	CHKECO		;ICF active and "Noecho"?		
+	BCC	80$		;No					
+	BIT	#J2NERR,(R4)	;Noecho, suppressing errors?		
+	BNE	80$		;Yes, so don't send it out		
+	MOV	JOBWRK,R4	;One last check to make			
+	BIT	#TO.FEC,XRMOD(R4) ;Doing forced output?			
+	BNE	80$		;Yes, so "?" already sent		
+	MOV	R2,-(SP)	;Save the character			
+	MOV	#'?,R2		;Set up to send "?"			
+	MOV	@#PS,-(SP)	;Save current priority			
+	SPLC	5		;;Now lock out terminal interrupts	
+	CALL	CHRLG4		;; and send it				
+	MOV	(SP)+,@#PS	;Back to original priority		
+	BR	70$		;Pop R2 and continue			
+
+CHRLG2:	CALL	CHKECO		;ICF active and "Noecho"?		
+	BCC	80$		;No					
+	CALL	TSTOUT		;Noecho, doing output?			
+	BCS	90$		;No					
+	MOV	@#PS,-(SP)	;Save current priority			
+	SPLC	5		;Lock out terminal interrupts		
+	BIS	#TTNOUT,TTMODE(R1) ;Set one-shot output suppression	
+	BR	100$		; and go do the output			
+
+60$:	MOV	R2,-(SP)	;Save the character			
+	BICB	#TTCRO!TTLFO,DDFLG2(R1) ;The "?" is at start of line	
+	MOV	#'?,R2		;Set up to send the pending "?"		
+	CALL	80$		;Send it out				
+70$:	MOV	(SP)+,R2	;Restore the character			
+80$:	CALL	TSTOUT		;Doing output?				
+	BCC	CHRLG3		;Yes, so do it				
+90$:	MOV	@#PS,-(SP)	;Save current priority			
+	SPLC	5		;;Now lock out terminal interrupts	
+	BIS	#TTNOUT,TTMODE(R1) ;;Set one-shot output suppression	
+	CALL	CHRLG4		;;Process the character			
+	MOV	(SP)+,@#PS	;Restore correct priority		
+	BR	110$		; and bypass log output			
+
+CHRLG3::MOV	@#PS,-(SP)	;Save current priority			
+	SPLC	5		;;Now lock out terminal interrupts	
+100$:	CALL	CHRLG4		;;Output to terminal			
+	MOV	(SP)+,@#PS	;Back to original priority		
+	TST	@JOBF3		;Log active?				
+	BPL	110$		;No, skip to CR/LF check		
+.ASSUME	J2LOG LT 0							
+105$:	CALLMI	PUTLOG,EM2AP5	;Write to the log			;001
+110$:	CMPB	R2,#15		;Carriage return just output?		
+	BHI	160$		;No, nor was it anything we check	
+	BNE	120$		;No, skip				
+	BICB	#TTCRO,DDFLG2(R1) ;Yes, mark that			
+	BR	140$		; and check for EOL			
+
+120$:	CMPB	R2,#12		;Line feed just output?			
+	BEQ	130$		;Yes, mark it				
+	CMPB	R2,#14		;No, but form feed perhaps?		
+	BNE	150$		;No, skip				
+130$:	BICB	#TTLFO,DDFLG2(R1) ;Mark LF or FF seen			
+140$:	BITB	#TTLFO!TTCRO,DDFLG2(R1) ;At EOL now?			
+	BNE	170$		;No, exit				
+	BICB	#TTERMS,DDFLG2(R1) ;Yes, so end of error message	
+	RETURN								
+
+150$:	TSTB	R2		;Null?					
+	BEQ	170$		;If so, don't touch flags at all	
+160$:	BISB	#TTLFO!TTCRO,DDFLG2(R1) ;Mark not at start of line	
+170$:	RETURN			;Done					
+
+;+									
+; Entry:								
+;	R1 ->	DDB							
+;	R2 =	Char to print						
+;									
+;	Priority is PR5
+;-									
+
+CHRLG4:	MOV	R3,-(SP)	;;Save R3				
+	MOV	JOBWRK,R3	;;Get XRB pointer			
+	TST	(R1)		;;Control/O in effect?			
+	BMI	180$		;;Yes, suppress terminal output		
+.ASSUME	DDSTAT LT 0							
+	CALL	CHKECO		;;ICF active and "Noecho"?		
+	BCC	190$		;;No					
+	CMPB	XRBSAV(R3),#.WRITE ;;Noecho, doing a .WRITE?		
+	BNE	180$		;;No, then other checks do not apply	;006
+	BIT	#TO.FEC!TO.MUL,XRMOD(R3) ;;Yes, but should we ignore it? 
+	BGT	190$		;;Yes, so ignore it			
+	BITB	#TTERMS,DDFLG2(R1) ;;No, but is this an error message?	
+	BEQ	180$		;;No, so suppress output		
+	BIT	#J2NERR,(R4)	;;Yes, suppressing errors too?		
+	BEQ	190$		;;No, so keep the output		
+180$:	BIS	#TTNOUT,TTMODE(R1) ;;Set one-shot output suppression	
+190$:	MOV	R2,-(SP)	;; and the character to be output	
+	CALL	@XRBUSE(R3)	;; AND CALL THE OUTPUT ROUTINE		
+	BIC	#TTNOUT,TTMODE(R1) ;;Cancel one-shot output suppression	
+	MOV	(SP)+,R2	;;Restore the character			
+	MOV	(SP)+,R3	;;Restore R3				
+	RETURN			;; and exit				
+        
+200$:	MOV	R0,-(SP)	;Get a work register			
+	MOV	(R5)+,-(SP)	;Pick up the new exit status		
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		
+	MOV	JOBJCR,R4	;And point to it			
+	ADD	#JCEXST,R4	; and point to exit status		
+	MOVB	(R4),R0		;Pick up present exit status		
+	BICB	#^C<7>,R0	;And save only program exit status	
+	BITB	#1,R0		;Current = success?			
+	BNE	210$		;Yes, set new				
+	CMPB	R0,(SP)		;New one more severe?			
+	BHIS	240$		;No, skip				
+210$:	MOVB	(SP),R0		;Yes, fetch error status		;004
+	MOVB	R0,(R4)		;Change current error status		;004
+	ASH	#4,R0		;Shift to high nybble			;004
+	BISB	R0,(R4)		;And change job's $_EXIT status		;004
+240$:	TST	(SP)+		;Dump the present exit status		
+	MOV	(SP)+,R0	;Restore work register			
+	MAP	TERAP6,APR=6,DATA ;Re-map terminal driver		
+	RETURN	R5		; and exit				
+        
+.DSABL	LSB								
+
+GLOBAL	<TERAP6>							
+
+;+									
+; TSTOUT -- Check whether output should be performed or skipped		
+;									
+; Entry:								
+;	R1 ->	DDB							
+;									
+; Exit:									
+;	C = 0	Do the output						
+;	C = 1	Skip doing output					
+;-									
+
+TSTOUT:	TSTB	@JOBF3		;ICF active?				
+	BPL	40$		;No (C=0 from TST)			;005
+.ASSUME	J2ICF EQ 200							
+	BIT	#J2VFY,@JOBF3	;Yes, but verification on?		
+	BNE	40$		;Yes (C=0 from TST)			;005
+	BITB	#TTERMS,DDFLG2(R1) ;Error message going out?		
+	BNE	40$		;Yes, do the output (C=0 from TST)	;005
+	MOV	R3,-(SP)	;Save R3				;005
+	MOV	JOBWRK,R3	;Get XRB pointer			;005
+	BIT	#TO.ERM!TO.FEC!TO.FRC!TO.MUL,XRMOD(R3) ;Forced output?	;005
+	BGT	30$		;Yes (C=0 from TST)			;005
+.ASSUME	TO.MUL LT 0							
+	CMP	JOBRTS,DEFKBM	;Are we in DCL?				
+	BEQ	20$		;Yes, so suppress the output		
+	BIT	#TO.CUI!TO.MUL,XRMOD(R3) ;No, but is it CUI?		
+	BGT	20$		;Yes, same as DCL			
+.ASSUME	TO.MUL LT 0							
+10$:	TST	(PC)+		;Clear carry, skip next line		
+20$:	 SEC			;Indicate no output			
+30$:	MOV	(SP)+,R3	;Restore R3				;005
+40$:	RETURN			; and exit				;005
+
+.SBTTL	CHKECO	Check to see if ICF is active and NOECHO is set
+
+;+									
+; CHKECO -- Check to see if ICF is active and NOECHO is set		
+;									
+; Exit:									
+;	R4 ->	JDB @ JDFLG3						
+;	C = 0	ICF not active or NOECHO bit is clear			
+;	C = 1	ICF is active and NOECHO bit is set			
+;-
+
+CHKECO:	MOV	JOBF3,R4	;Point to JDFLG3			
+	TSTB	(R4)		;ICF active?				
+	BPL	20$		;No (C=0)				
+.ASSUME	J2ICF EQ 200							
+	BIT	#J2NCHO,(R4)	;Set to "Noecho"?			
+	BNE	10$		;Yes					
+	TST	(PC)+		;No (C=0)				
+10$:	SEC			;Indicate active and noecho		
+20$:	RETURN			;That's all folks			
+
+.END

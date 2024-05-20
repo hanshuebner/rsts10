@@ -1,0 +1,172 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element GMARG.MAC
+;  *3    18-AUG-1986 11:21:10 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:22:49 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:37:03 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element GMARG.MAC
+	.NLIST							;Edit Level 00
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	GMARG	- Get a macro type argument
+	.SBTTL	GMARG	- Get a macro type argument
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Too many people to list here
+;
+;   Created:	From the dust and dirt
+;
+;  Abstract:	GMARG - This module is responsible for parsing MACRO
+;			type arguments.
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;--
+
+
+
+.IF	DF,RT11		;If RT-11
+
+	.PSECT	IMPURE,D,GBL
+
+.IFF;	DF,RT11		;If RT-11
+
+	.PSECT	IMPURE,D
+
+.ENDC;	DF,RT11		;If RT-11
+
+$ARGSZ::.BLKW	1		;SIZE OF PARSED MACRO-TYPE ARGUMENT
+
+.SBTTL	GMARG - Get non-null macro-type argument
+.SBTTL	GMARGF - Attempt to get macro-type argument
+
+;+
+; GMARG
+; GMARGF
+; These routines parse off the next macro-type argument, up to
+; the next terminator. A terminator check is only made if the
+; bracketed level is zero. IE: We are not scanning a string
+; inclosed in brackets. A terminator may be:
+;
+;	a blank, a semi-colon or a comma.
+;
+;	CHRPNT	-> Start of argument to scan
+;
+;	CALL	GMARGx
+;
+;	CHRPNT	-> Next argument start
+;	R0	-> Parsed argument save area
+;-
+.ENABL LSB
+	PURE	PUREI,I
+
+GMARG::	CALL	TSTARG		;Null argument?
+	BEQ	999$		;Branch if so, just exit.
+GMARGF::SAVREG			;Save our registers
+	CLR	R1		;Initialize "<>" flag
+	CLR	$ARGSZ		;Initialize argument size
+	MOV	#CHRPNT,R2	;R2 -> Character pointer word
+	MOV	@R2,-(SP)	;Save initial character pointer
+	MOV	#'<,R3		;Assume "<>"
+	MOV	#'>,R4
+	CMP	R5,R3		;Bracket construction?
+	BEQ	11$		;Branch if so, OK.
+	CMP	R5,#'^		;Up-Arrow construction?
+	BEQ	10$		;Branch if so
+1$:	BITB	#CT.PC & ^C<CT.COM!CT.SMC>,CTTBL(R5)  ;Printable character
+				; other than comma or semicolon?
+	BEQ	21$		;Branch if not, done.
+	CALL	GETCHR		;Else move on.
+	INC	$ARGSZ		;Increment argument size
+	BR	1$		;
+
+; Handle ^ contruction's
+
+10$:	CALL	GETNB		; "^", Bypass it
+	BEQ	20$		;Branch if null, error!
+	MOV	@R2,@SP		;Setup new start pointer
+	COM	R3		;Theres no "<" equivalent
+	MOV	R5,R4		;Load up the ">" equivalent
+11$:	CALL	GETCHR		;Get next character
+	BEQ	20$		;Branch if end, error (NESTED)
+	INC	$ARGSZ		;Bump argument size
+	CMP	R5,R3		; "<"?
+	BEQ	12$		;Branch if so, bump nesting depth.
+	CMP	R5,R4		;How about ">"?
+	BNE	11$		;Branch if not, go on to the next
+	DEC	R1		;Else decrement level count
+	DEC	R1		;Account for next INC
+12$:	INC	R1		;Bump level "<" found.
+	BPL	11$		;Loop if not through
+	DEC	$ARGSZ		;Exclude string terminator from argument size
+	INC	(SP)		;Point past "<"
+	BIS	#100000,R5	;Must move past in RMARG
+	BR	21$		;Terminate, done.
+
+20$:	ERROR	A		;Syntax error, EOL when not expecting.
+21$:	MOV	GMAPNT,R0	;Get current argument save pointer
+	BNE	22$		;Branch if initialized
+	MOV	#GMABLK,R0	;Else do it.
+22$:	MOV	@R2,(R0)+	;Save end of argument pointer
+	MOV	R5,(R0)+	;  and terminating character
+	CLRB	@(R2)		;Set null terminator
+	MOV	(SP)+,@R2	;Point to start of arg
+	CALL	SETCHR		;Set R5 = Start of parsed argument.
+	MOV	R0,GMAPNT	;Save new buffer pointer
+999$:	RETURN			;Return to the caller.
+
+
+.SBTTL	RMARG - Remove parsed macro argument
+
+;+
+; RMARG
+; This routine resets the previously parsed macro argument
+; back into the source string.
+;
+;	CALL	RMARG
+;
+;	R0	-> Saved argument block
+;-
+
+RMARG::	MOV	GMAPNT,R0	;R0 -> Saved items
+	MOV	-(R0),R5	;Set character
+	TST	-(R0)
+	MOVB	R5,@(R0)	;Restore virgin character
+	ASL	R5		;It high bit set add one to bypass "<"
+	ADC	@R0		;Increment address if so
+	MOV	@R0,CHRPNT	;Save it away.
+	CALL	SETNB		;Get the next non-blank
+	MOV	R0,GMAPNT	;Save new pointer
+	RETURN			;
+
+
+	.END

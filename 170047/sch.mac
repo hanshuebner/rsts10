@@ -1,0 +1,1468 @@
+.INCLUDE /CMN:COMMON/							;022
+.INCLUDE /CMN:KERNEL/							;022
+.INCLUDE /CMN:FLDEF/							;022
+.INCLUDE /CMN:KBDEF/							;022
+.INCLUDE /CMN:PFBDEF/							;022
+TITLE	SCH,<SCHEDULER>,0K,04-JUN-92,MHB/ABC/SJK/MJG/AJK/WJS/GPK/FEK/FRL/GPK/MNB/KPH
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR SCH
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	TG   27-Jun-80	Added GEN phase stuff
+;
+;				[RSTS V8.0]
+;  002  AJK  21-AUG-82  Added code for STALL-SYSTEM feature.
+;  003  WJS  19-Oct-82	JDB2 structure modifications
+;  004	WJS  04-Nov-82	Allow "Aux Buffers" to live in XBUF
+;  005	WJS  20-Nov-82	BL4 changes for EMT Logger
+;  006	GPK  23-Nov-82	Logged-in spawn feature
+;  007	WJS  12-Jan-83	BL5 cleanups
+;
+;				[RSTS V9.0]
+;  008  GPK  31-Mar-83	Multiple privileges
+;  009	WJS  21-Apr-83	Add KILL-time call to EMT Logger
+;  010	FEK  30-Jun-83	USER I/D SUPPORT
+;  011	GPK  21-Sep-83	Remove job headers
+;  012  FRL  25-Oct-83  Added extended level three queue (L3Q) capability
+;  013  GPK  01-Dec-83  Set sign bit in FQNENT if non-zero and privileged
+;			 program
+;  014	GPK  29-Dec-83	Take out setting of ACNT bit
+;  015  MNB  15-Jan-84	Asynch change - INC LCK count when est. "JOB"
+;			Used to be done in CAL's USRSET routine
+;  016	GPK  22-Feb-84	Put "old style" privileged program handling back in
+;  017	KPH  04-Apr-84	Changes for task-loader
+;  018	GPK  20-Apr-84	Remove large posting, privilege name changes
+;  019	GPK  15-May-84	Hooks for DECnet spawning
+;  020	KPH  25-Jun-84	Add program exit cleanup
+;			Add "wait for I/O complete" for fatal errors
+;			Move EMU to RSX phase
+;  021	KPH  29-Aug-84	Changes for APR5 FIP pool
+;			Move USRSET here from EMT phase
+;  022	KPH  16-Oct-84	Improved ICFP spawning
+;			Added .INCLUDEs and .LIBRARYs
+;			Fix system crashes on fatal errors during I/O redo
+;			Add job's worst exit status
+;  023	GPK  01-Nov-84	Add J2NCHO and related bits to those carried over
+;			on ICFP detach
+;  024	GPK  29-Nov-84	Bugfix in 023
+;  025	KPH  29-Nov-84	Don't kill job until I/O completes
+;			Make J2ISIZ and J2DSIZ be bytes
+;  026	KPH  24-Jan-85	Don't clear exit status on .RUN/.CHAIN
+;  027	KPH  07-Feb-85	Add monitor KBM
+;			Reset open files in RUNDWN
+;  028  KPH  01-Mar-85	Pass core common/logicals on ICFP detach
+;			Pass command line on spawn/ICFP detach
+;  029	KPH  21-Mar-85	Remove job kill I/O wait
+;			Don't call ENDKEY on ICFP detach
+;  030  KPH  10-Apr-85	Don't grant TMPPRV to temporarily privileged programs
+;			Pass privileges on ICFP detach
+;
+;			[RSTS V9.2]
+;  031  KPH  12-Jul-85	Add Job Control Region
+;			Move IOB to FIP pool
+;  032  KPH  23-Oct-85	Clean up job kill processing
+;
+;			[RSTS V9.3]
+;  033  KPH  02-May-86	Copy context word in ICFP detach
+;  034  KPH  24-Jun-86	Clean up library handling code
+;			Set up JOBF3 on context switch
+;  035  KPH  12-Aug-86	Call SPWERR directly on spawn failure
+;
+;			[RSTS V9.4]
+;  036  KPH  23-Jan-87	Re-write USRSET to be much faster
+;  037  WRM   7-Apr-87  Add FAST MAP disable to RUNDWN
+;
+;			[RSTS V9.6]
+;  038  KPH  18-Dec-87	Make ICFP detach work with dynamic keyboards
+;  039  WRM  15-Jan-88	Implement Super mode EMT's
+;  040  WRM  04-Mar-88	Add D-apr copy protection mask to context switch
+;  041  WRM  07-Apr-88	fix supervisor D space mapping in ID mode
+;
+;			[RSTS V9.7]
+;  042  KPH  16-Dec-88	Add callable subroutine for temporary privileges
+;
+;			[RSTS V10.0]
+;  043	WRM  14-Sep-89	Source clr 3.1.9 (swap error crash)
+;			Add MSDS$ support + Job Header dumping
+;
+;			[RSTS V10.1]
+;  044	FEK  16-Apr-91	Clear J41ASY in rundown
+;  045	FEK  21-May-92	Don't leave trash in high byte of APRMSK
+;-
+
+	DEFORG	SCH
+
+.SBTTL	Currently in GEN phase						;043
+.SBTTL	Kill a job
+
+; R0 = Job # * 2
+; R1 -> JDB @ JDFLG
+; R5 -> JDB @ JDFLG2
+
+KILJOB:	BIT	#J2KIL2,JDFLG3-JDFLG(R1) ; 2nd phase of KILL?		;036
+	BNE	30$		; Yes, go and get rid of this job!	;020
+	MAP	JOBJC6,APR=6,DATA ; Map job's JCR entry			;031
+	MOV	JOBJCR,R2	; And point to it			;031
+	MOV	JCASTS(R2),R4	; Pick up simulated AST block		;031
+	BEQ	10$		; None, that's good			;020
+	CLR	JCASTS(R2)	; Dump pointer to simulated block	;031
+	BUFFER	RETSML		; And return it to the pool		;020
+
+10$:	CALL	CLNASY		; Go and clean up asynchronous I/O	;020
+	CLR	JBSTAT(R0)	; Put job into a
+	MOV	#JSFIP,JBWAIT(R0) ;  FIP wait state
+	BIS	#J2KIL2,JDFLG3-JDFLG(R1) ; Set to kill job next time	;036
+	BIT	#J2FSPW,JDFLG3-JDFLG(R1) ; Job being spawned?		;031
+	BEQ	20$		; No
+	CALL	SPWNBF		; Yes, get the spawn related data
+	BIT	#1,R4		; NSP type spawn?			;019
+	BNE	20$		; Yes, skip those			;019
+	MOV	JOBTBL(R4),R2	; Get JDB pointer for spawning job
+	MOVB	JDIOST-JDFLG(R1),JDIOST(R2) ;Pass our error to that job
+	CALLX	IOFIP4		; Make him runnable now
+20$:	MOV	JDWORK-JDFLG(R1),R4 ; Get job's work block pointer
+	MOV	R4,R2		; Copy that pointer
+	CLR	(R2)+		; Skip FIRQB link word
+	MOVB	R0,(R2)+	; Set job number times 2 @ FQJOB
+	MOVB	#BYEFQ,(R2)+	; Set function as LOGOUT @ FQFUN
+	MOV	#NULRTS,R3	; Get NULRTS pointer			;027
+	CALLX	SWRTS		;  and switch job to that
+	MOV	R1,R2		; Copy JDB pointer @ JDFLG and
+	ADD	#JDMCTL-JDFLG,R2 ;  index to memory control area
+	CALLX	REMJOB		; Now remove job from memory list
+	CALLX	SAVJNL,R5	; Dump the job
+	JMPX	FIPSYS		; Now queue the LOGOUT into FIP
+
+GLOBAL	<JBSTAT,JBWAIT,JOBTBL,NULRTS,STLJOB,STLCNT>			;027
+
+; This is kill phase 2.
+;
+; R0 = Job # * 2
+; R1 -> JDB @ JDFLG
+; R5 -> JDB @ JDFLG2
+
+30$:	CALLMI	EMLKIL,EMTAP5	; Retrieve/queue any pending EML packet	;032
+
+; Now, we will see if DECnet spawned this job. If it did, we'll call
+; DECnet to log a spawn failure event.
+
+	MOV	JOBJCR,R5	; Pick up pointer to job's JCR entry	;032
+	BIT	#J2FSPW,JDFLG3-JDFLG(R1) ; Job being spawned?		;032
+	BEQ	80$		; No, skip				;019
+	CALL	SPWNBF		; Map the buffer			;019
+	CMPB	R4,#3		; NSP's special job number?		;019
+	BNE	80$		; No, skip				;032
+	CALLMI	SPWERR,SESAP5	; Yes, tell DECnet about the failure	;035
+
+; R0 = Job # * 2
+; R1 -> JDB @ JDFLG
+; R5 -> Caller's JCR entry (but not mapped)
+
+80$:	MAP	JOBJC6,APR=6,DATA ; Map caller's JCR entry		;032
+	ADD	#JCAUXB,R5	; Now, R5 -> first auxiliary buffer pointer ;032
+	MOV	#JCABCT,R2	; Number of auxiliary pointers (loop count) ;031
+90$:	MOV	(R5)+,R4	; Get next one				;032
+	BEQ	100$		; Nothing there - skip the return
+	CMP	R4,#ABFLGS	; Is this a "flag", instead of a buffer ?
+	BHIS	100$		; Yes -> skip returning a FLAG !
+	BUFFER	RETCHN		; Return an auxiliary buffer (note !  BUFHDR's presumed)
+100$:	SOB	R2,90$		; Loop for auxiliary buffer chain count	;031
+
+; Now we will remove the job from the tables
+
+; R0 = Job # * 2
+; R1 -> JDB @ JDFLG
+
+	CALLX	SAVJNL,R5	;Dump the current job (for the last time!) ;032
+	SPLC	5		;; No terminal interrupts now
+	CMPB	R0,STLJOB	;; This job requested stall-system?
+	BNE	50$		;; No
+	CLRB	STLJOB		;; Terminate stall-system in progress
+50$:	CLR	JBSTAT(R0)	;; Clear job status			;029
+	CLR	JBWAIT(R0)	;; Clear wait state
+	CLR	JOBTBL(R0)	;; Remove job from the job table
+	DECB	JOBCNT		;; Say 1 less job now
+	MOV	R1,R3		;; Copy JDB @ JDFLG pointer to here	;029
+	MOV	JDRTS-JDFLG(R3),R4 ;; Get RTS pointer
+	DEC	R.CNT(R4)	;; Say 1 less user there
+	MAP	FIPPOL		;; Map FIP pool to get the IOB		;031
+	MOV	@-(R3),R1	;; Get channel #0 DDB pointer
+.ASSUME	JDIOB	EQ	JDFLG-2
+	MAP	@#KISAR5,APR=5,DATA ;; Restore our data mapping		;031
+	CMPB	R0,DDJBNO(R1)	;; Job detached?
+	BNE	60$		;; Yes, skip terminal release
+	MOV	R3,-(SP)	;; No, save job data pointer
+	CALLMI	ENDKEY,KBDAP5	;; Release the terminal
+	MOV	(SP)+,R3	;; Restore job data pointer
+60$:	SPLC	3		;; Back to level 3 now
+	MAP	FIPPOL		; Map FIP pool for IOB return		;031
+	MOV	(R3),R4		; Get job's I/O block
+.ASSUME	JDIOB	EQ	0
+	BUFFER	RETSML		;  and return it
+	MOV	JDWORK(R3),R4	; Get job's work block
+	BUFFER	RETSML		; And return it
+	MOV	R3,R4		; Copy the job data pointer		;032
+	BUFFER	RETSML		; Return JDB
+	JMPX	RTI3		; Exit
+
+GLOBAL	<JBSTAT,JBWAIT,JOBTBL,JOBCNT,JCABCT>				;031
+
+.SBTTL	THIS IS THE SCHEDULER...
+
+;+
+; THE SCHEDULER IS A LEVEL 3 TASK THAT IS SCHEDULED BY:
+;
+;	1) THE CURRENT RUNNING JOB'S RUN BURST (IN 'QUANT')
+;		EXPIRING. THIS IS DETECTED BY THE CLOCK
+;		INTERRUPT SERVICE.
+;
+;	2) THE DUMPING OF THE CURRENT RUNNING JOB ('SAVJQX',
+;		'SAVJOB', AND 'SAVJNL').
+;
+;	3) THE I/O COMPLETION ROUTINE ('IOFINI', 'IOFIN4') WHEN
+;		THAT I/O COMPLETION MAKES A JOB RUNNABLE AND
+;		NO OTHER JOB WAS CURRENTLY RUNNING.
+;
+;	4) THE COMPLETION OF THE SWAP IN OF THE SCHEDULER'S
+;		SELECTED JOB (IN 'NEXT'). THIS TERMINATES THE
+;		RUN OF THE CURRENTLY RUNNING SUB-SCHEDULED JOB.
+;-
+
+.DSECT	JOB	;VERIFY ORDER OF LOWCOR LOCATIONS AS DEFINED IN KERNEL	;040
+
+JOB:	.BLKB		;CURRENT JOB
+NEXT:	.BLKB		;NEXT JOB
+JOBDA:	.BLKW		;-> JDB OF "JOB"
+JOBF:	.BLKW		;-> JDB @ JDFLG OF "JOB"
+IOSTS:	.BLKW		;-> JDB @ JDIOST OF "JOB"
+JOBWRK:	.BLKW		;-> WRK OF "JOB"
+JOBJD2:	.BLKW		;-> JDB2 OF "JOB"
+JOBRTS:	.BLKW		;-> RTS OF "JOB"
+CPUTIM:	.BLKW		;-> CPU TIME BUCKET
+JOBWDB:	.BLKW		;-> WDB OF "JOB"
+JOBJCR:	.BLKW		;-> JCR entry of "JOB"				;031
+JOBJC6:	.BLKW		; = MMU address to map JCR			;031
+JOBF3:			;-> JDB @ JDFLG3 of "JOB"
+
+.DSECT			;VERIFY ORDER OF JDB OFFSETS
+
+JDIOB:	.BLKW		;-> IOB
+JDFLG:	.BLKW		;JOB FLAGS
+JDIOST:	.BLKB		;I/O STATUS
+JDPOST:	.BLKB		;POSTING CODE
+JDWORK:	.BLKW		;-> WRK
+JDJDB2:	.BLKW		;-> JDB2
+JDFLG2:	.BLKB		;MORE JOB FLAGS
+	.BLKB		;We don't use this(wrong, looks like JDJBNO)	;031
+JDRTS:	.BLKW		;-> RTS
+
+	UNORG
+
+	L3QENT	QSCHED,,GENAP5	;SCHEDULE
+
+	TSTB	STLCNT		;STALLED EVERYONE?
+	BNE	30$		;YES, RUN NULL JOB
+	MOVB	STLJOB,R0	;GET STALLING JOB# * 2
+	BEQ	10$		;NONE, SCHEDULE NORMALLY
+	BIT	JBSTAT(R0),JBWAIT(R0) ;RUNNABLE?
+	BEQ	30$		;NO
+	CALL	RESCJB		;IS JOB RESIDENT NOW?
+	BCC	40$		;YES, RUN HIM
+	MOV	(PC)+,R3	;NO, SET L3Q BIT TO SET ON RESIDENCY ;012
+	 .L3Q	 QSCHED						     ;012
+	CALLX	RESJOB		;  AND REQUEST JOB RESIDENCY
+	BR	30$		;IN THE MEAN TIME, RUN NULL JOB
+
+; SEE IF WE HAVE ALREADY PICKED A JOB TO RUN NEXT (IN 'NEXT')
+
+10$:	MOVB	NEXT,R0		;GET JOB NUMBER TIMES 2 OF JOB TO RUN NEXT
+	BNE	20$		;THAT JOB HAS ALREADY BEEN PICKED
+	CALL	SCHED,R5,<RTSPC> ;MAIN SCHEDULE
+	BLE	30$		;NOBODY FOUND, RUN NULL JOB
+	MOVB	R0,NEXT		;ONE FOUND, SET IT IN NEXT
+
+; THE JOB TO BE RUN NEXT HAS BEEN PICKED AND IS IN R0 AND 'NEXT'
+
+20$:	CALL	RESCJB		;IS JOB RESIDENT NOW?
+	BCC	40$		;YES, SO RUN THIS JOB
+	MOV	(PC)+,R3	;NO, SET L3Q BIT TO SET ON RESIDENCY ;012
+	 .L3Q	 QSCHED						     ;012
+	CALLX	RESJOB		; AND REQUEST JOB RESIDENCY
+
+; WHILE WAITING FOR THAT JOB WE WILL DO A SUB-SCHEDULE
+
+	CALL	SCHED,R5,<RESCJB> ;SUB-SCHEDULE
+	BGT	40$		;A JOB TO RUN WAS FOUND
+
+; ONLY THE NULL JOB CAN RUN... SO WE MUST RUN IT
+
+30$:	CLR	R5		;SET RUN BURST=0 FOR NULL JOB
+	JMP	RUNULL		; AND RUN IT
+
+GLOBAL	<GENAP5,RTSPC,JOBTBL>
+
+; R0 NOW HAS THE JOB NUMBER TIMES 2 OF A JOB WE WILL RUN
+
+40$:	MOV	#NEXT,R4	;GET POINTER TO JOB/NEXT
+	CMPB	R0,(R4)		;IS OUR JOB THE SELECTED NEXT JOB?
+	BNE	50$		;NO
+	CLRB	(R4)		;YES, SO WE FINALLY GOT 'NEXT'
+50$:	CMPB	R0,-(R4)	;IS OUR JOB THE CURRENTLY RUNNING JOB?
+	BNE	60$		;NO, GO PROCESS IT
+
+; WE UPDATE THE JOB'S TIMING INFORMATION TO AVOID OVERFLOW HERE
+
+	MOV	JOBDA,R1	;YES, GET JOB DATA POINTER
+	CALLX	FNDRSQ		; AND RE-CALCULATE RESIDENCY QUANTUM
+	TST	(R1)+		;ADVANCE TO JDB @ JDFLG
+	CALLX	SAVTIM		; AND SAVE ALL TIMING INFORMATION
+	JMP	RUNJOB		;NOW GO RUN THE JOB
+
+; DUMP THE CURRENT "JOB" SINCE IT IS NOT OUR JOB
+
+60$:	MOV	R0,R3		;MOVE JOB NUMBER OVER HERE
+	TSTB	(R4)		;IS ANY JOB NOW RUNNING?
+	BEQ	70$		;NOPE, JUST LOAD UP OUR JOB
+	CALLX	SAVJQX,R5	;YEP, DUMP CURRENT RUNNING JOB
+
+; NOW ESTABLISH THIS JOB AS "JOB". SET ALL LOW MEMORY POINTERS, ETC.
+
+70$:	MOVB	R3,(R4)+	;SET OUR JOB AS "JOB"
+	MOV	R3,R0		;COPY JOB NUMBER TIMES 2 TO HERE
+	MOV	JOBTBL(R0),R1	;GET JOB'S JOB DATA POINTER
+	CALL	DIAMON		;POST JOB TO DIAMOND
+	INC	R4		;-> JOBDA,JOBF,IOSTS,JOBWRK,JOBJD2,JOBRTS,CPUTIM,JOBWDB,JOBJCR
+	MOV	R1,(R4)+	;SET JOBDA AS -> JDB OF JOB
+	MOV	JDMCTL+M.PHYA(R1),@#X.TAB+<<SEG.JH*XMTLEN>+XM.ADD>	;043
+				; Put JOBs physical address in DUMP table ;043
+	TST	(R1)+		;INDEX TO JDFLG IN JDB NOW
+	MOV	R1,(R4)+	;SET JOBF AS -> JDFLG IN JDB OF JOB
+	MOV	R1,R5		;COPY THE POINTER TO HERE
+	TST	(R5)+		;INDEX TO JDIOST IN JDB NOW
+	MOV	R5,(R4)+	;SET IOSTS AS -> JDIOST IN JDB OF JOB
+	TST	(R5)+		;INDEX TO JDWORK IN JDB NOW
+	MOV	(R5)+,(R4)+	;SET JOBWRK AS -> WORK BLOCK OF JOB
+	MOV	(R5)+,(R4)+	;SET JOBJD2 AS -> 2ND JOB DATA BLOCK
+	TST	(R5)+		;INDEX TO JDRTS IN JDB NOW
+	MOV	(R5),R3		;GET -> TO JOB'S RTS
+	MOV	R3,(R4)+	;SET JOBRTS AS -> JOB'S RTS
+	MOV	R0,R2		;Copy job # * 2				;031
+	ADD	#JBTICK,R2	;And point to CPU time bucket		;031
+	MOV	R2,(R4)+	;And set that in CPUTIM			;031
+	CALLX	MAPJCR		;Map the JCR entry for this job		;031
+	MOV	JCWPTR(R1),(R4)+ ;SET JOBWDB AS -> TO JOB'S WDB		;031
+	MOV	R1,(R4)+	;Save JCR virtual address in JOBJCR	;031
+	MOV	@DPAR6,(R4)+	;Save MMU value in JOBJC6		;031
+	MOV	R1,R2		;Move JCR pointer out of harms way	;031
+	ADD	#JCSIZN,R2	;And point to "next residency" size	;031
+	MOV	JOBF,R1		;Get back pointer to JDB @ JDFLG	;031
+	MOV	R1,(R4)		;Get initial value for JOBF3		;034
+	ADD	#JDFLG3-JDFLG,(R4)+ ;Now set up the actual value	;034
+	CMPB	(R2),JDSIZE-JDFLG(R1) ;IS NEW SIZE <= CURRENT SIZE?	;031
+	BLOS	80$		;NEW SIZE IS SMALLER, SO USE IT
+	MOVB	JDSIZE-JDFLG(R1),(R2) ;ELSE SET THE SIZES TO MATCH	;031
+80$:	MOVB	(R2),JDSIZE-JDFLG(R1) ;NOW CORRECTLY SET CURRENT SIZE	;031
+	ADD	#<MC.LCK*400>,JDMCTL+M.SIZE-JDFLG(R1) ;Inc JOB LCK count ;015
+.ASSUME	M.CTRL	EQ M.SIZE+1						;015
+	BCS	90$		;Overflowed the LCK count, crash	;015
+	CALL	USRSET		;MAP THIS USER JOB			;021
+	DEC	R5		;Offset past unused byte		;043
+	TST	(R1)		;ANY SPECIAL CONDITION?
+	BMI	100$		;Yes, process it
+.ASSUME	JFSPCL	EQ	100000
+	JMP	330$		;Otherwise continue normally
+
+90$:	CRASH			;Illegal LCK count			;015
+
+GLOBAL	<JOBTBL,DPAR6,JBTICK,X.TAB>					;043
+
+; SOME SPECIAL CONDITION EXISTS
+
+100$:	BITB	#JFKILL!JFSTAK!JFSWPR!JFPRTY!JFSWPE,-(R5) ;FATAL TYPE ERROR? ;043
+	BMI	102$		;YES, AND IT IS KILL A JOB		;031
+	BEQ	105$		;No, it is an entry point or D init	;031
+	JMP	170$		;YES, SIMPLE FATAL ERROR		;031
+
+102$:	JMP	KILJOB		;Off to kill a job			;031
+
+; Special condition is D-initialization or a P.??? entry point
+
+105$:	BITB	#JFDINI,(R5)	;Are we here for D-space turn on?	;036
+	BEQ	109$		;No, not this time			;036
+	BICB	#JFDINI,(R5)	;Yes, turn the flag off			;036
+	BIC	#JFSPCL,(R1)	;And no longer a special condition	;036
+	REGSAV			;Save our registers			;036
+	MOV	UISAR0,R0	;Get mapping of I-space code		;036
+	MOV	#120000,R1	;And set the start address		;036
+	MOV	#NSTORG,R2	;Copy up to NSTORG			;036
+	MOV	#140000,R3	;Now point virtually to D-space		;036
+	CALLX	MOVMEM		;Move I-space to D-space		;036
+	REGRES			;Restore registers			;036
+	JMP	330$		;And continue				;036
+
+; Special condition is a P.??? entry point
+
+109$:	BIT	#J2FSPW,JDFLG3-JDFLG(R1) ;Being spawned?		;031
+	BEQ	130$		;No, skip
+	REGSAV			;Save registers				;008
+	MOVB	JOB,R0		;Pick up job # * 2			;031
+	CALL	SPWNBF		;Map the buffer, get spawner's job # in R4
+	CLR	-(SP)		;Guess at DECnet spawn			;028
+	BIT	#1,R4		;Job from DECnet?			;019
+	BNE	110$		;Yes, skip making runnable		;019
+	MOV	JOBTBL(R4),R0	;Get his JDB pointer
+	MOV	R0,(SP)		;Now save the JDB address		;028
+	MOV	JDWORK(R0),R0	;Now work block pointer
+	MAP	PUSH,APR=6,DATA	;Save mapping for a second		;031
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;031
+	MOV	JOBJCR,R1	;And point to it			;031
+	MOVB	FQBUFL(R0),JCPRI(R1) ;Set final priority		;031
+	MAP	POP,APR=6,DATA	;Restore XBUF mapping			;031
+	CALLX	IOFIP4		;Let him run again
+	TSTB	FQFIL(R0)	;ICFP detach?				;028
+	BNE	110$		;No, not this time			;022
+	CALL	ICFDET		;Yes, so do the special processing	;022
+
+110$:	MOV	@DPAR6,R0	;Get mapping for XBUF data
+	MOV	R3,R1		; and starting address
+	SUB	#20000,R1	;Bias to make it an APR5 address
+	MOV	#<NSTORG-CORCMN>,R2 ;Byte count to move
+	MOV	#CORCMN+140000,R3 ;Data will go here
+	MAP	@UDPAR0,DATA,APR=6 ;Restore mapping to user low end	;010
+	CALLX	MOVMEM		;Move the data to core common/logicals
+120$:	MOV	JOBDA,R0	;Point to JDB				;031
+	DEC	JDFLG3(R0)	;Indicate spawn is complete		;031
+.ASSUME	J2FSPW EQ 1
+	MAP	JOBJC6,APR=6,DATA ;Map JCR entry for job		;031
+	MOV	JOBJCR,R3	;And point to it			;031
+	MOV	JCSPWN(R3),R4	;Get our buffer pointer			;031
+	BUFFER	RETURN		;Release it
+	MOV	(SP)+,R1	;Restore creator's JDB pointer		;028
+	BEQ	125$		;None, job from DECnet			;028
+	MOVB	JDJBNO(R1),R0	;Got one, get job # * 2			;031
+	CALLX	MAPJCR		;Map the JCR entry			;031
+	MOV	JCCMDL(R1),R2	;Pick up command line pointer		;031
+	MAP	PUSH,APR=6,DATA	;Save mapping				;031
+	MAP	JOBJC6,APR=6,DATA ;Map the new job JCR entry		;031
+	MOV	R2,JCCMDL(R3)	;And give the command line to new job	;031
+	MAP	POP,APR=6,DATA	;Restore mapping to old job		;031
+	MOV	R1,R3		;Set up pointer to spawning job		;031
+125$:	CLR	JCSPWN(R3)	;Clear spawn buffer or command line	;031
+.ASSUME	JCSPWN	EQ	JCCMDL
+	REGRES			;Restore registers			;016
+130$:	MAP	@UDPAR0,APR=6,DATA ;Restore user mapping		;031
+	CLR	@#XRB+6+140000	;GUESS AT REAL RTS SWITCH
+	CMP	R.NAME(R3),@#XRB+2+140000 ;GOOD GUESS?
+	BNE	140$		;YES, LEAVE XRB+6 = 0
+	CMP	R.NAME+2(R3),@#XRB+4+140000 ;MIGHT BE??
+	BNE	140$		;IT IS, LEAVE XRB+6 = 0
+	COM	@#XRB+6+140000	;NO REAL SWITCH, SET XRB+6 = -1
+140$:	MOV	JOBJD2,R3	;R3 -> JDB2 for this job		;020
+	MOV	#P.RUN,R4	;GUESS AT RUN ENTRY POINT
+	BITB	#JFRUN,(R5)	;GOOD GUESS?
+	BEQ	150$		;No, must be new this time		;020
+	BITB	#JFCTXT,(R5)	;Is this a .CHAIN style run?		;020
+	BEQ	190$		;No, rundown processing will be done later ;026
+	CALL	RUNDWN		;.CHAIN, do rundown processing now	;020
+	BR	190$		;And join up				;020
+
+150$:	MOV	#P.NEW,R4	;Set up the entry point			;020
+	TST	J2PPN(R3)	;Logged out now?			;020
+	BNE	200$		;No, go on				;020
+	MAP	JOBJC6,APR=6,DATA ;Yes, map the JCR for this job	;031
+	MOV	JOBJCR,R3	;And point to the entry			;031
+	TSTPRV	WACNT,JCPRIV(R3) ;Yes, but allowed to be that way?	;031
+	BNE	200$		;Yes, skip				;020
+	MOV	JOBF,R1		;No, point to JDB @ JDFLG		;020
+	BIS	#JFSPCL,(R1)	;Indicate special condition		;020
+	BISB	#JFKILL,JDFLG2-JDFLG(R1) ; and job being killed		;020
+160$:	JMP	KILJOB		;Now kill that job			;031
+
+; THE SPECIAL CONDITION IS A FATAL TYPE ERROR
+
+170$:	MOV	#P.BAD,R4	;SET FATAL ERROR ENTRY POINT
+	BITB	#JFPRTY,(R5)	;IS IT A PARITY ERROR?
+	BNE	180$		;YES, CODE IS ALREADY SET IN JDIOST
+	SETERR	B.SWAP,JDIOST-JDFLG(R1) ;GUESS AT SWAP ERROR
+	BITB	#JFSWPE,(R5)	;GOOD GUESS?
+	BNE	180$		;IT IS A SWAP ERROR
+	SETERR	NRRTS,JDIOST-JDFLG(R1) ;GUESS AT RTS LOAD ERROR
+	BITB	#JFSWPR,(R5)	;GOOD GUESS?
+	BNE	180$		;It is RTS load error
+	SETERR	B.STAK,JDIOST-JDFLG(R1) ;IT MUST BE A SP STACK ERROR NOW
+180$:	BICB	#JFCTXT,(R5)	;Ensure forgetting any context		;020
+	BIC	#JFCEMT!JFREDO,(R1) ;And forget complex EMTs and I/O redo ;022
+	BIT	#J2FSPW,JDFLG3-JDFLG(R1) ;Job being spawned?		;031
+	BEQ	190$		;No, so process fatal error normally
+	BISB	#JFKILL,(R5)	;Yes, so we'll kill this job		;020
+	BR	160$		;Off to the executioner			;031
+
+GLOBAL	<DPAR6,UDPAR0>							;011
+
+; SET UP JOB CONTEXT FOR SPECIAL CONDITIONS
+
+190$:	CLR	@#KEY+140000	;DO FULL KEYWORD "REFRESH"
+200$:	MAP	@UDPAR0,APR=6,DATA ;Be sure user's first 4K is mapped	;031
+	MOV	#SYSTAK,SP	;RESET THE SP STACK
+	BIS	#JFIOKY,(R1)	;GIVE USER KEY AND I/O ERROR STATUS
+	MOVB	JOB,@#FIRQB+FQJOB+140000 ; AND ENSURE VALID JOB NUMBER TIMES 2
+	MOV	R4,R0		;MOVE THE P.??? TO HERE			;017
+	CMP	JOBRTS,#NULRTS	;DOING RSX EMULATION?
+	BNE	210$		;NOPE
+	CLR	R4		;Yes, DUMMY A P.??? FOR THE "MFPI"
+	BR	220$		;And skip the context saving		;020
+
+210$:	BITB	#JFCTXT,(R5)	;Are we preserving the job context?	;020
+	BEQ	220$		;No, do rundown processing		;027
+	JMP	320$		;Yes, so go restore it			;027
+
+220$:	CALL	RUNDWN		;Do the rundown processing now		;020
+				;Note: RUNDWN will not return if there	;020
+				;is asynch I/O outstanding. The job	;020
+				;will be rescheduled when the I/O	;020
+				;finishes, and we will come back here	;020
+	CLRB	(R5)+		;Clear out flags now			;020
+	CLR	@#KEY+140000	;DO FULL KEYWORD "REFRESH"
+	MOV	JDJDB2-JDFLG(R1),R3 ;POINT TO JDB2
+	MOV	#PR0!170000,-(SP) ;SET AN INITIAL PS
+	SPLC	3		;Force prev mode to USER regardless	;039
+	MFPD	(R4)		;SET THE ENTRY PC			;010
+	CLR	-(SP)		;ZERO R5,
+	CLR	-(SP)		; AND R4,
+	CLR	-(SP)		;  AND R3,
+	CLR	-(SP)		;   AND R2,
+	CLR	-(SP)		;    AND R1,
+	CLR	-(SP)		;     AND R0
+	MOV	#USRSP,-(SP)	;SET THE DEFAULT USER SP STACK VALUE
+	MTPD	SP		; AND GIVE IT TO USER			;010
+	BIC	#JFSPCL!JFLOCK!JFBIG!JFSYS!JFFPP!JFSYST!JFPPT,(R1) ;"REFRESH" OUR KEY
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;031
+	MOV	JOBJCR,R4	;And point to it			;031
+	BICB	#4,JCPRI(R4)	; AND ENSURE NO SPEC RUN PRIORITY	;031
+	MAP	@UDPAR0,APR=6,DATA ;Restore mapping to first 4K		;031
+	CLR	FPPFEC		;NO FPP ERROR CODE
+	CLR	FPPFEC+2	; OR ADDRESS
+	MOV	R0,R4		;Get back the P.???			;017
+230$:	CALL	CHKRUN		;DO RUN ENTRY CHECKING			;017
+	MOV	R4,R0		;Now restore the P.??? for RETUSR	;017
+	MOV	JOBRTS,R3	;R3 -> JOBs RTS block			;020
+	CMP	R3,#NULRTS	;Are we going to the null RTS?		;020
+	BNE	250$		;No, so check on computing size		;017
+	CMP	R0,#P.RUN	;Is it a run entry?			;017
+	BEQ	240$		;Yes, so set up to go to RSXRUN		;020
+	CMP	R0,#P.NEW	;No, is it a new entry?			;027
+	BEQ	245$		;Yes, so set up to go to RSXKBM		;027
+	JMPX	RETUSR		;No, some other trap, re-route to RSX	;020
+
+240$:	MOVB	JOB,R0		;R0 = Job # *2				;017
+	CALLX	RESCNT,R5,<RSXRUN,RSXAP5> ;After posting go to RSXRUN	;020
+	BR	260$		;But check for sizing now		;020
+
+245$:	MOVB	JOB,R0		;R0 = Job # * 2				;027
+	CALLX	RESCNT,R5,<RSXKBM,RSXAP5> ;After posting go to RSXKBM	;027
+247$:	JMP	RUNJOB		;And go off to run the job now		;039
+
+250$:	CMP	R0,#P.RUN	;Is this a run entry?			;020
+	BNE	247$		;No, go run this job			;039
+260$:	CLR	R5		;Set an impossibly small size for RTS	;020
+	BIT	#PF.CSZ,R.FLAG(R3) ;Compute size for this RTS?		;020
+	BEQ	270$		;No, not this time			;020
+	MAP	FIPPOL		;Be sure FIP pool is mapped		;020
+	MOV	@JOBDA,R5	;R5 -> IOB for job			;020
+.ASSUME	JDIOB	EQ	0
+	MOV	15.*2(R5),R5	;R5 -> WCB for this open file		;020
+	MOV	W$FCB(R5),R5	;R5 -> FCB @ F$CLUS			;020
+	MOV	-(R5),R5	;R5 = Size of file			;020
+.ASSUME	F$SIZL	EQ	F$CLUS-2					;020
+	MAP	@#KISAR5,APR=5,DATA ;Restore mapping to our data	;021
+	ADD	#3,R5		;Now we have file size + 3		;020
+	ASH	#-2,R5		;R5 = (Size + 3) / 4			;020
+	CMPB	R5,R.SIZE(R3)	;Will this exceed RTS maximum?		;020
+	BLOS	270$		;No, not this time			;020
+	MOVB	R.SIZE(R3),R5	;Yes, so use RTS maximum instead	;020
+270$:	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;031
+	MOV	JOBJCR,R0	;R0 -> JCR entry for job		;031
+	MOVB	JCHDRS(R0),R2	;R2 = Headersize for job		;031
+	MOVB	JCSIZM(R0),R4	;R4 = User's private maximum		;031
+	SUB	R2,R4		;R4 = User's available memory		;020
+	CMPB	R4,R5		;Does user have enough memory?		;020
+	BHIS	280$		;Yes, they sure do			;020
+	MOVB	R4,R5		;No, use the user's maximum		;020
+280$:	CMPB	R5,R.MSIZ(R3)	;Is computed size < RTS minimum?	;020
+	BHIS	290$		;No, so we can use it			;020
+	MOVB	R.MSIZ(R3),R5	;Go and use RTS minimum			;020
+290$:	MOVB	R5,JCISIZ(R0)	;Set new I-space size			;031
+	ADD	R2,R5		;R5 now has I-space size + header size	;020
+	MOVB	R5,JCSIZN(R0)	;Set size for job next time		;031
+	MOVB	JOB,R0		;Get caller's job # * 2			;036
+	CALL	@SETMDE		;And re-calculate the job's mapping	;036
+ 	CMPB	R5,JDSIZE-JDFLG(R1) ;Is job getting larger?		;020
+	BLOS	300$		;No, so no memory to zero		;020
+	CMP	R5,JDMCTL+M.TSIZ-JDFLG(R1) ;Do we need to swap job?	;020
+	BHI	310$		;Yes, hole is too small			;020
+	CALL	@ZERMEM		;No, so zero the new memory		;020
+300$:	MOVB	R5,JDSIZE-JDFLG(R1) ;Set the new job size		;020
+	CALL	USRSET		;Go and remap this job			;021
+	BR	RUNJOB		;And go run this job			;020
+
+310$:	MOVB	#SWP!OUT!MC.LCK,JDMCTL+M.CTRL-JDFLG(R1) ;Set to swap job ;020
+	INC	SWOCNT		;Indicate another swap out pending	;020
+	CALLX	SAVJOB,R5	;Dump this job and			;020
+	JMPX	CHKSWP		;Get that swap out going		;020
+
+GLOBAL	<SYSTAK,NULRTS,FPPFEC,RSXRUN,RSXAP5,ZERMEM,SWOCNT,RSXKBM,UDPAR0> ;031
+GLOBAL	<SETMDE>							;036
+
+; RESTORE THE JOB'S CONTEXT
+
+320$:	CLRB	(R5)+		;Clear out context flags		;020
+	CALL	CHKRUN		;DO RUN ENTRY CHECKING
+330$:	MOV	#CONTXT+<10.*2>+140000,R0 ;GET CONTEXT AREA POINTER
+	CALL	@RESFPP		;RESTORE ASYNC FPP IF ANY
+	MOV	-(R0),R2	;GET USER'S SP STACK VALUE		;039
+	MOV	#8.,R3		;SET FOR 8. ITEMS (R0-R5, PC, PS)
+340$:	MOV	-(R0),-(SP)	;STACK A CONTEXT ITEM
+	SOB	R3,340$		; AND LOOP FOR MORE...
+	CLR	R3		;CLEAR THE CHECKSUM BUCKET
+	MOV	R2,-(SP)	;Put contents of user stk pointer on stk ;039
+350$:	MOV	(R0)+,R2	;GET AN ITEM (R0-R5, PC, PS AGAIN)
+	ASL	R2		; AND ROTATE IT 1 PLACE
+	ADC	R2		;  TO THE LEFT
+	XOR	R2,R3		;THEN .XOR. IT INTO THE TRIAL CHECKSUM
+	CMP	R0,#CONTXT+<9.*2>+140000 ;MORE?
+	BLO	350$		;YES, LOOP FOR THEM
+	COM	R3		;DONE, FORM THE REAL TRIAL CHECKSUM
+	CMP	R3,@#CONTXT+140000 ; AND CHECK IT
+	BEQ	370$		;Match, checksum is OK			;020
+
+; The checksum or PS is invalid
+
+360$:	BISB	#JFSWPE,-(R5)	;Indicate a swap error			;020
+	BIS	#JFSPCL,(R1)	;Which is a special condition		;020
+	LOG$CK			; And error log this fact		;020
+	JMP	170$		;Now off to handle this fatal error	;020
+
+370$:	MOV	#^B<0101000000000000>*2,R3 ;Check for user or supervisor mode ;036
+	BIC	R2,R3		;Is current and previous modes correct?	;036
+	BNE	360$		;NOPE, ERROR!!! Kernel mode found	;039
+	BIS	#30000,@#PS	;Force prev mode to user		;039
+	BIT	#1,R2		;test for Super mode (ROL 1 bit)	;039
+	BNE	375$		;No, user mode is correct		;039
+	MOV	(SP),-(SP)	;yes,super,make 2nd copy user sp value	;039
+	ADD	#4,(SP)		;compensate for PC,PS of RTI to user mode ;039
+	MTPD	SP		;default SP to user mode		;039
+	BIC	#20000,@#PS	; set Super mode in Prev		;039
+375$:	MTPD	SP		; Put SP contents in proper mode SP	;039
+	TST	(R1)		;SPECIAL CONDITION? (RTS CHANGE?)
+	BPL	RUNJOB		;NO, JUST GO DO IT
+.ASSUME	JFSPCL	EQ	100000
+	BIC	#JFSPCL,(R1)	;YES, BUT CLEAR THE SPECIAL FLAG NOW
+	SPLC	3		;force user mode here			;039
+	MFPD	(R4)		;GET THE ENTRY POINT
+	MOV	(SP)+,6*2(SP)	; AND SET THAT AS THE PC
+	MOV	#PR0!170000,7*2(SP) ;ALSO SET A NEW PS
+	.BR	RUNJOB		;NOW RUN THAT JOB			;020
+
+GLOBAL	<RESFPP>
+
+; SET CORRECT RUN BURST FOR THIS JOB. DOUBLE RUN BURST IF SPECIAL
+;	JOB PRIORITIES. DROP THE ONE-SHOT PRIORITY (+1/8 LEVEL).
+
+RUNJOB:	MAP	JOBJC6,APR=6,DATA ;Map JCR entry for job		;031
+	MOV	JOBJCR,R2	;And point to it			;031
+	MOVB	JCBRST(R2),R5	;Get job's run burst			;031
+	BITB	#3,JCPRI(R2)	;Running at a special priority?		;031
+	BEQ	RUNULL		;No, not this time
+	BICB	#1,JCPRI(R2)	;Yes, drop the favoritism bit		;031
+	ASL	R5		;And double the run burst
+RUNULL:	MOV	R5,QUANT	;SET THE RUN BURST
+	BICB	#BQSCHED,@#OQSCHED+L3QUE ;FORGET ANY PENDING SCHEDULER CALL ;012
+	CLR	JOBQNT		;START WITH A FRESH QUANTUM
+	MOV	JOBRTS,R3	;GET JOB'S RTS BLOCK POINTER
+	BEQ	10$		;NONE, NULL JOB, RUN IT
+	MOVB	R.MSIZ(R3),R0	;Get RTS's minimum size			;011
+	ADD	JCHDRS(R2),R0	;Count headersize in with minsize	;031
+.ASSUME	JCHDRS&1 EQ 0							;031
+	CMPB	JDSIZE-JDFLG(R1),R0 ;Is job large enough?		;011
+	BLO	20$		;NOPE, TOO SMALL, CORRECT JOB SIZE
+10$:	JMPX	RTI3		;O.K., EXIT
+
+; SIZE THE JOB IMAGE UP TO RTS MINIMUM SIZE
+
+20$:	JMPX	DOMSIZ		;SIZE JOB IMAGE UP TO MINIMUM SIZE
+
+; DO P.RUN ENTRY CHECKING FOR SPECIAL PRIVILEGES
+
+CHKRUN:	CMP	R4,#P.RUN	;RUN ENTRY?
+	BNE	60$		;NOPE
+	MOV	JDWORK-JDFLG(R1),R4 ;YEP, GET WORK BLOCK (FIRQB)	;011
+	TSTB	FQPROT(R4)	;PRIVILEGED PROGRAM?			;011
+	BPL	50$		;NOPE					;008
+.ASSUME	UP.PRV EQ 200							;008
+
+.REM	\			;Disabled until UU.PRM is complete	;016
+	CALLX	SCNPRM		;Scan the permanent file list		;011
+	BCS	50$		;Not there, so he gets no privs		;011
+	CALLX	MAPBUF		;Map the data buffer			;011
+	ADD	#F$WCB,R3	;Point to flags				;011
+	BIT	#FC$EXT,(R3)+	;Extended (i.e. privs present)?		;011
+	BEQ	50$		;No, just some random permanent file	;011
+.ERROR	;This code doesn't work anymore - see JCR changes		;031
+	\								;016
+	MAP	FIPPOL		;Map FIP pool for IOB and WCB		;031
+	MOV	@JOBDA,R3	;Get IOB pointer			;018
+.ASSUME	JDIOB	EQ	0
+	MOV	15.*2(R3),R3	;Get WCB pointer			;018
+	MOV	W$FCB(R3),R3	;Now FCB pointer @ F$CLUS		;018
+	MOVB	F$UNT-F$CLUS(R3),R3 ;Get FIP unit number		;018
+	ASL	R3		; times 2 for indexing			;018
+	TSTB	UNTOWN(R3)	;No-shared disk?			;018
+	BNE	50$		;Yes, so no priv'd programs there	;018
+GLOBAL	<UNTOWN>							;018
+	CALL	SETPRV		;Give the program temporary privilegs	;042
+	BIT	#JFSYS,(R1)	;Did we just set JFSYS?			;016
+	BEQ	40$		;No, so not a privileged program	;016
+	BIS	#J2PRVP,JDFLG3-JDFLG(R1) ;yes, indicate it		;031
+	MOV	JDWORK-JDFLG(R1),R4 ;Get work block pointer again	;020
+	CMP	FQNENT(R4),#1	;Are they allowed to pass privileges?	;020
+	BLE	40$		;Yes, they sure are			;020
+	BIC	#JFSYS!JFSYST,(R1) ;No, so drop privileges		;020
+	MOV	#PRIVSZ/2,R0	;Get count of privilege words to restore ;020
+	MOV	JOBJCR,R5	;Get JCR pointer again			;031
+	ADD	#JCPRIV,R5	;R5 -> JCR @ JCPRIV			;031
+30$:	MOV	JCSPRV-JCPRIV(R5),(R5)+ ;Restore saved privs to current	;031
+	SOB	R0,30$		;For all of them			;020
+40$:
+.REM	\								;016
+	MOV	JDWORK-JDFLG(R1),R4 ;Get work block pointer again	;013
+	TST	FQNENT(R4)	;Non-zero entry point?			;013
+	BEQ	50$		;No, starting at the top		;013
+	BIS	#100000,FQNENT(R4) ;Yes, set sign bit for old RTS's	;013
+	\								;016
+50$:	MOV	#P.RUN,R4	;Fix up R4 again			;011
+60$:	MAP	@UDPAR0,DATA,APR=6 ;Restore APR6 mapping		;010
+	MAP	@#KISAR5,DATA,APR=5 ;And restore our data mapping	;021
+	RETURN			;EXIT
+
+GLOBAL	<QUANT,JOBQNT,L3QUE,UDPAR0>
+
+.SBTTL	SETPRV	Give the current job temporary privileges
+
+;+
+; SETPRV - Give the current job temporary privileges
+;
+;	R1 -> JDB @ JOBF
+;	Calling job is "JOB"
+;
+;	CALL	SETPRV
+;
+;	R0 =  Undefined
+;	R1 -> JDB @ JOBF
+;		JFSYS set in JOBF if privileges were actually granted
+
+;	R2 =  Undefined
+;	R3 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;
+;	JCR is mapped
+;
+; This routine maps the JCR entry, and grants a job all privileges except
+; for SYSMOD and TMPPRV. If a job already had these privileges, no action
+; is taken, otherwise JFSYS is set in the JDB to mark the job as privileged.
+; Note that the J2PRVP flag is *not* set by this routine; the purpose of
+; that flag is to indicate that privileged program rundown should be
+; executed (to clear out lowcore); it is the caller's responsibility to
+; set this bit if this action is desired.
+;-
+
+SETPRV::								;042
+
+$$$$$$	=	PRIVSZ/2						;042
+.REPT	PRIVSZ/2							;042
+$$$$$$	=	$$$$$$-1						;042
+.IRP	NUM,<\$$$$$$>							;042
+	MOV	#..PRW'NUM,-(SP)					;042
+.ENDR									;042
+.ENDR									;042
+	CLRPRV	SYSMOD,(SP)	;Build (ALL,NOSYSMOD) mask on the stack	;042
+	CLRPRV	TMPPRV,(SP)	;Now we have (ALL,NOSYSMOD,NOTMPPRV)	;042
+	MOV	SP,R3		; and set mask pointer in R3		;042
+
+	MOV	#PRIVSZ/2,R0	;Count of privs to save/set		;042
+	MAP	JOBJC6,APR=6,DATA ;Map job's JCR entry			;042
+	MOV	JOBJCR,R5	;And point to it			;042
+	MOV	R5,R4		;Copy pointer				;042
+	ADD	#JCPRIV,R5	;Point to current privs			;042
+	ADD	#JCSPRV,R4	; and to privileges save buffer		;042
+10$:	MOV	(R3)+,R2	;Get program's privilege flags		;042
+	MOV	(R5),(R4)	;Save current privileges		;042
+	BIS	R2,(R5)+	;Add program's privs to user's privs	;042
+	BIC	(R4)+,R2	;See if user already had all of them	;042
+	BEQ	20$		;Yes he did				;042
+	BIS	#JFSYS!JFSYST,(R1) ;No, so set temp privs flags		;042
+20$:	SOB	R0,10$		;Loop through it all			;042
+	ADD	#PRIVSZ,SP	;Pop program mask off the stack		;042
+	RETURN			;And we're done				;042	
+
+.SBTTL	RESIDENCY CHECKING SUBROUTINE
+
+;+
+; RESCJB - CHECK FOR RESIDENCY.
+;
+;	R0 =  JOB NUMBER TIMES 2
+;
+;	CALL	RESCJB
+;
+;	IF C=0 THEN JOB IS RESIDENT (OR INTO KILL PHASE 2)
+;
+;	IF C=1 THEN JOB IS NON-RESIDENT
+;		R2 -> JDB for job
+;-
+
+.ENABL	LSB
+
+RESCJB:	CMPB	R0,JOB		;IS THE JOB CURRENTLY "JOB"?
+	BEQ	70$		;YES, RESIDENT [BEQ=>BHIS=BCC]
+	MOV	JOBTBL(R0),R2	;No, pick up JDB pointer		;031
+	BIT	#J2KIL2,JDFLG3(R2) ;IS JOB INTO JOB KILL PHASE 2??	;036
+	BNE	60$		;YES, SAY RESIDENT (C=0)
+	CALLRX	RESCHK		;NO, DO FURTHER CHECKING...
+
+GLOBAL	<JOBTBL>							;031
+
+.SBTTL	THE ACTUAL SCHEDULING OCCURS HERE
+
+;+
+; SCHED - DO AN ACTUAL SCHEDULE.
+;
+;	CALL	SCHED,R5,<ROUTINE>
+;
+;	IF (Z .OR. N .OR. V)=1 THEN NO JOB FOUND. (I.E. 'BLE' BRANCHES)
+;
+;	IF (Z .OR. N .OR. V)=0 THEN A JOB WAS FOUND. (I.E. 'BGT' BRANCHES)
+;
+;		R0 =  JOB NUMBER TIME 2 OF JOB FOUND
+;
+;	ALL OTHER REGISTERS ARE RANDOM.
+;
+; THE <ROUTINE> IS USED AS FOLLOWS:
+;
+;	R0 =  JOB NUMBER TIMES 2 OF JOB TO CHECK
+;
+;	CALL	<ROUTINE>
+;
+;	IF C=0 THEN JOB ACCEPTED.
+;	IF C=1 THEN JOB REJECTED.
+;-
+
+SCHED:	MOV	(R5)+,-(SP)	;SAVE THE <ROUTINE> ADDRESS
+	MOV	R5,2(SP)	;STORE THE RETURN ADDRESS
+	MOV	#-129.,R4	;SET A PRIORITY ANYONE CAN BEAT		;031
+	MOV	#JOBMX2,R0	;START AT HIGHEST POSSIBLE JOB # *2
+10$:	BIT	JBWAIT(R0),JBSTAT(R0) ;IS THIS JOB RUNNABLE?
+	BEQ	40$		;NOPE, SO SKIP IT
+	CALLX	MAPJCR		;Yes, map this job's JCR entry		;031
+	MOVB	JCPRI(R1),R3	;And get the priority			;031
+	CMP	R3,R4		;IS THIS JOB'S PRIORITY SMALLER THAN BEST? ;031
+	BLT	40$		;IF SMALLER THEN WE CAN SKIP IT QUICKLY
+	CALL	@(SP)		;ELSE MAKE ANY NEEDED RESIDENCY CHECK(S)
+	BCS	40$		;FAILED THE CHECK(S), SO SKIP IT
+	MOVB	SCHTBL+128.(R3),R1 ;GET BASE JOB # *2 FROM PRIORITY TABLE ;031
+	SUB	R0,R1		; AND FIND THIS JOB'S DISTANCE FROM IT	;031
+	BMI	20$		;DISTANCE IS O.K. AS IS
+	SUB	#JOBMX2,R1	; ELSE CORRECT DISTANCE			;031
+20$:	CMP	R3,R4		;IS THIS JOB'S PRIORITY BETTER THAN BEST? ;031
+	BGT	30$		;YEP, SO REMEMBER IT
+	CMP	R1,R5		;IS THIS JOB'S DISTANCE BETTER??	;031
+	BLE	40$		;NOPE, SKIP IT
+30$:	MOV	R3,R4		;REMEMBER THE BEST PRIORITY SO FAR	;031
+	MOV	R1,R5		; AND BEST DISTANCE ALSO		;031
+40$:	SUB	#2,R0		;GO TO NEXT LOWER JOB # *2
+	BGT	10$		; AND LOOP IF MORE JOBS TO CHECK...
+	TST	(SP)+		;DONE LOOPING, POP THE <ROUTINE> ADDRESS
+	CMP	R4,#-121.	;DID WE REALLY FIND ANYONE?		;031
+	BLE	70$		;NOPE, EXIT (Z .OR. N .OR. V)=1
+	MOVB	SCHTBL+128.(R4),R0 ;YEP, GET BASE JOB # *2 FROM TABLE	;031
+	SUB	#JOBMX2,R0	;NOW CALCULATE THE
+	SUB	R5,R0		; FOUND JOB NUMBER
+	BGT	50$		;  CORRECTING FOR THE
+	ADD	#JOBMX2,R0	;   ROUND-ROBIN FORMAT...
+50$:	MOVB	R0,SCHTBL+128.(R4) ;SAVE JOB # *2 OF FOUND JOB		;031
+60$:	CLC			;SET C=0
+70$:	RETURN			;EXIT
+
+.DSABL	LSB
+
+GLOBAL	<JOBMX2,JBWAIT,JBSTAT,JOBTBL,SCHTBL>
+
+
+.SBTTL	Map the spawn data buffer
+
+;+
+; Entry:
+;	R0 ->	Job # * 2
+;
+; Exit:
+;	R3 ->	Core common data
+;	R4 =	Job number * 2 of job issuing spawn
+;	Buffer mapped via APR6
+;-
+
+SPWNBF:	MOV	R1,-(SP)	;Save R1				;031
+	CALLX	MAPJCR		;Map the JCR entry			;031
+	MOV	JCSPWN(R1),R4	;Get contorted address of buffer	;031
+	MOV	(SP)+,R1	;Restore R1				;031
+	CALLX	MAPBUF		;Map the spawn buffer
+	ADD	#BUFHDR,R3	;Point to data
+	MOV	(R3)+,R4	;Get spawner's job number
+	RETURN			; and exit				;022
+
+.SBTTL	POST JOB TO DIAMOND
+
+;+
+; DIAMON - POSTS JOB TO DIAMOND.
+;
+;	R1 -> JOB'S JDB
+;	R3 =  JOB
+;
+;	CALL	DIAMON
+;
+;	ALL REGISTER ARE (MUST BE) PRESERVED
+;-
+
+	TMPORG	DIAMON							;021
+
+DIAMON:	MOV	R3,@DIABOX	;POST JOB TO DIAMOND
+	RETURN			; AND RETURN
+
+	UNORG								;021
+
+GLOBAL	<DIABOX>
+
+.SBTTL	Program exit cleanup
+
+;+									;020
+; This code is executed when leaving a program for any reason		;020
+;									;020
+;	Job is "JOB"							;020
+;									;020
+;	CALL	RUNDWN							;020
+;									;020
+;	All registers are preserved					;020
+;	User's first 4K is mapped through DPAR6				;031
+;									;020
+; User context is affected as follows:					;020
+;	1. Temporary privileges are dropped				;020
+;	2. Third-party privilege checks are cancelled			;020
+;	3. D-space is turned off					;020
+;	4. The AST active and AST disable flags are cleared		;020
+;	5. The AST queue is purged					;020
+;	6. If the current program was privileged, the job's size is	;020
+;	   reset to the RTS minimum and all memory above NSTORG is	;020
+;	   zeroed.							;020
+;	7. All open files are closed					;027
+;       8. Disable FASTMAP call acceptance                              ;037
+;	9. Clear D apr protection mask					;040
+;									;027
+; Note: If there is outstanding I/O, this routine will dump the job	;020
+;	via DMPJOB. It is assumed that when the job gets rescheduled,	;020
+;	control will come here again to clean up the I/O that has	;020
+;	just completed.							;020
+;									;027
+;	If there are files to close, this routine will queue the	;027
+;	request to FIP. We will come back here when the RSTFQ finishes.	;027
+;-									;020
+
+RUNDWN:	REGSCR			;Save all the registers			;020
+	MAP	JOBJC6,APR=6,DATA ;Map the job's JCR entry		;031
+	MOV	JOBF,R1		;Point to JDB @ JDFLG			;020
+        BIC     #JDFSTM!J41ASY,JDFLG4-JDFLG(R1) ;turn off flags		;044
+	MOV	JOBJCR,R0	;Point to JCR				;020
+	CLR	JCALPP(R0)	;Turn off third party privileges	;031
+	BIT	#JFSYS,(R1)	;Temporary privileges in effect?	;020
+	BEQ	30$		;No, skip resetting to normal		;020
+	ADD	#JCPRIV,R0	;Yes, point to privs			;031
+	MOV	#PRIVSZ/2,R2	;Count of words				;020
+20$:	MOV	JCSPRV-JCPRIV(R0),(R0)+ ;Restore saved privs to current	;031
+	SOB	R2,20$		;Loop through them			;020
+30$:	BIC	#JFSYS!JFSYST,(R1) ;Indicate no more temp privs		;020
+	BITB	#JFCTXT,JDFLG2-JDFLG(R1) ;Keeping context?		;027
+	BNE	37$		;Yes, so keep channels open		;027
+	MAP	FIPPOL		;Map FIP pool for the IOB		;031
+	MOV	@JOBDA,R2	;R2 -> IOB				;027
+.ASSUME	JDIOB	EQ	0
+	MOV	JOBWRK,R4	;R4 -> Work block			;027
+	CLRB	FQFIL(R4)	;Guess at resetting all channels	;027
+	ADD	#40,R2		;Point to just past last channel	;027
+	BITB	#JFRUN,JDFLG2-JDFLG(R1) ;Are we doing a .RUN?		;027
+	BEQ	35$		;No, so close all channels		;027
+	TST	-(R2)		;Yes, so don't check channel 15		;027
+	MOVB	#-15.*2,FQFIL(R4) ;And don't close it either		;027
+35$:	TST	-(R2)		;Channel open?				;027
+	BNE	70$		;Yes, off to do the reset		;027
+	BIT	#40-3,R2	;More to do?				;027
+	BNE	35$		;Yes, go loop				;027
+	NEGB	FQFIL(R4)	;No, fix channel number for .RUN	;027
+
+37$:	MAP	@#KISAR5,APR=5,DATA ;Restore APR5 mapping		;031
+	MAP	JOBJC6,APR=6,DATA ;And map the JCR through APR6		;031
+	CALL	CLNASY		;Clean up asynchronous I/O		;020
+	CLR	-(SP)		;Guess at not needing to re-map job	;031
+	MOV	JOBJCR,R0	;Point to caller's JCR entry		;031
+	MOVB	JCDSIZ(R0),R2	;Have D-space?				;031
+	BEQ	40$		;No, skip turning it off		;020
+	CALLMI	DCOPY,EMTAP5	;Copy D-space to I-space		;031
+	SUB	R2,JDSIZE-JDFLG(R1) ; and adjust job size		;025
+.ASSUME	JDSIZE&1 EQ 0							;020
+	MOVB	JDSIZE-JDFLG(R1),JCSIZN(R0) ; same size next time	;031
+	CLRB	JCDSIZ(R0)	;  and indicate no more D		;025
+	INC	(SP)		;Indicate we should re-map job		;031
+
+40$:	BIT	#J2PRVP,JDFLG3-JDFLG(R1) ;Is this a privileged program?	;031
+	BEQ	60$		;No, skip				;020
+	BIC	#J2PRVP,JDFLG3-JDFLG(R1) ;Yes, but not anymore		;031
+	MOVB	JCHDRS(R0),R2	;Get job header size			;031
+	ASH	#11.-6,R2	;Convert to slivers			;020
+	MOV	R2,R3		;Copy it				;020
+	ADD	JDMCTL+M.PHYA-JDFLG(R1),R3 ;Get MMU address of I-space	;020
+	MAP	R3,DATA,APR=6	;Map it					;020
+	MOV	#140000+NSTORG,R3 ;Point to area to zero		;020
+	MOV	#4000-1000/2,R4	;Count of words to get to 1KW		;020
+50$:	MOV	#0,(R3)+	;Zero (without reading it)		;020
+	SOB	R4,50$		;Loop					;020
+
+; Since we have zeroed the first 1K of the job, we will now set the
+; job size to 1K (+ header). If 1K is not large enough for this RTS,
+; the size will be changed by DOMSIZ (zeroing the rest of the memory).
+
+	MAP	JOBJC6,APR=6,DATA ;Re-map caller's JCR entry		;031
+	MOVB	JCHDRS(R0),R2	;Get header size			;031
+	INC	R2		;And add 1K for smallest RTS size	;020
+	MOVB	R2,JDSIZE-JDFLG(R1) ;Set as new job size		;020
+	MOVB	R2,JCSIZN(R0)	; and next time too			;031
+	MOVB	#1,JCISIZ(R0)	;Set it as the I-space size		;031
+	INC	(SP)		;Indicate we should re-map the job	;031
+60$:	TST	(SP)+		;Should we re-map the job?		;031
+	BEQ	65$		;No, not this time			;031
+	MOVB	JOB,R0		;Yes, get job # * 2			;036
+	CALL	@SETMDE		;And reset the mapping			;036
+	CALL	USRSET		;Go and reset the mapping		;021
+65$:	MAP	@UDPAR0,DATA,APR=6 ;Be sure user's first 4K is mapped	;031
+	RETURN			;And now we're done			;020
+
+; We need to close all channels
+;
+;	R4 -> Work block, with FQFIL set up
+
+70$:	MOVB	JOB,FQJOB(R4)	;Set our job number			;027
+	MOVB	#RSTFQ,FQFUN(R4) ;Indicate a reset function		;027
+	JMPX	FIPSTL		;And off to see the FIP...		;027
+
+GLOBAL	<UDPAR0,SETMDE>							;040
+
+.SBTTL	Clean up asynchronous I/O
+
+;+
+; CLNASY - Clean up asynchronous I/O
+;
+;	Calling job is "JOB"
+;	JCR is mapped through DPAR6
+;
+;	CALL	CLNASY
+;
+;	All registers are preserved
+;
+; This routine is used to clean up asynchronous I/O. It will clear
+; out the AST active/disable/posting flags, and return any AST blocks
+; in the queue.
+;
+; If there is any outstanding I/O, this routine will not return to
+; the caller. Instead, it will exit via DMPJOB.
+;-
+
+CLNASY:	REGSCR			;Save all registers			;020
+	MOV	JOBF,R1		;R1 -> JDB @ JDFLG			;020
+	BIC	#JFASTD,(R1)	;No more AST posting to do		;020
+	BIC	#J2ASTA!J2ASTD,JDFLG3-JDFLG(R1) ;No more AST active/disable ;031
+	MOV	JOBJCR,R0	;Point to JCR entry (caller mapped it)	;031
+	ADD	#JCASTQ,R0	;Point to head of AST queue		;031
+	MOV	R0,JCASTT-JCASTQ(R0) ;And reset the tail pointer	;031
+	MOV	(R0),R2		;Pick up the address of the first AST block ;031
+	CLR	(R0)		; and clear it				;031
+10$:	MOV	R2,R4		;Get link to next AST block		;020
+	BEQ	20$		;None left				;020
+	MOV	(R4),R2		;Stack its successor link		;020
+	BUFFER	RETSML		;Release it				;020
+	BR	10$		; and loop				;020
+
+20$:	CMPB	JDMCTL+M.CTRL-JDFLG(R1),#MC.LCK ;Any asynch I/O?	;020
+	BEQ	30$		;No, not this time			;020
+	MOVB	JOB,R0		;Yes, get job # * 2			;020
+	CLR	JBSTAT(R0)	;Put job into a				;020
+	MOV	#JSTIM,JBWAIT(R0) ;Sleep type wait			;020
+	JMPX	DMPJOB		;And go dump this job			;020
+
+30$:	RETURN			;No asynch I/O to wait for		;020
+
+.SBTTL	Map a user job
+
+;+
+; USRSET - Map a user job for running.
+;
+;	Calling job is "JOB" except for the mapping...
+;
+;	CALLM	USRSET,GENAP5  or  CALLMI  USRSTM,GENAP5		;043
+;
+;	MAXLOW/MAXDLO/MAXHGH are set up.
+;
+;	User's 1st 4K is mapped through APR 6.
+;-
+
+; First, set up MACRO which will expand to instructions necessary to
+; set up all the APRs for one type of space.
+;
+; R0 -> Start MDE for space
+; R2 -> Address register for space
+; R3 -> Description register for space
+
+.MACRO	SETMAP
+.REPT	8.		;For all 8 APRs:
+	MOV	@(R0)+,(R2)	;Set up base address
+.ASSUME	MDADDR	EQ	0
+	ADD	(R0)+,(R2)+	;Now add in offset
+.ASSUME	MDOFF	EQ	<MDADDR+2>
+	MOV	(R0)+,(R3)+	;Set up description register
+.ASSUME	MDDESC	EQ	<MDOFF+2>
+.ASSUME	MDSIZE	EQ	<MDDESC+2>
+.ENDR			;Loop for all 8 APRs
+.ENDM	SETMAP
+
+	TMPORG	GENDSP,16						;043
+	  .WORD	USRSET							;043
+	UNORG								;043
+
+USRSET::MOV	R0,-(SP)	;Get scratch registers			;036
+	MOV	R1,-(SP)	; ...					;036
+	MOV	R2,-(SP)	; ...					;036
+	MOV	R3,-(SP)	; ...					;036
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;036
+	MOV	JOBJCR,R0	;And point to it			;036
+	CLR	APRMSK		;Start with no high byte flags		;045
+	MOVB	JCAPRM(R0),APRMSK ;Set D apr protection mask		;040
+	ADD	#JCMHGH,R0	;And point to high address		;036
+	MOV	#MAXHGH,R1	;And point to MAXHGH			;036
+	MOV	(R0)+,(R1)+	;Set up MAXHGH				;036
+	MOV	(R0)+,(R1)+	;Set up MAXLOW				;036
+
+; Note: The assumption that JCMLOW eq JCMHGH+2 is in TBL.MAC since
+; it its location varies from monitor to monitor.  The assumption
+; that MAXLOW eq MAXHGH+2 is in RES.MAC since its location also will
+; vary from monitor to monitor.
+
+	MOV	(R0)+,(R1)+	;Set up MAXDLO				;036
+
+; Note: The assumption that JCMDLO eq JCMLOW+2 is in TBL.MAC since
+; it its location varies from monitor to monitor.  The assumption
+; that MAXDLO eq MAXLOW+2 is in RES.MAC since its location also will
+; vary from monitor to monitor.
+
+	MOV	(R0)+,R1	;Pick up job's mapping flags		;036
+
+; Note: The assumption that JCMFLG eq JCMDLO+2 is in TBL.MAC since
+; its location varies from monitor to monitor.
+
+	MOV	#UISAR0,R2	;Point to UISAR0			;036
+	MOV	#UISDR0,R3	;And to UISDR0				;036
+
+; At this point, we will set up the user mode APRs
+;
+;	R0 -> MDEs for start of user mode I-space
+;		(The assumption that JCMDE eq JCMFLG+2 is in TBL.MAC)
+;	R1 =  Job's mapping flags
+;	R2 -> UISAR0
+;	R3 -> UISDR0
+
+	MOV	R2,UDPAR0	;Initially, guess at no I&D space	;036
+	BIC	#13,@MMU22W	;Turn off CSM and I&D in supervisor	;036
+				;and user mode				;036
+.ASSUME	MOUSRI	EQ	0	;Point to I-space MDEs			;036
+	SETMAP			;Set up the mapping			;036
+
+; Now, we will see if we need to set up user mode D-space
+;
+;	R0 -> MDEs for start of user mode D-space
+;	R1 =  Job's mapping flags
+;	R2 -  UDSAR0 (since UDSAR0 eq UISAR0+20)
+;	R3 -  UDSDR0 (since UDSDR0 eq UISDR0+20)
+
+.ASSUME	UDSAR0	EQ	<UISAR0+20>
+.ASSUME	UDSDR0	EQ	<UISDR0+20>
+.ASSUME	MOUSRD	EQ	<MOUSRI+<8.*MDSIZE>> ;Point to D-space MDEs	;036
+	TSTB	R1		;Using I&D space?			;036
+.ASSUME	JM.UDS	EQ	200
+	BPL	10$		;No, not this time			;036
+	BIS	#1,@#MMUSR3	;Yes, enable it				;036
+	MOV	R2,UDPAR0	;Set up pointer to PAR0 for user's "data" ;036
+	SETMAP			;And set up the mapping			;036
+
+; Now, we will set up the mapping for supervisor mode if it is being used
+;
+; Note that supervisor mode is only used when user mode I&D space is
+; enabled as well. This is because any use of resident libraries will
+; enable I&D space. Doing so saves us some checks, thereby making
+; this routine faster.
+;
+;	R0 -> MDEs for start of supervisor mode I-space
+;		(Allocated by INISTA.MAC and set up by MAPSUB.MAC)
+;	R1 =  Job's mapping flags
+
+.ASSUME	MOSUPI	EQ	<MOUSRD+<8.*MDSIZE>> ;Verify MDE layout		;036
+	TST	R1		;Using supervisor mode?			;036
+.ASSUME	JM.SIS	EQ	100000
+	BPL	10$		;No, not this time			;036
+	BIS	#12,@#MMUSR3	;Yes, turn it and CSM instruction on	;036
+	MOV	#SISAR0,R2	;Point to supervisor mode address reg 0	;036
+	MOV	#SISDR0,R3	;And description register 0		;036
+	SETMAP			;Set up the mapping			;036
+
+; Now we will copy the user mode D-space APRs into the supervisor mode
+; D-space APRs.
+
+;	R2 -> SDSAR0 (since SDSAR0 eq SISAR0 + 20)
+;	R3 -> SDSDR0 (since SYSDR0 eq SISDR0 + 20)
+
+.ASSUME	SDSAR0	EQ	<SISAR0+20>
+.ASSUME	SDSDR0	EQ	<SISDR0+20>
+	MOV	R5,-(SP)	;save the 5th register			;043
+	SWAB	R1		;put mask at bottom			;043
+	MOV	#UDSAR0,R0	;Point to UDSAR0			;041
+	MOV	#UDSDR0,R5	;And UDSDR0				;043
+
+.REPT	8.		;For all APRs:
+	MOV	(R0)+,(R2)+	;Copy address register			;036
+	MOV	(R5)+,(R3)+	;And description register		;036
+.ENDR			;Loop for all the APRs
+
+	BIC	#^C<177>,R1	;leave only the 7 mask bits		;043
+	BEQ	9$		;if none that's it			;043
+	MOV	#SISAR0+2,R0	;point to Sup-I PAR0 +2			;043
+	MOV	#SISDR0+2,R5	;point to Sup-I PDR0+2			;043
+	MOV	#SDSAR0+2,R2	;point to sup-d par0+2			;043
+	MOV	#SDSDR0+2,R3	;point to Sup-D PDR0+2			;043
+6$:	ROR	R1		;this apr go to super I?		;043
+	BCC	8$		;if not set leave in user-D		;043
+	MOV	(R0)+,(R2)+	;par 					;043
+	MOV	(R5)+,(R3)+	;pdr					;043
+	BR	6$		;loop to next APR			;043
+
+8$:	BEQ	9$		;then were none				;043
+	CMP	(R0)+,(R2)+	;dummy advance PAR			;043
+	CMP	(R5)+,(R3)+	;  and PDR				;043
+	BR	6$		;and check for the next one		;043
+
+9$:	MOV	(SP)+,R5	;restore from super save		;043
+10$:	MOV	(SP)+,R3	;Restore working registers		;036
+	MOV	(SP)+,R2	; ...					;036
+	MOV	(SP)+,R1	; ...					;036
+	MOV	(SP)+,R0	; ...					;036
+	MAP	@UDPAR0,APR=6,DATA ;Map the user's first 4K		;036
+	RETURN			;And exit				;036
+
+GLOBAL	<JCMHGH,MAXHGH,UDPAR0,MMU22W,APRMSK>				;045
+
+.SBTTL	Handle ICFP detach final processing
+
+;+
+; ICFDET - Handle the ICFP detach final processing
+;
+; This is an ICFP detach, so we will move the PFB and present ICFP flags
+; from the old job to the new job.
+;
+;	R4 = Job # * 2 of old job
+;
+;	CALL	ICFDET
+;
+; All registers are preserved. APR6 mapping is preserved. APR5 data
+; mapping is set to be the same as APR5 instruction mapping.
+;-
+
+ICFDET:	REGSCR			;Save all registers			;028
+	MAP	PUSH,APR=6,DATA	;And APR6 mapping			;028
+	MOV	JOBDA,R0	;Pick up JDB for new job		;031
+	MOV	JOBTBL(R4),R3	;Get old job JDB pointer		;022
+	MAP	FIPPOL		;Map FIP pool for the IOB		;031
+	MOV	@(R3)+,R5	;Get old job Ch # 0 DDB pointer		;022
+.ASSUME	JDIOB	EQ	0
+	MOV	(R3),-(SP)	;Save old job JDFLG contents		;030
+.ASSUME	JDFLG	EQ	2
+	MOV	JDFLG3-JDFLG(R3),R2 ;Get old job flags			;031
+$$$$$1	=	J2ICF!J2LOG!J2NDAT!J2VFY!J2BAT!J2NET!J2NERR!J2NCHO	;023
+				; ^ bits to carry over to new job	;023
+	BIC	#^C<$$$$$1>,R2	;Isolate flags we want			;024
+	BIC	#<J2ICF!J2LOG!J2NDAT>,JDFLG3-JDFLG(R3) ;Clear some of old job ;031
+	BIS	R2,JDFLG3(R0)	; and set them in new job's		;031
+
+; We will now copy privileges from the old job to the new job
+;
+; R4 = old job # * 2
+; R5 -> old job console terminal
+; SP -> Old job JDFLG contents, ...
+
+	MOV	R4,R0		;Copy old job # * 2			;031
+	CALLX	GETJCR		;And get old job's JCR entry pointer	;031
+	MOV	R1,R3		;Stash old job's JCR pointer		;031
+	MOV	JOBJCR,R0	;Point to new job's JCR entry		;031
+	ADD	#JCAPRV,R0	;Point to authorized privileges for new job ;031
+	ADD	#JCAPRV,R1	;Point to authorized privileges for old job ;031
+
+; R0 -> New job's JCR entry @ JCAPRV
+; R1 -> Old job's JCR entry @ JCAPRV
+; R2 = MMU value to map old job's JCR entry
+; R3 -> Old job's JCR entry
+; R4 = old job # * 2
+; R5 -> Old job console terminal
+; SP -> Old job JDFLG contents, ...
+
+	CALL	80$		;Copy authorized privileges		;031
+	ADD	#JCPRIV-<JCAPRV+PRIVSZ>,R0 ;Point to current priv's for new job  ;031
+	ADD	#JCPRIV-<JCAPRV+PRIVSZ>,R1 ;Point to current priv's for old job  ;031
+	BIT	#JFSYS,(SP)+	;Old job using temporary privileges?	;030
+	BEQ	5$		;No, so all set				;030
+	ADD	#JCSPRV-JCPRIV,R1 ;Yes, so point to saved privileges	;031
+5$:	CALL	80$		;Copy current privileges		;031
+
+	MOV	JOBJCR,R1	;Point to new job's JCR entry		;033
+
+; We have copied privileges and will now copy the context word from one
+; job to the other.
+
+; R1 -> New job's JCR entry
+; R2 =  MMU value to map old job's JCR entry
+; R3 -> Old job's JCR entry
+; R4 =  Old job # * 2
+; R5 -> Old job console terminal
+; SP -> Old job JDFLG contents, ...
+
+	MAP	R2,APR=6,DATA	;Map old job's JCR entry		;033
+	MOV	JCDCLW(R3),R0	;Get the context word			;033
+	CLR	JCDCLW(R3)	;Clear it out for goodness		;033
+	MAP	JOBJC6,APR=6,DATA ;Map the new job's context word	;033
+	MOV	R0,JCDCLW(R1)	;And update it				;033
+
+	ADD	#JCPFB,R3	;Point to old job's PFB channels	;031
+	ADD	#JCPFB,R1	;Point to new job's PFB channels	;031
+
+; R1 -> New job's JCR entry @ JCPFB
+; R2 = MMU value to map old job's JCR entry
+; R3 -> Old job's JCR entry @ JCPFB
+; R4 = old job # * 2
+; R5 -> Old job console terminal
+; SP -> Old job JDFLG contents, ...
+;
+; At this point, we will move the PFB channels from the old job to the
+; new job, and change the owning job number.
+
+	CALL	60$		;Reset log and ICF to new job		;022
+	CLR	-(SP)		;And get a cell to count console opens	;022
+	MOV	#14.,-(SP)	;Set up a counter of channels to do	;031
+10$:	MAP	R2,APR=6,DATA	;Map original job JCR entry		;031
+	MOV	(R3),R0		;Get another PFB channel		;031
+	CLR	(R3)+		;And clear it				;031
+	MAP	JOBJC6,APR=6,DATA ;Map new job JCR entry		;031
+	MOV	R0,(R1)+	;And set it in the JCR			;031
+	BEQ	40$		;Skip if not open			;022
+	CMP	R0,R5		;Is this the old job's console?		;031
+	BNE	20$		;No, not this time			;022
+	INC	2(SP)		;Yes, so count another open		;031
+	BR	40$		;And handle this later			;022
+
+20$:	MAP	FIPPOL		;Map FIP pool for WCBs and DDBs		;031
+	SPLC	5		;Lock out terminal interrupts for detach case ;022
+	CMPB	R4,DDJBNO(R0)	;;Old job still own device?		;031
+	BNE	30$		;;No, not this time			;022
+	MOVB	JOB,DDJBNO(R0)	;;Set new owning job number * 2		;031
+.ASSUME	W$JBNO EQ DDJBNO						;022
+30$:	SPLC	3		;;And allow terminal interrupts again	;022
+40$:	DEC	(SP)		;Say one more channel done		;031
+	BNE	10$		;More to do, loop			;031
+
+; We have moved all of the PFB channels from the old job to the new
+; job. Now we will move channel zero from the old job to the new job
+; and set up ownership correctly.
+;
+;	R4 = Job # * 2 of old job
+;	SP -> 0 (from loop above), console opens, saved DPAR6, ...
+                                                                            
+	MOV	JOBTBL(R4),R1	;Pick up JDB pointer for old job	;022
+	MOVB	R4,(SP)		;And save the old job number		;031
+	CALLX	CONNEC		;Calculate the connect time		;022
+	MOV	R3,R1		;Get the DDB in the correct place	;022
+	SPLC	5		;Lock out terminal interrupts		;022
+	CMPB	(SP)+,DDJBNO(R1) ;;Is this terminal still attached?	;022
+	BNE	50$		;;No, so leave new job detached		;022
+	CALLMI	KBRSET,KBDAP5	;;Detach the old job			;029
+	MOVB	JOB,DDJBNO(R1)	;;Attach the terminal to the new job	;022
+	MOVB	(SP),DDCNT(R1)	;;And set the PFB count			;022
+	INCB	DDCNT(R1)	;;And add one for the IOB count (Ch #0)	;022
+	BIS	#DDCONS,DDCNT(R1) ;;Mark it as the console terminal	;038
+	MAP	FIPPOL		;;Map FIP pool				;038
+	MOV	@JOBDA,R2	;;Pick up IOB pointer for job		;038
+	MOV	R1,(R2)		;;Attach the terminal to the new job	;038
+50$:	SPLC	3		;;Now allow terminal interrupts again	;022
+	TST	(SP)+		;Dump the number of terminal opens	;022
+	MAP	POP,APR=6,DATA	;And reset APR6 mapping			;028
+	MAP	@#KISAR5,APR=5,DATA ;And reset APR5 mapping		;038
+	RETURN			;And we're done				;022
+
+60$:	CALL	(PC)		;Do this twice				;022
+	MOV	R4,-(SP)	;Save a register			;022
+	MAP	R2,APR=6,DATA	;Map original job's JCR entry		;031
+	MOV	(R3),R4		;Get CBB contorted address		;031
+	CLR	(R3)+		;And clear it				;031
+	MOV	R3,-(SP)	;Save pointer into JCR			;031
+	MAP	JOBJC6,APR=6,DATA ;Map new job's JCR entry		;031
+	MOV	R4,(R1)+	;Pass ownership of the CBB		;031
+	BEQ	70$		;Unowned, nothing to do			;031
+	CALLX	MAPBUF		;Map the CBB				;022
+	MOV	PF.WCB(R3),R3	;Get WCB pointer for file		;022
+	MAP	FIPPOL		;Map FIP for the WCB 			;022
+	MOVB	JOB,W$JBNO(R3)	;Update job number			;022
+70$:	MOV	(SP)+,R3	;Restore pointer into old job's JCR	;031
+	MOV	(SP)+,R4	;Restore R4				;022
+	RETURN			;And we're done				;022
+
+80$:	MOV	#PRIVSZ/2,-(SP)	;Get # of words to copy			;031
+90$:	MAP	R2,APR=6,DATA	;Map old job's JCR entry		;031
+	MOV	(R1)+,-(SP)	;Pick up a word of privileges		;031
+	MAP	JOBJC6,APR=6,DATA ;Map new job's JCR entry		;031
+	MOV	(SP)+,(R0)+	;And set the word			;031
+	DEC	(SP)		;Say one more word went by		;031
+	BNE	90$		;More, loop				;031
+	TST	(SP)+		;Dump the counter			;031
+	RETURN			;All done				;031
+
+	.END
+
+

@@ -1,0 +1,256 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+TITLE	DVDSK,<VIRTUAL DISK DRIVER>,0A,10-MAY-91,TG/MNB/MND/VAM/KCG
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DVDSK
+;+
+;  000  MND  07-MAR-84  Brought code back to life from V7.1 (TG author)
+;  001  MND  14-May-84  Do memory move at PR3
+;  002  VAM  05-Feb-85	Add IFUN non-existant device support
+;  003  VAM  30-May-85	Add RELFUN.
+;
+;			[RSTS V9.6]
+;  004	KCG  29-Feb-88	Add FMTFUN.
+;
+;			[RSTS V9.7]
+;  005  VAM  24-Jan-89	Have IFUN check MEMLST to make sure that virtual
+;			disk is all there (for online virtual disk support).
+;-
+
+	DEFORG	DVDSK
+
+	INCLUDE	<CMNDSK>
+
+	DSKDEF	DV
+
+
+.SBTTL	INTERRUPT SERVICE (PR5)
+.SBTTL	TIME-OUT SERVICE (PR5)
+
+;+
+;	INT$DV, TMO$DV and LOG$DV will cause a crash if entered.
+;-
+
+INT$DV::			;;We should never get here
+TMO$DV::;CRASH			;;We should never get here
+
+.SBTTL	ERROR LOGGING (PR7)
+
+	ERRENT	LOG$DV
+
+	CRASH			;;;We should never get here
+	;RETURN			;;;AND BACK
+
+.SBTTL	FREE UMR NOTIFICATION ENTRY ADDRESS
+
+;+
+;	DVDSK doesn't use UMRs, just return
+;-
+
+UMR$DV::RETURN			;;NO, WE'RE NOT INTERESTED
+
+
+.SBTTL	FORM THE PHYSICAL ADDRESS
+;+
+; WHEN THE DISK DRIVER IS CALLED:
+;
+;	R0 =  MSB OF THE STARTING LBN
+;	R1 =  LSB OF THE STARTING LBN
+;	R3 =  PHYSICAL UNIT NUMBER *2
+;	R4 -> DSQ
+;	R5 =  FIP UNIT NUMBER *2
+;	(R4) = 0
+;	PRIORITY LEVEL IS PR3
+;
+;	...
+;
+;	CALL	@(SP)+
+;
+;	R4 -> DSQ
+;	(R4) = OFFSET TO QUEUE ROOT
+;-
+
+QDS$DV::NOP				;Patched to BPT for humor
+	CMPB	DSQSAV(R4),#IFUN	;Is this an initialize command?
+	BEQ	20$			;Yes, nothing to do
+	CMPB	DSQSAV(R4),#RFUN.C	;Is this a read check?
+	BEQ	20$			;Yes, nothing to do
+	CMPB	DSQSAV(R4),#RELFUN	;How about a Release?		;003
+	BEQ	20$			;Yes, nothing to do.		;003
+	CMPB	DSQSAV(R4),#FMTFUN	;Maybe a FORMAT?		;004
+	BEQ	20$			;Yes, nothing to do..		;004
+	ASHC	#3,R0			;Get PAF value From LBN
+	MOV	CSR.DV,R2		;Get the DV memory base (Kw) in R2
+	ASH	#5,R2			;Convert KW to an MMU value
+	ADD	R2,R1			;Add to offsetting MMU
+	MOV	R1,DSQPTO(R4)		;SAVE APR5 VALUE FOR LATER
+	CLR	DSQCTO(R4)		;START AT VIR 0 
+	MOVB	DSQMAM(R4),R0		;GET MOST SIG BITS OF ADDRESS
+	MOV	DSQMAL(R4),R1		;GET LSB OF MEM ADDRESS
+	MOV	R1,-(SP)		;SAVE LSB'S
+	BIC	#^C<77>,R1		;CLEAR OFF ALL BUT OFFSET
+	MOV	R1,DSQOPT(R4)		;AND SAVE IT AWAY
+	MOV	(SP)+,R1		;RESTORE R1 
+	ASHC	#-6,R0			;SHIFT OUT OFFSET BITS
+	MOV	R1,DSQPDA(R4)		;AND SAVE MM REG FOR APR 6
+	CMPB	DSQSAV(R4),#WFUN	;ARE WE WRITING ?
+	BHI	10$			;READ - SO ALL IS WELL
+	MOV	DSQPTO(R4),-(SP)	;SAVE HIM
+	MOV	DSQCTO(R4),-(SP)	;AND THIS GUY AS WELL
+	MOV	DSQPDA(R4),DSQPTO(R4)	;MOVE IT 
+	MOV	DSQOPT(R4),DSQCTO(R4)	;AND THIS ONE
+	MOV	(SP)+,DSQOPT(R4)	;RESTORE IT
+	MOV	(SP)+,DSQPDA(R4)	;AND THE LAST ONE
+10$:	ADD	#140000,DSQOPT(R4)	;FIX HIM UP FOR APR 6
+	ADD	#120000,DSQCTO(R4)	;THIS ONE WILL BE APR 5
+20$:	CALL	@(SP)+			;RETURN WITH ADDRESS ALL SET UP
+
+GLOBAL	<CSR.DV,UNTSIZ,NOTAVL>
+
+.SBTTL	COMES HERE IF REQUEST IS FIRST IN QUEUE
+;+
+; CONTROL IS RETURNED TO DRIVER IF REQUEST IS FIRST IN QUEUE.
+;
+;	R0 -> QUEUE ROOT
+;	R3 -> CSR
+;	R4 -> DSQ
+;		DSQCNT = -(WORD COUNT)
+;		DSQPTO = MMU value of source memory (from)
+;		DSQCTO = Virtual address of source memory (from) using APR5
+;		DSQPDA = MMU value of destination memory (to)
+;		DSQOPT = Virtual address of destination memory (to) using APR6
+;
+;	PRIORITY LEVEL IS PR5
+;
+;-
+
+DOTRN:	MAP	PUSH,APR=6,DATA	;;Save current APR6 value
+	CMPB	DSQSAV(R4),#IFUN;;Is this an initialize command?
+	BEQ	50$		;;Yes, go check for availability.	;002
+	CMPB	DSQSAV(R4),#RFUN.C;;Is this a read check?
+	BEQ	40$		;;Yes, nothing to do
+	CMPB	DSQSAV(R4),#RELFUN	;;How about a Release?		;003
+	BEQ	40$			;;Yes, nothing to do.		;003
+	CMPB	DSQSAV(R4),#FMTFUN	;;FORMAT function?		;004
+	BEQ	35$			;;Yes, return error		;004
+	MOV	DSQCNT(R4),R2	;;SET UP NEG WORD COUNT
+	NEG	R2		;;AND MAKE IT POSITIVE
+10$:	MOV	#DSQPDA,R5	;;START HERE TO PICK UP PARAMS
+	ADD	R4,R5		;;ADD IN DSQ ADDRESS
+	MAP	(R5)+,APR=6,DATA;;  and set-up the mapping register
+	MOV	(R5)+,R3	;;MOVE TO HERE
+	TST	(R5)+		;;SKIP NEXT WORD
+	MOV	R2,-(SP)	;;SAVE WORD COUNT 
+	MOV	#2.*1024.,R2	;;ASSUME BIG XFER
+	CMP	R2,(SP)		;;ARE WE RIGHT ??
+	BLT	20$		;;YEP - BIG GUY
+	MOV	(SP),R2		;;NOPE- SO DO SMALL AMOUNT
+	CLR	(SP)		;;AND SAY NOTHING LEFT
+	BR	30$		;;SO DO IT ALREADY
+
+20$:	SUB	R2,(SP)		;;FIX UP WHAT'S LEFT
+30$:	MOV	(R0),-(SP)	;;SAVE THE QUEUE ROOT
+	MOV	(R5)+,(R0)	;;SET UP AP5 VALUE
+	MOV	(R5)+,R1	;;WHERE FROM
+	PUSH	<@#PS>		;;Save current priority			;002
+	SPLC	3		; Down to level 3 for memory move	;002
+	CALLM	MOVWRD,DQS$DV	;;DO IT
+	POP	<@#PS>		;;Restore priority			;002
+	MOV	(SP)+,(R0)	;;AND RESTORE IT 
+	MOV	(SP)+,R2	;;GET WHAT'S LEFT
+	BEQ	40$		;;ALL DONE
+	ADD	#100,DSQPTO(R4)	;;FIX AP5 VALUE
+	ADD	#100,DSQPDA(R4)	;;AND AP6 VALUE
+	BR	10$		;;AND GO RELOAD THEM
+
+35$:	SETERR	ERRERR,DSQERR(R4) ;;FORMAT command not supported	;004
+40$:	MAP	POP,APR=6,DATA	;;Restore previous mapping at entry
+	CALLRX	DFINT9		;;DEQUE IT ETC. AND GO AWAY
+
+GLOBAL	<ERRERR>
+	.PAGE
+	.SBTTL	IFUN Request Handler
+;+
+;
+;	I F U N   R E Q U E S T   H A N D L E R				;002
+;
+; The IFUN (Initialize FUNction) is used to check for the presence or absence
+; of the DV disk.
+;									;005+
+; To check for the DV disk, we look in the UNTSIZ table to see how big it's
+; supposed to be.  If UNTSIZ is zero, then no one has created a virtual disk
+; yet, so we return '?Device not available'.
+;
+; If there is a size in UNTSIZ, that means that FIP has queued up the requests
+; to the memory manager to allocate the space for the virtual disk, and has
+; then filled in CSR.DV and UNTSIZ with the size of the virtual disk to be
+; created.  However, on a really busy system, it may take (relatively) quite
+; a while for the memory manager to actually move enough stuff around in memory
+; to create the virtual disk!
+;
+; Therefore, in this section, we look through MEMLST to make sure that all of
+; the virtual disk has really been allocated before we allow anyone to do
+; anything with it.  We simply walk through MEMLST to find all Locked Memory
+; entries that represent the virtual disk, and total the sizes represented by
+; all such entries.  If the total of entries in MEMLST doesn't agree with the
+; size given in UNTSIZ, we return '?Device hung or write locked'.
+;									;005-
+; Since the DV disk is not a physical device (as such), there are no registers
+; or other bits to diddle, and no hard errors are possible during an IFUN.
+;
+;-
+
+50$:	MOVB	DSQUNT(R4),R1		;;Get the FIP unit number.	;002
+	ASL	R1			;;Times two.			;002
+	MOV	UNTSIZ(R1),R1		;;Get the unit size.		;005
+	BEQ	80$			;;Oops, nothing there - error!	;005
+	ASR	R1			;;Change from blocks...		;005
+	ASR	R1			;; ...to K words.		;005
+	CLR	R2			;;Clear out size accumulator.	;005
+	PUSH	<R0>			;;Save a work register.		;005
+	MOV	#MEMLST,R0		;;Get start of memory list.	;005
+60$:	MOV	M.PNXT(R0),R0		;;Get pointer to next entry.	;005
+	BEQ	70$			;;No more to do!		;005
+	MOV	R0,R3			;;Get copy of address.		;005
+	BIC	#^C<37>,R3		;;Get MCSB offset.		;005
+	CMP	R3,#ML.LCK		;;Is this a Locked Memory block?;005
+	BNE	60$			;;No, so skip it.		;005
+	CMP	M.PHYA-M.PPRV+2(R0),#-1	;;Is this one of ours??		;005
+	BNE	60$			;;Nope, so skip it also.	;005
+	CLR	R3			;;Set up for size (no SXT evil!);005
+	BISB	M.SIZE-M.PPRV(R0),R3	;;Get size of this entity.	;005
+	ADD	R3,R2			;;Include this in running total.;005
+	BR	60$			;;And, back for more.		;005
+
+70$:	POP	<R0>			;;Get original register back.	;005
+	CMP	R2,R1			;;Is it all there?		;005
+	BEQ	40$			;;Yup, just go back.		;005
+	MOVB	#HNGDEV,DSQERR(R4)	;;'?Device hung or write locked';005
+	BR	40$			;;Go back.			;005
+
+80$:	MOVB	#NOTAVL,DSQERR(R4)	;;'?Device not available'	;005
+	BR	40$			;;Let 'em know and go back.	;002
+
+GLOBAL	<MEMLST,NOTAVL,HNGDEV>						;005
+
+	.END
+

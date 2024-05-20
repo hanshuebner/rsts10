@@ -1,0 +1,208 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	RSTSUM,<BACKUP and VOLUME summary restoration>,0A,10-MAY-91,KPH/BGN
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for RSTSUM
+
+;+
+;
+;      Edit	By	Reason
+;
+;	000	KPH	Creation for Version 9.0 RSTS/E
+;	001	BGN	Add support for BACKUP/DIRECTORY header information
+;	002     BGN	Printer header infor for VMS savesets 
+;	003	REG	Increase size of RSTS/E Vnn.n attribute
+;	004	REG	Increase pack clustersize to 64
+;-
+
+.SBTTL	Call any needed MACROs
+
+.MCALL	$CUI
+
+$CUI	MSG
+
+.SBTTL	Process Backup summary records
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+	RECENT	BRT$SU
+
+.ENABL	LSB
+
+	BIT	#RS.FRS,RSTFLG	;Is this the first record in the set?
+	BNE	10$		;Yes, it sure is
+	CMESSAGE <#SUMNFR>	;No, so complain about that
+	BR	20$		;And we're done
+
+10$:	CALLX	ATRDSP		;Off to attribute dispatcher
+	MOVB	$GRPSZ,XORCNT	;Set up XOR count for this block
+	BIT	#GF.DIR,GENFLG	;Are we doing a directory pass?		;002
+	BEQ	20$		;No, skip header output check		;002
+	CALL	FULHD1		;Yes, write the header info out		;002
+	BIC	#GF.BHD,GENFLG	;Indicate we can write /BRIEF header    ;002
+
+20$:	RETURN			;And we're done
+
+.DSABL	LSB
+
+GLOBAL	<RSTFLG,SUMNFR,$GRPSZ,XORCNT,FULHD1>				;002
+
+.SBTTL	Handle attributes that are .ASCIC strings
+
+	ATRENT	BRT$SU,BSA$SN,BBHDAT+BBH$SN,1,31. ;Save set name
+	ATRENT	BRT$SU,BSA$CM,BCKCOM,1,511. ;Backup command line	;001
+	ATRENT	BRT$SU,BSA$UN,BCKUNM,1,31. ;User who created save set	;001
+	ATRENT	BRT$SU,BSA$SV,BCKOSV,1,6   ;Operating system version	;003
+	ATRENT	BRT$SU,BSA$NN,BCKNOD,1,12. ;Node name			;001
+	ATRENT	BRT$SU,BSA$DI,BCKDEV,1,16. ;Device			;001
+	ATRENT	BRT$SU,BSA$BV,BCKVER,1,32. ;BACKUP version		;001
+	MOVB	R2,(R4)+	;Save the length of the .ASCIC string
+	.BR	CPYATR		;And fall through to general copier
+
+GLOBAL	<BBHDAT,BCKCOM,BCKOSV,BCKNOD,BCKDEV,BCKVER>
+
+.SBTTL	Handle attributes that are simple moves
+
+	ATRENT	BRT$SU,BSA$AC,BCKPPN,4,4 	;PPN			;001
+	ATRENT	BRT$SU,BSA$OS,BCKOSI,2,2	;Operating system ID	;001
+
+	ATRENT	BRT$SU,BSA$BS,BBHDAT+BBH$BS,4,4 ;Block size
+	ATRENT	BRT$SU,BSA$GS,$GRPSZ,2,2 	;XOR group size
+
+CPYATR:	MOVB	(R3)+,(R4)+	;Move a byte to the save field
+	SOB	R2,CPYATR	;And loop for the whole thing
+	RETURN			;Now we're done
+
+GLOBAL	<BBHDAT,$GRPSZ,BCKUNM,BCKPPN,BCKOSI>				;001
+
+.SBTTL	Handle date attributes
+
+	ATRENT	BRT$SU,BSA$DT,BCKDAT,8.,8.,PRSDAT ;Backup date and time
+
+GLOBAL	<PRSDAT,BCKDAT>
+
+.SBTTL	Handle volume summary attributes
+
+	RECENT	BRT$VL		;Volume Summary				;002
+
+.ENABL	LSB
+
+	CALLX	ATRDSP		;Off to attribute dispatcher		;002
+	BIT	#GF.DIR,GENFLG	;Are we doing a directory pass?		;002
+	BEQ	20$		;No, skip header output check		;002
+	CALL	FULHD2		;Yes, write the header info out		;002
+
+20$:	RETURN			;And we're done				;002
+
+.DSABL	LSB
+
+GLOBAL	<FULHD2,BRFHDR,ATRDSP>						;002
+
+.SBTTL	Handle volume name attributes
+
+	ATRENT	BRT$VL,BVA$ID,$DSKLB,12.,12. ;Volume name
+
+.ENABL	LSB
+
+	BIT	#GF.DIR,GENFLG	;Are we doing a directory pass?		;001
+	BEQ	5$		;No, skip .ASCIC copy of data		;001
+	MOVB	R2,(R4)+	;Save the length of the .ASCIC string	;001
+	BR	CPYATR		;And fall through to general copier	;001
+
+5$:	TSTB	(R4)		;Did the user specify a volume label?	;001
+	BNE	10$		;Yes, so go use that one...
+
+	BIT	#DO.INI,C$FLAG	;Is this an initialize?
+	BEQ	10$		;No, so don't touch output label
+	ASR	R2		;Yes, set up to copy six bytes
+	BR	CPYATR		;And go off to the attribute copier
+
+10$:	RETURN			;Nothing to do, volume label all set up
+
+.DSABL	LSB
+
+GLOBAL	<$DSKLB,C$FLAG,GENFLG>
+
+.SBTTL	Handle volume cluster factor attribute
+
+	ATRENT	BRT$VL,BVA$CS,DSKCLU,2.,2. ;Volume cluster factor
+
+.ENABL	LSB
+
+	MOVB	(R3),R3		;R3 = Cluster factor of volume
+	CMP	R3,#64.		;Is this within the RSTS range?		;004
+	BHIS	60$		;No, so use 64 instead			;004
+
+	CLR	R0		;R0 will hold the number of shifts we do
+	CLR	R1		;And R1 will be the fudge indicator
+
+20$:	ASR	R3		;Shift over a bit of the clustersize
+	BEQ	30$		;We're done, R0 has shifts and R1 has fudge
+	INC	R0		;Say we did one more shift
+	BCC	20$		;Don't set fudge factor if bit wasn't set
+	INC	R1		;Not a power of two, set fudge factor
+	BR	20$		;And loop
+
+; We get here when we are done shifting the cluster factor. R3 will
+; be zero, R0 will be the number of shifts we did - 1, and R1 will
+; be non-zero if we need to round our cluster factor up.
+
+30$:	TST	R1		;Do we need to do one extra shift?
+	BEQ	40$		;No, not this time
+	INC	R0		;Yes, so set to do one more shift
+	CMP	R0,#4		;Is number going to be > 16?
+	BHI	60$		;Yes, so use 16 instead
+
+40$:	INC	R3		;Set up initial number to shift
+50$:	DEC	R0		;Say one more shift is done
+	BMI	70$		;Now we're done, R3 has the power of 2 to use
+	ASL	R3		;We need to do another shift, so do it
+	BR	50$		;And loop
+
+60$:	MOV	#64.,R3		;Set up to use largest valid clus size	;004
+
+70$:	MOVB	R3,(R4)		;Stash the clustersize to use
+	RETURN			;And we're done
+
+.DSABL	LSB
+
+GLOBAL	<DSKCLU>
+
+.SBTTL	Handle RSTS specific attributes (pack status)
+
+	ATRENT	BRT$VL,BVA$RS,DSKSTA,4.,4. ;Volume cluster factor
+
+	ADD	#BVR$FL,R3	;R3 -> Pack status word
+	MOVB	(R3)+,(R4)+	;Copy the low byte
+	MOVB	(R3)+,(R4)+	;Now copy the high byte
+	RETURN			;And that was easy...
+
+GLOBAL	<DSKSTA>
+
+
+.SBTTL	Get pack size for directory header output
+
+	ATRENT	BRT$VL,BVA$PS,BCKPCK,4.,4. ;Volume pack size		;001
+	CALL	CPYATR		;And go off to the attribute copier	;001
+	RETURN
+
+GLOBAL	<BCKPCK>
+.END

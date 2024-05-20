@@ -1,0 +1,154 @@
+$!******************************************************************************
+$!
+$! UPDLIB.COM - command file to build the RSX RTS and RSX libraries.
+$!
+$! 24-Feb-83	PCH	Add FTB
+$! 02-Nov-82	PCH	Remove DTR logical assignments
+$! 14-Oct-82	NMC	Update for RMS V2 kit received for
+$!			V8 field test (Oct-82)
+$! ??-Aug-82	NMC	Update for first field test
+$!			version of RMS V2
+$! 25-Mar-85	CMK	Fix command line to CNV and delete R1GET and
+$!			 R1GSET refernces
+$! 04-Aug-87	JJT	Update for V9.5
+$! 23-Mar-86	JJT	Remove FTB
+$! 12-Jul-91	SEL	Convert to .COM file, add Fast Taskbuilder (HFT)
+$!******************************************************************************
+$!
+$ _ON ERROR THEN GOTO EXIT
+$ _SET ECHO
+$ _SET JOB/PRIORITY=-16
+$!
+$ _ASSIGN/USER/REPLACE D:         BL
+$ _ASSIGN/USER/REPLACE D:$        LIB
+$ _ASSIGN/USER/REPLACE D:[170,0]  CMN
+$ _ASSIGN/USER/REPLACE D:[170,90] RMS
+$ _ASSIGN/USER/REPLACE D:[170,91] SRT
+$ _ASSIGN/USER/REPLACE D:[170,92] EDT
+$!
+$! Set up logicals to point to local (test) account
+$!
+$ _ASSIGN/USER/REPLACE D:[170,53] RSX
+$ _ASSIGN/USER/REPLACE D:[170,60] FCS
+$ _ASSIGN/USER/REPLACE D:[170,61] UTL
+$ _ASSIGN/USER/REPLACE D:[170,62] MAC
+$ _ASSIGN/USER/REPLACE D:[170,63] LBR
+$ _ASSIGN/USER/REPLACE D:[170,64] TKB
+$ _ASSIGN/USER/REPLACE D:[170,65] RNO
+$ _ASSIGN/USER/REPLACE D:[170,66] PAT
+$ _ASSIGN/USER/REPLACE D:[170,67] CRF
+$!
+$ _ASSIGN/USER/REPLACE D:[170,53] SYSTEM
+$ _ASSIGN/USER/REPLACE D:[170,53] LST
+$ _ASSIGN/USER/REPLACE D:[170,53] LB
+$!
+$ _SET PROT/DEFAULT 60
+$!
+$! Note that LIB: is D:$
+$RUN LIB:PIP.SAV
+LIB:[0,1]*.*  < 40>/MO:16/RTS:RSX=RSX:RSX   .RTS
+LIB:    *.TSK<104>/MO:64/RTS:RSX=CRF:CRF   .TSK
+LIB:    *.TSK<104>/MO:64/RTS:RSX=MAC:MAC   .TSK
+LIB:    *.TSK<104>/MO:64/RTS:RSX=LBR:LBR   .TSK
+LIB:    *.TSK<104>/MO:64/RTS:RSX=TKB:TKB   .TSK
+LIB:    *.TSK<104>/MO:64/RTS:RSX=TKB:STK   .TSK
+LIB:    *.TSK<104>/MO:64/RTS:RSX=TKB:HFT   .TSK
+LIB:    *.TSK<104>/MO:64/RTS:RSX=RNO:RNO   .TSK
+LIB:    *.TSK<104>/MO:64/RTS:RSX=PAT:PAT   .TSK
+;
+LIB:    *.TSK<104>/MO:64/RTS:RSX=D:[170,51]MAKSIL.TSK
+;
+;LIB:   *.TSK<104>/MO:64/RTS:RSX=EDT:EDT   .TSK
+;
+LIB:[1,1]*.*  < 40>      /RTS:RSX=BL:[170,104]CSP100.TSK
+LIB:[1,1]*.*  < 40>      /RTS:RSX=BL:[170,104]CSP100.STB
+LIB:[1,1]*.*  < 40>      /RTS:RSX=RSX:SYSLIB.OLB
+LIB:[1,1]*.*  < 40>      /RTS:RSX=RSX:RSXMAC.SML
+DU12:[208,1]*.*  < 40>/MO:16/RTS:RSX=RSX:RSX   .RTS
+DU12:[208,1]    *.TSK<104>/MO:64/RTS:RSX=CRF:CRF   .TSK
+DU12:[208,1]    *.TSK<104>/MO:64/RTS:RSX=MAC:MAC   .TSK
+DU12:[208,1]    *.TSK<104>/MO:64/RTS:RSX=LBR:LBR   .TSK
+DU12:[208,1]    *.TSK<104>/MO:64/RTS:RSX=TKB:TKB   .TSK
+DU12:[208,1]    *.TSK<104>/MO:64/RTS:RSX=TKB:STK   .TSK
+DU12:[208,1]    *.TSK<104>/MO:64/RTS:RSX=TKB:HFT   .TSK
+DU12:[208,1]    *.TSK<104>/MO:64/RTS:RSX=RNO:RNO   .TSK
+DU12:[208,1]    *.TSK<104>/MO:64/RTS:RSX=PAT:PAT   .TSK
+;
+DU12:[208,1]    *.TSK<104>/MO:64/RTS:RSX=D:[170,51]MAKSIL.TSK
+;
+;DU12:[208,1]   *.TSK<104>/MO:64/RTS:RSX=EDT:EDT   .TSK
+;
+DU12:[208,1]*.*  < 40>      /RTS:RSX=BL:[170,104]CSP100.TSK
+DU12:[208,1]*.*  < 40>      /RTS:RSX=BL:[170,104]CSP100.STB
+DU12:[208,1]*.*  < 40>      /RTS:RSX=RSX:SYSLIB.OLB
+DU12:[208,1]*.*  < 40>      /RTS:RSX=RSX:RSXMAC.SML
+DU12:[208,1]*.*  < 40>      /RTS:RSX=D:[170,53]*.OLB
+DU12:[208,1]*.*  < 40>      /RTS:RSX=D:[170,53]*.SML
+DU12:[208,1]*.*  < 40>      /RTS:RSX=D:[170,60]*.OLB
+DU12:[208,1]*.*  < 40>      /RTS:RSX=D:[170,61]*.OLB
+DU12:[208,1]*.*  < 40>      /RTS:RSX=D:[170,62]*.OLB
+DU12:[208,1]*.*  < 40>      /RTS:RSX=D:[170,63]*.OLB
+DU12:[208,1]*.*  < 40>      /RTS:RSX=D:[170,64]*.OLB
+DU12:[208,1]*.*  < 40>      /RTS:RSX=D:[170,65]*.OLB
+DU12:[208,1]*.*  < 40>      /RTS:RSX=D:[170,66]*.OLB
+DU12:[208,1]*.*  < 40>      /RTS:RSX=D:[170,67]*.OLB
+DU12:[208,2]*.*=D:[1,1]*.*
+DU12:[208,3]*.*=D:[1,2]*.*
+;
+; Emulate an RMS install - this is for RMS V2.0
+;
+; RMS: is D:[170,90]
+;
+; NOTE: THIS ASSUMES V2.0 HAS NO PATCHES,
+; so no special juggling to not wipe out patched
+; versions (of, say, RMSLIB.OLB) is needed
+;
+LIB:[1,1]*.*  < 40>      /RTS:RSX=RMS:RMSMAC.MLB
+LIB:[1,1]*.*  < 40>      /RTS:RSX=RMS:RMSLIB.OLB
+LIB:[1,1]*.*  < 40>      /RTS:RSX=RMS:RMSDAP.OLB
+;
+; we won't use RMSACF
+LIB:    RMSBCK.TSK<104>/MO:64/RTS:RSX=RMS:BCKNRN.TSK
+LIB:    RMSRST.TSK<232>/MO:64/RTS:RSX=RMS:RSTNRN.TSK
+LIB:    RMSDEF.TSK<104>/MO:64/RTS:RSX=RMS:DEFNRN.TSK
+LIB:    RMSDSP.TSK<104>/MO:64/RTS:RSX=RMS:DSPNRN.TSK
+LIB:    RMSCNV.TSK<104>/MO:64/RTS:RSX=RMS:CNVNRN.TSK
+LIB:    RMSDES.TSK<104>/MO:64/RTS:RSX=RMS:DESNRN.TSK
+;
+LIB:    RMSIFL.TSK<104>/MO:64/RTS:RSX=RMS:IFLNRN.TSK
+;
+LIB:[1,1]*.*  < 40>/MO:64/RTS:RSX=RMS:RMS11 .ODL
+LIB:[1,1]*.*  < 40>/MO:64/RTS:RSX=RMS:R0RMS1.MAC
+LIB:[1,1]*.*  < 40>/MO:64/RTS:RSX=RMS:RMS11S.ODL
+LIB:[1,1]*.*  < 40>/MO:64/RTS:RSX=RMS:RMS11X.ODL
+LIB:[1,1]*.*  < 40>/MO:64/RTS:RSX=RMS:RMS12X.ODL
+LIB:[1,1]*.*  < 40>/MO:64/RTS:RSX=RMS:RMSRLX.ODL
+LIB:[1,1]*.*  < 40>/MO:64/RTS:RSX=RMS:DAP11X.ODL
+LIB:[1,1]*.*  < 40>/MO:64/RTS:RSX=RMS:DAPRLX.ODL
+LIB:[0,1]*.*  < 40>/MO:16/RTS:RSX=RMS:RMSRES.LIB
+LIB:[1,1]*.*  < 40>/MO:64/RTS:RSX=RMS:RMSRES.TSK
+;
+LIB:[0,1]*.* /MODE:16.=RMS:RMSLBA.LIB/BL
+LIB:[0,1]*.* /MODE:16.=RMS:RMSLBB.LIB/BL
+LIB:[0,1]*.* /MODE:16.=RMS:RMSLBC.LIB/BL
+LIB:[0,1]*.* /MODE:16.=RMS:RMSLBD.LIB/BL
+LIB:[0,1]*.* /MODE:16.=RMS:RMSLBE.LIB/BL
+LIB:[0,1]*.* /MODE:16.=RMS:RMSLBF.LIB/BL
+LIB:[1,1]*.* <40>=RMS:RMSRES.STB
+LIB:[0,1]*.* /MODE:16.=RMS:DAPRES.LIB/BL
+LIB:[1,1]*.* <40>=RMS:DAPRES.TSK/BL
+LIB:[1,1]*.* <40>=RMS:DAPRES.STB
+LIB:[1,1]*.* <40>=RMS:RMSDES.HLP
+$EOD
+$!
+$! May get errors if SYSLIB is contiguous, so flag it as not
+$!
+$ _SET FILE/NOCONT LIB:[1,1]SYSLIB.OLB/LOG
+$!
+$EXIT:
+$ _IF $SEVERITY .EQ. 1 THEN _WRITE 0 "UPDLIB completed successfully"
+$ _IF $SEVERITY .NE. 1 THEN _WRITE 0 "UPDLIB completed with errors"
+$!
+$ _SET JOB/PRIORITY=-8
+$ _exit
+

@@ -1,0 +1,1013 @@
+.INCLUDE /CMN:COMMON/							;031
+.INCLUDE /CMN:KERNEL/							;031
+.INCLUDE /CMN:FLDEF/							;031
+.INCLUDE /CMN:KBDEF/							;031
+TITLE	UUO,<NON-DISK CALLS>,0B,21-JUN-91,MHB/ABC/SJK/JTC/SRM/GPK/DRP/PRL/FEK/WJS/FRL/KPH/DBM/WRM/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR UUO
+
+;+
+;
+;  000	DRP  03-Mar-82	CREATION - COPIED FROM V7.1-11
+;  001	DRP  03-Mar-82	Return address of SATEND in UU.TB3 call.
+;  002	PRL  15-Mar-82	Retain KB assignment with detach/noclose.
+;
+;				[RSTS V8.0]
+;  003	FEK  29-Jul-82	Return UNTLVL & MFDPTR in UU.TB3
+;  004	DRP  14-Sep-82	Added a subfunction to the UU.FCB directive
+;  005	WJS  29-Oct-82	New UUOENT for EMT Logger
+;  006	GPK  23-Nov-82	Removed spawn code (to SLI), add MAGLBL to UU.TB3
+;			UU.DET to LOG, UU.YLG,NLG,LOG to UTL, UU.PRI to UTL
+;  007	WJS  12-Jan-82	UU.TB3 changes for EMT Logger
+;
+;				[RSTS V9.0]
+;  008	GPK  25-Mar-83	Multiple privileges
+;  009	GPK  07-Jun-83	Change .PRIV to .BPRIV
+;  010	FEK  11-Jul-83	Return hardware configuration word in UU.TB3
+;  011	GPK  20-Sep-83	Add SYSMGR privilege
+;  012	DRP  03-Oct-83	Table changes to UNTCNT, UNTOWN/UNTOPT and 
+;			UNTCLU/UNTERR
+;  013	GPK  19-Nov-83	Move most of date/time conversion to PFBIO
+;  014	DRP  05-Dec-83	Move UU.ERR here from OPNLRG
+;  015	GPK  23-Jan-84	Bugfix in 008 (UU.SYS)
+;  016	KCG  15-Feb-84	Return pointer to NULRTS Descriptor Block in UU.TB3
+;  017	GPK  13-Mar-84	Add UU.SYS part 3
+;  018  FRL  01-Apr-84  V9.0 logicals
+;  019	GPK  17-Apr-84	Privilege name changes, move PFBIO
+;  020	GPK  11-May-84	Allow non-priv'd UU.SYS on controlled jobs
+;  021	DRP  03-Jul-84	Change the error returned by UU.SYS for non-existent
+;			job numbers
+;  022	KPH  16-Jul-84	Return DSTCTL in UU.TB3
+;  023	KPH  02-Aug-84	Bugfix in 022
+;  024	KPH  29-Aug-84	Changes for FIP pool in APR5
+;  025	FEK  01-NOV-84	Add support for Stardates
+;  026	KPH  08-Jan-85	Return "KEY" compatibility in UU.SYS
+;			Return accurate connect time in UU.SYS
+;
+;			[RSTS V9.2]
+;  027  KPH  25-Jul-85	Add job control region
+;  028  KPH  03-Dec-85	Fix MAP macro usage in UU.ERR
+;  029  KPH  14-Jan-86	Fix reference to JCHDRS
+;
+;			[RSTS V9.3]
+;  030  KPH  08-Jun-86	Bugfix in 029
+;
+;			[RSTS V9.5]
+;  031  KPH  13-Oct-87	Add .INCLUDEs
+;			Change PK DDB references to use CSR.KB
+;
+;			[RSTS V9.7]
+;  032	DBM  01-Nov-88	Return saved privilege mask in UU.SYS subcode 2
+;
+;			[RSTS V10.0]
+;  033	FEK  29-Jan-90	Add file name to returned info for UU.FCB
+;  034  WRM  25-Apr-90	Remove header size from memory values reported (uu.SYS)
+;
+;			[RSTS V10.1]
+;  035	FEK  10-Apr-91	Add UU.USC and fix MOVB -(SP)s
+;  036	JFM  31-May-91	Return either the input buffer or the type ahead buffer
+;			in UU.FCB for terminal DDBs, depending on where next 
+;			read will get satisfied.
+;-
+
+	IONLY			;Request I-only versions of FIP macros	;024
+
+FQFSRT	UUO,LODABL							;024
+
+.SBTTL	THE UUO HOOK
+
+;+
+; UUOFQ - THE UUO HOOK.
+;
+;	R4 -> FIRQB
+;		FQERNO =  THE UUO FUNCTION CODE
+;		+5     =  PARAMETER BYTE(S) (UP TO 26. OF THEM)
+;-
+
+	FQFENT	UUO,,<4,6,10,12,14,16,20,22,24,26,30,32,34,36>
+
+	CRASH			;AN ERROR!
+
+.SBTTL	GET MONITOR TABLES
+
+;+
+; UU.TB1 - GET MONITOR TABLES PART 1.
+;
+;	R4 -> FIRQB
+;
+;	IN FIRQB ON RETURN
+;		+4  =  HIGHEST KB NUMBER
+;		+5  =  HIGHEST POSSIBLE JOB NUMBER
+;		+6  -> "DEVCNT"
+;		+10 -> "DEVPTR"
+;		+12 -> "MEMLST"
+;		+14 -> "JOBTBL"
+;		+16 -> "JBSTAT"
+;		+20 -> "JBWAIT"
+;		+22 -> "UNTCLU"
+;		+24 -> "UNTCNT"
+;		+26 -> "SATCTL"
+;		+30 -> "JSBTBL"
+;		+32 -> "SATCTM"
+;		+34 =  CURRENT DATE
+;		+36 -> "UNTOPT"
+;-
+
+.MACRO	MOVE	SYMBOL
+	 MOV	#SYMBOL,(R4)+
+.DSABL	CRF
+.GLOBL	SYMBOL
+.ENABL	CRF
+.ENDM	MOVE
+
+	UUOENT	TB1,,SYNC,LOGABL	;GET TABLES PART 1
+
+	CMP	(R4)+,(R4)+	;BUMP FIRQB POINTER TO FREE AREA
+	MOVB	#CNT.KB-1,(R4)+	;SET MAX LINE #
+	MOVB	@#MAXCNT,(R4)+	; AND SET MAX JOB #
+	MOVE	DEVCNT		;DEVICE UNIT MAX TABLE
+	MOVE	DEVPTR		;DEVICE SUB POINTER TABLE
+	MOVE	MEMLST		;CORE TABLE
+	MOVE	JOBTBL		;JOB TABLE
+	MOVE	JBSTAT		;JOB STATUS
+	MOVE	JBWAIT		;JOB WAIT CONDITIONS
+	MOVE	UNTCLU		;UNIT CLUSTER LIST
+	MOVE	UNTCNT		;DISK STATUS
+	MOVE	SATCTL		;SAT COUNT LOW PART
+	MOVE	JSBTBL		;JOB STATUS BIT TABLE
+	MOVE	SATCTM		;SAT COUNT HIGH PART
+	MOV	@#DATE,(R4)+	;GIVE BACK DATE ALSO
+	MOVE	UNTOPT		;UNIT OPTIONS				;012
+	RETURN			;EXIT
+
+GLOBAL	<CNT.KB,MAXCNT>
+
+;+
+; UU.TB2 - GET MONITOR TABLES PART 2.
+;
+;	R4 -> FIRQB
+;
+;	IN FIRQB ON RETURN
+;		+4  -> "FREES"
+;		+6  -> "DEVNAM"
+;		+10 -> "CSRTBL"
+;		+12 =  "DEVOKB"
+;		+14 -> "TTYHCT"
+;		+16 -> "JOBCNT"
+;		+20 -> "RTSLST"
+;		+22 -> "ERLCTL"
+;		+24 -> "SNDLST"
+;		+26 -> "DSKLOG"						;018
+;		+30 =  "DEVSYN"
+;		+32 -> "MEMSIZ"
+;		+34 -> "CCLLST"
+;		+36 -> "FCBLST" IF LARGE FILES
+;		    =  0	IF SMALL FILES
+;-
+
+	UUOENT	TB2,,SYNC,LOGABL	;GET TABLES PART 2
+
+	CMP	(R4)+,(R4)+	;INDEX TO FREE PART OF FIRQB
+	MOVE	FREES		;SMALL BUFFERS
+	MOVE	DEVNAM		;DEVICE NAME TABLE
+	MOVE	CSRTBL		;CSR TABLE
+	MOVE	DEVOKB		;DISK TO KB OFFSET
+	MOVE	TTYHCT		;HUNG TTY COUNT
+	MOVE	JOBCNT		;JOBCNT,MAXCNT,MAXJOB
+	MOVE	RTSLST		;RUN-TIME SYSTEM LINK
+	MOVE	ERLCTL		;ERROR LOGGING CONTROL
+	MOVE	SNDLST		;MESSAGE SENDING LIST
+	MOVE	DSKLOG		;LOGICAL NAME TABLE			;018
+	MOVE	DEVSYN		;START OF ALTERNATE NAMES
+	MOVE	MEMSIZ		;MEMORY SIZE LOCATION
+	MOVE	CCLLST		;CCL COMMAND LINK WORD
+	MOVE	FCBLST		;LIST HEADERS OF FCB'S
+	RETURN			;EXIT					;008
+
+;+
+; UU.TB3 - Get Monitor tables part 3.
+;
+;	R4 ->	FIRQB
+;
+;	In FIRQB on return
+;		+4  ->	"DDCTBL"
+;		+6  ->	"UCTTBL"
+;		+10 ->	"SATEND"
+;		+12 ->	"UNTLVL"
+;		+14 ->	"MFDPTR"
+;		+16 ->	"MAGLBL"
+;		+20  =	number of jobs in JOBTBL
+;		+21  =	SO.1MX, number of "one-instance" LOT's
+;		+22 ->	"LOTTBL"
+;		+24 ->	"EMLCTL"
+;		+26  =  Hardware configuration word
+;		+30 ->	"UNTERR"
+;		+32 ->	"DEVCLU"
+;		+34 ->	"NULRTS"
+;		+36  =  MMU address of disk statistics, if present
+;-
+
+	UUOENT	TB3,,SYNC,LOGABL	; Get tables part 3
+	CMP	(R4)+,(R4)+	; Index to free part of FIRQB
+	MOVE	DDCTBL		; Controller count/UCTTBL index table
+	MOVE	UCTTBL		; Unit count table
+	MOVE	SATEND		; SAT end table (highest PCN)
+	MOVE	UNTLVL		; Unit rev & level table
+	MOVE	MFDPTR		; MFD DCN value
+	MOVE	MAGLBL		; Magtape labelling default and densities
+	CLR	R0		; Initialize active-job counter			       ;007+
+	MOV	#JOBTBL+2,R1	; Point R1 -> first "real" JOBTBL slot
+10$:	CMP	(R1),#-1	; End of JOBTBL ?
+	BEQ	20$		; Yes => go post active-job count
+	TST	(R1)+		; Not yet:  is there a job here, then ?
+	BEQ	10$		; No => go look at next JOBTBL slot
+	INC	R0		; Yes:  bump active-job count
+	BR	10$		;   and go look at next JOBTBL slot
+
+20$:	MOVB	R0,(R4)+	; Post active-job count
+	MOVB	#SO.1MX,(R4)+	; Number of "one-instance" Local Object Types
+	MOVE	LOTTBL		; Local Object Type Table (RIB pointers)
+	MOVE	EMLCTL		; EMT Logger control table		;007-
+	MOV	@#X.CON,(R4)+	; RETURN THE CONFIGURATION WORD		;010
+	MOVE	UNTERR		; Unit error table			;012
+	MOVE	DEVCLU		; Device cluster table			;012
+	MOVE	NULRTS		; NULRTS Descriptor Block		;016
+	MOV	#DSTPTR,(R4)	; Pick up address of DSTPTR		;022
+	BEQ	30$		; None, stats not SYSGENed		;022
+	MOV	@(R4)+,-(R4)	; We have stats, return the contents	;023
+30$:	RETURN			; All done				;022
+
+GLOBAL	<JOBTBL,X.CON>
+.WEAK	DSTPTR								;022
+
+.SBTTL	GET FCB/DDB
+
+;+
+; UU.FCB - GET FCB/DDB.
+;
+;	R1 -> JOB DATA BLOCK
+;	R4 -> FIRQB
+;		FQFIL  =  CHANNEL NUMBER
+;		FQSIZM =  SUB-FUNCTION CODE
+;
+;	IN FIRQB ON RETURN FOR SUB-FUNCTION CODE 0
+;		+4     =  WCB/DDB WORD #1.
+;		+6     =  WCB/DDB WORD #2.
+;		+10    =  WCB/DDB WORD #3.
+;		+12    =  WCB/DDB WORD #4.
+;		+14    =  WCB/DDB WORD #5.
+;		+16    =  WCB/DDB WORD #6.
+;		+20    =  WCB/DDB WORD #7.
+;		+22    =  WCB/DDB WORD #8.
+;		+24    =  WCB/DDB WORD #9.
+;		+26    =  WCB/DDB WORD #10.
+;		+30    =  WCB/DDB WORD #11.
+;		+32    =  WCB/DDB WORD #12.
+;		+34    =  WCB/DDB WORD #13.
+;		+36    =  WCB/DDB WORD #14.
+;
+;	IN FIRQB ON RETURN FOR SUB-FUNCTION CODE 1
+;		+4     =  FCB - N/U ACCESS COUNT
+;		+5     =  FCB - RR ACCESS COUNT
+;		+6     =  FCB - STATUS BYTE
+;		+7     =  FCB - FILE SIZE (MSB)
+;		+10    =  FCB - FILE SIZE (LSB)
+;-
+
+	UUOENT	FCB,,SYNC,LOGABL	;GET FCB/DDB
+
+	CMP	(R4)+,(R4)+	;INDEX TO FQFIL
+	MOVB	(R4),R0		;GET CHANNEL NUMBER
+	CMP	R0,#15.		;LEGAL?
+	BHI	20$		;NO
+	ASL	R0		;YES, TIMES 2 NOW
+	ADD	(R1),R0		;FIND THE POINTER INTO THE IOB
+	MOV	(R0),R1		; AND GET THE WCB/DDB POINTER
+	BEQ	30$		;ERROR, NOT OPEN
+	MOVB	FQSIZM-FQFIL(R4),R0 ;GET THE SUB-FUNCTION CODE
+	BEQ	10$		;RETURN WCB/DDB INFO IF SUB-FUNCTION IS 0
+	CMP	#1.,R0		;IS IT SUB-FUNCTION 1
+	BNE	40$		;NO, ILLEGAL SUB-FUNCTION THEN
+	BIT	#DDNFS!WC$UFD!377,(R1) ;FILE ON DISK?
+	BNE	50$		;NO, THAT'S ILLEGAL ALSO
+	MOV	W$FCB(R1),R1	;GET THE FCB POINTER
+	BEQ	30$		;BAD NEWS IF THERE ISN'T ONE
+	MOV	F$ACNT-F$CLUS(R1),(R4)+ ;COPY THE ACCESS COUNTS
+	MOVB	F$STAT-F$CLUS(R1),(R4)+ ; ALONG WITH THE STATUS BYTE
+	INC	R4			; Skip this byte for now	;033
+	MOV	-(R1),(R4)+		;  Copy the FILE SIZE (LSB)
+.ASSUME	F$SIZL	EQ	F$CLUS-2
+	MOVB	-(R1),-3(R4)		;   and THE FILE SIZE (MSB)	;033
+.ASSUME	F$SIZM	EQ	F$SIZL-1
+	MOVB	-(R1),R3		; GET THE FIP UNIT NUMBER	;033
+.ASSUME	F$UNT	EQ	F$SIZM-1
+	ADD	#F$PPN-F$UNT,R1		;Point to the name		;033
+	MOV	(R1)+,(R4)+		;Return the files PPN		;033
+	MOV	(R1)+,(R4)+		;Get the file name		;033
+	MOV	(R1)+,(R4)+		; and the second part		;033
+	MOV	(R1)+,(R4)+		;  along with the extension	;033
+	MUL	#DL$SIZ,R3	;COMPUTE OFFSET INTO DISK TABLE @ PHYSICAL ;033
+	ADD	#DSKLOG+DL$DEV,R3 ;   NAME FROM FIP UNIT NUMBER		;033
+	ADD	#FQDEV-FQMODE,R4  ; Point to FQDEV			;033
+	MOV	(R3)+,(R4)+	; AND FINALLY SET THE DEVICE NAME	;033
+	MOV	(R3)+,(R4)+	; AND the unit number			;033
+	RETURN
+
+10$:	MOV	(R1)+,(R4)+	;MOVE A WORD TO THE FIRQB
+	BIT	R4,#40-1	;MORE?
+	BNE	10$		;YES, LOOP
+
+	; If this is a terminal, then return the type ahead buffer 	;036
+	; pointers (already moved into the FIRQB) unless there's 	;036
+	; characters in the input buffer.				;036
+									;036
+	CMPB	<DDIDX-14.*2>(R1),#TTYHND ;KB device?			;036
+	BNE	15$		;Not this time				;036
+	ADD	#TTINPT+BC-TTCHAR,R1 ;R1->buffer quota of input buffer	;036
+.ASSUME	TTCHAR	EQ <14.*2>						;036
+.ASSUME	TTINPT	GT TTINEC						;036
+	CMP	-(R1),-(R1)	;Are buffer pointers the same?		;036
+	BEQ	15$		;Nothing here, return type ahead buffer	;036
+	SUB	#TTCHAR-TTINEC,R4 ;R4 -> TTINEC+EP field in FIRQB	;036
+	MOV	(R1)+,(R4)+	;Put TTINPT+EP into FIRQB		;036
+	MOV	(R1)+,(R4)+	;Put TTINPT+FP into FIRQB		;036
+	MOV	(R1)+,(R4)+	;Put TTINPT+BC into FIRQB		;036
+15$:	RETURN			;All done				;036
+
+20$:	ERROR	BSERR		;ILLEGAL I/O CHANNEL
+
+30$:	ERROR	NOTOPN		;NOT OPEN
+
+40$:	ERROR	BADFUO		;ILLEGAL SYS () USAGE
+
+50$:	ERROR	NODEVC		;NOT A VALID DEVICE
+
+.SBTTL	DATE AND TIME CONVERSIONS
+
+;+
+; UU.CNV - DATE AND TIME CONVERSIONS.
+;
+;	R4 -> FIRQB
+;		+4  =  INTERNAL FORM DATE (0=>TODAY)
+;		+6  =0 => USE SYSTEM DEFAULT FORMAT
+;		    <0 => USE ALPHABETIC MONTH FORMAT
+;		    >0 => USE ISO FORMAT
+;		+22 =  INTERNAL FORM TIME (0=>NOW)
+;		+24 =0 => USE SYSTEM DEFAULT FORMAT
+;		    <0 => USE AM/PM FORMAT
+;		    >0 => USE 24 HOUR FORMAT
+;
+;	IN FIRQB ON RETURN
+;		+10 =  DATE STRING AS .ASCIZ ("DD-MMM-YY" OR "YY.MM.DD ")
+;			(DDDDDD.MM as the Stardate)
+;		+26 =  TIME STRING AS .ASCIZ ("HH:MM XM" OR "HH:MM   ")
+;-
+
+	UUOENT	CNV,,SYNC,LOGABL	;DATE AND TIME CONVERSIONS
+
+	CMP	(R4)+,(R4)+	;INDEX TO THE DATE INFORMATION
+	CLR	-(SP)		;SAVE A FLAG				;025
+	SPLC	6		;;;LOCK OUT THE CLOCK			;025
+	MOV	(R4)+,R3	;;;GET DATE TO CONVERT
+	BNE	10$		;;;A DATE WAS SPECIFIED
+	DEC	(SP)		;;;USE DEFAULT, SO MAKE FLAG -1		;025
+	MOV	@#DATE,R3	;;;ELSE GET TODAY'S DATE
+10$:	MOV	@#TIME,-(SP)	;;;GET TODAYS TIME			;025
+	SPLC	3		;;;NOW BACK DOWN LOW			;025
+	MOV	(R4)+,R5	;Get conversion format			;013
+	BNE	20$		;One was specified, use it		;013
+	MOV	@#DATCNV,R5	;None, use system default		;013
+	BNE	20$		;DEFAULT <> STARDATE			;025
+	INC	2(SP)		;MAKE IT -1 IF STARDATE			;025
+20$:	CALLM	CNVDAT,EM2AP5	;Convert the date to ASCII		;019
+	TST	2(SP)		;DID WE JUST DO A STARDATE?		;025
+	BLE	30$		;NO, SO CONTINUE WITH THE WORLD		;025
+	MOVB	#'0,-2(R4)	;ZERO OUT THE LAST 2 DIGITS		;025
+	MOVB	#'0,-1(R4)	; AND DONE				;025
+30$:	MOV	(SP)+,(SP)	;CLOBER THE OLD FLAG WITH THE TIME	;025
+	CLRB	(R4)+		;SET FINAL .ASCIZ NULL
+	MOV	(R4)+,R1	;GET SPECIFIED TIME			;013
+	BNE	130$		;ONE WAS SPECIFIED
+	MOV	(SP),R1		;ELSE USE RIGHT NOW			;025
+130$:	TST	(SP)+		;AND NOW TRASH IT			;025
+	MOV	(R4)+,R5	;Get time format			;013
+	BNE	140$		;One was specified, use it		;013
+	MOV	@#TIMCNV,R5	;Otherwise use system default		;013
+140$:	CALLM	CNVTIM,EM2AP5	;Convert the time			;019
+	MOVB	#40,(R4)+	;Put in space after minutes		;013
+	MOV	R0,(R4)+	;Put in AM, PM, or blanks		;013
+	CLR	(R4)		;SET FINAL .ASCIZ NULL(S)
+	RETURN			;EXIT
+
+GLOBAL	<DATCNV,TIMCNV>							;013
+
+FQFEND
+
+
+.SBTTL	RETURN JOB PARAMETERS (UU.SYS)
+
+FQFSRT
+
+;+
+; UU.SYS - RETURN JOB PARAMETERS
+;
+;	R0 =  CALLING JOB NUMBER TIMES TWO
+;	R4 -> FIRQB
+;		FQERNO = JOB NUMBER TO RETURN, DEFAULT TO CALLING IF NON-PRIV
+;		FQSIZM = SUBFUNCTION (0, 1 or 2)			;017
+;
+; IN FIRQB ON RETURN OF SUBFUNCTION 0
+;
+;	4	JOB NUMBER TIMES TWO OF JOB BEING REPORTED
+;	5	KEYBOARD NUMBER OF JOB'S CONSOLE, OR THE COMPLEMENT
+;		OF THE KEYBOARD NUMBER THE JOB WAS DETACHED FROM
+;	6	IF THE JOB IS ON A PSUEDO KEYBOARD, THE CONTROLLING
+;		JOB NUMBER TIME TWO
+;	7	THE JOB'S SWAP PARAMETER
+;     10-11	THE LSB OF THE JOB'S LOGGED IN CPU TIME IN 10THS OF SECONDS
+;     12-13	THE JOB'S CONNECT TIME, IN MINUTES
+;     14-15	THE LSB OF THE JOB'S KCT'S
+;     16-17	THE JOB'S DEVICE TIME.
+;	20	THE MSB OF THE JOB'S KCT'S
+;	21	THE MSB OF THE JOB'S CPU TIME
+;     22-25	THE JOB'S NAME IN TWO RADIX 50 WORDS
+;     26-27	THE JOB'S PPN IN INTERNAL FORMAT
+;     30-33	THE NAME OF THE JOB'S DEFAULT RUN-TIME SYSTEM
+;     34-37	THE NAME OF THE JOB'S CURRENT RUN-TIME SYSTEM
+;
+; IN FIRQB ON RETURN OF SUBFUNCTION 1
+;
+;	4	JOB NUMBER TIMES TWO OF JOB BEING REPORTED
+;	5	KEYBOARD NUMBER OF JOB'S CONSOLE, OR THE COMPLEMENT
+;		OF THE KEYBOARD NUMBER THE JOB WAS DETACHED FROM
+;      6-7	THE JOB'S CURRENT FLAG WORD
+;	10	THE JOB'S CURRENT IOSTS
+;	11	THE JOB'S CURRENT POSTING INFORMATION
+;     12-13	JBSTAT PARAMETER FOR THE JOB
+;     14-15	JBWAIT PARAMETER FOR THE JOB
+;	16	SIZE OF THE JOB'S USER MEMORY ALLOCATION less JCHDRS (K WORDS)
+;	17	THE JOB'S CURRENT MEMORY CONTROL SUB-BLOOCK CONTROL WORD
+;     20-21	THE JOB'S CURRENT PHYSICAL ADDRESS, IN 32-WORD INCREMENTS
+;	22	THE JOB'S PRIORITY
+;	23	THE JOB'S ALLOTTED RUN BURST IN TENTH'S OF SECONDS
+;	24	THE JOB'S MAXIMUM ALLOWED MEMORY SIZE less JCHDRS (K WORDS)
+;	25	XRCI @ XRK FOR JOB
+;     26-27	XRTIME @ WRK IF (JBSTAT AND JBWAIT)=JS.KB
+;		DEVICE NAME  IF (JBSTAT AND JBWAIT) INDICATE OTHER I/O STALL
+;		FIP CODE     IF (JBSTAT AND JBWAIT) INDICATE A FIP WAIT
+;     30-31	XRBSAV @ WRK FOR JOB
+;     32-33	POINTER TO THE JOB'S JDB
+;     34-35	POINTER TO THE JOB'S JDB2
+;     36-37	POINTER TO THE JOB'S RIB
+;
+; In FIRQB on return of subfunction 2					;017
+;									;017
+;	4	Job number times two of job being reported		;017
+;	5	Keyboard number of job's console, or the complement	;017
+;		of the keyboard number the job was detached from	;017
+;	6	Job's current I-space size				;017
+;	7	Job'd current D-space size				;017
+;	10-17	Job's current privilege mask				;017
+;	20	Job's access type:					;017
+;			0 - Local					;017
+;			1 - Dialup					;017
+;			2 - Batch					;017
+;			4 - Network					;017
+;			6 - Server					;017
+;			other values reserved				;017
+;	21	Job's header size					;017
+;	22-25	Unused							;032
+;	26-27	Job's PPN in internal format				;032
+;	30-37	Job's saved privilege mask				;032
+;-
+
+USYSER:	ERROR	BADFUO		;AN ERROR IN THE JOB HAPPENED
+
+USYSPV:	ERROR	PRVIOL		;THE JOB IS NOT LOGGED IN
+
+	UUOENT	SYS,,SYNC,LOGABL	;RETURN JOB PARAMETERS
+
+	CMPB	FQSIZM(R4),#2	;Legal subfunction?			;017
+	BHI	USYSER		;No, reject				;017
+	CMP	(R4)+,(R4)+	;BUMP THE POINTER TO THE USER'S PARAMETERS
+	MOVB	(R4),R5		;GET THE JOB NUMBER PASSED TO US
+	ASL	R5		;DOUBLE THE JOB NUMBER FOR PROPER INDEX
+	BNE	10$		;One was specified, skip		;020
+	MOV	R0,R5		;Job defaulted, use ours		;020
+10$:	CMP	R5,#JOBMX2	;FIRST, IS THIS A LEGAL JOB NUMBER?
+	BHI	USYSER		; NO, GIVE A BADFUO ERROR
+	MOV	R5,-(SP)	;Save R5				;008
+	MOV	(PC)+,R5	;Set up privilege mask			;024
+	 .BPRIV	JOBCTL		;as job-control privs			;024
+	CALLX	CHKPR5,R4	;Check user's privileges		;024
+	MOV	(SP)+,R5	;Re-get job number			;008
+	ROR	-(SP)		;Save privilege indicator		;020
+20$:	MOV	JOBTBL(R5),R1	;GET THE JDB POINTER OF THE TARGET JOB
+	BEQ	USYSPV		;NO JDB IMPLIES NOT A JOB		;021
+	MOVB	R5,(R4)+	;RETURN THE JOBNO*2 OF JOB REPORTING ON
+	MOV	R4,-(SP)	;Save FIRQB pointer			;026
+	MOVB	R5,R4		;And get job number for CONNEC		;026
+	CALLX	CONNEC		;Be sure that connect time is updated	;026
+	MOV	(SP)+,R4	;Restore FIRQB pointer			;026
+	MOV	R3,R2		;Get DDB pointer in correct place	;026
+	MOVB	DDUNT(R2),R3	;GET THE KEYBOARD NUMBER
+	BCC	40$		;Complement it if detached (from CONNEC) ;026
+30$:	COM	R3		; NO - ONE'S COMPLEMENT THE KEYBOARD NUMBER
+40$:	MOV	(SP)+,R5	;Re-get the privilege flag		;020
+	CLR	-(SP)		;Get a cell on the stack		;017
+	MOVB	(R4),(SP)	;Get function code			;017
+	MOVB	R3,(R4)+	;Replace it by keyboard number		;017
+	BMI	50$		;IF JOB IS DETACHED MERGE TO THE COMMON CODE
+	CMPB	TTINTF(R2),#TTPK11;IS THIS A PK11 INTERFACE TYPE?
+	BNE	50$		;NO, SO NO CONTROLLING JOB IS POSSIBLE
+	ASL	R3		;Yes, get keyboard number times two	;028
+	MOV	CSR.KB(R3),R3	;And pick up corresponding PK DDB	;028
+	MOVB	DDJBNO(R3),(R4)	;SET THE CONTROLLING JOB NUMBER OF THIS PK
+	BR	55$		;CONTINUE WITH EASIER THINGS
+
+50$:	CLRB	(R4)		;CLEAR THE CONTROLLING JOB NUMBER
+55$:	TST	R5		;Do we have privs?			;020
+	BPL	57$		;Yes, skip job number check		;020
+	CMPB	-2(R4),R0	;Looking up self?			;020
+	BEQ	57$		;Yes, so ok				;020
+	CMPB	(R4),R0		;No, but is the job controlled by us?	;020
+	BNE	USYSER		;No, so reject the request		;020
+57$:	MOVB	-2(R4),R5	;Re-get specified job number		;020
+	ASL	(SP)		;Make word offset			;017
+	ADD	(SP)+,PC	; and dispatch				;017
+	 BR	60$		;Part 0					;020
+	 BR	70$		;Part 1					;017
+	 FJMP	UUSYS2		;Part 2 is in another overlay...	;027
+
+; UU.SYS part 0								;017
+;
+; R1 -> JDB @ JDFLG
+; R5 = Job # * 2
+
+60$:	TSTB	(R4)+		;Controlled job?			;020
+	BEQ	65$		;No					;020
+	INCB	-1(R4)		;Yes, mark it				;020
+65$:	MOV	JDJDB2-JDFLG(R1),R2 ;Pick up the JDB2 pointer		;027
+	MOV	R5,R0		;Get the job # * 2			;027
+	CALLX	MAPJCR		;Go map the job's JCR entry		;027
+	MOVB	JCSWAP(R1),(R4)+ ;Return the swap parameter		;027
+	ADD	#JCCPU,R1	;And point to the CPU time word		;027
+	MOV	(R1)+,(R4)+	;Return the LSB of CPU time		;027
+	MOV	(R1)+,(R4)+	;Return the connect time		;027
+.ASSUME	JCCON	EQ	JCCPU+2
+	MOV	(R1)+,(R4)+	;Return the LSB of KCTs			;027
+.ASSUME	JCKCT	EQ	JCCON+2
+	MOV	(R1)+,(R4)+	;Return the job's device time		;027
+.ASSUME	JCDEV	EQ	JCKCT+2
+	MOV	(R1)+,(R4)+	;Return the MSB of KCTs and CPU	time	;027
+.ASSUME	JCKCTM	EQ	JCDEV+2
+.ASSUME	JCCPUM	EQ	JCKCTM+1
+	MOV	(R1)+,(R4)+	;Return the first word of the job's name ;027
+	MOV	(R1)+,(R4)+	;Return the second word of the job's name ;027
+.ASSUME	JCNAME	EQ	JCCPUM+1
+	MOV	(R1),R3		;Pick up the job's default RTS pointer	;027
+.ASSUME	JCDRTS	EQ	JCNAME+4
+	MOV	J2PPN(R2),(R4)+	;Return the job's PPN			;027
+	TST	(R3)+		;BUMP THE RTS BLOCK POINTER
+	MOV	(R3)+,(R4)+	;SET THE FIRST PART OF THE JOB'S DEFAULT RTS
+.ASSUME	R.NAME	EQ	2
+	MOV	(R3)+,(R4)+	;SET THE SECOND PART OF THE JOB'S DEFAULT RTS
+	MOV	JOBTBL(R0),R3	;Get the pointer to the job's JDB	;027
+	MOV	JDRTS(R3),R3	;Now point to the RTS block		;027
+	TST	(R3)+		;BUMP THE RTS BLOCK POINTER
+	MOV	(R3)+,(R4)+	;SET THE FIRST PART OF THE JOB'S CURRENT RTS
+.ASSUME	R.NAME	EQ	2
+	MOV	(R3)+,(R4)+	;SET THE SECOND PART OF THE JOB'S CURRENT RTS
+	MAP	FIPPOL		;Restore FIP mapping			;027
+	RETURN			; END OF UU.SYS SUBFUNCTION 0
+
+GLOBAL	<JOBTBL,JOBMX2,CSR.KB>						;028
+
+; UU.SYS part 1:
+;
+; STATE OF REGISTERS:
+; R0 = CALLING JOB*2	R1 -> JOB'S JDB@JDFLG	R2 -> TARGET JOB'S KBDDB
+; R3 = JOB'S KB NUMBER	R4 -> FIRQB @ FQPPN	R5 =  TARGET JOB*2	;017
+
+70$:	MOV	(R1),(R4)	;SET THE JOB'S CURRENT FLAG WORD	;026
+	BIC	#JFPRIV!JFNOPR,(R4) ;Now clear out pre-V9.0 bits	;026
+	MOV	JDJDB2-JDFLG(R1),R3 ;Get pointer to JDB2		;026
+	TST	J2PPN(R3)	;Logged-in?				;026
+	BNE	71$		;Yes, sure is				;026
+	BIS	#JFNOPR,(R4)	;No, tell the user about it		;026
+71$:	MOV	R1,-(SP)	;Save pointer to JDB @ JDFLG		;027
+	MOV	R0,-(SP)	;Save caller's job number		;027
+	MOV	R5,R0		;Get target job # times two		;027
+	CALLX	MAPJCR		;Map the JCR for the job		;027
+	MOV	R1,R3		;Copy pointer to start of JCR		;027
+	MOV	(SP)+,R0	;Restore caller's job number		;027
+	MOV	(SP)+,R1	;And restore pointer to JDB @ JDFLG	;027	
+	MOV	R3,-(SP)	;Save JCR pointer			;027
+	ADD	#JCPRIV,R3	;Point to current privs			;027
+	BIT	#JFSYS,(R1)	;Temporary privs in effect?		;026
+	BEQ	72$		;No, so this is the right mask		;026
+	ADD	#JCSPRV-JCPRIV,R3 ;Otherwise use what was saved		;027
+72$:	TSTPRV	WACNT,(R3)	;Does he have world-accounting?		;026
+	BEQ	73$		;No					;026
+	TSTPRV	WWRITE,(R3)	;Yes, but can he write anything?	;026
+	BEQ	73$		;No					;026
+	TSTPRV	SYSIO,(R3)	; and do system-I/O also?		;026
+	BEQ	73$		;No					;026
+	BIS	#JFPRIV,(R4)	;Yes, so he must be "privileged"	;026
+73$:	MOV	(SP)+,R2	;Restore JCR pointer			;027
+	CMP	(R4)+,(R1)+	;Skip past flag word and JDFLG		;026
+	MOV	(R1)+,(R4)+	;SET THE JOB'S IOSTS AND POST WORDS
+.ASSUME	JDPOST	EQ	JDIOST+1
+	MOV	(R1)+,-(SP)	;Push pointer to job's work block	;027
+.ASSUME	JDWORK	EQ	JDPOST+1
+	MOV	(R1),34-12(R4)	;Return the JDB2 pointer to the job	;027
+.ASSUME	JDJDB2	EQ	JDWORK+2
+	MOV	JBSTAT(R5),(R4)+;SET THE JOB'S CURRENT JBSTAT PARAMETER
+	MOV	JBWAIT(R5),R3	;GET THE JOB'S CURRENT JBWAIT PARAMETER
+	MOV	R3,(R4)+	;RETURN THE JOB'S JBWAIT TO THE CALLER
+	ADD	#JDSIZE-JDJDB2,R1;POINT TO THE JOB'S CURRENT SIZE
+.ASSUME	JDWORK	EQ	JDPOST+1
+	CLR	-(SP)		;Clear a holding cell			;035
+	MOVB	(R1)+,(SP)	;get the JDSIZE value			;035
+	CLR	-(SP)		;Clear a holding cell			;035
+	MOVB	JCHDRS(R2),(SP)	; get job header size			;035
+	SUB	(SP)+,(SP)	;jdsize-JCHDRS->(SP)			;034
+	MOVB	(SP)+,(R4)+	;put in firqb for return		;034
+	MOVB	(R1)+,(R4)+	;SET THE M.CTRL BYTE in firqb		;034
+.ASSUME	M.CTRL	EQ	M.SIZE+1
+	MOV	(R1)+,(R4)+	;SET THE JOB'S CURRENT PHYSICAL MEMORY ADDRESS
+.ASSUME	M.PHYA	EQ	M.CTRL+1
+	MOV	JCPRI(R2),(R4)+	;Save priority and run-burst		;027
+.ASSUME	<JCPRI & 1> EQ 0
+.ASSUME JCBRST EQ JCPRI+1
+	MOV	R5,-(SP)	;Save a register			;008
+	MOV	(PC)+,R5	;Set up privilege word			;024
+	 .BPRIV	TUNE		;To check priority-related things	;024
+	CALLX	CHKPR5,R4	;Check privileges of caller		;024
+	MOV	(SP)+,R5	;Restore R5 first			;008
+	BCC	75$		;Yes, so don't clear the word		;008
+	CLR	-2(R4)		;No, don't return priority/runburst	;027
+75$:	CLR	-(SP)		;Clear a holding cell			;035
+	MOVB	JCSIZM(R2),(SP) ;Return the job's private memory max	;035
+	CLR	-(SP)		;Clear a holding cell			;035
+	MOVB	JCHDRS(R2),(SP) ;get the header size again		;035
+	SUB	(SP)+,(SP)	;JCSIZM-JCHDRS->(SP)			;034
+	MOVB	(SP)+,(R4)+	;return private mem max less header siz	;034
+	MOV	JCMPTR(R2),36-25(R4) ;Return the job's first RIB	;027
+	MAP	FIPPOL		;Restore FIP mapping			;027
+	MOV	JOBTBL(R5),R0	;SAVE THE JOB'S JDB POINTER IN R0	;015
+	MOV	R0,32-25(R4)	;And return it to the user		;027
+	MOV	(SP)+,R2	;Restore job's work block pointer	;027
+	MOVB	XRCI(R2),(R4)+	;SET THE XRCI OFFSET FROM JOB'S WORK BLOCK
+	MOV	XRBSAV(R2),2(R4);SET THE XRBSAV IN THE LOCATION AFTER STATE
+	CLR	(R4)		;PRECLEAR THE EXTENDED STATE INDICATOR
+	BIT	R3,JBSTAT(R5)	;IS THE JOB IN A RUN STATE?
+	BNE	110$		;YES, NO FURTHER PROCESSING NEEDED
+	MOV	XRTIME(R2),(R4)	;SET THE XRTIME OFFSET FROM WRK
+	BIT	R3,#<JSTEL!JSTIM!JSBUF!JS.KB> ;JOB IN KB OR NON-I/O STATE?
+	BNE	110$		;YES, THEN NO NEED FOR FURTHER PROCESSING
+	MOVB	FQFUN(R2),(R4)	;SET THE FIP FUNCTION
+	BIT	R3,#JSFIP	;IS THE JOB IN A FIP STATE?
+	BNE	110$		;YES, THEN NO NEED FOR FURTHER PROCESSING
+	MOVB	XRCI(R2),R2	;GET THE CHANNEL NUMBER AGAIN
+	BIT	R2,#^C<15.*2>	;VALID CHANNEL NUMBER?
+	BNE	110$		;NO, SO SKIP REPORTING THE DEVICE NAME
+	ADD	(R0),R2		;POINT TO THE OPEN CHANNEL IN THE IOB	;015
+.ASSUME	JDIOB	EQ	0
+
+	MOV	(R2),R2		;POINT TO THE OPEN CHANNEL DDB OR SCB OR WCB
+	BEQ	110$		;NOT A VALID POINTER, CONTINUE
+	MOVB	(R2),R1		;GET DEVICE'S HANDLER INDEX FROM DDB/S(W)CB
+.ASSUME	DDIDX	EQ	0
+	BEQ	80$		;THE DEVICE IS DISK, LOOK IN DSKLOG TABLE ;018
+	BIT	R1,#1		;IS THIS A VALID INDEX?
+	BNE	110$		;NO, SO CONTINUE ON
+	CMP	R1,#DEVSYN-DEVNKB;IS THE INDEX WITHIN THE PROPER RANGE
+	BHI	110$		;NO, CONTINUE WITH REST OF PROCESSING
+	ADD	#DEVNKB-2,R1	;ADD IN THE OFFSET IN DEVNAM TABLE TO INDEX
+	BR	100$		; AND MERGE TO COMMON CODE
+
+80$:	MOV	W$FCB(R2),R1	;GET POINTER TO CHANNELS FCB FROM WCB
+	MOVB	F$UNT-F$CLUS(R1),R1; AND GET THE FIP UNIT NUMBER
+	CMP	R1,#MAXUNT	;IS THE UNIT NUMBER WITHIN RANGE?
+	BHI	110$		;NO, SO SKIP THIS, AND CONTINUE
+	MUL	#DL$SIZ,R1	;COMPUTE OFFSET INTO DISK TABLE @ PHYSICAL ;018
+	ADD	#DSKLOG+DL$DEV,R1 ;   NAME FROM FIP UNIT NUMBER		;018
+100$:	MOV	(R1),(R4)	; AND FINALLY SET THE DEVICE NAME
+110$:	RETURN			; FINALLY RETURN
+
+GLOBAL	<JBSTAT,JBWAIT,DEVSYN,DEVNKB,MAXUNT,DSKLOG>			;018
+
+FQFEND
+
+FQFSRT									;014
+
+.SBTTL	FETCH AN ERROR MESSAGE
+
+;+
+; ERRFQ - FETCH AN ERROR MESSAGE.
+; UU.ERR - FETCH AN ERROR MESSAGE.
+;
+;	R0 =  JOB NUMBER TIMES 2
+;	R1 -> JOB DATA BLOCK
+;	R4 -> FIRQB
+;		FQERNO =  ERROR CODE
+;
+;	IN FIRQB ON RETURN
+;		FQJOB  =  YOUR JOB NUMBER TIMES 2
+;		FQFUN  =  YOUR KB NUMBER TIMES 2
+;		          NOT(KB NUMBER DETACHED FROM TIMES 2)
+;		FQERNO =  ERROR MESSAGE TEXT 0 PADDED (UP TO 28. CHARS)
+;-
+
+	FQFENT	ERR,,<3,4,6,10,12,14,16,20,22,24,26,30,32,34,36>
+
+	UUOENT	ERR,,,LOGABL	;ERROR MESSAGE LOOKUP
+
+	MOVB	#ERRFQ,JDPOST(R1) ;ENSURE ERROR MESSAGE POSTING
+	MOV	(R4),-(SP)	;RE-QUEUE REQUEST THROUGH
+	MOV	SP,@#FIQUE	; FIP'S STACK FOR ERROR RECOVERY
+	CMP	(R4)+,(R4)+	;INDEX TO ERROR CODE AND
+	CLR	R5		;CLEAR FOR BISB
+	BISB	(R4),R5		; AND GET THE ERROR CODE (NO SIGN EXTEND)
+	CMP	@#ERSIZE,#16.	;IS THE ERROR FILE 16 BLOCKS?
+	BEQ	10$		;IF SO, ERROR CODES ARE 0 TO 255.
+	BIC	#^C<177>,R5	;IF NOT, MAKE IT 0 TO 127.
+10$:	MOV	R5,10-4(R4)	;Save away a copy			;014
+	MOV	@(R1)+,R1	;GET CONSOLE TERMINAL DDB POINTER
+	CMP	(R1)+,(R1)+	; AND INDEX INTO IT
+	MOVB	-(R1),-(R4)	;SET KB NUMBER IN FIRQB
+.ASSUME	DDUNT	EQ	3
+	ASLB	(R4)+		; TIMES 2 AS PROMISED
+	CMPB	R0,-(R1)	;JOB DETACHED?
+.ASSUME	DDJBNO	EQ	DDUNT-1
+	BNE	20$		;YES
+	BIT	#DDCONS,DDCNT-DDJBNO(R1) ;MIGHT BE
+	BNE	30$		;JOB NOT DETACHED
+20$:	COMB	-1(R4)		;JOB DETACHED, COMPLEMENT KB NUMBER *2
+30$:	MOV	R5,R1		;COPY THE VALUE
+	ASH	#-4,R5		; THEN DIVIDE BY 20 FOR BLOCK NUMBER
+	BIC	#^C<17>,R1	;TRIM FOR THE OFFSET WITHIN BLOCK
+	ASH	#5,R1		; AND SHIFT FOR A TRUE BYTE OFFSET
+	MOV	R4,-(SP)	;SAVE THE FIRQB POINTER @ +4 ON THE STACK
+	MOV	R1,(R4)+	;SAVE THE BYTE OFFSET IN FIRQB @ +4
+	MOV	R5,(R4)		;SAVE THE BLOCK OFFSET IN FIRQB @ +6
+
+GLOBAL	<FIQUE,ERSIZE>
+
+	CALL	40$		;STACK ERROR EXIT ADDRESS, TRY USER FILE
+	MOV	@#FIQUE,R4	;ERROR IN USER FILE. GET THE QUEUE BASE TO
+	MOV	-(R4),R4	; GET THE SAVED FIRQB POINTER @ +4
+	MOV	(R4)+,R5	;RESTORE THE BLOCK OFFSET VALUE
+	BR	50$		;GO TRY THE INIT FILE
+
+40$:	MOV	(SP)+,@#FIPERX	;SET ALTERNATE ERROR EXIT FOR USER FILE FAILURE
+	MOV	#ERBASU,R0	;Set up for user's file			;024
+	CALL	80$		;Now do the setup			;024
+	BNE	60$		;IF PRESENT, TRY THE USER FILE
+50$:	CALL	58$		;Stack another error address		;014
+	MOV	@#FIQUE,R4	;Error in user file. get the queue base to ;014
+	MOV	-(R4),R4	; get the saved firqb pointer @ +4	;014
+	MOV	10-4(R4),R1	;Retrieve message number		;014
+	MOVPIC	#130$,R2	;Point to string			;014
+	MAP	@#KISAR5,APR=5,DATA,PIC ;And be sure it is mapped	;028
+51$:	MOVB	(R2)+,(R4)+	;Move a byte of string			;014
+	BNE	51$		;Continue until null			;014
+	MAP	FIPPOL		;And be sure that we are mapped correctly ;024
+	DEC	R4		;Back up over null			;014
+	CALL	110$		;Convert number to ASCII		;014
+52$:	CLRB	(R4)+		;Pad out with nulls			;014
+	BIT	#40-1,R4	;Done?					;014
+	BNE	52$		;Loop if not				;014
+	BR	75$		;Now exit				;014
+
+58$:	MOV	(SP)+,@#FIPERX	;Set another error exit address		;014
+	MOV	#ERBASE,R0	;Now set up for file that INIT saw	;024
+	CALL	80$		;And go check it out			;024
+60$:	CALLX	READ		;TRY TO READ USER OR INIT FILE
+	CLR	@#FIPERX	;FILE READ O.K., DISABLE ERROR EXIT
+	MOV	-(R4),R1	;GET BYTE OFFSET AND INDEX TO FIRQB @ +4
+	ADD	#FIBUF,R1	;NOW POINT INTO BUFFER
+70$:	MOV	(R1)+,(R4)+	;MOVE MESSAGE INTO FIRQB
+	BIT	R4,#40-1	;MORE FIRQB TO MOVE INTO??
+	BNE	70$		;YEP, SO CONTINUE MOVING
+75$:	MOV	@#FIJBDA,R0	;Get caller's JDB pointer		;014
+	CLRB	JDIOST(R0)	;Make sure error code is clear		;014
+	JMPX	FIEXIT		;THEN EXIT (NOT USING THE SP STACK!)
+
+80$:	MOVB	(R0)+,@#FIPUNT	;SET THE UNIT NUMBER			;024
+	MOVB	(R0)+,R3	;GET MSB AND
+	MOV	(R0)+,R2	; LSB OF THE FILE'S START
+	BNE	90$		;FILE EXISTS IF NON-ZERO
+	TST	R3		;REALLY THERE?
+	BEQ	100$		;NOPE, GO EXIT Z=1
+90$:	ADD	R5,R2		;EXISTS, ADD IN THE OFFSET
+	ADC	R3		; AND CARRY IF NEEDED
+	CLZ			;ENSURE Z=0 ON THIS EXIT
+100$:	RETURN			;NOW EXIT				;024
+
+110$:	CLR	R0		;Set up for divide			;014
+	DIV	#10.,R0		;Divide the number by 10		;014
+	MOV	R1,-(SP)	;Stack the remainder			;014
+	MOV	R0,R1		;Copy the quotient			;014
+	BEQ	120$		;Branch if done				;014
+	CALL	110$		;Not yet, recursively do it again	;014
+120$:	MOV	(SP)+,R1	;Get digit				;014
+	ADD	#'0,R1		;Convert to ASCII			;014
+	MOVB	R1,(R4)+	;Buffer it				;014
+	RETURN			;Exit					;014
+
+130$:	.ASCIZ	"?Message number "  ;Substitute message text		;014
+
+.EVEN									;027
+
+GLOBAL	<FIQUE,FIPERX,ERBASU,ERBASE,FIBUF,FIPUNT,FIJBDA>
+
+;+
+; UUSYS2 - UU.SYS part 2						;027
+;
+; R1 -> JDB @ JDFLG
+; R2 -> DDB
+; R5 = Job # * 2
+;-
+
+UUSYS2:	MOV	R1,R3		;Copy JDB @ JDFLG pointer		;027
+	MOV	R5,R0		;Copy job # * 2				;027
+	CALLX	MAPJCR		;Go map the JCR for this job		;027
+	MOV	JCISIZ(R1),(R4)+ ;Return I&D sizes			;027
+.ASSUME	<JCISIZ & 1> EQ 0
+.ASSUME JCISIZ+1 EQ JCDSIZ
+	ADD	#JCPRIV,R1	;Point to mask				;027
+.REPT	<PRIVSZ/2>							;027
+	MOV	(R1)+,(R4)+						;027
+.ENDR									;017
+.REPT	4-<PRIVSZ/2>							;017
+	CLR	(R4)+		;Clear out unused part			;017
+.ENDR									;017
+	MOV	R3,-(SP)	;Save JDB @ JDFLG pointer		;032
+	MOV	JDFLG3-JDFLG(R3),R3 ;Get flags				;027
+	BIC	#^C<J2NET!J2BAT>,R3 ;Isolate batch and net flags	;017
+	MOVB	R3,(R4)		;Set 0,2 or 4				;017
+	BNE	42$		;Was batch or net, skip			;017
+	TSTB	5-20(R4)	;Detached job?				;017
+	BMI	42$		;Yes, so can't be dialup		;017
+	BIT	#TTMODM,TTINTF(R2) ;Dialup terminal?			;017
+	BEQ	42$		;No, skip				;017
+	INC	(R4)		;Yes, set code 1 for dialup		;017
+42$:	INC	R4		;Bump pointer				;017
+	MOVB	JCHDRS-<JCPRIV+PRIVSZ>(R1),(R4)+ ;Return header size 	;030
+	CMP	(R4)+,(R4)+	;Skip FQMODE and FQFLAG			;032
+	MOV	(SP)+,R3	;Restore JDB @ JDFLG pointer		;032
+	MOV	JDJDB2-JDFLG(R3),R2 ;Get JDB2 pointer			;032
+	MOV	J2PPN(R2),(R4)+	;Return PPN of target job		;032
+	BIT	#JFSYS,(R3)	;Job running with temp privs?		;032
+	BNE	45$		;Yep, already pointing to saved mask	;032
+	SUB	#PRIVSZ,R1	;Point back to current priv mask	;032
+.ASSUME	JCPRIV+PRIVSZ EQ JCSPRV	;Priv masks must be in the right place	;032
+45$:									;032
+.REPT	<PRIVSZ/2>							;032
+	MOV	(R1)+,(R4)+	;Return saved priv mask			;032
+.ENDR									;032
+.REPT	4-<PRIVSZ/2>							;032
+	CLR	(R4)+		;Clear out unused part			;032
+.ENDR									;032
+	MAP	FIPPOL		;Restore FIP mapping			;027
+	RETURN			;Done part 2				;017
+
+FQFEND
+
+FQFSRT
+
+.SBTTL	Some General Synchronous Utility Code
+
+;+									;035+
+; UU.USC - General Utility Synch Code
+;
+;	R0 =  JOB NUMBER TIMES 2
+;	R1 -> JOB DATA BLOCK
+;	R4 -> FIRQB
+;		FQERNO = Sub-function
+;			1  => Clear Disk error counter
+;			2  => Clear System error counter
+;			16 => Disk Drive STATUS
+;		FQDEV  = Disk name to operate on
+;		FQDEVN = Unit number and flag
+;
+;	IN FIRQB ON RETURN
+;
+;		FQFIL  = UNTCNT entry for this disk		[STATUS]
+;		FQPPN  = CSR for this disk			[STATUS]
+;		FQNAM1 = The RU cntrl # (if DU & CSR <>0)	[STATUS]
+;		    +2 = UNTOPT entry for this disk		[STATUS]
+;		FQEXT  = MID$XX entry for this disk (disk type)	[STATUS]
+;-
+
+.ENABL	LSB
+
+	UUOENT	USC,,SYNC,LOGABL	;General Utility Synch Code
+
+	NOP
+	MOV	R0,R3		;Copy the job number for later
+	MOVB	FQERNO(R4),R5	;GET THE FUNCTION CODE
+	CMP	R5,#2		;Clear system error counter
+	BNE	100$		; No
+	CALL	CKPRV		;Verify that the user has H/W privilege
+	MOV	@#DISPLY,R3	;Get the address of the display pointer
+				; (can't use @DISPLY since not PIC)
+	CLR	@#ERLCNT	; and clear the errors
+	MOV	@#ERLCNT,(R3)	; and move (not clr) it there also
+				; (since ERLCNT can change at PR > 3)
+	RETURN			;All done - nice and easy
+
+100$:	TST	FQDEVN(R4)	;WAS A REAL DEVICE NAME SPECIFIC?
+	BEQ	110$		;NO, ERROR
+
+;
+;	Much of the following code duplicates GUNOWN (in CTL.MAC).
+;	However, this code is SYNC, therefore can't modify FIPGEN, and
+;	can't rely on FIJOB, or other FIP cells.  Therefore, this
+;	code has been setup based on that requirement.
+;
+
+	CALLX	GUNSUB,R5	;Get name, in a SYNC fashion
+	 ERROR	NODEVC		; not a valid name
+	ASL	R2		;Get the unit number * 2
+	ADD	DEVPTR(R0),R2	;Get the DDB table pointer
+	CMP	R0,#DEVOKB	;Is it a disk?
+	BLT	130$		; YES - DISK
+				;No, do NON-DISK stuff here
+	ERROR	DEVNFS		; Error if not disk
+
+110$:	ERROR	PRVIOL		;ILLEGAL OPERATION REQUESTED
+
+120$:	ERROR	BADFUO		;Illegal SYS-CALL if we don't know it.
+
+130$:	MOV	R2,R1		;Copy the UNTCNT pointer
+	CMP	R5,#16		;Disk STATUS call?
+	BEQ	DODSTS		; Yes
+	CMP	R5,#1		;Clear Disk error counter?
+	BNE	120$		; NO
+	CALL	CKPRV		;Do they have H/W priv?
+	CLR	UNTERR-UNTCNT(R1) ;Clear the disks error counter.
+	RETURN
+
+CKPRV:	MOV	R3,R0		;Get our job number
+	MOV	(PC)+,R5	;Do a check for
+	 .BPRIV	HWCTL		; HWCTL privilege?
+	CALLX	CHKPR5,R4	;  Does the user have it?
+	BCS	110$		; No HWCTL priv - so error
+	RETURN			; Yes - so return
+
+.DSABL	LSB
+
+GLOBAL	<UNTERR,JOB,ERLCNT,DISPLY>
+
+.SBTTL	Do Disk Status information
+
+DODSTS::ADD	#FQFIL,R4	;Entry for DO Disk STatuS
+	MOV	(R1),(R4)+	;return the UNTCNT entry
+	MOV	DSKMAP-UNTCNT(R1),R2 ;Get disk driver index from FUN *2
+	MOV	DSKCSR(R2),R5	;Save the non-MSCP CSR address
+	CMP	FQDEV-<FQFIL+2>(R4),#"DU  ; Is this an MSCP disk?
+	BNE	140$			  ; No, so all done
+	MOVB	FQDEVN-<FQFIL+2>(R4),R2	  ;Get the unit #
+	ASL	R2		; * 2
+	ASL	R2		; * 4
+	CLR	R5		;Make sure we don't return garbage
+	;Since MSCP is an L3Q process the following is OK at PR3
+	TST	UMT$DU+2(R2)	;Is there a unit here?
+	BEQ	140$		; NO, so skip it
+	MOV	UMT$DU(R2),R3	;Get the offset into the CMT entry
+	MOV	CMT+CM.CSR(R3),R5 ;so we can get this units CSR!
+	CLR	R2		;clear the high part to
+	DIV	#CMTSIZ,R2	;Get the DU controller #
+140$:	MOV	R5,(R4)+	;return the CSR for this unit.
+	MOV	R2,(R4)+	;return the DU cntrl # (if CSR <>0)
+	MOV	UNTOPT-UNTCNT(R1),(R4)+ ;Return the UNTOPT entry
+	MOV	MID$XX-UNTCNT(R1),(R4)+ ;Return the drive type word
+	RETURN
+
+GLOBAL	<UNTCNT,DSKMAP,DSKCSR,UMT$DU,CMT,UNTOPT,MID$XX>
+									;035-
+FQFEND
+
+.END

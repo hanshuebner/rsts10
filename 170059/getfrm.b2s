@@ -1,0 +1,686 @@
+1	SUB GETFRM ( FORM$ , SERVER$ , PARSE% )				      &
+\	MODULE$ = "GETFRM"						      &
+\	ON ERROR GOTO 19000						      &
+\	SUBEXIT IF CC.FLG%						      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   t i t l e				      &
+	!								      &
+	!	  subprogram : GETFRM					      &
+	!	     version : V10.1					      &
+	!	        edit : A					      &
+	!	   edit date : 10-MAY-91				      &
+	!	   author(s) : PRL/DRP/ACT/KCG/TJK			      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!		  C O P Y R I G H T				      &
+	!								      &
+	!								      &
+	!		      Copyright (C) 1982, 1991 by		      &
+	!	Digital Equipment Corporation, Maynard, Mass.		      &
+	!								      &
+	!								      &
+	! This software is furnished under a license and may be used and      &
+	! copied  only  in accordance with the terms of such license and      &
+	! with the  inclusion  of  the  above  copyright  notice.   This      &
+	! software  or  any  other copies thereof may not be provided or      &
+	! otherwise made available to any other person.  No title to and      &
+	! ownership of the software is hereby transferred.		      &
+	!								      &
+	! The information in this software is subject to change  without      &
+	! notice  and should not be construed as a commitment by Digital      &
+	! Equipment Corporation.					      &
+	!								      &
+	! DIGITAL assumes no responsibility for the use  or  reliability      &
+	! of its software on equipment that is not supplied by DIGITAL.	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   c a l l   f o r m a t		      &
+	!								      &
+	!	CALL GETFRM (FORM$,SERVER$,PARSE%)			      &
+	!								      &
+	!	Argument	I/O	Usage				      &
+	!	========	===	=====				      &
+	!	FORM$		I	name of form to lookup		      &
+	!	SERVER$		I	server name to match		      &
+	!	PARSE%		I	lookup mode flag:		      &
+	!					0 = don't parse keywords      &
+	!				      <>0 = parse keywords	      &
+	!	ERRSTS%	(G)	O	error status code:		      &
+	!					0 = no error		      &
+	!				      <>0 = ERR value		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m o d i f i c a t i o n   h i s t o r y   l o g		      &
+	!								      &
+	!								      &
+	! VER/ED	EDIT DATE	REASON				      &
+	! V9.0-02	04-Jul-83	(PRL) Update for V9.0		      &
+	! V9.0-03	14-Aug-83	(PRL) Add valid form name check	      &
+	! V9.0-03	30-Aug-83	(PRL) Use PKT.ID.CHR% for form flags  &
+	! V9.0-07	02-Jul-84	(KCG) Add support for ??* in srv name &
+	!		08-Aug-84	(PRL) Use PBS.LOC$ to build file-spec &
+	! V9.0-10	14-Jan-85	(PRL) Add BOTTOM_MARGIN=n field	      &
+	! V9.0-14	22-Apr-85	(PRL) Raise temp privs to open FDF    &
+	! V9.2-01	10-SEP-85	(TJK) Add support for [NO]TRAILER     &
+	! V9.2-02	07-NOV-85	(TJK) Fix default for TRAILER	      &
+	! V9.2-02	09-NOV-85	(TJK) Fix default for SIMULATE	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   d e s c r i p t i o n		      &
+	!								      &
+	!	This subroutine is called to locate a supplied form name      &
+	!	(FORM$) in the forms definition file (FRM.FIL$).  The file    &
+	!	is opened READ REGARDLESS.  If the file does not exist, the   &
+	!	error NOSUCH is returned, and an error message displayed.     &
+	!	If a record is found matching the supplied form-name and      &
+	!	server-name, then further action is determined by the PARSE%  &
+	!	flag.  If zero, no parsing of the form attributes occurs, and &
+	!	ERRSTS%=0 is returned to indicate the specified form-name was &
+	!	found.  If non-zero, then the form record is parsed, and the  &
+	!	attributes for the form are loaded into the proper fields in  &
+	!	the send/receive packet.  If the specified form-name and      &
+	!	server-name is not found, a NOSUCH error code is returned.    &
+	!	The ERR.BADNAM error is returned if a bad keyword or keyword  &
+	!	argument is found.					      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	c h a n n e l   a s s i g n m e n t s			      &
+	!								      &
+	!	channel #	usage					      &
+	!	=========	=====					      &
+	!	   4		forms definition file			      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	v a r i a b l e s  /  a r r a y s   u s e d		      &
+	!								      &
+	!	name			description			      &
+	!	====			===========			      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b r o u t i n e s   u s e d				      &
+	!								      &
+	!	line #/name		description			      &
+	!	===========		===========			      &
+	!	DISPLY			display text at user's KB:	      &
+	!	CHKNAM BY REF		validate form name		      &
+	!								      &
+	!	10000			open forms definition file	      &
+	!	10100			read next form record		      &
+	!	11000			parse form record		      &
+	!	11100			process LENGTH keyword		      &
+	!	11200			process WIDTH keyword		      &
+	!	11300			process [NO]SIMULATE keyword	      &
+	!	11400			process JOB_PAGES keyword	      &
+	!	11500			process FLAG_PAGES keyword	      &
+	!	11600			process [NO]TRAILER_PAGES keyword     &
+	!	11700			process BOTTOM_MARGIN keyword	      &
+	!	12000			parse next keyword in record	      &
+	!	12100			lookup keyword in table		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	f u n c t i o n s   u s e d				      &
+	!								      &
+	!	line #	name		description			      &
+	!	======	====		===========			      &
+	!	15000	FN.RANGE%	return arg in range status	      &
+	!	16000	FN.SERVER$	verifies and strips server names      &
+	!	17000	FN.FORM$	return validated form name	      &
+	!	18000	FN.MATCH%	match current def's server name	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m a p   d e c l a r a t i o n s				      &
+	!								      &
+	!	line #	name	description				      &
+	!	======	====	===========				      &
+	!	   700	PBSCMN	PBS common data (%INCLUDE PBSCMN.B2S)	      &
+	!	   	PBSMAP	PBS map fields (%INCLUDE PBSMAP.B2S)	      &
+	!		CUICMN	CUI common (%INCLUDE CUI:CUICMN.B2S)	      &
+	!								      &
+	!******************************************************************** &
+
+200	!	d a t a   f o r   f o r m   k e y w o r d s		      &
+	!								      &
+	!								      &
+	!Note that any keywords that are defined with embedded underscores    &
+	!should be entered twice in the data table, once with the underscore  &
+	!and once without.  This allows the underscore to be an optional      &
+	!character in the keyword.  The "arg" flag indicates that the keyword &
+	!requires an argument.  The "no" flag indicates that the keyword can  &
+	!be preceeded by a "NO" prefix.					      &
+	!								      &
+	!								      &
+	!	keyword		index	arg	no			      &
+	!	-------		-----	---	--			      &
+	DATA	LENGTH,		1,	-1,	 0,			      &
+		WIDTH, 		2,	-1,	 0,			      &
+		SIMULATE,	3,	 0,	-1,			      &
+		JOBPAGES,	4,	-1,	 0,			      &
+		JOB_PAGES,	4,	-1,	 0,			      &
+		FLAGPAGES,	5,	-1,	 0,			      &
+		FLAG_PAGES,	5,	-1,	 0,			      &
+		TRAILERPAGES,	6,	 0,	-1,			      &
+		TRAILER_PAGES,	6,	 0,	-1,			      &
+		BOTTOMMARGIN,	7,	-1,	 0,			      &
+		BOTTOM_MARGIN,	7,	-1,	 0,			      &
+		""							      &
+
+700	!	i n c l u d e   r e q u i r e d   M A P s , C O M M O N s     &
+	!								      &
+	!								      &
+	%INCLUDE "SYSTEM:PBSCMN.B2S"		!include QUEUE data section   &
+	%INCLUDE "SYSTEM:PBSMAP.B2S"		!include QUEUE map sections   &
+	%INCLUDE "CUI:CUICMN.B2S"		!include CUI common section   &
+
+1000	!	m a i n   s u b p r o g r a m   l o g i c		      &
+	!								      &
+	!								      &
+\	SUBEXIT IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!init error code	      &
+\	DEF.TXT$ = ""				!init prefix error text	      &
+						!			      &
+\	FORM$ = FN.FORM$(FORM$)			!validate form-name	      &
+\	GOTO 32000 IF ERRSTS%			!exit if invalid form name    &
+						!			      &
+\	FORM$ = SEG$(FORM$,1%,9%)		!ensure max of 9 chars	      &
+						!			      &
+\	GOSUB 10000				!go open form def file	      &
+\	GOTO 32000 IF ERRSTS% OR CC.FLG%	!exit if errors or CTRL/C     &
+						!			      &
+\	SRVER$ = FN.SERVER$(SERVER$,FALSE%)	!normalize server name	      &
+\	SUBEXIT IF ERRSTS% OR CC.FLG%		!exit if error or CTRL/C      &
+						!			      &
+\	GOSUB 10100				!get matching form record     &
+\	GOTO 32000 IF ERRSTS% OR CC.FLG%	!exit if error or CTRL/C      &
+\	GOSUB 11000				!parse the form rec	      &
+		IF PARSE%			!  if parse flag set	      &
+\	GOTO 32000				!and exit		      &
+
+10000	!	o p e n   f o r m s   d e f i n i t i o n   f i l e	      &
+	!								      &
+	!								      &
+	!inputs:	PBS.LOC$	-	PBS package location	      &
+	!		FRM.FIL$	-	forms file name & type	      &
+	!								      &
+	!outputs:	ERRSTS%		-	error status:		      &
+	!					   0 = open succeeded	      &
+	!					   n = ERR value n	      &
+	!								      &
+	!notes:	This routine attempts to open the forms definition file	      &
+	!	(PBS.LOC$+FRM.FIL$) on channel #FRM.CHNL%.  If the file	      &
+	!	is not found, the error NOSUCH is returned, and an error      &
+	!	message displayed.					      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ON ERROR GOTO 10050			!trap own errors	      &
+\	CLOSE #FRM.CHNL%			!close form def file	      &
+\	Z0$ = EDIT$(PBS.LOC$+FRM.FIL$,-2%)	!build form def file-spec     &
+\	Z$ = SYS(PRIV.ON$)			!raise temp privs	      &
+\	OPEN Z0$ FOR INPUT AS FILE #FRM.CHNL%, MODE 4096%		      &
+						!open file read-regardless    &
+\	ERRSTS% = 0%				!return success status	      &
+
+10010	Z$ = SYS(PRIV.OFF$)			!drop temp privs	      &
+\	ON ERROR GOTO 19000			!restore standard error trap  &
+\	RETURN					!and exit		      &
+
+10050	ERRSTS% = ERR				!return RSTS error	      &
+\	Z0$ = "Forms Definition File " + Z0$	!build file name text	      &
+\	IF ERRSTS% = ERR.NOSUCH% THEN		!if no forms def file found,  &
+		Z$ = "?" + Z0$ + " does not exist"			      &
+						!  use 'does not exist' msg   &
+\	ELSE	Z$ = "?Unable to open " + Z0$ + CR + LF + ERT$(ERRSTS%)	      &
+						!else use RSTS error message  &
+\	END IF					!end if			      &
+						!			      &
+\	U.POS% = 0%				!disable repainting cmd line  &
+\	CALL DISPLY (Z$)			!display error message	      &
+\	RESUME 10010				!and resume to exit	      &
+
+10100	!	r e a d   n e x t   f o r m s   r e c o r d		      &
+	!								      &
+	!								      &
+	!inputs:	None						      &
+	!								      &
+	!outputs:	ERRSTS%		-	error status		      &
+	!					  0 = no error		      &
+	!					  n = ERR value		      &
+	!		FRM.NAM$	-	form name		      &
+	!		FRM.KWD$	-	form keywords		      &
+	!		FRM.SER$	-	form server		      &
+	!								      &
+	!notes:								      &
+	!								      &
+	! This routine is called to read the next forms definition record.    &
+	! Form records are of the form:					      &
+	!								      &
+	!	form-name[=server] [NO]form-keyword[=n] [ ...] [comment] [-]  &
+	!								      &
+	! where								      &
+	!								      &
+	! form-name							      &
+	!	is the name of the form to which this definition applies.     &
+	!								      &
+	! [=server]							      &
+	!	is the name of the server for this form.  If not specified or &
+	!	'*", then this form applies to all servers. If the server has &
+	!	unit no. *, then this form applies to all servers with the    &
+	!	same 2-char device mnemonic (LP or KB).			      &
+	!								      &
+	! [NO]form-keyword[=n]						      &
+	!	is one or more form keywords.  Some field keywords are flags  &
+	!	and accept an optional NO prefix, while others require an     &
+	!	argument value.						      &
+	!								      &
+	! [comment]							      &
+	!	is a comment field starting with an exclamation point.  All   &
+	!	characters in the comment field, except for a a possible      &
+	!	continuation character is ignored.			      &
+	!								      &
+	! [-]								      &
+	!	is a continuation character.  If the last non-blank, non-tab  &
+	!	character on the line is a '-', then the record continues on  &
+	!	the next line.						      &
+	!								      &
+	! Note that no form-name validation is performed by this routine.     &
+	!								      &
+	!								      &
+	ON ERROR GOTO 10150			!trap own errors	      &
+\	FRM.FLG% = FALSE%			!show no form name match      &
+
+10110	ERRSTS% = 0%				!init error variable	      &
+\	REC$ = ""				!init null record	      &
+
+10120	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	LINPUT #FRM.CHNL%, Z$			!read next form rec	      &
+\	Z% = POS(Z$,"!",1%)			!find any comment char	      &
+\	Z% = LEN(Z$)+1% UNLESS Z%		!point past rec if none	      &
+\	REC$ = EDIT$(REC$+" "+SEG$(Z$,1%,Z%-1%),8%+128%)		      &
+						!append rec to full rec	      &
+\	Z% = LEN(REC$)				!save length of rec	      &
+\	IF SEG$(REC$,Z%,Z%) = "-" THEN		!if rec has "-" at end,	      &
+		REC$ = SEG$(REC$,1%,Z%-1%)	!  trim continuation char     &
+\		GOTO 10120			!  and add more lines to rec  &
+\	END IF					!endif			      &
+
+10130	REC$ = EDIT$(REC$,4%+8%+16%+32%+128%)	!trim full record	      &
+\	GOTO 10110 UNLESS LEN(REC$)		!skip over null records	      &
+\	Z0% = POS(REC$," ",1%)			!find form-name end	      &
+\	Z0% = LEN(REC$)+1% UNLESS Z0%		!point past end if none	      &
+\	FRM.NAM$ = SEG$(REC$,1%,Z0%-1%)		!extract form name	      &
+\	FRM.KWD$ = SEG$(REC$,Z0%+1%,MAXINT%)	!extract form keywords	      &
+\	Z$ = "?Error in forms definition "	!init error message text      &
+						!			      &
+\	Z1% = POS(FRM.NAM$,"=",1%)		!find possible "=server"      &
+\	Z1% = Z0% UNLESS Z1%			!point at end if none	      &
+\	IF Z1% >= Z0% THEN			!if no "=server" found,	      &
+		SER.NAM$ = ""			!  show no server name	      &
+\		DEF.TXT$ = Z$ + FRM.NAM$ + CR + LF			      &
+						!  append form name to text   &
+						!			      &
+	ELSE	SER.NAM$ = SEG$(FRM.NAM$,Z1%+1%,Z0%-1%)			      &
+						!else save server name	      &
+\		FRM.NAM$ = SEG$(FRM.NAM$,1%,Z1%-1%)			      &
+						!  strip srvr from form-name  &
+\		DEF.TXT$ = Z$ + FRM.NAM$ + CR + LF			      &
+						!  append form name to text   &
+\		SER.NAM$ = FN.SERVER$(SER.NAM$,TRUE%)			      &
+						!  validate/normalize srv nam &
+\		GOTO 10140 IF ERRSTS%		!  exit if invalid name	      &
+\	END IF					!end if			      &
+						!			      &
+\	GOTO 10110				!read next rec		      &
+	   IF (FORM$ <> FRM.NAM$)		!  if wrong form name	      &
+		IF LEN(FORM$)			!    if any form-name arg     &
+						!			      &
+\	FRM.FLG% = TRUE%			!show we've matched a form    &
+						!			      &
+\	GOTO 10110				!read next rec		      &
+		IF NOT FN.MATCH%(SRVER$)	!  if different server names  &
+			IF LEN(SRVER$)		!    if any server to match   &
+						!			      &
+\	FORM$ = FN.FORM$(FRM.NAM$)		!return matched form name     &
+		UNLESS LEN(FORM$)		!  if null form name	      &
+
+10140	ON ERROR GOTO 19000			!restore standard trap	      &
+\	RETURN					!exit			      &
+
+10150	GOTO 19000				!skip to standard error trap  &
+		UNLESS ERR = ERR.EOF%		!  unless EOF error	      &
+						!			      &
+\	IF LEN(REC$) THEN			!if partial record,	      &
+		ERRSTS% = ERR.NOSUCH%		!  bad form file	      &
+\		U.POS% = 0%			!  don't repaint cmd line     &
+\		Z$ = "?Error in forms definition file" ! error message text   &
+	ELSE	ERRSTS% = ERR			!else return ERR value	      &
+\		Z$ = "?Forms not defined"	!  build error text	      &
+\		Z$ = Z$ + " for server"		!append 'for server' text     &
+			IF FRM.FLG%		!  if form name found	      &
+\	END IF					!endif			      &
+\	CALL DISPLY (Z$)			!display error		      &
+\	RESUME 10140				!and resume to exit	      &
+
+11000	!	p a r s e   f o r m   r e c o r d			      &
+	!								      &
+	!								      &
+	PKT.ID.FML$ = CHR$(LEN(FORM$))		!load form-name length	      &
+\	PKT.ID.FRM$ = FORM$			!load form-name		      &
+\	PKT.ID.LNG$ = CHR$(DFL.LNG%)		!load default length	      &
+\	PKT.ID.WID$ = CHR$(DFL.WID%)		!load default width	      &
+\	PKT.ID.JHD$ = CHR$(DFL.JHD%)		!load default job headers     &
+\	PKT.ID.FHD$ = CHR$(DFL.FHD%)		!load default file headers    &
+\	PKT.ID.BOM$ = CHR$(DFL.BOM%)		!load default bottom margin   &
+\	PKT.ID.CHR% = PKT.ID.CHR% AND NOT IDC.FTP%	! default TRAILER TJK &
+\	PKT.ID.CHR% = PKT.ID.CHR% AND NOT IDC.TOF%	! default SIMULATE TJK &
+\	NEG% = NOT DFL.SIM%			!set NEG% to set/clr TOF bit  &
+\	GOSUB 11300				!set/clear TOF bit in charac  &
+						!			      &
+\	KWD.STR% = 1%				!init keyword start pointer   &
+\	UNTIL KWD.STR% > LEN(FRM.KWD$)		!while more keywords:	      &
+\		GOSUB 12000			!  go parse keyword	      &
+\		GOTO 11050 IF ERRSTS%		!  skip if invalid	      &
+\		ON IDX% GOSUB			!  gosub to process keyword:  &
+				11100,		!	/LENGTH=n	      &
+				11200,		!	/WIDTH=n	      &
+				11300,		!	/[NO]SIMULATE	      &
+				11400,		!	/JOB_PAGES=n	      &
+				11500,		!	/FLAG_PAGES=n	      &
+				11600,		!	/[NO]TRAILER_PAGES    &
+				11700		!	/BOTTOM_MARGIN=n      &
+\		GOTO 11050 IF ERRSTS% 		!  skip if arg error	      &
+\	NEXT					!next (keyword)		      &
+						!			      &
+\	IF PKT.ID.BOM$ < PKT.ID.LNG$ THEN	!if bottom margin ok,	      &
+		ERRSTS% = 0%			!  clear error status	      &
+\		RETURN				!  exit with all ok	      &
+						!			      &
+	ELSE	ERR.TXT$ = "?BOTTOM_MARGIN exceeds LENGTH"		      &
+						!else build error text	      &
+\	END IF					!end if			      &
+
+11050	U.POS% = 0%				!don't repaint command line   &
+\	ERR.TXT$ = DEF.TXT$ + ERR.TXT$		!prefix with def text	      &
+		IF LEN(DEF.TXT$)		!  if any		      &
+\	CALL DISPLY (ERR.TXT$)			!display error msg	      &
+\	ERRSTS% = ERR.BADNAM%			!return bad name error	      &
+\	RETURN					!and exit		      &
+
+11100	!	p r o c e s s   L E N G T H   k e y w o r d		      &
+	!								      &
+	!								      &
+	PKT.ID.LNG$ = CHR$(ARG%)		!move value into pkt	      &
+		IF FN.RANGE%(ARG$,1%,255%)	!  if arg is in range	      &
+\	RETURN					!exit			      &
+
+11200	!	p r o c e s s   W I D T H   k e y w o r d		      &
+	!								      &
+	!								      &
+	PKT.ID.WID$ = CHR$(ARG%)		!move arg value into pkt      &
+		IF FN.RANGE%(ARG$,1%,255%)	!  if valid arg		      &
+\	RETURN					!exit			      &
+
+11300	!	p r o c e s s   [ N O ] S I M U L A T E   k e y w o r d	      &
+	!								      &
+	!								      &
+	IF NEG% THEN				!if NO prefix,		      &
+		PKT.ID.CHR% = PKT.ID.CHR% OR IDC.TOF%			      &
+						!  set TOF bit in chars word  &
+	ELSE	PKT.ID.CHR% = PKT.ID.CHR% AND NOT IDC.TOF%		      &
+						!else clear TOF bit in word   &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!and exit		      &
+
+11400	!	p r o c e s s   J O B _ P A G E S   k e y w o r d	      &
+	!								      &
+	!								      &
+	PKT.ID.JHD$ = CHR$(ARG%)		!move arg value into pkt      &
+		IF FN.RANGE%(ARG$,0%,127%)	!  if valid arg		      &
+\	RETURN					!exit			      &
+
+11500	!	p r o c e s s   F L A G _ P A G E S   k e y w o r d	      &
+	!								      &
+	!								      &
+	PKT.ID.FHD$ = CHR$(ARG%)		!move arg value into pkt      &
+		IF FN.RANGE%(ARG$,0%,127%)	!  if valid arg		      &
+\	RETURN					!exit			      &
+
+11600	!	p r o c e s s   T R A I L E R _ P A G E S   k e y w o r d     &
+	!								      &
+	!								      &
+	IF NEG% THEN				!if NO prefix,		      &
+						! clear FTP bit in chars word &
+		PKT.ID.CHR% = PKT.ID.CHR% AND NOT IDC.FTP%	! TJK	      &
+	ELSE								      &
+						!else set FTP bit in word     &
+		PKT.ID.CHR% = PKT.ID.CHR% OR IDC.FTP%		! TJK	      &
+	END IF					!end if			      &
+						!			      &
+\	RETURN					!and exit		      &
+									      &
+
+11700	!	p r o c e s s   B O T T O M _ M A R G I N   k e y w o r d     &
+	!								      &
+	!								      &
+	PKT.ID.BOM$ = CHR$(ARG%)		!move value into pkt	      &
+		IF FN.RANGE%(ARG$,0%,255%)	!  if arg is in range	      &
+\	RETURN					!exit			      &
+
+12000	!	p a r s e   f o r m s   r e c o r d			      &
+	!								      &
+	!								      &
+	Z1% = POS(FRM.KWD$,"=",KWD.STR%)	!get arg start		      &
+\	Z1% = LEN(FRM.KWD$)+1% 			!point past string	      &
+		UNLESS Z1% 			!  if no next keyword	      &
+\	Z2% = POS(FRM.KWD$," ",KWD.STR%)	!look for arg end	      &
+\	Z2% = LEN(FRM.KWD$) + 1%		!point past string	      &
+		UNLESS Z2%			!  if no next keyword	      &
+\	Z1% = Z2% IF Z2% < Z1%			!use leftmost delimiter	      &
+\	KWD$ = SEG$(FRM.KWD$,KWD.STR%,Z1%-1%)	!save keyword		      &
+\	GOSUB 12100				!go lookup keyword	      &
+\	RETURN IF ERRSTS%			!exit if not found	      &
+		  OR CC.FLG%			!  or CTRL/C		      &
+
+12010	ARG$ = SEG$(FRM.KWD$,Z1%+1%,Z2%-1%)	!save keyword arg	      &
+\	IF ARG% AND (LEN(ARG$) = 0%) THEN	!if arg required but none,    &
+		ERRSTS% = ERR.BADNAM%		!  return error		      &
+\		ERR.TXT$ = "?" + KWD$ + " argument required"		      &
+						!  return error text	      &
+\		RETURN				!  and exit		      &
+
+12020	IF NOT ARG% AND (LEN(ARG$) > 0%) THEN	!if arg not allowed but any,  &
+		ERRSTS% = ERR.BADNAM%		!  return error		      &
+\		ERR.TXT$ = "?No " + KWD$ + " argument allowed"		      &
+						!  return error text	      &
+\		RETURN				!  and exit		      &
+
+12030	KWD.STR% = Z2% + 1%			!update next keyword pointer  &
+\	ERRSTS% = 0%				!return valid keyword status  &
+\	RETURN					!and exit		      &
+
+12100	!	l o o k u p   k e y w o r d   i n   t a b l e		      &
+	!								      &
+	!								      &
+	!input: 	KWD$		-	keyword to match	      &
+	!								      &
+	!output:	KWD$		-	full keyword name	      &
+	!		IDX%		-	keyword index		      &
+	!		ARG%		-	keyword requires argument     &
+	!		NO%		-	keyword allows NO prefix      &
+	!		NEG%		-	NO prefix was included	      &
+	!		ERRSTS%		-	keyword found status:	      &
+	!					   0 = keyword found	      &
+	!					 <>0 = keyword not found      &
+	!								      &
+	!notes:	This subroutine looks up the keyword 'KWD$' in a table	      &
+	!	of defined keywords, and returns its index and flags.	      &
+	!								      &
+	!								      &
+	NEG% = (SEG$(KWD$,1%,2%)="NO")		!set NEG flag if NO prefix    &
+\	KWD$ = SEG$(KWD$,3%,MAXINT%)		!strip NO prefix	      &
+		IF NEG%				!  if any found		      &
+\	IF LEN(KWD$) < 2% THEN			!if keyword too short,	      &
+		ERRSTS% = ERR.BADNAM%		!  return error		      &
+\		ERR.TXT$ = "?Ambiguous keyword " + KWD$			      &
+						!  return error text	      &
+\		RETURN				!  and exit		      &
+
+12110	RESTORE 				!reset keyword data ptr	      &
+\	READ KW$				!read 1st keyword	      &
+\	WHILE LEN(KW$) > 0%			!do while more keywords:      &
+\		READ IDX%, ARG%, NO%		!  read index, ARG & NO flags &
+\		GOTO 12120 IF 1% = POS(KW$,KWD$,1%)			      &
+						! exit loop if match	      &
+\		READ KW$			! read next keyword	      &
+\	NEXT					!next (keyword)		      &
+\	ERRSTS% = ERR.BADNAM%			!return error		      &
+\	ERR.TXT$ = "?Invalid keyword " + KWD$ 	!  return error text	      &
+\	RETURN					!and exit		      &
+
+12120	KWD$ = KW$				!return full keyword name     &
+\	ERRSTS% = 0%				!clear error status	      &
+\	RETURN					!and exit		      &
+
+15000	!	f n . r a n g e %  ( ARG$ , MIN% , MAX% )		      &
+	!								      &
+	!								      &
+	!inputs:	ARG$		-	string arg to test	      &
+	!								      &
+	!		MIN%		-	minimum value allowed	      &
+	!								      &
+	!		MAX%		-	maximum value allowed	      &
+	!								      &
+	!outputs:	FN.RANGE%	-	valid arg status:	      &
+	!					  TRUE%  -> valid arg	      &
+	!					  FALSE% -> invalid arg	      &
+	!								      &
+	!		ERRSTS%		-	error status:		      &
+	!					  0 if valid arg	      &
+	!					  BADNAM if invalid arg	      &
+	!								      &
+	!		ARG%		-	integer arg if valid	      &
+	!								      &
+	!								      &
+	DEF FN.RANGE% (ARG$,MIN%,MAX%)					      &
+\	ON ERROR GOTO 15020			!trap own errors	      &
+\	ARG% = VAL(ARG$)			!convert arg string to intgr  &
+\	IF ARG% >= MIN% AND ARG% <= MAX% THEN	!if in range,		      &
+		FN.RANGE% = TRUE%		!  return TRUE fn value	      &
+\		ERRSTS% = 0%			!  and clear error status     &
+\		FNEXIT				!  exit			      &
+
+15010	FN.RANGE% = FALSE%			!return FALSE fn value	      &
+\	ERRSTS% = ERR.BADNAM%			!return error		      &
+\	ERR.TXT$ = "?" + KWD$ + " argument not in range " + NUM1$(MIN%) +     &
+		   " to " + NUM1$(MAX%)		!return error message	      &
+\	FNEXIT					!exit			      &
+
+15020	RESUME 15010				!resume to error handler      &
+
+15030	FNEND					!end FN.RANGE% function	      &
+
+16000	!	f n . s e r v e r $  ( SRV$ , CHECK% )			      &
+	!								      &
+	!								      &
+	! inputs:	SRV$		-	server name to normalize      &
+	!		CHECK%		-	validate server name	      &
+	!								      &
+	! outputs:	FN.SERVER$	-	normalized server name:	      &
+	!					   "ddn" (dd=device,u=unit)   &
+	!					   "dd*" (wildcard unit)      &
+	!					   ""    (widcard device)     &
+	!		ERRSTS%		-	valid server name status:     &
+	!					    0 -> valid name	      &
+	!					  <>0 -> invalid name	      &
+	!								      &
+	! uses:		X$		-	work string		      &
+	!		X0%,X1%		-	work integers		      &
+	!								      &
+	!								      &
+	DEF FN.SERVER$ (SRV$,CHECK%)					      &
+\	FN.SERVER$ = ""				!init null server name	      &
+\	IF CHECK% THEN				!if validate name,	      &
+\		X1% = 1% + 2% + 4%		!  allow wild,logcl,null name &
+\		DISPLAY% = FALSE%		!  turn off error display     &
+\		CALL CHKSER (SRV$,X0%,X1%)	!  validate server name	      &
+\		DISPLAY% = TRUE%		!  turn on error display      &
+\		ERRSTS% = ERR.BADNAM%		!  return BADNAM error	      &
+			IF X0% <> PRT.TYP%	!    if not a print server    &
+				IF X0%		!      if specific type	      &
+\		IF ERRSTS% THEN			!  if any errors,	      &
+			ERR.TXT$ = "?Invalid server name " + SRV$	      &
+						!    display error msg	      &
+\			FNEXIT			!    and exit		      &
+\		END IF				!  end if		      &
+\	END IF					!end if			      &
+
+16010	X$ = SEG$(SRV$,2%,LEN(SRV$)-1%)		!strip _ and : chars	      &
+\	X$ = ""					!return null server name      &
+		IF X$ = "*"			!  if wildcard		      &
+\	X$ = SEG$(X$,1%,2%)			!strip unit no. from name     &
+		IF SEG$(X$,3%,3%) = "*"		!  if unit no. is wild	      &
+						!			      &
+\	FN.SERVER$ = X$				!return server name	      &
+\	FNEND					!end FN.SERVER$ function      &
+
+17000	!	f n . f o r m $ ( FORM$ )				      &
+	!								      &
+	!								      &
+	DEF FN.FORM$ (FORM$)						      &
+\	FN.FORM$,Z$ = EDIT$(FORM$,-2%)		!return trimmed form name     &
+\	CALL CHKNAM BY REF (Z$,LEN(Z$),2%+4%)	!check if valid form name     &
+\	IF ERRSTS% THEN				!if invalid form name,	      &
+		Z$ = "?Invalid form name"	!  build error text	      &
+\		Z$ = DEF.TXT$ + Z$		!  prefix def error text      &
+			IF LEN(DEF.TXT$)	!    if any		      &
+				UNLESS U.POS%	!      unless form specified  &
+\		CALL DISPLY (Z$)		!  display invalid name msg   &
+\	END IF					!end if			      &
+						!			      &
+\	FNEND					!end FN.FORM$ function	      &
+
+18000	!	f n . m a t c h  ( SRVER$ )				      &
+	!								      &
+	!								      &
+	!input:		SRVER$		-	server name to match	      &
+	!		SER.NAM$	-	current def's server name     &
+	!								      &
+	!output:	FN.MATCH%	-	server names match flag:      &
+	!					    TRUE% = names match	      &
+	!					   FALSE% = names don't match &
+	!uses:		None.						      &
+	!								      &
+	!								      &
+	DEF FN.MATCH% (SRVER$) =		!return TRUE% if:	      &
+		((LEN(SER.NAM$) = 0%) OR	!  null form server or,	      &
+		(SRVER$ = SER.NAM$) OR		!  names match exactly or,    &
+		(SEG$(SRVER$,1%,2%) = SER.NAM$))!  1st two chars match name   &
+
+19000	!	s t a n d a r d   e r r o r   h a n d l i n g		      &
+	!								      &
+	!								      &
+	FATAL% = TRUE%				!set fatal error flag	      &
+\	ERRSTS% = ERR				!save error no.		      &
+\	ERRLIN% = ERL				!save error line no.	      &
+\	ERRNAM$ = ERN$				!save module name	      &
+\	RESUME 32767				!resume to exit		      &
+
+32000	!	e n d - o f - s u b p r o g r a m   p r o c e s s i n g	      &
+	!								      &
+	!								      &
+	CLOSE #FRM.CHNL%			!close form def file	      &
+
+32767	!	e n d   o f   s u b p r o g r a m			      &
+	!								      &
+	!								      &
+	SUBEND

@@ -1,0 +1,1366 @@
+5!		VERSION		: V10.1
+6!		EDIT		: A
+7!		EDIT DATE	: 10-MAY-91
+10		EXTEND		! PROGRAM IS WRITTEN IN EXTEND MODE
+11	!								      &
+									      &
+									      &
+	!		  C O P Y R I G H T				      &
+									      &
+									      &
+  !		      Copyright (C) 1974, 1991 by			      &
+  !	        Digital Equipment Corporation, Maynard, Mass.		      &
+  !									      &
+  !									      &
+  !	This software is furnished under a license and may be used and	      &
+  !	copied  only  in accordance with the terms of such license and	      &
+  !	with the  inclusion  of  the  above  copyright  notice.   This	      &
+  !	software  or  any  other copies thereof may not be provided or	      &
+  !	otherwise made available to any other person.  No title to and	      &
+  !	ownership of the software is hereby transferred.		      &
+  !									      &
+  !	The information in this software is subject to change  without	      &
+  !	notice  and should not be construed as a commitment by Digital	      &
+  !	Equipment Corporation.						      &
+  !									      &
+  !	DIGITAL assumes no responsibility for the use  or  reliability	      &
+  !	of its software on equipment that is not supplied by DIGITAL.	      &
+  !									      &
+  !*******************************************************************	      &
+									      &
+
+20	!								      &
+									      &
+	!	M O D I F I C A T I O N   H I S T O R Y			      &
+									      &
+
+21	! VER/ED	EDIT DATE	REASON				      &
+	! V9.0-05	12-Mar-84	(PRL) Remove <0> prot from temp file  &
+	! V9.0-09	31-Jan-85	(KPH) Privilege checks		      &
+	! V9.0-12	12-Mar-85	(KPH) Get rev lvl with read pack attr &
+	! ==================================================================== &
+	! V9.3-01	10-Jan-85	(PRL) Require WACNT or GACNT privs    &
+	!				      to run, WACNT priv to reorder   &
+	!				      account outside own group	      &
+	! V9.4-01	22-Jan-87	(BGN) Make REORDR work for units > 9  &
+	! V10.0-I	29-Jan-90	(JJT) Allow sort by filename + type   &
+	! V10.0-L	06-Jun-90	(SEL) Fix sort by filename + type     &
+	!								      &
+
+100	!								      &
+									      &
+	!	P R O G R A M   D E S C R I P T I O N			      &
+									      &
+
+101!	EACH RSTS/E ACCOUNT HAS ASSOCIATED WITH IT A 'USER FILE		      &
+   !	DIRECTORY' (UFD).   A UFD CONSISTS OF 8 WORD RECORDS CALLED	      &
+   !	ENTRIES.  THERE ARE THE FOLLOWING KINDS OF ENTRIES:		      &
+   !									      &
+   !	   1.   NAME - EVERY USER FILE HAS ONE NAME ENTRY.  NAME ENTRIES      &
+   !		ARE MAINTAINED AS A SINGLY LINKED LIST.  THE ROOT OF	      &
+   !		THIS LIST IS THE FIRST ENTRY IN THE UFD AND IS CALLED	      &
+   !		THE LABEL ENTRY.					      &
+   !									      &
+   !	   2.   ACCOUNTING - EVERY USER FILE HAS ONE ACCOUNTING ENTRY.	      &
+   !		THE NAME ENTRY CONTAINS A LINK TO THE ACCOUNTING ENTRY.	      &
+   !									      &
+   !	   3.   ATTRIBUTE - A USER FILE MAY CONTAIN ONE OR MORE		      &
+   !		ATTRIBUTE ENTRIES.  ATTRIBUTE ENTRIES FOR A SINGLE FILE	      &
+   !		ARE MAINTAINED AS A SINGLY LINKED LIST.  THE ROOT OF	      &
+   !		THIS LIST IS THE ACCOUNTING ENTRY.			      &
+   !									      &
+   !	   4.   RETRIEVAL - A USER FILE MAY REQUIRE ONE OR MORE		      &
+   !		RETRIEVAL ENTRIES.  EACH RETRIEVAL ENTRY CONTAINS UP TO	      &
+   !		7 POINTERS TO FILE CLUSTERS.  RETRIEVAL ENTRIES FOR A	      &
+   !		SINGLE FILE ARE MAINTAINED AS A SINGLY LINKED LIST WITH	      &
+   !		THE ROOT OF THIS LIST IN THE ACCOUNTING ENTRY.		      &
+   !									      &
+   !	   5.	CLUSTER MAP ENTRY - EVERY BLOCK OF A UFD CONTAINS AN	      &
+   !		IDENTICAL CLUSTER MAP ENTRY AS THE 32ND ENTRY.		      &
+   !		THE CONTENTS ARE THE CLUSTER MAP WHICH CONTAINS THE	      &
+   !		DEVICE CLUSTER NUMBERS OF UP TO 7 CLUSTERS.		      &
+   !									      &
+   !	   6.	LABEL ENTRY - THE FIRST ENTRY OF THE FIRST BLOCK IN A	      &
+   !		UFD IS THE ROOT OF THE NAME ENTRY LIST.			      &
+   !									      &
+   !	AS FILES ARE CREATED, DELETED AND EXTENDED, THE UFD LINKED LISTS      &
+   !	BECOME PHYSICALLY SCATTERED.  THIS AFFECTS THE TIME REQUIRED TO	      &
+   !	ACCOMPLISH A FILE "OPEN" AND THE TIME REQUIRED TO OBTAIN THE	      &
+   !	NEXT RETRIEVAL ENTRY (WINDOW TURN).				      &
+   !									      &
+   !	RE-ORDER, THROUGH THE USE OF A TEMPORARY FILE(TARGET UFD),	      &
+   !	REARRANGES THE UFD ENTRIES TO REDUCE THE TIME REQUIRED TO SCAN	      &
+   !	NAME ENTRIES AND ARRANGES ACCOUNTING, RETRIEVAL AND ATTRIBUTE	      &
+   !	ENTRIES TO OCCUPY THE SAME PHYSICAL DISK BLOCK WHERE POSSIBLE.	      &
+   !									      &
+   !	THE NATURAL ORDER OF FILES IN THE UFD IS BY CREATION DATE AND	      &
+   !	TIME WHERE THE NAME ENTRY OF THE LAST FILE CREATED IS AT THE END      &
+   !	OF THE LIST.							      &
+   !									      &
+   !	RE-ORDER ALLOWS THE NAME ENTRY LIST TO BE ORDERED BY EITHER	      &
+   !	CREATION DATE/TIME OR DATE OF LAST ACCESS, IN EITHER FORWARD OR	      &
+   !	REVERSE	CHRONOLOGICAL ORDER.  FOR EXAMPLE, THE UFD MAY BE	      &
+   !	RE-ORDERED SO THAT THE FILE ACCESSED FIRST MAY HAVE ITS NAME	      &
+   !	BLOCK APPEAR AT THE BEGINNING OF THE LIST.			      &
+   !									      &
+   !	RE-ORDER also allows the name entry list to be ordered by the	      &
+   !	filename and type, in either forward or reverse alphabetical order.   &
+   !									      &
+   !	RE-ORDER DOES NOT ALLOW THE REORDERING OF ACCOUNTS [0,1] OR	      &
+   !	[1,1] NOR DOES IT ALLOW THE REORDERING OF ANY UFD WHICH CONTAINS      &
+   !	A CURRENTLY OPEN FILE.						      &
+   !									      &
+
+165	!								      &
+									      &
+									      &
+	!	O P E R A T I O N					      &
+									      &
+
+170	! REORDR, AFTER OBTAINING USER COMMANDS, OPENS A TEMP FILE IN	      &
+	! ACCOUNT [0,1] AND DIMENSIONS IT AS A VIRTUAL ARRAY		      &
+	! [TARGET].  IT ALSO OPENS THE UFD TO BE REORDERED AND IT	      &
+	! TOO IS A VIRTUAL ARRAY.					      &
+	! IF REORDR IS RUNNING ON A LARGE FILE SYSTEM, IT WILL PEEK	      &
+	! THROUGH THE FCB'S TO DETERMINE IF ANY FILES ARE OPEN ON	      &
+	! THE ACCOUNT.							      &
+
+175	! REORDR COPIES CLUSTER MAP ENTRIES FROM SOURCE TO TARGET.	      &
+	! REORDR THEN READS EACH NAME ENTRY IN THE SOURCE UFD.		      &
+	! BASED ON USER COMMAND IT THEN EXTRACTS THE CREATION OR	      &
+	! ACCESS (DATE/TIME) FROM THE ASSOCIATED ACCOUNTING ENTRY	      &
+	! AND IT BUILDS A 3 WORD RECORD CONSISTING OF NAME ENTRY	      &
+	! LINK ADDRESS (THE ADDRESS), AND THE DATE/TIME (THE KEY).	      &
+
+180	! EACH RECORD IS INSERTED INTO AN IN CORE FILE (ARRAY)		      &
+	! MAINTAINED IN ASCENDING KEY SEQUENCE.  AS EACH NAME ENTRY	      &
+	! IS PROCESSED,  REORDR ALSO CHECKS FOR OPEN FILE ACCESS	      &
+	! COUNT <>0).  IF AN OPEN FILE IS FOUND, THEN REORDR		      &
+	! ABORTS THE REORDERING OF THAT UFD. NEXT, REORDR UTILIZES	      &
+	! THE IN CORE FILE TO MOVE NAME ENTRIES FROM SOURCE TO TARGET	      &
+	! UFD.  THE IN CORE FILE IS READ EITHER FORWARD OR BACKWARD	      &
+	! BASED ON PREVIOUSLY ENTERED USER COMMAND.  THE RESULT IS THAT	      &
+	! ALL NAME BLOCKS ARE NOW IN THE TARGET ARRAY IN THE ORDER THE	      &
+	! USER SPECIFIED.						      &
+
+185	! REORDR THEN CALCULATES THE NUMBER OF REMAINING ENTRIES	      &
+	! ASSOCIATED WITH EACH FILE AND ONE FILE AT A TIME, IT FINDS	      &
+	! THE OPTIMUM PLACE IN THE TARGET ARRAY AND THEN MOVES ALL	      &
+	! ENTRIES FROM THE SOURCE TO TARGET UFD.  WHEN ALL FILE		      &
+	! ENTRIES ARE IN THE TARGET UFD, THEN REORDR REOPENS THE	      &
+	! SOURCE UFD FOR WRITE ACCESS AND COPIES THE TARGET UFD TO	      &
+	! THE SOURCE UFD.  AT THIS POINT, REORDR PRINTS A MESSAGE	      &
+	! AND GOES BACK TO PROCESS THE NEXT UFD.			      &
+									      &
+
+300	!								      &
+									      &
+									      &
+	!	I / O    C H A N N E L S				      &
+									      &
+									      &
+
+301!	CHANNEL #		USED FOR				      &
+   !
+311!	    1			ORIGINAL UFD SOURCE FILE		      &
+   !	    2			TARGET WORK ARRAY(VIRTUAL ARRAY)	      &
+   !				   (WHERE THE NEW UFD WILL BE		      &
+   !				    BUILT)
+313!	    3			USER DIALOGUE TERMINAL			      &
+   !	    4			RESERVED FOR DEBUGGING USAGE		      &
+
+400	!								      &
+									      &
+	!	V A R I A B L E    D E F I N I T I O N S		      &
+
+401	!	VARIABLE   DEFINITION					      &
+
+410	!	A%	INDEX INTO NEXT AVAILABLE TARGET UFD ENTRY	      &
+	!	AO%	POINTER TO FIRST BLOCK BEYOND LAST NAME ENTRY	      &
+	!	B%	NUMBER OF BLOCKS IN UFD				      &
+	!	C%	UFD CLUSTERSIZE					      &
+	!	C$	USER ENTERED INPUT				      &
+	!	C3%	=-1 IF REORDER BY ACCESS DATE			      &
+	!		= 0 IF REORDER BY CREATION DATE/TIME		      &
+	!		= 1 IF REORDER BY FILENAME OR FILETYPE		      &
+	!	D$	UFD FILE SPECIFICATION OF UFD CURRENTLY BEING	      &
+	!		PROCESSED					      &
+	!	D%	DUMMY VARIABLE FOR INTERNAL FUNCTIONS		      &
+	!	D%()	THE UFD TO BE REORDERED SET UP AS A WORD ARRAY	      &
+	!	F%()	FREE ENTRY COUNTER FOR EACH DIRECTORY BLOCK	      &
+	!	F0%	WORKING VARIABLE				      &
+	!	F1%	WORKING VARIABLE				      &
+	!	FILE%	= -1 IF SORTING BY FILETYPE (C3% = 1%)		      &
+	!		=  0 IF SORTING BY FILENAME (C3% = 1%)		      &
+	!	I$	VERSION/EDIT #'S TEXT STRING			      &
+	!	I%()	ARRAY USED TO HOLD RETURN FROM FILE STRING SCAN	      &
+	!		OF USER ENTERED DEVICE/UFD SPECIFICATION(S)
+500	!	I%	HOLDS SECOND FLAG WORD RETURNED FROM FILE STRING      &
+	!		SCAN.						      &
+	!		OF USER ENTERED DEVICE/UFD SPECIFICATION(S)	      &
+	!	I0%()	ARRAY USED TO BUILD INPUT STRING FOR WILD	      &
+	!		CARD MFD LOOKUP.				      &
+	!	I1%	CMD STRING PROJ #				      &
+	!	I2%	CMD STRING PROG #				      &
+	!	I8%	USED IN PROCESSING COMMAND STRING		      &
+	!	I9%	POINTER TO CURRENT POSITION IN DEVICE/UFD USER	      &
+	!		ENTERED SPECIFICATION				      &
+	!	K%	RELATIVE FILE NUMBER WITHIN UFD WHICH IS	      &
+	!		CURRENTLY BEING MOVED				      &
+	!	L%	UFD DIRECTORY LINK POINTING TO THE ENTRY	      &
+	!		CURRENTLY BEING PROCESSED.			      &
+	!	N%	# OF FILES IN UFD				      &
+	!	P%	POINTER TO NEXT NAME ENTRY			      &
+	!	P0%	POINTER TO THE SOURCE UFD ENTRY WHICH IS TO BE MOVED. &
+	!	P1%	POINTER TO NAME BLOCK IN TARGET UFD		      &
+	!	R%	= 0 IF SORT IN FORWARD CHRONOLOGICAL ORDER	      &
+	!		=-1 IF SORT IN REVERSE ORDER.
+600	!	S%( , )	ARRAY FOR SORTING NAMES BY ACCESS OR CREATION DATA    &
+	!	S%	COUNT OF NUMBER OF ATTRIBUTE, ACCOUNTING AND	      &
+	!		RETRIEVAL ENTRIES FOR CURRENT FILE BEING REORDERED.   &
+	!	S0%	= 0% IF NO SORT BY ACCESS DATA DESIRED		      &
+	!		= 1% IF    SORT BY ACCESS DATA DESIRED		      &
+	!	T%	WORKING VARIABLE				      &
+	!	T%()	TARGET UFD SET UP AS A WORD ARRAY		      &
+	!	T0%	WORKING VARIABLE USED IN MOVING UFD CLUSTERMAPS	      &
+	!	T1%	POINTER TO NAME ENTRY. USED IN CREATION/ACCESS SORT   &
+	!	T2%	POINTER TO ACCOUNTING ENTRY. USED IN CREATION/ACCESS  &
+	!		SORT.						      &
+	!	W$	FILE SPEC FOR UFD TARGET ARRAY.			      &
+	!	W%	WORKING VARIABLE				      &
+	!	W1%	WORKING VARIABLE				      &
+	!	Z%	WORKING VARIABLE				      &
+
+800	!								      &
+									      &
+	!	P R O G R A M   I N D E X				      &
+									      &
+
+801!	SUBROUTINE	USE						      &
+   !
+805!	10000		FIND NEXT AVAILABLE TARGET UFD ENTRY SLOT.  MOVE      &
+   !			   POINTED TO ENTRY FROM SOURCE UFD TO TARGET	      &
+   !			   UFD, FIXING LINKS AS NECESSARY.		      &
+
+850!									      &
+   !	FUNCTION	STMT#	DESCRIPTION				      &
+   !
+851!	FNP%(L%)	15100	EXTRACT WORKING ARRAY POINTER VALUE FROM      &
+   !				   DIRECTORY LINK PARAMETER		      &
+
+852!	FNI%(L%,D%,T%)	15200	GIVEN DIRECTORY LINK, DATE AND TIME, ADD TO   &
+   !				  NAME ENTRY SORT LIST ARRAY IN SORTED ORDER  &
+   !									      &
+   !	FNO%()		16000	CHECK TO SEE IF THIS IS A LARGE FILE SYSTEM   &
+   !				  AND IF SO, IF ANY FILES ARE OPEN ON THE     &
+   !				  ACCOUNT TO BE REORDERED.		      &
+
+900	!								      &
+									      &
+	! 	D I M E N S I O N     S T A T E M E N T S		      &
+									      &
+
+910	DIM F%(111%)							      &
+		! FREE BLOCK COUNTER FOR EACH DIRECTORY BLOCK		      &
+
+920	   DIM #1%, D%(28671%)						      &
+	\  DIM #2%, T%(28671%)						      &
+		! SOURCE AND TARGET DIRECTORY ARRAYS			      &
+
+930	DIM I%(30%),							      &
+	   I0%(30%)							      &
+		! ARRAYS FOR HOLDING COMMAND AND DIRECTORY SCAN RESULTS	      &
+
+940	DIM S%(1737%,3%)						      &
+		!SORTING WORK ARRAY					      &
+	\ EXTERNAL WORD CONSTANT RECSIZ					      &
+		!Recordsize for work array, determined at TKB time	      &
+
+950	Dim Firqb%(30%)							      &
+		! General SYS call array				      &
+
+998!
+999	!								      &
+									      &
+	!	M A I N   P R O G R A M   L O G I C			      &
+									      &
+
+1000	ON ERROR GO TO 19000						      &
+		! SET GENERAL ERROR TRAP				      &
+
+1010	I$ = "V10.1-A"							      &
+		! SET UP VERSION/EDIT #'S FOR HEADER			      &
+
+1020	   PRINT							      &
+	\  PRINT "REORDR"+CHR$(9%)+I$+CHR$(9%)				      &
+		+CVT$$(RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(0%)),3%),4%)	      &
+		+CHR$(13%)+CHR$(10%)					      &
+		+"Directory Reordering Program"				      &
+		! PRINT PROGRAM NAME, VERSION #, SYSTEM TITLE, AND	      &
+		!   PROGRAM DESCRIPTION TEXT."				      &
+
+1030	!								      &
+									      &
+	!	C H E C K    F O R   P R I V I L E G E S		      &
+
+1040	J$ = SYS(CHR$(6%)+CHR$(-21%)+CHR$(-1%))				      &
+	\ Gacnt% = FnPriv%("GACNT")					      &
+	\ Wacnt% = FnPriv%("WACNT")					      &
+	\ If Not (Gacnt% or Wacnt%) then				      &
+		PRINT							      &
+	\	PRINT "?REORDR requires GACNT or WACNT privilege"	      &
+	\	GOTO 32767						      &
+	! Drop temporary privileges					      &
+	! Set flag for GACNT privilege					      &
+	! Set flag for WACNT privilege					      &
+	! If user does not have either privilege,			      &
+	!	Display error message					      &
+	!	Exit							      &
+
+1050	J$ = SYS(CHR$(6%)+CHR$(-21%)+CHR$(0%))				      &
+	! Regain temporary privileges					      &
+
+1060	Change Sys(Chr$(6%)+Chr$(26%)) to Firqb%			      &
+	\ Proj% = Firqb%(22%)						      &
+	\ Prog% = Firqb%(21%)						      &
+		! Get job information					      &
+		! Save proj,prog nos.					      &
+
+1100	!								      &
+									      &
+									      &
+	!	S E T U P   T A R G E T   W O R K F I L E		      &
+									      &
+
+1105	W$ = "_SY:[0,1]TEMP"						      &
+	    +MID(NUM$(100%+(PEEK(518%) AND 255%)/2%), 3%, 2%)		      &
+	    +".TMP"							      &
+		! CREATE A FILE SPECIFICATION				      &
+
+1110	T% = 16%							      &
+		! SET UP CLUSTERSIZE PARAMETER				      &
+
+1120	OPEN W$ FOR OUTPUT AS FILE 2%, CLUSTERSIZE -T%, FILESIZE 112%,	      &
+		RECORDSIZE RECSIZ					      &
+	\  KILL W$							      &
+		! OPEN TARGET ARRAY WORKFILE, MARK FOR DESTRUCTION WHEN	      &
+		! CLOSED.  IF CLUSTERSIZE IS GREATER THEN DISK UFD	      &
+		! CLUSTERSIZE, THE ERROR HANDLER WILL TRAP THE ERROR,	      &
+		! HALVE THE DESIRED CLUSTERSIZE, AND RETRY THE OPEN.	      &
+		! THIS WILL BE REPEATED UNTIL SUCCESSFUL.  IF T% EVER GETS    &
+		! TO ZERO (0), A FATAL ERROR WILL BE DECLARED AND THE	      &
+		! PROGRAM ABORTED.					      &
+
+1125	!								      &
+									      &
+									      &
+	!	S E T U P   D I A L O G U E    T E R M I N A L		      &
+									      &
+
+1130	OPEN "_KB:REORDR.CMD" AS FILE 3%				      &
+		!OPEN THE KEYBOARD TO GAIN CONTROL			      &
+
+1199!
+1200	!								      &
+									      &
+									      &
+	!	C O M M A N D   G E T    A N D    D E C O D E		      &
+									      &
+
+1202	   S0%,								      &
+	    F%,								      &
+	    FILE%,							      &
+	    R%,								      &
+	   C3% = 0%							      &
+	\  PRINT							      &
+	\  INPUT #3%, "Sort Directory(s) (YES/NO) <NO>?  "; C$		      &
+	\  S0% = 1%	IF LEFT(CVT$$(C$,32%),1%) = "Y"			      &
+	\  GO TO 1240	IF S0% = 0%					      &
+		! INITIALIZE CONTROL FLAGS TO DEFAULT SETTINGS.  PROMPT	      &
+		! FOR SORT DIRECTORIES QUERY.  IF 'Y', 'YE' OR 'YES',	      &
+		! SET SORT FLAG.  SKIP OTHER QUERIES IF NO SORT TO BE DONE    &
+
+1205	   PRINT							      &
+	\  INPUT #3%,							      &
+	 "Order by CRE[ATION], ACC[ESS] Date or FIL[ENAME] <CRE>?  "; C$      &
+		! GET USER SELECTION OF RE-ORDER KEY			      &
+
+1210	   GO TO 1220	IF LEN(C$) = 0%					      &
+	\  C$ = LEFT(CVT$$(C$,32%),3%)					      &
+	\  GO TO 1220	IF C$ = "CRE"					      &
+	\  GO TO 1215	IF C$ = "FIL"					      &
+	\  GO TO 1205	IF C$ <> "ACC"					      &
+	\  C3% = -1%							      &
+	\  GO TO 1220							      &
+		! PRESET TO DEFAULT VALUE.  DONE IF DEFAULT INPUT. ELSE,      &
+		! GET FIRST THREE CHARACTERS IN UPPER-CASE ONLY. DONE IF      &
+		! "CRE".  GET SELECTION AGAIN IF NOT "ACC" EITHER.  OTHERWISE, &
+		! SET TO ACCESS DATE SETTING				      &
+
+1215	C3% = 1%							      &
+	\  PRINT							      &
+	\  INPUT #3%, "Order by FIL[ENAME] or TYP[E] <FIL>?  "; C$	      &
+	\  GO TO 1220	IF LEN(C$) = 0%					      &
+	\  C$ = LEFT(CVT$$(C$,32%),3%)					      &
+	\  GO TO 1220	IF C$ = "FIL"					      &
+	\  GO TO 1215	IF C$ <> "TYP"					      &
+	\  FILE% = -1%							      &
+		! DONE IF DEFAULT INPUT. ELSE,				      &
+		! GET FIRST THREE CHARACTERS IN UPPER-CASE ONLY.  DONE IF     &
+		! "FIL".  GET SELECTION AGAIN IF NOT "TYP" EITHER.	      &
+		! OTHERWISE, SET TO SORT BY TYPE			      &
+
+1220	   PRINT							      &
+	\  INPUT #3%, "In FOR[WARD] or REV[ERSE] Order<FOR>?  "; C$	      &
+		! GET USER SELECTION OF ORDERING DIRECTION		      &
+
+1230	   GO TO 1240	IF LEN(C$) = 0%					      &
+	\  C$ = LEFT(CVT$$(C$,32%),3%)					      &
+	\  GO TO 1240	IF C$ = "FOR"					      &
+	\  GO TO 1220	IF C$ <> "REV"					      &
+	\  R% = -1%							      &
+		! PRESET TO DEFAULT VALUE.  DONE IF DEFAULT INPUT. ELSE,      &
+		! GET FIRST THREE CHARACTERS IN UPPER-CASE ONLY.  DONE IF     &
+		! "FOR".  GET SELECTION AGAIN IF NOT "REV" EITHER.	      &
+		! OTHERWISE, SET TO FORWARD DIRECTION SETTING		      &
+
+1240	   PRINT							      &
+	\  PRINT "Device and UFD Specification(s)?  ";			      &
+	\  INPUT LINE #3%, C$						      &
+	\  C$ = CVT$$(C$,-2%)						      &
+		! PROMPT FOR COMMAND QUERY, GET COMMAND LINE, STRIP OUT	      &
+		! ALL USELESS CHARACTERS				      &
+
+1250	I9% = 1%							      &
+		! INITIALIZE PARSE TO START WITH FIRST CHARACTER IN STRING    &
+
+1299!
+1300	!								      &
+									      &
+									      &
+	!	P A R S E   T H E   C O M M A N D			      &
+									      &
+
+1310	   I8% = 32767%							      &
+	\  IF I9% > LEN(C$)+1% THEN					      &
+		GO TO 1200						      &
+	   ELSE CHANGE SYS(CHR$(6%)+CHR$(-23%)+RIGHT(C$,I9%)) TO I%	      &
+		! SCAN THE COMMAND LINE FROM THE POINTER I9% TO THE END.      &
+		! SCAN WILL TERMINATE ON A ',' OR END OF STRING		      &
+
+1320	   I8% = LEN(C$) - RECOUNT + 2%					      &
+	\  IF RECOUNT <> 0% THEN					      &
+		IF MID(C$,(I8%-1%), 1%) <> "," THEN			      &
+			I8% = I8% + 1%					      &
+		     \  GO TO 1350					      &
+		! IF THE SCAN DID NOT TERMINATE ON A ',', THEN THE	      &
+		! COMMAND LINE SPEC IS ILLEGAL - MOVE THE POINTER	      &
+		! PAST THE TERMINATOR AND INFORM THE USER		      &
+
+1330	   I% = I%(29%) + SWAP%(I%(30%))				      &
+	\  IF (I% AND -19201%) <> 12416%				      &
+		   OR  I%(26%) = 0%					      &
+		   OR (STATUS AND 255%) <> 0% THEN			      &
+			GO TO 1350					      &
+		! SET I% TO THE VALUE OF THE 2ND FLAG WORD RETURNED FROM THE  &
+		! SYS CALL - IF THE FLAG WORD INDICATES AN INVALID SPEC,      &
+		! THEN GO TELL THE USER					      &
+
+1335	If Not Wacnt% then						      &
+		If I%(6%) <> Proj% then					      &
+			Print "?WACNT privilege required - ";		      &
+				Mid(C$,I9%,I8%)				      &
+	\		Goto 1240					      &
+		! If user doesn't have WACNT privilege,			      &
+		!	If not job's proj no.,				      &
+		!		Display error message			      &
+		!		Reprompt				      &
+
+1340	   I9% = I8%							      &
+	\  IF I% AND 768% THEN						      &
+		GO TO 1400						      &
+	   ELSE GO TO 1510						      &
+		! SET THE COMMAND STRING POINTER PAST THE CURRENT COMMAND.    &
+		! IF THE PROJ-PROG #'S ARE BOTH '*', THEN GO DO THE MFD	      &
+		! LOOKUP; OTHERWISE, GO ACCESS THE UFD FOR THIS PPN.	      &
+
+1350	   PRINT "?Illegal Specification - "				      &
+		+MID(C$,I9%,(I8%-1%))					      &
+	\  GO TO 1240							      &
+		! TELL THE USER OF THE ERROR, GET ANOTHER COMMAND	      &
+
+1399!
+1400	!								      &
+									      &
+									      &
+	!	W I L D     C A R D    M F D   L O O K U P		      &
+									      &
+
+1410	   I0%(T%) = 0%	FOR T% = 0% TO 30%				      &
+	\  I0%(0%) = 30%						      &
+	\  I0%(1%) =  6%						      &
+	\  I0%(2%) = 14%						      &
+	\  I0%(3%) =  1%						      &
+	\  I0%(9%) =  1%	! DON'T RETURN USAGE			      &
+	\  I0%(T%) = I%(T%)	FOR T% = 23% TO 26%			      &
+		! INITIALLY, SET UP THE ARRAY FOR FORMING THE SYS CALL	      &
+		! DURING THE WILDCARD MFD DIRECTORY SEARCH		      &
+
+1420	   I1% = I%(6%)							      &
+	\  I2% = I%(5%)							      &
+		! SAVE THE PRJ, PRG #'S FROM THE CMD STRING SPEC	      &
+
+1430	   CHANGE I0% TO D$						      &
+	\  CHANGE SYS(D$) TO I%						      &
+	\  I0%(3%) = I0%(3%) + 1%					      &
+	\  I0%(4%) = SWAP%(I0%(3%))					      &
+		! CONVERT TO STRING, MAKE DIRECTORY LOOKUP SYS CALL	      &
+		! GET BACK IN ARRAY FORM, INCRMENT LOOKUP COUNT IN	      &
+		! PREPARATION FOR POSSIBLE NEXT USE.  MAKE SURE THAT	      &
+		! BYTE ADD OVERFLOW IS SAVED PROPERLY			      &
+
+1440	GO TO 1430	IF  (I% AND 256%) = 0% AND I%(8%) <> I1%	      &
+				!IF PROJ # WAS NOT A '*', THEN TEST TO	      &
+				! SEE IF PROJ#'S MATCH;  IF NOT, THEN TRY     &
+				! NEXT MFD ENTRY			      &
+
+1450	GO TO 1430	IF  (I% AND 512%) = 0% AND I%(7%) <> I2%	      &
+				! IF PROG # WAS NOT A '*', THEN TEST TO	      &
+				! SEE IF PROG#'S MATCH;  IF NOT, THEN TRY     &
+				! NEXT MFD ENTRY			      &
+
+1460	I%(T%) = I%(T%+2%)	FOR T% = 5% TO 6%			      &
+		! MOVE THE PROJ-PROG #'S, AS RETURNED IN THE MFD	      &
+		! LOOKUP ARRAY, TO THE POSITION THEY WILL OCCUPY IN	      &
+		! THE FILE STRING SCAN RETURN.  THIS ALLOWS THE GENERATION    &
+		! ROUTINE FOR THE DIRECTORY NAMING STRING TO USE EITHER	      &
+		! ARRAY.						      &
+
+1499!
+1500	!								      &
+									      &
+									      &
+	!	F O R M    D I R E C T O R Y   F I L E    S P E C	      &
+									      &
+
+1510	D$ = "_"							      &
+	    +CHR$(I%(23%))						      &
+	    +CHR$(I%(24%))						      &
+	    +NUM1$(I%(25%))						      &
+	    +":"							      &
+	    +"["							      &
+	    +NUM1$(I%(6%))						      &
+	    +","							      &
+	    +NUM1$(I%(5%))						      &
+	    +"]"							      &
+		! FILE NAME STRING PREFIX IS				      &
+		!							      &
+		!	DEVICE NAME AND #:[PRJ#,PRG#]			      &
+
+1599!
+1600	!								      &
+									      &
+									      &
+	!	S E T U P   F O R   D I R E C T O R Y			      &
+									      &
+
+1610	   PRINT	IF CCPOS(0%) <> 0%				      &
+	\  PRINT "Directory "; D$;					      &
+	\  C%=INSTR(1%,D$,":")	! FIND THE DEVICE NAME			      &
+	\  DEV$="SY0:"		! SET UP A DEFAULT DEVICE		      &
+	\  DEV$=LEFT(D$,C%) IF C%	! GET REAL DEVICE NAME		      &
+	\  C% = SWAP%(CVT$%(RIGHT(SYS(CHR$(6%)+CHR$(-25%)+CHR$(-4%)	      &
+		+ STRING$(19%,0%) + MID(SYS(CHR$(6%)+CHR$(-10%)+DEV$),	      &
+		  23%, 4%)),9%)))	! Get the revision level	      &
+	\  C%=-(C%<257%)	! Get a 1 for 0.0 and a 0 for 1.1 or above    &
+	\  IF  I%(5%)  = 1% AND I%(6%) <= C% THEN			      &
+		   PRINT " cannot be Reordered"				      &
+		\  GO TO 6000						      &
+			! Skip account [0,1] on all disks and		      &
+			! account [1,1] on RDS0 disks.			      &
+
+1620	OPEN D$ FOR INPUT AS FILE 1%, RECORDSIZE RECSIZ			      &
+	\  GOTO 6000 IF FNO%						      &
+		! OPEN THE SOURCE UFD FILE				      &
+		! SKIP THIS UFD IF A LARGE FILE SYSTEM AND		      &
+		! THERE IS AN OPEN FILE ON THIS ACCOUNT.		      &
+
+1630	IF SWAP%(CVT$%(MID(SYS(CHR$(12%)),13%,2%)))=0% THEN		      &
+		   PRINT " is Null"					      &
+		\  GO TO 6000						      &
+			! IF THE UFD IS EMPTY(NULL), TELL THE USER AND	      &
+			! SKIP IT					      &
+
+1999!									      &
+
+2000	!								      &
+									      &
+									      &
+	!	I N I T I A L I Z E    T H E   T A R G E T    U F D	      &
+									      &
+
+2010	   C% = D%(248%)						      &
+	\  B% = 0%							      &
+	\  B% = B% + C%		IF D%(T%) <> 0%				      &
+		FOR T% = 249% TO 255%					      &
+			!GET THE UFD CLUSTERSIZE.  NOW, ADD UP THE TOTAL      &
+			! NUMBER OF BLOCKS IN THIS FILE			      &
+
+2020	FOR T% = 0% TO SWAP%(B%-1%) STEP 256%				      &
+		\  T%(T%+T0%) = 0%	FOR T0% = 0% TO 247%		      &
+		\  T%(T%+T0%) = D%(T0%) FOR T0% = 248% TO 255%		      &
+	\  NEXT T%							      &
+		! FOR EVERY BLOCK IN THE UFD, SET THE FIRST 31 ENTRIES	      &
+		! TO ALL ZEROS.  SET THE LAST ENTRY TO BE IDENTICAL WITH      &
+		! THE SOURCE UFD CLUSTER MAP				      &
+
+2030	T%(T%) = D%(T%)		FOR T% = 0% TO 7%			      &
+		! COPY THE LABEL ENTRY FROM SOURCE TO TARGET ARRAY	      &
+
+2040	   F%(0%) = 30%							      &
+	\  F%(T%) = 31%		FOR T% = 1% TO (B%-1%)			      &
+		! INITIALIZE THE FREE ENTRIES COUNTER FOR EACH TARGET	      &
+		! UFD BLOCK.  THE FIRST COUNTER IS 30 BECAUSE OF THE	      &
+		! PRESENCE OF THE LABEL BLOCK.				      &
+
+3999!
+4000	!								      &
+									      &
+									      &
+	!	N A M E    B L O C K    R E O R D E R			      &
+									      &
+									      &
+
+4005	   P%,								      &
+	   S%(0%,0%),							      &
+	   S%(0%,1%) = 0%						      &
+	\  S%(0%,2%) = 1440% UNLESS C3% = 1%				      &
+	\  S%(0%,2%) = 0%    IF     C3% = 1%				      &
+	\  S%(0%,3%) = 0%						      &
+		! INITIALIZE POINTER INTO SOURCE ARRAY.  ZERO NUMBER OF	      &
+		! ENTRIES IN FILE AND SET DATE TO ZERO.  SET TIME TO FULL     &
+		! DAY(1440 MINUTES 'TO' MIDNIGHT) SINCE IT WORKS BACKWARDS    &
+
+4010	   L% = D%(P%)							      &
+	\  GO TO 4050	IF (L% AND -16%) = 0%				      &
+	\  P% = FNP%(L%)						      &
+		! ADVANCE LINK DOWN CHAIN.  EXIT IF END OF CHAIN.	      &
+		! GET POINTER TO NEXT UFD NAME ENTRY.  PICK UP		      &
+		! POINTER TO NAME ENTRY BLOCK				      &
+
+4015	GO TO 6100	IF D%(P%+5%) <> 0%				      &
+		! ABORT IF ACCESS COUNT IS NON-ZERO			      &
+
+4020	T2% = FNP%(D%(P%+6%)) UNLESS C3% = 1%				      &
+		! GET POINTER TO ACCOUNTING ENTRY			      &
+
+4030	Z% = FNI%(L%,D%(T2%+3%),D%(T2%+4%))				      &
+		IF  C3% = 0%						      &
+\	Z% = FNF%(L%,D%(P%+1%),D%(P%+2%),D%(P%+3%))			      &
+		IF (C3% = 1%) AND (FILE% =  0%)				      &
+\	Z% = FNF%(L%,D%(P%+3%),D%(P%+1%),D%(P%+2%))			      &
+		IF (C3% = 1%) AND (FILE% <> 0%)				      &
+\	Z% = FNI%(L%,D%(T2%+1%),0%)					      &
+		IF  C3% = -1%						      &
+		! SELECT SORTING BY EITHER CREATION DATE/TIME OR	      &
+		! BY FILENAME OR					      &
+		! BY FILETYPE OR					      &
+		! BY DATE OF LAST ACCESS(TIME IS 0)			      &
+
+4035	IF Z% <> 0%							      &
+	THEN								      &
+		PRINT IF CCPOS(0%)					      &
+	     \	PRINT "?REORDR Fatal Error - Submit a Software Performance Report (SPR)" &
+	     \  GO TO 19910						      &
+			! FATAL SYSTEM ERROR, SHOULD NEVER HAPPEN.  IF SO,    &
+			! CONTACT SOFTWARE AND/OR HARDWARE MAINTENANCE.	      &
+
+4040	GO TO 4010							      &
+		! RETURN FOR NEXT ENTRY IN LIST				      &
+
+4048!
+4049	!								      &
+									      &
+									      &
+	!	P A C K   N A M E   E N T R I E S   I N    U F D	      &
+									      &
+
+4050	A%,								      &
+	P% = 0%								      &
+		! INITIALIZE ARRAY POINTERS PRIOR TO PACKING		      &
+
+4055	GO TO 4070	IF R% <> 0%					      &
+		! GO PROCESS IN REVERSE ORDER				      &
+
+4060	FOR N% = 3% TO S%(0%,0%)+2%					      &
+		\  L% = S%(N%,0%)					      &
+		\  GO SUB 10010						      &
+	\  NEXT N%							      &
+	\  GO TO 4080							      &
+			! PEEL OFF AND WRITE INTO TARGET UFD ARRAY	      &
+			! IN THE FORWARD ORDER				      &
+
+4070	FOR N% = S%(0%,0%)+2% TO 3% STEP -1%				      &
+		\  L% = S%(N%,0%)					      &
+		\  GO SUB 10010						      &
+	\  NEXT N%							      &
+			! PEEL OFF AND WRITE INTO TARGET UFD ARRAY IN	      &
+			! THE REVERSE ORDER				      &
+
+4080	N% = S%(0%,0%)							      &
+		! SET COUNT OF ENTRIES PROCESSED			      &
+
+4099!
+4100	!								      &
+									      &
+									      &
+	!	C A L C U L A T E    #  O F   E N T R I E S		      &
+									      &
+									      &
+
+4110!		CALCULATE NUMBER OF ENTRIES REQUIRED TO HOLD ATTRIBUTE,	      &
+    !		ACCOUNTING AND RETRIEVAL ENTRIES			      &
+
+4120	A0% = 1% + SWAP%((A%-1%) AND (NOT 255%))			      &
+		! MOVE POINTER TO BEGINNING OF NEXT BLOCK		      &
+
+4130	FOR K% = 0% TO (N%-1%)						      &
+		! MAJOR LOOP ON LIST OF FILES				      &
+
+4135		   T% = (K%+1%)/31%					      &
+		\  P1% = SWAP%(T%) + 8%*(K%+1%-T%*31%)			      &
+			! CALCULATE THE POINTER TO THE NAME BLOCK IN THE      &
+			! TARGET UFD, POINTED TO BY P1%			      &
+
+4140!		BEGIN CALCULATION OF NUMBER OF ENTRIES REQUIRED TO HOLD	      &
+    !		ACCOUNTING, ATTRIBUTES AND RETRIEVAL ENTRIES		      &
+
+4150		S% = 1%							      &
+			! ALWAYS ONE FOR THE ACCOUNTING BLOCK		      &
+
+4160		   P0% = FNP%(T%(P1%+6%))				      &
+		\   L% =      D%(P0%   )				      &
+			! GET THE SOURCE ACCOUNTING BLOCK POINTER.  THEN,     &
+			! GET THE SOURCE ATTRIBUTE LIST POINTER		      &
+
+4170		   GO TO 4190	IF (L% AND -16%) = 0%			      &
+		\  S% = S% + 1%						      &
+		\  L% = D%(FNP%(L%))					      &
+		\  GO TO 4170						      &
+			! FOLLOW THE ATTRIBUTES LINKS, ADDING ONE TO THE      &
+			! ENTRIES COUNTER FOR EACH NON-ZERO LINK	      &
+
+4190		   T0% = D%(P0%+2%)					      &
+		\  T1% = D%(P0%+7%)					      &
+		\ T0 = 32768. + (T0% EQV 32767%)			      &
+		\ T0 = T0 + 65536.*(D%(P0%+6%) AND 255%) IF D%(P0%+5%) = 0%   &
+		\ S% = (S% + 1%) + (T0-1.) / (T1%*7%)			      &
+			! T0% IS NUMBER OF BLOCKS IN FILE.  T1% IS THE FILE   &
+			! CLUSTER SIZE.  THE REST OF THE STATEMENTS CALCULATE &
+			! THE NUMBER OF RETRIEVAL BLOCK ENTRIES AND	      &
+			! ADD THE RESULT TO THE ENTRIES COUNTER		      &
+
+4200!		CALCULATE THE OPTIMUM PLACE TO PUT THE ACCOUNTING,	      &
+    !		ATTRIBUTE AND RETRIEVAL ENTRIES				      &
+
+4210		   F0% = S%						      &
+		\  F0% = 31%	IF F0% > 31%				      &
+			! USE F0% AS TEMP STORAGE.  LIMIT THE REQUIRED SIZE   &
+			! FOR SEARCHING TO NO MORE THAN 31% ENTRIES/BLOCK     &
+
+4220		FOR F1% = A0% TO (B%-1%)				      &
+		\	GO TO 4240	IF F%(F1%) >= F0%		      &
+		\  NEXT F1%						      &
+			! SCAN THE FREE ENTRIES ARRAY LOOKING FOR A BLOCK     &
+			! WHICH HAS THE REQUIRED NUMBER OF FREE ENTRIES	      &
+
+4230		   F0% = F0% - 1%					      &
+		\  GO TO 4220	IF F0% <> 0%				      &
+		\  F1% = 0%						      &
+			! IF NO BLOCK HAD ENOUGH FREE ENTRIES, THEN DECREMENT &
+			! THE REQUIRED FREE ENTRIES COUNT BY ONE, TRYING      &
+			! AGAIN. IF WE FAIL ENTIRELY, THEN ASSUME THE	      &
+			! NECESSARY FREE ENTRIES ARE BEFORE A0%.	      &
+
+4240		A% = SWAP%(F1%) - 8%					      &
+			! ADJUST THE POINTER TO THE PREVIOUS ENTRY, SINCE     &
+			! THE MOVE LOOP WILL INCREMENT THE POINTER AT THE     &
+			! START OF THE MOVE				      &
+
+4299!
+4300	!								      &
+									      &
+									      &
+	!	M O V E   N A M E   A N D   A C C T.   E N T R I E S	      &
+									      &
+
+4320		   P% = P1%+6%						      &
+		\  L% = T%(P%)						      &
+		\  GO SUB 10010						      &
+			! SET UP P% AS THE POINTER  TO THE ACCOUNTING ENTRY   &
+			! LINK IN THE SOURCE NAME BLOCK.  GET THE LINK.  GO   &
+			! TRANSFER THE ACCOUNTING ENTRY AND FIX ITS LINK.     &
+			! DECREMENT THE NUMBER OF ENTRIES COUNTER AND	      &
+			! EXIT THE LOOP IF NO MORE TO XFER		      &
+
+4400	!								      &
+									      &
+									      &
+	!	M O V E   A T T R I B U T E S				      &
+									      &
+
+4410		L% = D%(P0%)						      &
+			! GET THE SOURCE LINK				      &
+
+4420		   GO TO 4500	IF (L% AND -16%) = 0%			      &
+		\  GO SUB 10010						      &
+		\  GO TO 4420						      &
+			! EXIT IF CURRENT LINK IS END OF LIST.  ELSE	      &
+			! GO TRANSFER CURRENT ATTRIBUTE ENTRY AND FIX ITS     &
+			! LINK.  DECREMENT THE NUMBER OF ENTRIES COUNTER      &
+			! AND EXIT IF GOES TO ZERO.  ELSE, GO TO NEXT LIST    &
+			! ENTRY						      &
+
+4500	!								      &
+									      &
+									      &
+	!	M O V E   R E T R I E V A L    E N T R I E S		      &
+									      &
+
+4510		   P% = P1%+7%						      &
+		\  L% = T%(P%)						      &
+			! CALCULATE THE POINTER TO THE RETRIEVAL LIST	      &
+			! IN THE SOURCE NAME ENTRY.  GET THE LINK	      &
+
+4520		   GO TO 4600	IF (L% AND -16%) = 0%			      &
+		\  GO SUB 10010						      &
+		\  GO TO 4520						      &
+			! TEST CURRENT LINK FOR END OF LIST.  IF NOT,	      &
+			! TRANSFER THE RETRIEVAL ENTRY AND FIX ITS LINK.      &
+			! THEN TRY THE NEXT LINKED ENTRY		      &
+
+4600	NEXT K%								      &
+		! ALL DONE WITH THE DIRECTORY ENTRIES FOR THIS FILE	      &
+		! NOW, GO BACK FOR NEXT FILE IN LIST			      &
+
+4609!
+4610	!								      &
+									      &
+									      &
+	!	O V E R L A Y    O R I G.   D I R E C T O R Y		      &
+									      &
+
+4620	CLOSE 1%							      &
+		! CLOSE THE ORIGINAL UFD SO WE CAN RE-OPEN IT PRIOR	      &
+		! TO RE-WRITING IT WITH THE RE-ORDERED INFORMATION	      &
+
+4630	   OPEN D$ FOR INPUT AS FILE 1%, MODE 16384%, RECORDSIZE RECSIZ	      &
+	\  D%(T%) = T%(T%)	FOR T% = 0% TO SWAP%(B%)-1%		      &
+	\  CLOSE 1%							      &
+		! COPY REORDERED UFD BACK OVER THE ORIGINAL UFD		      &
+
+4640	   PRINT " has been Reordered"					      &
+	\  GO TO 6000							      &
+		! SIGNAL USER THAT RE-ORDERING OF CURRENT UFD IS COMPLETE     &
+		! AND NEW UFD HAS BEEN WRITTEN TO DISK			      &
+
+5999!
+6000	!								      &
+									      &
+									      &
+	!	W H A T   T O   D O   N E X T				      &
+									      &
+
+6010	IF (I% AND 768%) THEN						      &
+		GO TO 1430						      &
+	ELSE 	GO TO 1300						      &
+		! IF EITHER PROJ OR PROG # WAS '*', THEN RETURN TO	      &
+		! MFD SEARCH ROUTINE;  OTHERWISE, RETURN TO PROCESS	      &
+		! UFD SPEC IN COMMAND STRING				      &
+
+6100	   PRINT " is not Reordered - File ";				      &
+	\  PRINT CVT$$(( RAD$(D%(P%+1%))				      &
+			+RAD$(D%(P%+2%))				      &
+			+"."						      &
+			+RAD$(D%(P%+3%))),2%)				      &
+		+" is OPEN"						      &
+	\  GO TO 6000							      &
+		! SIGNAL TO USER THAT UFD HAS A FILE OPEN, SO REORDERING      &
+		! WILL NOT TAKE PLACE					      &
+
+9999!
+10000	!								      &
+									      &
+									      &
+	!	U S E R     S U B R O U T I N E S			      &
+									      &
+
+10001	!								      &
+									      &
+									      &
+	!	F I N D   N E X T   A V A I L A B L E   T A R G E T	      &
+									      &
+	!			  E N T R Y				      &
+									      &
+
+10010!	THIS SUBROUTINE FINDS THE NEXT AVAILABLE TARGET ENTRY		      &
+     !	(A%) UPDATES THE POINTER TO IT (P%) DECREMENTS THE		      &
+     !  NUMBER OF FREE ENTRIES IN THE CURRENT TARGET DIRECTORY BLOCK	      &
+     !	COUNTER (F%()) AND MOVES THE 8 WORD ENTRY FROM SOURCE TO	      &
+     ! 	TARGET UFD   IT ALSO FINDS THE LINK TO THE NEXT ENTRY(L%)	      &
+     !	THIS ROUTINE IS USED ON NAME,ACCOUNTING,ATTRIBUTE AND		      &
+     !	AND RETRIEVAL ENTRIES						      &
+
+10020	   A% = A% + 8%							      &
+	\  A% = 0%	IF A% >= SWAP%(B%)				      &
+	\  GO TO 10020	IF F%(A%/256%)  = 0%				      &
+			OR T%(A%     ) <> 0%				      &
+			OR T%(A%+1%  ) <> 0%				      &
+		! BUMP NEW ENTRY POINTER.  RESET TO ZERO (0) IF NEW VALUE     &
+		! IS BEYOND END OF UFD.  EXECUTE THIS LINE AGAIN IF NO FREE   &
+		! ENTRIES IN THIS BLOCK, OR IF CURRENT ENTRY IS IN USE.	      &
+
+10030	F%(A%/256%) = F%(A%/256%) - 1%					      &
+		! DECREMENT THE NUMBER OF FREE ENTRIES IN THIS UFD BLOCK      &
+
+10040	   F0% = A% AND 255%						      &
+	\   F% = SWAP%(A% XOR F0%)					      &
+	\  F1% = F%/C%							      &
+	\   F% = SWAP%(F1% + 8%*(F%-(F1%*C%)))				      &
+	\   T%(P%) = (T%(P%) AND 15%) + (F0%+F0%+F%+F%)			      &
+		! STRIP OFF THE ENTRY AND FLAGS.  GET BLOCK AND CLUSTER	      &
+		! VALUES, RIGHT JUSTIFIED.  DIVIDE BY BLOCKS/CLUSTER.	      &
+		! GENERATE A PARTIAL LINK.  THEN UPDATE THE LINK WHICH	      &
+		! POINTS TO THE NEW TARGET ENTRY			      &
+
+10050	P0% = FNP%(L%)							      &
+		! CALCULATE THE SOURCE ENTRY ARRAY INDEX FROM THE LINK	      &
+
+10060	   T%(A%+T%) = D%(P0%+T%)	FOR T% = 0% TO 7%		      &
+	\  T%(A%   ) = (T%(A%) AND 15%) OR 1%				      &
+		! MOVE THE ENTRY. ZERO THE LINK AND MARK ENTRY IN USE	      &
+
+10070	   P% = A%							      &
+	\  L% = D%(P0%)							      &
+		! SET UP ADDRESS OF NEXT ENTRY TO BE UPDATED. GET THE	      &
+		! SOURCE UFD LINK.					      &
+
+10080	RETURN								      &
+		! EXIT FROM SUBROUTINE					      &
+
+14999!
+15000	!								      &
+									      &
+									      &
+	!	U S E R    D E F I N E D   F U N C T I O N S		      &
+									      &
+
+15100	!								      &
+									      &
+									      &
+	!	E X T R A C T   P O I N T E R   F R O M   L I N K	      &
+									      &
+
+15101!									      &
+     !			FUNCTION  FNP%( F% )				      &
+     !									      &
+     !	THIS FUNCTION CALCULATES AND RETURNS A POINTER VALUE, GIVEN:	      &
+     !									      &
+     !		C%  -  # OF BLOCKS/CLUSTER				      &
+     !		F%  -  THE LINK VALUE					      &
+     !
+15110	DEF* FNP%(F%)							      &
+
+15120		   F0% = F% AND 496%					      &
+		\   F% = (SWAP%(F%) AND 254%)/2%			      &
+		\ FNP% = F0%/2% + SWAP%((F%/8%) + C%*(F% AND 7%))	      &
+			! FIRST, EXTRACT THE ENTRY.  RIGHT JUSTIFY BLOCK AND  &
+			! CLUSTER VALUES.  THEN GENERATE THE POINTER WITH 3   &
+			! LOW ORDER BITS = 0(MULTIPLE OF 8 WORDS)	      &
+
+15130	FNEND								      &
+		!END OF FUNCTION AND EXIT POINT
+15199!
+15200	!								      &
+									      &
+									      &
+	!	I N T E R N A L   S O R T   E N T R Y			      &
+									      &
+
+15201!									      &
+     !		FUNCTION  FNI%(L%, D%, T%)				      &
+     !									      &
+     !	THIS FUNCTION INSERTS RECORDS, IN ASCENDING 'KEY' SEQUENCE,	      &
+     !	INTO AN IN-CORE ARRAY.						      &
+     !									      &
+     !	THE IN-CORE ARRAY CONSISTS OF 1738 3-WORD RECORDS.  THE FIRST	      &
+     !	THREE RECORDS ARE USED FOR HOUSEKEEPING PURPOSES, WHILE THE	      &
+     !	LAST 1735 MAY CONTAIN VALID DATA.				      &
+     !									      &
+     !	EACH VALID RECORD CONSISTS OF A RSTS/E LINKWORD(THE ADDRESS)	      &
+     !	AND TWO INTEGERS, DATE AND TIME(THE KEY).  THE FIRST RECORD	      &
+     !  (0,0) IN THE ARRAY CONTAINS THE CURRENT COUNT OF VALID RECORDS,	      &
+     !	AND THE DATE AND TIME OF THE HIGHEST RECORD ENTERED.  THE NEXT TWO    &
+     !	RECORDS ARE USED FOR TEMPORARY STORAGE DURING THE ENTRY PROCESS.      &
+     !									      &
+     !	FNI% IS CALLED WITH THE FOLLOWING ARGUMENTS:			      &
+     !									      &
+     !		L%  -  LINKWORD TO SOURCE UFD NAME ENTRY BLOCK		      &
+     !		D%  -  EITHER DATE OF CREATION, OR DATE OF LAST		      &
+     !			  ACCESS FOR THE FILE WHOSE NAME ENTRY BLOCK	      &
+     !			  IS POINTED TO BY L%				      &
+     !		T%  -  TIME OF CREATION OR 0% IF D% IS DATE OF LAST	      &
+     !			  ACCESS, FOR THE SAME FILE AS ABOVE		      &
+     !									      &
+     !	IF THE CALLER ATTEMPTS TO INSERT A RECORD WHOSE KEY IS > THAN	      &
+     !	THE HIGHEST KEY IN THE FILE, THEN THE SEARCH AND COMPARE PORTION      &
+     !  OF THE ALGORITHM IS SKIPPED.					      &
+     !									      &
+     !	THE FUNCTION RETURNS 0% IF INSERTION OCCURRED, AND -1%(TRUE)	      &
+     !  IF INSERTION DID NOT OCCUR.					      &
+     !									      &
+     !	IF S0% IS RESET (0%), THE NO SORT IS DONE AND THE INSERTION BECOMES   &
+     !	A SIMPLE STRAIGHT LINE INSERTION..				      &
+     !
+15210	DEF* FNI%(L%,D%,T%)						      &
+
+15220	      FNI% = 0%							      &
+	   \  GO TO 15260	IF S%(0%,0%) >= 1735%			      &
+		! INITIALIZE TO INSERTION MADE RESULT, IF ARRAY IS	      &
+		! FULL, GO CHANGE RESULT TO NO-INSERTION		      &
+
+15230	      GO TO 15270	IF S0% = 0%				      &
+	   \  GO TO 15270	IF  D% >  S%(0%,1%)			      &
+	   \  GO TO 15270	IF  D%  = S%(0%,1%)			      &
+				AND T% <= S%(0%,2%)			      &
+		!SKIP SEARCH AND COMPARE IF NEW ENTRY GOES AT END OF LIST     &
+
+15240	   FOR W1% = 3% TO S%(0%,0%)+2%					      &
+	   	\  GO TO 15280	IF  D% <  S%(W1%,1%)			      &
+		\  GO TO 15280	IF  D%  = S%(W1%,1%)			      &
+				AND T% >  S%(W1%,2%)			      &
+	   \  NEXT W1%							      &
+		! FOR ALL ENTRIES IN THE LIST, SEARCH FOR THE FIRST ENTRY     &
+		! ABOVE THE NEW ENTRY TO BE MADE			      &
+
+15260	      FNI% = -1%						      &
+	   \  GO TO 15298						      &
+		! SIGNAL NO INSERTION MADE, GO TO EXIT POINT		      &
+
+15270	      W1% = S%(0%,0%) + 3%					      &
+	   \  S%(0%,1%) = D%						      &
+	   \  S%(0%,2%) = T%						      &
+		! SET LOOP FOR SINGLE ENTRY ADD AT END OF LIST. SAVE	      &
+		! KEY AS HIGHEST IN FILE				      &
+
+15280	      S%(2%,0%) = L%						      &
+	   \  S%(2%,1%) = D%						      &
+	   \  S%(2%,2%) = T%						      &
+	   \  S%(0%,0%) = S%(0%,0%) + 1%				      &
+		! SAVE ENTRY FOR LOADING INTO LIST, INCREMENT TOTAL NUMBER    &
+		! OF ENTRIES IN LIST					      &
+
+15290	   FOR W% = W1% TO S%(0%,0%)+2%					      &
+	   \  FOR T1% = 0% TO 2%					      &
+		! SET OUT AND INNER LOOP CONTROLS FOR DATA MOVEMENT	      &
+
+15292		S%(1%,T1%) = S%(W%,T1%)					      &
+		\	     S%(W%,T1%) = S%(2%,T1%)			      &
+		\			  S%(2%,T1%) = S%(1%,T1%)	      &
+			! DATA SWAP LOOP: TO TEMP THEN EXCHANGE IN CIRCULAR   &
+			! SWAP OPERATION				      &
+
+15294	      NEXT T1%							      &
+			! END INNER RECORD LOOP				      &
+
+15296	   NEXT W%							      &
+		!END OUTER RECORD LOOP
+15298	FNEND								      &
+		!END OF FUNCTION AND EXIT POINT				      &
+
+15299!									      &
+
+15300	!								      &
+									      &
+									      &
+	!	I N T E R N A L   S O R T   E N T R Y			      &
+									      &
+
+15301!									      &
+     !		FUNCTION  FNF%(L%, T1%, T2%,  T3%)			      &
+     !									      &
+     !	THIS FUNCTION INSERTS RECORDS, IN ASCENDING 'KEY' SEQUENCE,	      &
+     !	INTO AN IN-CORE ARRAY.						      &
+     !									      &
+     !	THE IN-CORE ARRAY CONSISTS OF 1738 4-WORD RECORDS.  THE FIRST	      &
+     !	FOUR RECORDS ARE USED FOR HOUSEKEEPING PURPOSES, WHILE THE	      &
+     !	LAST 1735 MAY CONTAIN VALID DATA.				      &
+     !									      &
+     !	EACH VALID RECORD CONSISTS OF A RSTS/E LINKWORD(THE ADDRESS)	      &
+     !	AND THREE INTEGERS, FILENAME AND TYPE(THE KEY).  THE FIRST RECORD     &
+     !  (0,0) IN THE ARRAY CONTAINS THE CURRENT COUNT OF VALID RECORDS,	      &
+     !	AND THE FILENAME AND TYPE OF THE HIGHEST RECORD ENTERED.THE NEXT THREE &
+     !	RECORDS ARE USED FOR TEMPORARY STORAGE DURING THE ENTRY PROCESS.      &
+     !									      &
+     !	FNI% IS CALLED WITH THE FOLLOWING ARGUMENTS:			      &
+     !									      &
+     !		L%  -  LINKWORD TO SOURCE UFD NAME ENTRY BLOCK		      &
+     !		T1%  -  EITHER FIRST RAD-50 WORD OF THE FILENAME OR	      &
+     !			  THE RAD-50 WORD OF THE TYPE			      &
+     !		T2%  -  EITHER SECOND RAD-50 WORD OF THE FILENAME OR	      &
+     !			  THE FIRST RAD-50 WORD OF THE FILENAME		      &
+     !		T3%  -  EITHER THE RAD-50 WORD OF THE TYPE OR		      &
+     !			  THE SECOND RAD-50 WORD OF THE FILENAME	      &
+     !									      &
+     !	IF THE CALLER ATTEMPTS TO INSERT A RECORD WHOSE KEY IS > THAN	      &
+     !	THE HIGHEST KEY IN THE FILE, THEN THE SEARCH AND COMPARE PORTION      &
+     !  OF THE ALGORITHM IS SKIPPED.					      &
+     !									      &
+     !	THE FUNCTION RETURNS 0% IF INSERTION OCCURRED, AND -1%(TRUE)	      &
+     !  IF INSERTION DID NOT OCCUR.					      &
+     !									      &
+     !	IF S0% IS RESET (0%), THE NO SORT IS DONE AND THE INSERTION BECOMES   &
+     !	A SIMPLE STRAIGHT LINE INSERTION..				      &
+     !
+15310	DEF* FNF%(L%,T1%,T2%,T3%)					      &
+
+15320	      FNF% = 0%							      &
+	   \  GO TO 15360	IF S%(0%,0%) >= 1735%			      &
+		! INITIALIZE TO INSERTION MADE RESULT, IF ARRAY IS	      &
+		! FULL, GO CHANGE RESULT TO NO-INSERTION		      &
+
+15325	      GO TO 15370	IF S0% = 0%				      &
+	   \  T1$ = RAD$(T1%) + RAD$(T2%) + RAD$(T3%)			      &
+	   \  GO TO 15370	IF  T1$ >  RAD$(S%(0%,1%)) + RAD$(S%(0%,2%))+ &
+					   RAD$(S%(0%,3%))		      &
+		!SKIP SEARCH AND COMPARE IF NEW ENTRY GOES AT END OF LIST     &
+
+15330	   FOR W1% = 3% TO S%(0%,0%)+2%					      &
+		\  GO TO 15380	IF  T1$ < RAD$(S%(W1%,1%)) + RAD$(S%(W1%,2%))+ &
+					  RAD$(S%(W1%,3%))		      &
+	   \  NEXT W1%							      &
+		! FOR ALL ENTRIES IN THE LIST, SEARCH FOR THE FIRST ENTRY     &
+		! ABOVE THE NEW ENTRY TO BE MADE			      &
+
+15360	      FNF% = -1%						      &
+	   \  GO TO 15430						      &
+		! SIGNAL NO INSERTION MADE, GO TO EXIT POINT		      &
+
+15370	      W1% = S%(0%,0%) + 3%					      &
+	   \  S%(0%,1%) = T1%						      &
+	   \  S%(0%,2%) = T2%						      &
+	   \  S%(0%,3%) = T3%						      &
+		! SET LOOP FOR SINGLE ENTRY ADD AT END OF LIST. SAVE	      &
+		! KEY AS HIGHEST IN FILE				      &
+
+15380	      S%(2%,0%) = L%						      &
+	   \  S%(2%,1%) = T1%						      &
+	   \  S%(2%,2%) = T2%						      &
+	   \  S%(2%,3%) = T3%						      &
+	   \  S%(0%,0%) = S%(0%,0%) + 1%				      &
+		! SAVE ENTRY FOR LOADING INTO LIST, INCREMENT TOTAL NUMBER    &
+		! OF ENTRIES IN LIST					      &
+
+15390	   FOR W% = W1% TO S%(0%,0%)+2%					      &
+	   \  FOR T1% = 0% TO 3%					      &
+		! SET OUT AND INNER LOOP CONTROLS FOR DATA MOVEMENT	      &
+
+15400		S%(1%,T1%) = S%(W%,T1%)					      &
+		\	     S%(W%,T1%) = S%(2%,T1%)			      &
+		\			  S%(2%,T1%) = S%(1%,T1%)	      &
+			! DATA SWAP LOOP: TO TEMP THEN EXCHANGE IN CIRCULAR   &
+			! SWAP OPERATION				      &
+
+15410	      NEXT T1%							      &
+			! END INNER RECORD LOOP				      &
+
+15420	   NEXT W%							      &
+		!END OUTER RECORD LOOP
+15430	FNEND								      &
+		!END OF FUNCTION AND EXIT POINT				      &
+
+15499!									      &
+
+15500	!								      &
+									      &
+									      &
+	!	C H E C K    F O R    P R I V I L E G E			      &
+									      &
+									      &
+	!		FUNCTION FnPriv%(Priv.Name$)			      &
+									      &
+	!  This function returns:					      &
+									      &
+	!	 0  Job does not have specified privilege enabled.	      &
+									      &
+	!	-1  Job has specified privilege enabled.		      &
+									      &
+
+15510	Def FnPriv%(Priv.Name$) =					      &
+		(Ascii(Mid(Sys(Chr$(6%)+Chr$(32%)+Chr$(1%)+String$(3%,0%)+    &
+		 Cvt$$(Priv.Name$,-2%)),3%,1%)) = 0%)			      &
+
+16000	!								      &
+									      &
+									      &
+	!	C H E C K    F O R    O P E N    F I L E S		      &
+									      &
+	!	O N    L A R G E    F I L E    S Y S T E M		      &
+
+16001	!								      &
+	!		FUNCTION FNO%( )				      &
+	!								      &
+	!  THIS FUNCTION RETURNS:					      &
+	!								      &
+	!	 0  THIS IS A SMALL FILE SYSTEM OR THIS IS A LARGE	      &
+	!	    FILE SYSTEM WITH NO FILES OPEN ON THE ACCOUNT	      &
+	!	    WHOSE UFD IS OPEN ON CHANNEL 1.			      &
+	!								      &
+	!	-1  THIS IS A LARGE FILE SYSTEM AND THERE IS A FILE	      &
+	!	    OPEN ON THE ACCOUNT WHOSE UFD IS OPEN ON CHANNEL 1.	      &
+	!
+16010	  DEF* FNO%							      &
+
+16020		FNO%, W% = 0%						      &
+		! INITIALIZE FUNCTION.					      &
+
+16030		W1%=SWAP%(CVT$%(RIGHT(SYS(CHR$(6%)+CHR$(-12%)),29%)))	      &
+	\	GOTO 16080 UNLESS W1%					      &
+	\	Z%=PEEK(PEEK(PEEK(PEEK(520%))+2%)+8%)-28%		      &
+	\	T%=PEEK(Z%+4%)						      &
+	\	Z%=PEEK((PEEK(Z%+24%) AND 255%)*2%+W1%)			      &
+		! INITIALIZE.						      &
+		! GET POINTER TO THE FCBLST TABLE.			      &
+		! EXIT IF THIS IS A SMALL FILE SYSTEM.			      &
+		! FOR MFD OPEN ON CHANNEL 1, GET PPN AND ROOT OF THE	      &
+		! FCB LIST FOR THAT DEVICE AS FOLLOWS:			      &
+		!							      &
+		! PEEK(520)	-> OUR JDB.				      &
+		! PEEK(JDB)	-> OUR IOB.				      &
+		! PEEK(IOB+2)	-> WCB FOR OPEN CHANNEL 1.		      &
+		! PEEK(WCB+8)	-> FCB @ F$CLUS (OFFSET 28 IN FCB).	      &
+		! PEEK(FCB+4)	-> PPN OF OPEN FILE.			      &
+		! PEEK(FCB+24)	-> F$UNT FIP UNIT NUMBER (LOW BYTE).	      &
+		! PEEK(FCBLST+F$UNT*2) -> ROOT OF THE FCB LIST.		      &
+		!							      &
+
+16040		W%=W%+1%						      &
+	\	W1%=0%							      &
+	\	IF W%>3% THEN						      &
+			PRINT						      &
+	\		PRINT "?FCB pointers changing - REORDR can't run now" &
+	\		GOTO 32767					      &
+		! INCREMENT COUNT THAT TELLS HOW MANY TIMES WE'VE TRIED	      &
+		! TO READ FCB'S.  INITIALIZE COUNT THAT TELLS HOW MANY	      &
+		! OPEN FILES WE'VE FOUND ON THE DISK.			      &
+
+16050		IF Z% THEN						      &
+			W1%=W1%+1%					      &
+	\		GOTO 16030 IF W1%>1000%				      &
+	\		GOTO 16070 IF (PEEK(Z%+12%) AND 64%)=0%		      &
+				   IF PEEK(Z%+4%)=T%			      &
+	\		Z%=PEEK(Z%)					      &
+	\		GOTO 16050					      &
+		! IF WE HAVE ANOTHER FCB, THEN:				      &
+		! RESTART PEEKS IF WE ARE JUST ENDLESS LOOPING.		      &
+		! IF THE PPN MATCHES AND THE FILE IS NOT AN MFD		      &
+		! ENTRY (THE ONE WE HAVE OPEN), RETURN FNO%=-1%.	      &
+		! GET THE LOCATION OF THE NEXT FCB FOR THIS DISK,	      &
+		! AND CONTINUE.						      &
+
+16060		GOTO 16080						      &
+		! SUCCESS - NO FILES OPEN FOR THS UFD.			      &
+
+16070		FNO%=-1%						      &
+	\	PRINT " is not Reordered - File ";			      &
+			   CVT$$(RAD$(PEEK(Z%+6%))			      &
+				+RAD$(PEEK(Z%+8%))			      &
+				+"."					      &
+				+RAD$(PEEK(Z%+10%)),2%);		      &
+		      " is OPEN"					      &
+		! WE FOUND AN OPEN FILE.				      &
+
+16080	FNEND								      &
+		! END OF FUNCTION AND EXIT POINT.			      &
+
+16099!									      &
+
+19000	!								      &
+									      &
+									      &
+	!	E R R O R    H A N D L I N G				      &
+									      &
+
+19010	IF ERL = 1120%							      &
+	THEN								      &
+		   T% = T%/2%						      &
+		\  RESUME 1120	IF T% <> 0%				      &
+		\  PRINT "?Clustersize Reduced to Zero (0)"		      &
+		\  GO TO 19900						      &
+			! HANDLE FILE CLUSTERSIZE TOO BIG ERROR.	      &
+			! REDUCE CLUSTERSIZE TO ONE-HALF ITS VALUE AND	      &
+			! TRY AGAIN.  SHOULD NEVER BECOME ZERO.  IF SO,	      &
+			! SYSTEM ERROR AND PROGRAM ABORTS.		      &
+
+19020	RESUME 1350	IF ERL = 1310%					      &
+		! HANDLE FAILURE ON COMMAND LINE SCAN - GO TELL USER	      &
+
+19030	RESUME 1300	IF  ERR = 5%					      &
+			AND ERL = 1430%					      &
+		! HANDLE END OF DIRECTORY SEARCH - GO BACK FOR ANOTHER	      &
+		! COMMAND						      &
+
+19040	IF  ERR = 11%							      &
+	AND ( ERL = 1202%						      &
+	   OR ERL = 1205%						      &
+	   OR ERL=1220%							      &
+	     OR ERL = 1240%)						      &
+	THEN								      &
+		CLOSE 1%, 2%, 3%					      &
+	     \  RESUME 32767						      &
+			! EXIT PROGRAM IF ANY QUERY RESPONSE IS CTRL-Z	      &
+
+19050	IF  ERR = 5%							      &
+	AND ERL = 1620%							      &
+	THEN								      &
+		PRINT " does not exist"					      &
+	     \  RESUME 1300						      &
+			! IF NO DIRECTORY, TELL USER AND CONTINUE SCAN	      &
+			! OF COMMAND LINE				      &
+
+19060	RESUME 16030	IF ERL = 16050					      &
+			! IF ERROR ON PEEKING AT FCB'S, GO BACK AND TRY	      &
+			! AGAIN UNTIL OUR COUNTER SAYS TO QUIT.		      &
+
+19070	IF ERR = 10% THEN						      &
+		PRINT " is not Reordered - No write access to UFD"	      &
+	\	CLOSE -1%						      &
+	\	RESUME 6000						      &
+		! IF REORDR CAN'T GAIN WRITE ACCESS TO THE UFD		      &
+		! BECAUSE A PRIV USER SET MODE 16384%			      &
+		! SEND "NOT REORDERED" MESSAGE AND CONTINUE.		      &
+
+19900	   PRINT							      &
+	\  PRINT "?REORDR Fatal Error (";				      &
+		 CVT$$(NUM$(ERR),-1%);					      &
+		 ") ";							      &
+		! BEGIN WITH STANDARD DEFAULT ERROR MESSAGE HEADING	      &
+
+19910      PRINT  CVT$$(RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(ERR)),3%),4%);	      &
+			IF ERR > 0%					      &
+	\  PRINT " at Line"; ERL					      &
+			IF ERR > 0%					      &
+	\  CLOSE 1%, 2%, 3%						      &
+	\  PRINT							      &
+	\  RESUME 32767							      &
+		! FOR ALL UNKNOWN ERRORS, PRINT ERROR MESSAGE GIVING ERR      &
+		! #, TEXT AND LINE WHERE IT OCCURRED.  CLOSE ANY OPEN FILE    &
+		! AND ABORT PROGRAM					      &
+
+32765!
+32766	!								      &
+									      &
+	!	E N D   O F   P R O G R A M				      &
+									      &
+
+32767	END

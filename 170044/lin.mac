@@ -1,0 +1,578 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:FLDEF/
+TITLE	LIN,<FILE ATTRIBUTES>,0A,13-MAY-91,MHB/ABC/SRM/JTC/PRL/DRP/GPK/WJS/FEK/KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR LIN
+
+;+
+;
+;  000	GPK  27-Sep-82	Created out of old LIN
+;  001	WJS  29-Oct-82	New UUOENT for EMT Logger
+;  002	FEK  28-Jan-83	Add read account attributes
+;  003			????
+;  004	FEK  02-Mar-83	Correct FIRQB allignment for GUN
+;
+;				[RSTS V9.0]
+;  005	GPK  25-Mar-83	Multiple privileges
+;  006	GPK  20-Sep-83	Add code to enforce bounds on privileges
+;  007	GPK  19-Nov-83	Add account attribute read on index
+;			Change privilege requirements for account attributes
+;  008	GPK  29-Dec-83	Split ACNT into GACNT/WACNT, clean up 007
+;  009	KPH  29-Feb-84	Add read pack label function
+;  010	KPH  10-Apr-84	Add read/write accounting entry function
+;			Add delete account attributes
+;  011	DRP  02-May-84	Add code to not permit the changing of usage
+;			if the Disk Quota Attribute already exists
+;  012	GPK  17-Apr-84	Allow writing flags in AT.LTI; force unused
+;			privilege bits clear
+;  013	KPH  26-Jun-84	Bugfixes
+;  014	KPH  29-Aug-84	Changes for APR5 FIP pool
+;  015	GPK  30-Oct-84	Fix GACNT privilege check
+;  016	KPH  31-Oct-84	Additional information in return pack attributes
+;  017	GPK  22-Jan-85	Disallow account attribute calls on RDS 0.0 disks
+;  018	KPH  30-Jan-85	More information in return pack attributes
+;			Use saved privileges when writing privilege mask
+;  019	KPH  26-Feb-85	Take third-party-privileges into account when
+;			writing privilege mask and using saved privileges
+;  020	GPK  28-Feb-85	Fix CHKACC reference
+;  021	KPH  12-Mar-85	Return "fake" expiration date for RDS 1.1 disks
+;  022  KPH  12-Apr-85	Bugfix in writing privilege mask
+;  023  KPH  19-Apr-85	Bugfix in disk free space return
+;
+;			[RSTS V9.1]
+;  024  KPH  31-May-85	Don't return BADDIR if no [0,1] QTB present
+;
+;			[RSTS V9.2]
+;  025  KPH  25-Jul-85	Add job control region
+;
+;			[RSTS V10.0]
+;  026	FEK  29-Jan-90	Allow login date/time info to be changed on creation
+;
+;			[RSTS V10.1]
+;  027	DRP  19-Mar-91	Update the in-memory copy of the quotas.
+;-
+
+	IONLY				;Set up for I-only FIP macros	;014
+
+FQFSRT	LIN,LODABL							;014
+
+.SBTTL	FILE ATTRIBUTE READ/WRITE
+
+;+
+; UU.ATR - ATTRIBUTE READ/WRITE.
+;
+;	R1 -> JOB DATA BLOCK
+;	R4 -> FIRQB
+;		FQFIL  =  CHANNEL NUMBER OR
+;				-1 FOR READ ACCOUNT ATTRIBUTES
+;				-2 FOR WRITE ACCOUNT ATTRIBUTES		;005
+;				-3 FOR DELETE ACCOUNT ATTRIBUTES 	;010
+;				-4 FOR READ PACK ATTRIBUTES		;009
+;		FQSIZM =  0 => READ ATTRIBUTES
+;		          N => WRITE N WORDS OF ATTRIBUTES (1<=N<=11.)
+;			or	ATTRIBUTE TYPE NUMBER TO READ (non-0)	;007
+;				zero to indicate read on index		;007
+;		FQPPN  =	PPN TO USE IF FQFIL = -1 OR -2
+;		FQNAM1 =	Index (1-n) if FQFIL < 0, FQSIZM = 0	;007
+;		FQDEV  =	DEVICE NAME IF FQFIL = -1 TO -4
+;		FQDEVN =	DEVICE NUMBER & FLAG IF FQFIL = -1 TO -4
+;
+;	IN FIRQB ON RETURN			IF READ ACCOUNT/PACK ATTRIBUTE ;009
+;		+6     =  ATTRIBUTE WORD #1.		PPN (not for pack) ;009
+;		+10    =  ATTRIBUTE WORD #2.		WORD 1
+;		+12    =  ATTRIBUTE WORD #3.		WORD 2
+;		+14    =  ATTRIBUTE WORD #4.		WORD 3
+;		+16    =  ATTRIBUTE WORD #5.		WORD 4
+;		+20    =  ATTRIBUTE WORD #6.		WORD 5
+;		+22    =  ATTRIBUTE WORD #7.		WORD 6
+;		+24    =  ATTRIBUTE WORD #8.		WORD 7
+;		+26    =  ATTRIBUTE WORD #9.
+;		+30    =  ATTRIBUTE WORD #10.		DEVICE NAME PASSED
+;		+32    =  ATTRIBUTE WORD #11.		UNIT # AND FLAG
+;		+34    =  FILE'S RTS NAME PART 1
+;		+36    =  FILE'S RTS NAME PART 2
+;-
+
+	UUOENT	ATR,,,LOGABL	;ATTRIBUTE READ/WRITE
+
+	CMP	(R4)+,(R4)+	;INDEX TO CH #
+	MOVB	(R4)+,R0	;GET THE CH #
+	CMP	R0,#15.		;LEGAL?
+	BHI	140$		;NOPE, ERROR
+	ASL	R0		;O.K., NOW TIMES 2
+	ADD	(R1),R0		;GET POINTER INTO IOB
+	MOV	(R0),R1		; AND GET THE FCB/DDB POINTER
+	BEQ	130$		;NONE, NOT OPEN ERROR
+	BIT	#DDNFS!377,(R1)	;ONE, IS IT FS DISK?
+	BNE	110$		;ERROR IF NOT
+	CALLX	RNE		;READ IN THE N.E.
+	BITB	#US.UFD,USTAT(R5) ;Is it a directory?
+	BNE	100$		;Yes, can't write to that
+	CALLX	RAE		;READ IN THE A.E.
+	MOVB	(R4)+,R0	;IS IT ATTRIBUTE GET (READ)?
+	BEQ	50$		;YES
+
+	BIT	#DDWLO,(R1)	;NO, WRITE, IS IT LEGAL?
+	BNE	100$		;NOT LEGAL UNLESS WRITE ACCESS
+	CMP	R0,#11.		;IS THE COUNT TOO BIG?
+	BHI	120$		;YES, ERROR
+	ADD	#20,R5		;FAKE EMPTY ATT ENTRY
+10$:	BIT	R5,#20-1	;ROOM IN THIS ATT ENTRY?
+	BNE	30$		;THERE IS ROOM
+	SUB	#20,R5		;NO ROOM, TO BACK TO LINK WORD
+	CALLX	RDEPRV		;TRY TO READ NEXT SAVING THIS LINK
+	BNE	20$		;A NEXT LINK DOES EXIST
+	CALLX	GDE		;NO LINK, TRY TO GET A NEW ENTRY
+	BCS	90$		;FAILURE
+	INC	(R5)		;MARK AS IN USE (BUT NO LINK)
+.ASSUME	UL.USE	EQ	1
+	MOV	R3,R1		;PLACE NEW LINK HERE
+	MOV	R2,R3		;RESTORE PREVIOUS LINK
+	CALLX	RDESV		;NOW RE-READ PREVIOUS
+	BIS	R1,(R5)		;LINK TO THE NEW ENTRY
+	MOV	R1,R3		;MOVE LINK OVER AND
+	CALLX	RDESV		; READ IN NEW ATT ENTRY
+20$:	TST	(R5)+		;SKIP OVER LINK
+30$:	MOV	(R4)+,(R5)+	;SET AN ATTRIBUTE WORD
+	MARK	FIBUF		;MARK BUFFER
+	SOB	R0,10$		;LOOP FOR MORE IF NEEDED
+40$:	RETURN			;ELSE EXIT
+
+50$:	BIT	#DDRLO,(R1)	;IS THE FILE READ LOCKED?
+	BNE	100$		;YES, ERROR
+	MOV	R4,R2		;NO, COPY THE FIRQB POINTER AND
+	ADD	#40-6,R2	; INDEX TO END+2 OF FIRQB
+	MOV	(R5),R3		;GET (POSSIBLE) 1ST ATT ENTRY LINK
+	BIT	#WC$UFD,(R1)	;IS THIS REALLY A UFD?
+.ASSUME	SC$UFD	EQ	WC$UFD
+	BNE	60$		;YES, DON'T SET ANY RTS NAME
+	MOV	URTS+2(R5),-(R2) ;NO, STORE RTS NAME PART 2 @ FIRQB +36
+	MOV	URTS(R5),-(R2)	; AND RTS NAME PART 1 @ FIRQB +34
+	BNE	60$		;THE RTS NAME EXISTS
+	CLR	2(R2)		; ELSE NULL IT OUT...
+60$:	CALLX	RDECHK		;READ (POSSIBLE) NEXT ENTRY
+	BEQ	80$		;NO MORE
+	MOV	(R5)+,R3	;SAVE (POSSIBLE) LINK TO NEXT
+70$:	BIT	R5,#20-1	;MORE DATA IN THIS ATT ENTRY?
+	BEQ	60$		;NO, TRY TO GET THE NEXT
+	MOV	(R5)+,(R4)+	;YES, MOVE OVER A DATA WORD
+	CMP	R4,R2		;IS FIRQB FULL NOW?
+	BLO	70$		;NOPE, CONTINUE
+80$:	CMP	R4,R2		;FILL ALL OF FIRQB??
+	BHIS	40$		;YES, EXIT
+	CLR	(R4)+		;NO, DUMMY IN A 0 THEN
+	BR	80$		; AND LOOP...
+
+90$:	ERROR	NOROOM		;NO MORE UFD/GFD SPACE
+
+100$:	ERROR	PRVIOL		;ILLEGAL ACCESS
+
+110$:	ERROR	DEVNFS		;WRONG KIND OF DEVICE
+
+120$:	ERROR	BADCNT		;>11. ATTRIBUTES TO WRITE
+
+130$:	ERROR	NOTOPN		;NOT OPEN ERROR
+
+140$:	CMPB	R0,#-4		;Is this a legal call?			;019
+	BLO	200$		;No, forget it				;019
+	BIC	#37,R4		;REALLIGN TO THE TOP OF THE FIRQB	;018
+	CALLX	GUN,R5		;CHECK FOR A DISK UNIT, AND SETUP	;018
+	 BR	150$		; YES, IT'S A DISK			;018
+	ERROR	DEVNFS		;NO, SO NFS ERROR			;018
+
+150$:	ADD	#FQFIL,R4	;R4 -> FIRQB @ FQFIL			;018
+	CMPB	(R4)+,#-4	;Is this read pack attributes?		;018
+	BEQ	RDPATR		;Yes, go do it				;019
+	CLR	-(SP)		;Clear a spot for accounting privs flag	;015
+	CLR	-(SP)		;CLEAR A HOLDER FOR BLOCKETTE #
+	BISB	(R4)+,(SP)	;SAVE THE BLOCKETTE NUMBER REQUESTED
+	TST	(R4)		;WAS A PPN SPECIFIED?????
+	BNE	160$		;YES, SO USE IT
+	MOV	@#FIUSER,(R4)	; NO, SO USE THE CALLERS
+160$:	MOV	(R4),R0		;Get PPN to access			;015
+	CALLX	CHKACC		;Allowed to do this?			;015
+	MOV	R0,2(SP)	;Save accounting rights flag		;015
+	BIT	#DDSTAT!DDAUXA,R0 ;Check the two accounting flags	;020
+	BMI	170$		;Have change privs, so all is ok	;020
+.ASSUME	DDSTAT LT 0							;015
+	BEQ	100$		;No privs at all, error			;020
+
+;+									;015
+; Users can read their own attributes (but not write them)		;015
+; without requiring privilege, except for the password attribute	;015
+; and user-defined attributes 192-255.					;015
+;-									;015
+
+	CMPB	FQFIL-FQPPN(R4),#-1 ;Reading?				;007
+	BNE	100$		;No, requires ACNT also			;015
+	CMPB	(SP),#AA.PAS	;Reading password attribute?		;007
+	BEQ	100$		;Yes, fail				;015
+	CMPB	(SP),#300	;Upper half of user range?		;015
+	BHIS	100$		;Yes, that set is restricted also	;015
+170$:	MOV	R4,R0		;MAKE R0 POINT TO THE PPN
+	CALLX	SDM		;NOW, FIND THAT ACCOUNT
+	BCS	210$		; CAN'T FIND THE REQUESTED ACCOUNT
+	MOV	(SP)+,R0	;RESTORE THE TYPE REQUESTED
+	MOV	@#FIPUNT,-(SP)	;Save FIPUNT and FIPGEN			;019
+	CMPB	FQFIL-FQPPN(R4),#-1 ;Reading attributes?		;027
+	BNE	180$		;No					;027
+	FJMP	RDATT		;Yes, go read them			;027
+
+180$:	FJMP	WRTATT		;Write or delete them			;027
+
+200$:	ERROR	BSERR		;ILLEGAL I/O CHANNEL
+
+210$:	ERROR	NOSUCH		;CAN'T FIND THE ACCOUNT
+
+GLOBAL	<FIPRVM,FIPUNT>							;018
+
+.SBTTL	Read pack attributes
+
+;+									;009
+; RDPATR - Read pack attributes						;009
+;									;009
+;	R0 = Fip unit number * 2					;010
+;	R4 -> FIRQB @ FQSIZM						;010
+;									;009
+; Data returned in FIRQB:						;009
+;									;009
+;	+10 = Start DCN of MFD						;009
+;	+12 = Pack revision level					;009
+;	+14 = Pack cluster size						;009
+;	+16 = Pack status/flags						;009
+;	+20 = Pack ID part 1 in RAD-50					;009
+;	+22 = Pack ID part 2 in RAD-50					;009
+;	+24 = Size of disk in DCNs					;009
+;	+26 = Device cluster size					;009
+;	+27 = 0 if not system disk, 1 if system disk			;016
+;	+30 = UNTCNT word for disk					;016
+;	+32 = Pack ID part 3 in RAD-50					;016
+;	+34 = Count of free DCNs for disk				;018
+;									;009
+;									;009
+; We get here if the user specifies -4 in FQFIL. Currently, the only	;009
+; implemented function is return pack label.				;009
+;-									;009
+
+RDPATR:	CALLX	READPL		;Go and get the pack label		;019
+	ADD	#10-FQSIZM,R4	;R4 -> Return area in FIRQB		;010
+	MOV	MFDPTR(R0),(R4)+ ;Return the start DCN			;009
+	MOV	UNTLVL(R0),(R4)+ ;And the structure level		;009
+	MOV	#FIBUF+PPCS,R5	;R5 -> Pack label @ pack cluster size	;009
+	MOV	(R5)+,(R4)+	;Copy pack clustersize			;009
+	MOV	(R5)+,(R4)+	;And pack status			;009
+	MOV	(R5)+,(R4)+	;And first part of pack label		;009
+	MOV	(R5)+,(R4)+	;And second part of pack label		;009
+	MOV	UNTSIZ(R0),(R4)+ ;Return the size of this disk		;009
+	MOVB	DEVCLU(R0),(R4)+ ;And the device cluster size		;009
+	CLRB	(R4)+		;Guess at not the system disk		;016
+	CMPB	R0,@#SYSUN2	;Is this the system disk?		;016
+	BNE	10$		;No, not this time			;016
+	INCB	-1(R4)		;Yes, so return that			;016
+10$:	MOV	UNTCNT(R0),(R4)+ ;Now return UNTCNT			;016
+	CLR	(R4)+		;And return pack ID part 3 as zero	;016
+	MOV	SATCTL(R0),R3	;Get LSB of free blocks			;018
+	MOV	SATCTM(R0),R2	;Get MSB of free blocks			;018
+	MOVB	DEVCLU(R0),R1	;Get the device clustersize		;023
+	CLR	R5		;Guess at doing zero shifts		;023
+20$:	ASR	R1		;Divide clustersize by two		;023
+	BEQ	30$		;All done, we have shift amount		;023
+	DEC	R5		;Say one more shift is needed		;023
+	BR	20$		;And loop				;023
+	
+30$:	ASHC	R5,R2		;Now get number of free clusters	;023
+	MOV	R3,(R4)+	;And return it				;023
+	RETURN			;Now we're done				;009
+
+GLOBAL	<FIBUF,FIPRVM,UNTLVL,UNTSIZ,DEVCLU,MFDPTR,SYSUN2,UNTCNT,SATCTL>	;018
+GLOBAL	<SATCTM>							;018
+FQFEND									;010
+
+FQFSRT									;010
+
+.SBTTL	Read attribute code
+
+;+
+; RDATT - Even more attribute code
+;
+;	R4    -> FIRQB @ FQSIZM
+;	(SP)   = FIPUNT/FIPGEN
+;	(SP)+2 = Privilege flag
+;-
+
+RDATT:	NOP								;027
+	MOV	(SP)+,@#FIPUNT	;Restore FIPUNT/FIPGEN			;018
+	TST	R0		;Doing lookup by index?			;007
+	BNE	80$		;No					;007
+50$:	MOV	FQNAM1-FQPPN(R4),R0 ;Get index desired			;007
+	BNE	60$		;Really index... not accounting lookup	;010
+	MOV	UAA(R5),R3	;Pick up link to accounting entry	;010
+	CALLX	RDECHK		;And read it in				;010
+	BEQ	150$		;Can't find it... error!		;010
+	MOV	#6,R1		;Return only six words			;010
+	CMP	(R4)+,(R5)+	;Skip past account number and link	;010
+	CLRB	(R4)+		;Set attribute type = 0			;013
+	MOVB	UCLUS-2(R5),(R4)+ ;Return the UFD clustersize		;010
+	BR	100$		;And get ready to return the rest	;010
+
+;+									;017
+; Note on disk rev. level checks:					;017
+;	This (lookup by index) is the only place where an explicit	;017
+;	check is needed, since the FIP resident routines SAA and	;017
+;	SAACR have their own checks of rev. level as well.  Because	;017
+;	of that, the non-indexed read and the write need no check	;017
+;	in this code.							;017
+;-									;017
+
+60$:	MOVB	@#FIPUNT,R3	;Get FIP unit number			;017
+	ASL	R3		; times 2 for word offset		;017
+	TST	UNTLVL(R3)	;RDS0 disk?				;017
+	BEQ	120$		;Yes, so pretend attribute doesn't exist ;017
+65$:	CALLX	RDENXT		;Read next in chain if any		;007
+	BEQ	120$		;Error if none left			;007
+	TST	(SP)		;Does caller have accounting privs?	;015
+	BMI	70$		;Yes, skip type code check		;015
+.ASSUME	DDSTAT LT 0							;020
+	CMPB	UATYP(R5),#AA.PAS ;Is this the password block?		;008
+	BEQ	65$		;Yes, skip it but don't count it	;015
+	CMPB	UATYP(R5),#300	;Upper half of user range?		;015
+	BHIS	65$		;Yes, skip it but don't count it	;015
+70$:	SOB	R0,65$		;Loop until we're there			;008
+	BR	90$		; and skip search by type		;007
+
+80$:	CALLX	SAA		;NOW, GO FIND THE ATTRIBUTE
+	BCS	120$		; CAN'T FIND THE ATTRIBUTE
+90$:	CMP	(R4)+,(R5)+	;SKIP PAST THE ACCOUNT #, AND LINK
+	MOV	#7,R1		;COUNT OF WORDS TO RETURN
+100$:	MOV	(R5)+,(R4)+	;COPY WORDS FROM BLOCKETTE TO FIRQB
+	SOB	R1,100$		; ALL DONE
+	TST	(SP)+		;Get rid of accounting privs flag	;015
+
+; We have looked up the attribute for the user, and moved it into the
+; work block. The final thing for us to do is to check to see if it
+; is a date/time attribute. RDS 1.1 disks do not define an expiration
+; date, but instead have the creation time of the account in that cell.
+; In order for this function to work transparently on RDS 1.1 and RDS 1.2
+; disks, we will always return "no expiration set" for 1.1 disks.
+
+	CMPB	10-26(R4),#AA.DAT ;Are we returing date/time attribute?	;021
+	BNE	105$		;No, so no hackery			;021
+	MOVB	@#FIPUNT,R3	;Pick up FIP unit number		;021
+	ASL	R3		;Now make it times two			;021
+	CMP	UNTLVL(R3),#401	;Is this a 1.1 disk?			;021
+	BNE	105$		;No, not this time			;021
+	MOV	#-1,-(R4)	;Yes, those accounts are never expired	;021
+.ASSUME	<11+AT.EXP-UADAT> EQ <26-2>
+105$:	RETURN			; NOW, GIVE IT TO THE USER		;021
+
+120$:	ERROR	EOF		;THE ATTRIBUTE ISN'T AVAILABLE
+
+150$:	ERROR	BADDIR		;Something wrong with directory		;010
+
+GLOBAL	<FIPUNT,UNTLVL,FIUSER>
+FQFEND
+
+FQFSRT
+.SBTTL	Write or delete attributes
+
+;+
+; WRTATT - Write or delete attributes
+;
+;	R4    -> FIRQB @ FQSIZM
+;	(SP)   = FIPUNT/FIPGEN
+;	(SP)+2 = Privilege flag
+;-
+
+.ENABL	LSB
+
+
+120$:	ERROR	EOF		;THE ATTRIBUTE ISN'T AVAILABLE
+
+130$:	ERROR	PRVIOL		;General protection violation		;010
+
+140$:	ERROR	NOROOM		;Out of room to create attributes	;010
+
+150$:	ERROR	BADDIR		;Something wrong with directory		;010
+
+WRTATT:	NOP								;027
+	MOV	(SP)+,@#FIPUNT	;Restore FIPUNT/FIPGEN			;027
+	TST	(SP)+		;Get rid of privileges flag		;027
+	MOVB	@#FIPUNT,R2	;Get FIP unit number			;010
+	ASL	R2		; times 2				;010
+	BIT	#UC.WLO,UNTCNT(R2) ;Write locked unit?			;010
+	BNE	130$		;Yes, error				;008
+	CMPB	FQFIL-FQPPN(R4),#-3 ;Is this a delete?			;010
+	BNE	170$		;No, not this time			;010
+	TSTB	R0		;Trying to delete system attributes?	;010
+	BPL	130$		;Yes, so forget that			;010
+	CALLX	SAA		;Go and read in the attribute		;010
+	BCS	120$		;Can't find it, forget it then		;010
+	MOV	(R5),R1		;Pick up link to next			;010
+	BIC	#^C<UL.BLO!UL.CLO!UL.ENO>,R1 ;And dump the flags	;010
+	CALLX	ZDE		;Now zero this entry out		;010
+	MOV	R2,R3		;Get ready to read previous entry	;010
+	CALLX	RDE		;Now read it in				;010
+	BIC	#UL.BLO!UL.CLO!UL.ENO,(R5) ;Trash the current link word	;010
+	BIS	R1,(R5)		;And set the new link word		;010
+	BR	185$		;Exit marking FIBUF			;026
+
+170$:	TSTB	R0		;Specifying zero for type?		;010
+	BNE	190$		;No, so it is a normal attribute	;010
+	MOV	UAA(R5),R3	;Pick up link to accounting entry	;010
+	CALLX	RDECHK		;Go and read in the accounting entry	;010
+	BEQ	150$		;Error... forget this!			;010
+	TST	(R5)+		;Skip past link word			;010
+	CMP	(R4)+,(R4)+	;And point to the data to write		;010
+	MOV	#6,R0		;Set up count of words to write		;010
+180$:	MOV	(R4)+,(R5)+	;Copy a word				;010
+	SOB	R0,180$		;And loop for all the words		;010
+185$:	JMP	250$		;Get out, marking FIBUF on exit		;010
+
+190$:	ADD	#FQNAM1+1-FQPPN,R4 ;Point to where data starts		;011
+	CMPB	#AA.QUO,R0	;Writing disk quotas?			;011
+	BNE	200$		;No					;011
+	CMP	UNTLVL(R2),(PC)+ ;Support extended disk quotas?		;011
+	 .BYTE	2,1							;011
+	BLO	200$		;No					;011
+	CMP	FQPPN-<FQNAM1+1>(R4),#1 ;Yes, but account [0,1]?	;024
+	BEQ	200$		;Yes, that doesn't have a QTB		;024
+	CALLX	SAA		;Get the disk quota blockette		;011
+	BCS	150$		;None, that's an error			;011
+	MOVB	AQ.CRM(R5),<FQBUFL+1>-<FQNAM1+1>(R4) ;Move the current usage ;011
+	MOV	AQ.CRL(R5),FQFLAG-<FQNAM1+1>(R4) ; into the user's FIRQB ;011
+	ADD	#AQ.DJB,R5	;Skip to the first data field		;011
+	MOV	R4,-(SP)	;Preserve the current FIRQB ->		;027
+	MOV	R5,-(SP)	; and blockette ->			;027
+	MOV	R4,R0		;Copy the FIRQB ->			;027
+	ADD	#FQPPN-<FQNAM1+1>,R0 ;-> at the PPN			;027
+	CALLM	SERQTB,OPNAP5	;Look for in-memory QTB block		;027
+	BCS	198$		;None (FIP mapping restored by SERQTB)	;027
+				;Otherwise, R5 -> QTB block for PPN	;027
+	ADD	#QTBDJB,R5	;Point to the detached job quota	;027
+	MOV	#7,R2		;R2 = number of bytes to move		;027
+195$:	MOVB	(R4)+,(R5)+	;Move a byte				;027
+	SOB	R2,195$		; until done				;027
+	MAP	FIPPOL		;Restore FIP mapping			;027
+198$:	MOV	(SP)+,R5	;Restore saved				;027
+	MOV	(SP)+,R4	; registers				;027
+	BR	240$		;Now go do the write			;011
+
+200$:	CALLX	SAACR		;Try to find or create the attribute	;005
+	BCS	140$		;No room for one, that's too bad	;005
+	TST	(R5)+		;Skip to type field			;007
+.ASSUME	UATYP EQ 2							;007
+	CMPB	(R5)+,#AA.PRV	;Writing privs?				;007
+	BNE	230$		;No, that's easier			;007
+.ASSUME	UADAT EQ UATYP+1						;007
+	CMPB	(R5)+,(R4)+	;First byte is unused			;007
+.ASSUME	AP.PRV EQ UADAT+1						;007
+	MOV	#FIPRVM,R1	;Point to caller's mask			;007
+	MOV	@#FIJBDA,R2	;Point to caller's JDB			;018
+	BIT	#JFSYS,JDFLG(R2) ;Temporary privileges active?		;018
+	BEQ	205$		;No, so all set up			;018
+	MOV	@#FIPJCR,R1	;Point to JCR entry for job		;025
+	MOV	R1,R2		;With two registers			;025
+	MAP	@#FIPJC6,APR=6,DATA,PIC ;And map the JCR entry		;025
+	ADD	#JCSPRV,R1	;And point to saved privileges		;018
+	TST	JCALPP(R2)	;Is there alternate privilege data?	;025
+	BEQ	205$		;No, nothing to do			;019
+	ADD	#JCALPV,R2	;Yes, point to privilege mask		;025
+	BR	207$		;And join up				;019
+
+205$:	MOV	R1,R2		;No 3PP, copy pointer to privileges	;019
+207$:	MOV	#PRIVSZ/2,R0	;Count of words to process		;019
+	MOV	#PRVMSK,R3	;Point to masks for defined bits	;014
+
+; R0 = Number of words to process
+; R1 -> Privilege mask to use (FIPRVM or JCSPRV)
+; R2 -> Alternate privilege mask to use (or same as R1 if none)
+; R3 -> Mask for defined privilege bits
+; R4 -> FIRQB @ passed privilege mask
+; R5 -> Privilege mask in GFD
+
+210$:	BIC	(R3)+,(R4)	;Get rid of undefined bits first	;012
+	MOV	(R4),-(SP)	;Get mask supplied by caller		;019
+	BIC	(R5)+,(SP)	;Leave set only new bits being set	;019
+	MOV	(R1)+,-(SP)	;Get a word from first privilege mask	;022
+	MOV	(R2)+,-(SP)	;Get a word from second privilege mask	;022
+	COM	(SP)		;Get complement of second mask		;022
+	BIC	(SP)+,(SP)	;Now we have the "AND" of the two masks	;022
+	BIC	(SP)+,(SP)	;Now clear all bits being set user has,	;022
+				;leaving bits user is setting that he's
+				;not allowed to
+	BIC	(SP)+,(R4)+	;Now clear bits user doesn't have	;019
+
+; The result of the above sequence is that the caller is allowed to set	;007
+; (i.e. change from 0 to 1) only privileges he has in his current	;007
+; privileges mask, but is allowed to clear any privileges, and		;007
+; privileges specified as set but that were set already are allowed	;007
+; to remain set whether or not the caller has that privilege.		;007
+
+	SOB	R0,210$		;Loop through mask			;007
+	MAP	FIPPOL		;Restore FIP mapping			;025
+	MOV	#20-<UADAT+PRIVSZ+1>/2,R0 ;Count of unused words	;012
+220$:	CLR	(R4)+		;Zero unused words in FIRQB		;012
+	SOB	R0,220$		; and loop				;012
+	SUB	#20-UADAT,R4	;Back up to start of attributes in FIRQB ;012
+	SUB	#PRIVSZ+1,R5	; and in attribute block		;007
+230$:	CMPB	UATYP-UADAT(R5),#AA.QT2 ;Setting Quota 2 info?		;026
+	BNE	236$		;No					;026
+	TSTB	FQPPN-<FQNAM1+1>+1(R4); Is it group 0?			;026
+	BNE	232$		; No date/time changes for group 0	;026
+	CLR	A2.NDT-UADAT(R4) ; Clear any non-interactive date	;026
+	CLR	A2.NTI-UADAT(R4) ; Clear any non-interactive time	;026
+	CLRB	A2.PWF-UADAT(R4) ; Clear any fail login attempts	;026
+232$:	TST	A2.NDT-UADAT(R5) ;Existing non-interactive login date?	;026
+	BEQ	234$		; No, so setting it is legal.		;026
+	MOV	A2.NDT-UADAT(R5),A2.NDT-UADAT(R4) ; Preserve old date	;026
+	MOV	A2.NTI-UADAT(R5),A2.NTI-UADAT(R4) ; Preserve old time	;026
+234$:	TSTB	A2.PWF-UADAT(R5) ; Is there an OLD fail count?		;026
+	BEQ	240$		; No, so OK to change it		;026
+	MOVB	A2.PWF-UADAT(R5),A2.PWF-UADAT(R4) ; preserve old fails	;026
+	;BR	240$		;all done with QT2 work			;026
+236$:	CMPB	UATYP-UADAT(R5),#AA.DAT ;Setting date/time info?	;007
+	BNE	240$		;No					;007
+	TSTB	FQPPN-<FQNAM1+1>+1(R4); Is it group 0?			;026
+	BEQ	238$		; No date/time changes for group 0	;026
+	TST	AT.LDA-UADAT(R5);Is there a date of last login already?	;026
+	BEQ	240$		; No, so allow changes to it		;026
+238$:	ADD	#AT.LTI-UADAT,R4 ;Yes, don't ever let login info change	;012
+	ADD	#AT.LTI-UADAT,R5 ; so advance both pointers		;012
+.ASSUME	AT.KB LT AT.LTI							;012
+.ASSUME	AT.LDA LT AT.LTI						;012
+	BIC	#AT.MSK,(R4)	;Mask out time field in user's data	;012
+	BIC	#^C<AT.MSK>,(R5) ;Zap flags in attribute block		;012
+	BIS	(R4)+,(R5)+	;Set flags in high order of AT.LTI	;012
+.ASSUME	AT.PDA EQ AT.LTI+2						;012
+240$:	MOVB	(R4)+,(R5)+	;Set up another byte			;005
+	BIT	#20-1,R5	;Done moving?				;005
+	BNE	240$		;Branch if not				;005
+250$:	MARK	FIBUF		;Make sure it gets written back		;010
+	RETURN			;Done					;005
+
+GLOBAL	<UNTCNT,FIPRVM,UNTLVL,PRVMSK,FIJBDA,FIPJCR,FIPJC6,FIJBD2>	;025
+GLOBAL	<FIPUNT>							;027
+.DSABL	LSB
+FQFEND
+
+.END

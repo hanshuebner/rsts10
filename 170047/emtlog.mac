@@ -1,0 +1,598 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+	.INCLUDE /CMN:KBDEF/
+	.INCLUDE /CMN:EMLDEF/
+TITLE	EMTLOG,<EMT Logger>,0A,10-MAY-91,WJS/FEK/GPK/KPH/DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit History for EMTLOG
+
+;+
+;
+;  000	WJS  21-Oct-82	Creation
+;  001	WJS  25-Jan-83	Fix UUO code sign extension error
+;  002	WJS  24-Feb-83	Changes deriving from code review
+;  003	WJS  21-Apr-83	EMLKIL entry point added
+;  004	FEK  05-Jul-83	Support for user I/D space
+;  005	GPK  22-Sep-83	Remove J2SFLG reference
+;  006	GPK  08-Mar-84	Update comments for MSG changes
+;
+;			[RSTS V9.2]
+;  007  KPH  08-Aug-85	Move IOB to FIP pool
+;			Add job control region
+;
+;			[RSTS V9.5]
+;  008	DRP  26-Aug-87	Make sure FIRQB gets posted in EMLRCV
+;-
+
+.SBTTL	Define and order the CSECT's
+
+
+	ORG	EMLBLD		; Builds packets at EMT dispatch time
+				;   (called from FIPPRE in FSS)
+
+	ORG	EMLRTR		; Retrieves and queues a packet at directive-completion time
+				;   (called from DOPOST in CAL, and from KILL code in SCH)
+
+	ORG	EMLRCV		; Posts packets to the user-level EMT Logger
+				;   (called from .MESAG in FSS)
+
+
+	DEFORG	EMLPAT		; Patch space 						;003
+
+.SBTTL	EMLBLD  --  Entry:  determine if directive should be logged
+
+	ORG	EMLBLD
+;+
+;	R0  =	UUO code, if a .UUO (if R2 = UUOFQ)
+;	R2  =	Posting pattern index (equal to FQFUN)
+;	R4  ->	FIRQB of caller (in work block)
+;	R5  =	Dispatch "address" of FIP function (if going to FIPSNC)
+;
+;	SP ->	"[A]SYNC","RTI3",R0,R1,R2,R3,R4,R5,PC,PS,..
+;
+;	CALL	EMLBLD
+;
+;	R0,R1,R2,R3  ..munged
+;-
+
+EMLBLD::			; Define global for SYSGEN selection by the linker
+
+	TST	@#LT.EML	; Is there an active EMT Logger ?
+	BEQ	30$		; No => quick exit
+	CMP	R2,#EMLMFQ	; Yes:  FQFUN in range for logging ?
+	BHI	30$		; Too high => quick exit
+	MOV	R2,R1		; In range:  copy FQFUN code,
+	ASR	R1		;   and make it into a byte offset
+	MOVB	EMLFQ$(R1),R1	; Get EML's flag byte for this FQFUN
+	BPL	15$			; Not a UUO => go flag it that way
+								       .ASSUME EMLQUU EQ 200
+	MOVB	$UUOSNC-UU$MIN(R0),R1	; UUO:  get EML's UUO flag, then,
+	BIC	#^C<377>,R0		;       and make UUO code a byte value		;001
+	BR	20$				; Continue
+
+15$:	MOV	#<ADINUU!UU.NOT>,R0	; Indicate call is not a UUO
+20$:	BITB	#EMLQNL!EMLQNV,R1  	; Logging wanted for this function ?
+	BEQ	40$			; Yes => continue processing.  Else..
+30$:	RETURN			; That "quick exit"
+
+40$:	REGSCR			; We're going to need more registers
+
+	MAP	JOBJC6,APR=6,DATA ; Map caller's JCR entry		;007
+	MOV	JOBJCR,R5	; And point to it			;007
+	ADD	#JCEMLP,R5	; Now point to JCR @ JCEMLP		;007 
+	TST	(R5)		; Something there ?  (a packet, or don't-log flag ?)
+	BNE	30$		; Yes - don't build a packet => quick exit
+	MOV	#EMLTBL,R3	; No:  point R3 -> EML's control table
+
+GLOBAL	<LT.EML,EMLFQ$,JCEMLP,$UUOSNC,EMLTBL>				;007
+
+.SBTTL	EMLBLD  --  Check quota and obtain packet buffer
+
+;+
+;	R3  ->	EMLCTL table @ EMLRPQ
+;	R5  ->	JCEMLP in JCR (JCEMLP now zero but later
+;			will -> job's new directive packet
+;	SP  ->	"REGSCR",R0,R1,R2,R3,R4,R5,"[A]SYNC","RTI3",R0,R1,R2,R3,R4,R5,PC,PS,..
+;
+; TOS.R0(SP) =	UUO code, if a .UUO (if R2 = UUOFQ), UU.NOT otherwise
+; TOS.R1(SP) =	EML's directive flag (from EMLFQ$ or UUOSNC)
+; TOS.R2(SP) =	Posting pattern index (equal to FQFUN)
+; TOS.R4(SP) ->	FIRQB of caller (in work block)
+; TOS.R5(SP) =	Dispatch "address" of FIP function (if going to FIPSNC)
+;-
+
+	DEC	(R3)+		; Punish allowable-pending-packet quota
+								.ASSUME EMLRPQ EQ 0
+	BMI	50$		; Quota exhausted => skip buffer-get, Carry set
+	BUFFER	GETLRG,100,-1	; Ask for message-packet buffer				;002
+	BCC	70$		; Got a buffer => continue
+50$:	INC	-(R3)		; No buffer gotten:  restore "remaining packet quota"
+	BIT	#EMLQMS,TOS.R1(SP)   ; Is "MUST" specified for this directive ?
+	BEQ	55$		; No => go count a "missed" directive
+	ERROR	NOBUFS		; Yes:  give "no small buffers" error, then
+
+55$:	INC	@#EMLTBL+EMLMSD	; Increment "missed" counter
+60$:	RETURN			; Another exit
+
+70$:	MOV	R4,(R5)		; Hang EML packet on this job (JCEMLP now -> packet)	;007
+	INC	(R3)		; Bump EML's master sequence number
+.ASSUME EMLSEQ EQ EMLRPQ+2
+	MOV	(R3),R5		; Hold onto sequence number, to put in packet
+	CALLX	MAPBUF		; Now map the packet
+	ADD	#PROOT,R3  	; R3, R1 -> beginning of "root" data area,
+	MOV	R3,R1		;           just beyond packet count fields
+
+GLOBAL	<EMLTBL>
+
+.SBTTL	EMLBLD  --  Load packet's header and "root"
+
+;+
+;	R1  ->	Packet @ PSEQ:  beginning of data area
+;			--for loading counts, via -(R1)
+;	R3  ->	Packet @ PSEQ:  beginning of data area
+;			--for loading data, via (R3)+
+;	R5  =	New packet's sequence number
+;
+;	SP  ->	"REGSCR",R0,R1,R2,R3,R4,R5,"[A]SYNC","RTI3",R0,R1,R2,R3,R4,R5,PC,PS,..
+;
+; TOS.R0(SP) =	UUO code, if a .UUO (if R2 = UUOFQ), UU.NOT otherwise
+; TOS.R1(SP) =	EML's directive flag (from EMLFQ$ or UUOSNC)
+; TOS.R2(SP) =	Posting pattern index (equal to FQFUN)
+; TOS.R4(SP) ->	FIRQB of caller (in work block)
+; TOS.R5(SP) =	Dispatch "address" of FIP function (if going to FIPSNC)
+;-
+
+
+LROOT:	MOV	R5,(R3)+	; Give packet its sequence number
+								.ASSUME PSEQ EQ PROOT
+	MOV	#DATE,R5	; Address Monitor Low Memory @ DATE
+	MOV	(R5)+,(R3)+	; Put date in packet
+								.ASSUME PDATE EQ PSEQ+2
+	MOV	(R5)+,(R3)+	; Put time in packet
+								.ASSUME TIME EQ DATE+2
+								.ASSUME PTIME EQ PDATE+2
+	MOV	(R5)+,(R3)+	; Put seconds + ticks in packet
+								.ASSUME TIMSEC EQ TIME+2
+								.ASSUME TIMCLK EQ TIMSEC+1
+								.ASSUME PSEC EQ PTIME+2
+								.ASSUME PCLK EQ PSEC+1
+	MOVB	(R5)+,R0	; Now get job number * 2
+								.ASSUME JOB EQ TIMSEC+2
+	MOV	JOBTBL(R0),R5	; R5 -> job's JDB
+	MAP	PUSH,APR=6,DATA	;Save MMU address of packet		;007
+	MAP	FIPPOL		;Restore FIP pool mapping		;007
+	MOV	@(R5)+,R2	; R2 -> DDB of job's channel 0, R5 -> JDFLG
+.ASSUME	JDIOB	EQ	0
+	MAP	POP,APR=6,DATA	;Restore APR6 mapping			;007
+	MAP	@#KISAR5,APR=5,DATA ;And restore our data mapping	;007
+	MOV	(R5)+,(R3)	; Put job's flags in packet
+								.ASSUME JDFLG EQ 0+2
+	BIC	#<JFFPP!JFSPCL!377>,(R3)   ; Clear unwanted bits, and zero the low byte
+	BIS	R0,(R3)+	; Put job number in packet
+								.ASSUME PJOB EQ PSEC+2
+								.ASSUME PJBFLG EQ PJOB+1
+	MOV	(R5)+,(R3)+	; Put JDIOST (still zero) and FQFUN in packet
+								.ASSUME JDIOST EQ JDFLG+2
+								.ASSUME JDPOST EQ JDIOST+1
+								.ASSUME PIOST EQ PJOB+2
+								.ASSUME PFQFUN EQ PIOST+1
+	MOV	(R5)+,R4	; Pick up pointer to work block again
+								.ASSUME JDWORK EQ JDIOST+2
+
+	MOV	DDJBNO(R2),(R3)	; Put DDJBNO and DDUNT in packet
+								.ASSUME DDUNT EQ DDJBNO+1
+								.ASSUME PINTFS EQ PIOST+2
+								.ASSUME PKB EQ PINTFS+1
+	CMPB	(R3)+,R0	; Is this DDB owned by this job ?
+	BNE	10$		; No => go complement the KB number (DDUNT byte)
+	BIT	#DDCONS,DDCNT(R2)   ; Yes: is it marked "console", then ?
+	BNE	20$		; Yes => let KB number stand
+10$:	COMB	(R3)		; No:  complement it
+20$:	MOV	TTINTF(R2),R2	; Get TTINTF data from DDB
+	MOVB	R2,-(R3)	; Put TTINTF code in packet (overlaying DDJBNO)
+	BIC	#^C<TTMODM>,R2	; Isolate the TTMODM bit
+	ASH	#-7,R2		; Shift TTMODM down to PINTFS byte's sign bit
+								.ASSUME TTMODM EQ 40000
+	BIS	R2,(R3)+	;  and put it in packet
+
+	MOV	(R5)+,R5	; R5 -> JDB2
+								.ASSUME JDJDB2 EQ JDWORK+2
+	CLR	(R3)+		; Next word is reserved			;005
+								.ASSUME PSFLG EQ PINTFS+2
+	MOV	J2PPN(R5),(R3)+	; Put PPN in packet
+								.ASSUME PPPN EQ PSFLG+2
+	MOV	36(SP),(R3)+	; Put virtual PC @ EMT time in packet
+								.ASSUME PPC EQ PPPN+2
+	MOV	TOS.R0(SP),R2	; Retrieve saved UUO code (or ADINUU!UU.NOT)
+	BMI	30$		; Not a UUO => go post ADINUU!UU.NOT
+								.ASSUME ADINUU EQ 100000
+	MOV	TOS.R5(SP),R5	; Retrieve function's "address"
+	BIC	#777,R5		; Develop displacement into OVRTBL
+	ASHC	#-7,R5		;  for this directive's entry
+	MAP	PUSH,APR=6,DATA	; Save APR6 mapping			;007
+	MAP	FIPPOL		; Map FIP pool for overlay base table	;007
+	TST	OVBASE(R5)	; Is this function resident ?
+	BMI	25$		; Yes => continue
+	BIS	#ADINRS,R2	; No:  set the "non-resident" flag bit
+25$:	MAP	POP,APR=6,DATA	; Restore APR6 mapping			;007
+	MAP	@#KISAR5,APR=5,DATA ; Restore APR5 mapping		;007
+30$:	MOV	R2,(R3)+	; Put UUO code and "add'l info" in packet
+								.ASSUME PUUO EQ PPC+2
+								.ASSUME PADI EQ PUUO+1
+	MOVB	#PROTSZ-BUFHDR,-(R1)	; Put length of "root" data in packet
+								.ASSUME PROTLN EQ PROOT-1
+GLOBAL	<JOBTBL,OVBASE>
+
+.SBTTL	EMLBLD  --  Load packet's FIRQB-image area
+
+;+
+;	R1  ->	Packet @ PROTLN ("root" length header byte)
+;			--for loading counts, via -(R1)
+;	R3  ->	Packet just beyond "root" data
+;			--for loading data, via (R3)+
+;	R4  ->	FIRQB of caller (in work block)
+;
+;	SP  ->	"REGSCR",R0,R1,R2,R3,R4,R5,"[A]SYNC","RTI3",R0,R1,R2,R3,R4,R5,PC,PS,..
+;
+;-
+
+
+LFIRQB:	MOV	R3,R5		; Save starting value of "fill" pointer
+	CMP	(R4)+,(R4)+	; Skip first two words of FIRQB
+	MOV	#FQBSIZ/2-2,R0	; Set up maximum count of words to load
+
+;   Per-call determination of pertinent FIRQB-data length goes here
+
+20$:	MOV	(R4)+,(R3)+	; Put FIRQB data in packet,
+	SOB	R0,20$		;   one word at a time
+
+	MOV	R3,R4		; Compute length of
+	SUB	R5,R4		;  loaded FIRQB data
+	MOVB	R4,-(R1)	;  and put it in packet
+								.ASSUME PFQBLN EQ PROTLN-1
+
+
+.SBTTL	EMLBLD  --  Load packet's XRB-image area
+
+
+LXRB:	MOV	R3,R5		; Save start address of XRB area
+
+; XRB gets loaded here   -- needs APR6 magic, and testing of directive flag
+
+	MOV	R3,R4		; Compute length of
+	SUB	R5,R4		;  loaded XRB data
+	MOVB	R4,-(R1)	;  and put it in packet
+
+								.ASSUME PXRBLN EQ PFQBLN-1
+
+.SBTTL	EMLBLD  --  Load packet's "options" area
+
+
+LOPT:	MOV	R3,R5		; Save start address of "options" area
+
+; "Options" get loaded here
+
+	MOV	R3,R4		; Compute length of
+	SUB	R5,R4		;  loaded "options" data
+	MOVB	R4,-(R1)	;  and put it in packet
+								.ASSUME POPTLN EQ PXRBLN-1
+
+
+.SBTTL	EMLBLD  --  Finish up
+
+	SUB	R1,R5		; Finally, compute total length of data we loaded
+	MOV	R5,-(R1)	;   and load it in BUFHDR
+								.ASSUME BF.CNT EQ POPTLN-2
+	RETURN			; All done => exit
+
+.SBTTL	EMLRTR  -- Entry from job KILL code
+
+	ORG	EMLRTR
+
+;+										       ;003+
+;	R0  = Job # * 2 of job being killed
+;
+;	CALLMI	EMLKIL		(from SCH)
+;
+;	All registers preserved
+;-
+
+	TMPORG	EMTDSP,30
+	.WORD	EMLKIL		; Entry for SCH's job KILL code
+	UNORG
+
+.ENABL	LSB
+
+EMLKIL:	REGSCR				; Save all registers
+	CALLX	MAPJCR			; Map JCR entry			;031
+	MOV	#-1,R0			; Say IOSTS = -1 for "job going away"
+	BR	5$			; Go process a possible EML packet ;007
+
+.SBTTL	EMLSND  --  Attach new packet to active PMB's chain of packets
+
+;+
+;	R0  =	I/O completion status, as posted in FIRQB
+;
+;	CALL	EMLSND
+;
+;	R0,R1,R3,R4,R5..   munged 	  (only R2 preserved)
+;	APR6 ->	User job's first 4K
+;-
+
+EMLSND::			; Define global for SYSGEN selection by the linker
+
+	MAP	JOBJC6,APR=6,DATA ;Map job's JCR entry			;007
+	MOV	JOBJCR,R1	; And point to it			;007
+5$:	ADD	#JCEMLP,R1	; Now point to the packet queue		;007
+	MOV	(R1),R4		; Point R4 -> possible EML packet
+	BEQ	EXIT		; 'Twas empty => quick exit
+	CMP	R4,#ABFLGS	; Is JCEMLP a valid packet pointer ?
+	BHIS	EXIT		; No, it's a "flag" => quick exit
+	CLR	(R1)		; Yes:  clear it in JCR @ JCEMLP now
+	CALLX	MAPBUF		; Map the packet (with APR6) for a moment
+	MOVB	R0,PIOST(R3)	;   and post I/O completion status in packet @ PIOST
+	BIT	#ADINLG,PADI-1(R3)	; Is logging to be turned off for this job ?
+	BEQ	10$			; No => continue
+	MAP	PUSH,APR=6,DATA		; Yes, save APR6 mapping	;007
+	MAP	JOBJC6,APR=6,DATA	; Map the JCR again		;007
+	MOV	#EMLNLG,(R1)		; And set the EMLNLG flag in JCEMLP ;007
+	MAP	POP,APR=6,DATA		; And restore mapping		;007
+10$:	MOV	R4,R1		    ; Now set R1 = "address" of packet about to be queued
+	MOV	#EMLTBL+EMLLND,R0   ; Point R0 -> EMLCTL @ EMLLND
+	PUSH	R0		    ;   and save a copy of that EMLLND pointer on the stack
+	.BR	EMLQUE
+
+.DSABL	LSB
+
+GLOBAL	<JCEMLP,EMLTBL>							;007
+
+
+;+
+;	R0  ->	EMLCTL @ EMLLND  (@ packet-list "tail" pointer)
+;	R1  =	"address" of current packet (to be queued)
+;	R3  ->	Packet about to be queued (via APR6)
+;	SP  ->	"EMLLND",..
+;-
+
+;  Verify layout of buffer headers for what follows
+
+	.DSECT	,NOCREF
+BF.SIZ:	.BLKW			; Buffer size in bytes
+BF.OFF:	.BLKW			; Byte offset to data in buffer
+BF.LNK:	.BLKW			; Link "address" to next buffer
+BF.CNT:	.BLKW			; Data size in bytes
+BUFHDR:				; Buffer header size in bytes
+	UNORG
+
+EMLQUE:	MOV	BF.CNT(R3),R5	; Save byte count of packet about to be queued
+	ADD	#2,R5		;   (including the word @ BF.CNT itself)		;002
+	MOV	(R0)+,R4	; Get possible contorted pointer -> "tail" packet
+	BNE	10$		; There is one => point old tail's link -> new packet
+	MOV	R1,(R0)+	; Queue is empty:  point "root" cell -> new packet
+	BR	20$		;      and continue
+								.ASSUME EMLLST EQ EMLLND+2
+10$:	CALLX	MAPBUF		; Map old "tail" packet with R3 in APR6,
+	MOV	R1,BF.LNK(R3)	;   point old tail's link -> new packet (the new "tail"),
+	TST	(R0)+		;   and leave EMLLST ("root") cell alone
+								.ASSUME EMLLST EQ EMLLND+2
+20$:	MOV	R1,@(SP)+	; Point EMLLND ("tail" cell) -> new packet (the new "tail")
+	ADD	R5,(R0)+	; Add current packet's byte count to total
+								.ASSUME EMLBRM EQ EMLLST+2
+	INC	(R0)		; Count a(nother) packet pending
+								.ASSUME EMLPKC EQ EMLBRM+2
+	MOV	@#LT.EML,R1	; Now point R1 -> EMT Logger's RIB
+	BEQ	HORROR		; No RIB !   (EML teardown should zot JCEMLP's)		;999
+	CMPB	(R0),S.PQTA(R1)	; Packet-per-message quota satisfied ?
+	BLO	EXIT		; Not yet => no need to wake up receiving job
+	MOVB	S.JBNO(R1),R4	; Yes:  get job number * 2 of the EMT Logger
+	CALLX	IOFIN4,R5,JSTIM	;   and awaken him/her
+EXIT:	MAP	@UDPAR0,APR=6,DATA   ; Restore mapping of user's first 4K		;004
+	RETURN			    ;   and exit
+
+HORROR:	CRASH										;999
+
+GLOBAL	<LT.EML,UDPAR0>
+
+.SBTTL	EMLRCV  --  Entry:  determine if EMLRCV should process this RECEIVE
+
+	ORG	EMLRCV
+
+;+
+;	R1  ->  JDB @ JDFLG						;008
+;	R2  ->	JDB2							;006
+;	R3  ->	FIRQB         (in work block)
+;	R4  ->  FIRQB         (in work block)
+;
+;	CALL	EMLRCV
+;
+;	C = 0	It was EML's RECEIVE, and it's been processed
+;	C = 1   It wasn't, MSG should proceed normally			;006
+;
+;	R3,R5   ..munged
+;-
+
+
+EMLRCV::CMPB	JOB,@#LF.EML	; Is JOB the EMT Logger ?
+	BNE	10$		; No => quick exit
+	CMP	(R3)+,(R3)+	; Point R3 -> function code in FIRQB
+	CMPB	(R3)+,#2	; Is the function "RECEIVE" ?
+	BNE	10$		; No => quick exit
+	BITB	(R3)+,#4	; Asking for local messages ?
+	BEQ	10$		; No => quick exit
+	TSTB	(R3)		; Asking for some specific job ?
+	BNE	10$		; Yes => quick exit
+	MOV	@#LT.EML,R5		; Point R5 -> EML's RIB
+	CMPB	FQDEVN(R4),S.SRBN(R5)	; Is EMLRIB the one being RECEIVEd on ?		;002
+	BNE	10$			; No => quick exit
+	MOV	#EMLTBL+EMLLST,R3	; Point R3 -> EMLCTL @ EMLLST
+	TST	(R3)			; Check pointer -> possible first packet
+	BNE	20$			; Packet(s) exist => we WILL process this call
+
+10$:	SEC			; "Quick exit":  indicate call not processed here
+	RETURN			;    and get back to FSS
+
+GLOBAL	<LF.EML,LT.EML,EMLTBL>
+
+.SBTTL	EMLRCV  --  Set up scratch area
+
+20$:	BIS	#JFPOST,(R1)	; Make sure the FIRQB gets posted	;008
+	MOV	#UUOFQ*400,JDIOST-JDFLG(R1) ; Message posting & no error ;008
+	MOV	R4,R5		; Make a copy of work-block pointer
+	CLR	(R5)+		; Clear first word of work block
+	CLR	(R5)+		; Clear second word of work block
+	MOV	#377,(R5)+	; Set P$TYPE = -1, and P$SNDR = 0
+								.ASSUME P$TYPE EQ 4
+								.ASSUME P$SNDR EQ P$TYPE+1
+	CLR	(R5)+		; Set P$SPPN = 0
+								.ASSUME P$SPPN EQ P$TYPE+2
+	REGSAV				    ; Save registers
+	MOV	@#XRB+XRLEN+140000,-(SP)    ; Save "available buffer" size
+					    ;   (TOS.R5+2 will renew "base of scratch area")
+					    ;	(TOS.R3+2 will give EMLCTL @ EMLLST later)
+	MOV	(R3)+,(R5)+		    ; Load "address" of next packet (EMLLST)
+	MOV	(R3)+,(R5)+		    ; Load bytes-remaining count
+								.ASSUME P$BREM EQ P$SPPN+4
+								.ASSUME EMLBRM EQ EMLLST+2
+	MOV	(R3)+,(R5)+		    ; Load pending-packets count
+								.ASSUME EMLPKC EQ EMLBRM+2
+	MOV	@#XRB+XRLOC+140000,(R5)+    ; Save starting buffer address
+	CLR	(R5)			    ; Initialize delivered-packets count
+	BR	NXTPKT		; Join processing loop at "get next packet"
+
+.SBTTL	EMLRCV  --  Deliver packets to EMT Logger
+
+
+
+;   The Work Block is used as a scratch area in the following code, both to construct the
+;  PMB and to hold necessary control data, including certain cells from the EMLCTL table.
+;  The words at 0 through 6 are loaded with their PMB values to begin;  the word at 10
+;  is the "base" of the scratch area.  R5 is used as the scratch-area cursor, and gets
+;  restored to the "base" word as each "next" packet enters processing. (This is at the
+;  label NXTPKT:.)
+
+
+
+;            EMLCTL                 Work block, used as            Work block, as delivered
+;             Table                scratch, during loading          (that is, as the PMB)
+;
+;                                 ------------------------         ------------------------
+;                                |                        |   0   |          Zero          |
+;    -----------------------     |------------------------|       |------------------------|
+;   |        EMLRPQ         |    |                        |   2   |          Zero          |
+;   |-----------------------|    |------------------------|       |------------------------|
+;   |        EMLSEQ         |    |                        |   4   | P$SNDR=0  | P$TYPE= -1 |
+;   |-----------------------|    |------------------------|       |------------------------|
+;   |        EMLLND         |    |                        |   6   |      P$SPPN = 0        |
+;   |-----------------------|    |------------------------|       |------------------------|
+;   |        EMLLST         |    |         EMLLST         |  10   |          Zero          |
+;   |-----------------------|    |------------------------|       |------------------------|
+;   |        EMLBRM         |    |         EMLBRM         |  12   |         P$BREM         |
+;   |-----------------------|    |------------------------|       |========================|
+;   |        EMLPKC         |    |         EMLPKC         |  14   |   Packets remaining    |
+;   |-----------------------|    |------------------------|       |------------------------|
+;   |        EMLMSD         |    |  Next byte in buffer   |  16   |    "Missed" count      |
+;    -----------------------     |------------------------|       |------------------------|
+;                                |  Delivered-pkts count  |  20   |  Delivered-pkts count  |
+;                                |------------------------|       |------------------------|
+;                                |                        |  22   |         Zeros          |
+;                                                                             |             
+;                                                                             v             
+
+
+
+
+;  Verify layout of buffer headers
+
+	.DSECT	,NOCREF
+BF.SIZ:	.BLKW			; Buffer size in bytes
+BF.OFF:	.BLKW			; Byte offset to data in buffer
+BF.LNK:	.BLKW			; Link "address" to next buffer
+BF.CNT:	.BLKW			; Data size in bytes
+BUFHDR:				; Buffer header size in bytes
+	UNORG
+
+	.ENABL	LSB
+
+10$:	SUB	R2,(R5)+	; Decrement pending "bytes remaining"
+	DEC	(R5)+		; Decrement pending "packets remaining"
+	MOV	@DPAR6,R0	; Save packet's MMU value (for MOVMEM)
+	MOV	(R5),-(SP)	; Get pointer -> next byte in user's buffer
+	ADD	R2,(R5)+	; Increment the pointer by packet's length for next time
+	INC	(R5)		; Count one (more) packet delivered
+	MOV	(SP)+,R5	; Now put "current pointer" here, and
+	CALLX	SCRUMP		;   map destination in buffer using R5, via APR6
+			; Set up parameters for MOVMEM
+					; R0 = packet's MMU value (loaded above)
+	MOV	R3,R1			; R1 -> packet @ BF.CNT     (via APR6)
+	ADD	#120000-140000,R1	; R1 -> packet @ BF.CNT (now via APR5)
+					; R2 = byte count to move (loaded below)
+	MOV	R5,R3			; R3 -> destination in buffer (via APR6)
+	CALLX	MOVMEM		; Transfer packet to user's buffer
+	BUFFER	RETURN		;   and return packet's buffer to the pool
+
+NXTPKT:	MOV	TOS.R5+2(SP),R5	; Re-load our work-block pointer
+	MOV	(R5),R4		; Get (next) packet's buffer "address"
+	BEQ	LOADED		; No more packets => go finish up
+	CALLX	MAPBUF		; Map packet with R3, via APR6
+	CMP	(R3)+,(R3)+	; Bump (over BF.SIZ, BF.OFF) to BF.LNK
+	MOV	(R3)+,(R5)+	; Save BF.LNK (link "address") for next time
+	MOV	(R3),R2		; Get packet's data-byte count,
+	ADD	#2,R2		;   incremented to include BF.CNT word itself		;002
+	SUB	R2,(SP)		; Decrement "bytes available" (and check for fit)
+	BHIS	10$		; (Next) packet will fit in buffer => load it
+	ADD	R2,(SP)		; Packet wouldn't fit:  don't include it in byte count	;002
+	.BR	LOADED		; Go finish up
+
+	.DSABL	LSB
+
+GLOBAL	<DPAR6>
+
+LOADED:	MAP	@UDPAR0,APR=6,DATA	; Restore user mapping (lowest 4K)		;004
+	MOV	#XRB+XRLEN+140000,R3	; Point R3 -> XRB @ XRLEN
+	MOV	(R3)+,(R3)		; Copy user's buffer length,
+	SUB	(SP)+,(R3)		;   and calculate delivered byte count
+								.ASSUME XRBC EQ XRLEN+2
+	REGRES			; Restore registers
+					; R5 -> Work block @ WRK + 10 again
+					; R3 -> EMLCTL @ EMLLST again
+	MOV	(R5),(R3)+	; Reset EMLLST to possible residue of packet list
+	BNE	10$		; More packet(s) in list => continue
+	CLR	@#EMLTBL+EMLLND	; List was exhausted:  clear EML's "tail" pointer
+10$:	CLR	(R5)+		; Clear word in Work Block @ WRK + 10
+	MOV	(R5)+,(R3)+	; Salt away new "remaining byte count" in EMLCTL @ EMLBRM
+	MOV	(R5)+,(R3)+	; Similarly, "remaining packet count" in EMLCTL @ EMLPKC
+	MOV	(R3),(R5)+	; Now, post any "missed" count in work block
+	CLR	(R3)		;  and clear it in EMLCTL for next time
+								.ASSUME EMLMSD EQ EMLPKC+2
+	ADD	(R5)+,@#EMLTBL+EMLRPQ   ; Say packet quota now upped by delivered count
+20$:	CLR	(R5)+		; Now, clear out the
+	BIT	#40-1,R5	;   remainder of
+	BNE	20$		;   the work block
+								.ASSUME EMLMSD+4 LT 40
+	;CLC			; Indicate message delivered (from the CLR above)
+	RETURN			; Back to FSS
+
+GLOBAL	<EMLTBL,UDPAR0>
+
+
+	.END

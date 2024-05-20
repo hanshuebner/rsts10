@@ -1,0 +1,1691 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	BCKLIS,<Backup listing routines>,0C,19-JUL-91,KPH/BGN
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BCKLIS
+
+;+
+;
+; Edit	Date		By	Reason
+;
+;  000	01-Jan-84	KPH	Creation for Version 9.0 RSTS/E
+;  001	09-Jan-85	KPH	Add account listing stuff
+;  002  10-Jul-87	BGN	Backup/directory support
+;  003  13-Apr-88	BGN	Allow for large cluster size in DSPCLU
+;  004  28-Sep-88	BGN	Modifications for BACKUP/DIRECTORY header info
+;  005  28-Feb-89	BGN	Fix problem with long command lines
+;  006  19-May-89	BGN	Fix problem with zero length .ASCIC
+;  007  22-May-89	BGN	Split FULTHR into two threads
+;  008  26-Oct-89	BGN	Rework BCKRST routine for image mode
+;  009  10-Nov-89	BGN	use $IMGFI when in image mode
+;  010	01-Feb-90	REG	Get the <prot> from a byte, not a word
+;  011  29-Apr-90	REG	Fix /DIR/NOLIS loop bug
+;
+;				[RSTS V10.1]
+;  012  REG  26-JUN-91	Improve handling of per-file messages
+;-
+
+.SBTTL	Call any needed MACROs
+
+.MCALL	.ASCIC, $CUI, SAVREG
+
+$CUI	MSG		; Get the message stuff
+
+
+.SBTTL	Declare our local data
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+;
+; This table is used by routine EXPPRT
+;
+;	Protection code tables
+;		Use exeoff if bit 64 in protection code is off
+;		Use exeon if bit 64 in protection code is on
+;
+;	Format:
+;		.WORD	address of text to print (text must be in .ASCIZ form)
+;		.WORD	number of items to check (n)
+;	entry#1	.BYTE	bit to check(its value),char to print if bit set OFF
+;	entry#2	.BYTE	
+;		.
+;		.
+;	entry#n .BYTE
+;
+;		.WORD	address of text to print
+;		.
+;		.
+;
+;		.WORD	0
+;		
+
+EXEOFF:	.WORD	OWNMSG			;Print owner text
+	.WORD	2			;Two entries
+	.BYTE	1,'R			;Owner read
+	.BYTE	2,'W			;Owner write
+	.WORD	GRPMSG			;Print group text
+	.WORD	2			;Two entries
+	.BYTE	4,'R			;Group read
+	.BYTE	8.,'W			;Group write
+	.WORD	WRLMSG			;Print world text	
+	.WORD	2			;Two entries
+	.BYTE	16.,'R			;World read
+	.BYTE	32.,'W			;Write world
+	.WORD	0			;End of table
+
+EXEON:	.WORD	OWNMSG			;Print owner text
+	.WORD	3			;Three entries
+	.BYTE	2,'R			;Owner read
+	.BYTE	2,'W			;Owner write
+	.BYTE	1,'E			;Owner execute
+	.WORD	GRPMSG			;Print group text
+	.WORD	3			;Three entries
+	.BYTE	8.,'R			;Group read
+	.BYTE	8.,'W			;Group write
+	.BYTE	4,'E			;Group execute
+	.WORD	WRLMSG			;Print world text
+	.WORD	3			;Three entries
+	.BYTE	32.,'R			;World read
+	.BYTE	32.,'W			;World write
+	.BYTE	16.,'E			;World execute
+	.WORD	0			;End of table
+
+;Text messages
+
+MODNAM:	.ASCIC	<"BCKLIS">
+CONMSG:	.ASCIZ	/Contiguous/			;Attributes
+PRTMSG:	.ASCIZ	/Protected/
+PLAMSG:	.ASCIZ	/Placed/
+UNDMSG:	.ASCIZ	/Undefined/			;Record Formats
+FIXMSG:	.ASCIZ	/Fixed length/
+VARMSG:	.ASCIZ	/Variable length/
+VFCMSG:	.ASCIZ	/Variable length, fixed control/
+STRMSG:	.ASCIZ	/Stream/
+SEQMSG:	.ASCIZ	/Sequential/			;File organization
+RELMSG:	.ASCIZ	/Relative/
+INDMSG:	.ASCIZ	/Indexed/
+FORMSG:	.ASCIZ	/FORTRAN carriage control/	;Record attributes
+ICCMSG:	.ASCIZ	/Implied carriage control/
+NOSMSG:	.ASCIZ	/Non-spanned/
+NONMSG:	.ASCIZ	/None/
+PAEMSG:	.ASCIZ	/Privileged, Executable, /	;Protection code shit
+EXEMSG:	.ASCIZ	/Executable, /
+ERAMSG:	.ASCIZ	/Erase on delete, /
+OWNMSG:	.ASCIZ	/Owner:/
+GRPMSG:	.ASCIZ	/, Group:/
+WRLMSG:	.ASCIZ	/, World:/
+BCKMSG:	.ASCIC	<" backed up to ">					;012
+RSTMSG:	.ASCIC	<" restored from ">
+IMGMSG:	.ASCIC	<" written to ">					;012
+VFYMSG:	.ASCIC	<" verified against ">
+	.EVEN
+
+;File record format table
+FFMT:	.WORD	0,UNDMSG	;Undefined
+	.WORD	1,FIXMSG	;Fixed length
+	.WORD	2,VARMSG	;Variable length
+	.WORD	3,VFCMSG	;Variable length, fixed control
+	.WORD	4,STRMSG	;Stream
+	.WORD	0		;End of table
+
+;File record attribute table
+FATR:	.WORD	0,NONMSG	;No attributes
+	.WORD	400,FORMSG	;FORTRAN carriage control
+	.WORD	1000,ICCMSG	;Implied carriage control
+	.WORD	4000,NONMSG	;No span
+	.WORD	0
+
+;File flags
+				;Define file flags in order to be printed
+				;This is for /BRIEF
+FFDAT:	.BYTE	US.NOX,'C	;Contiguous
+	.BYTE	US.NOK,'P	;Protected
+	.BYTE	US.PLC,'L	;Located
+	.WORD	0		;End of the list (Must be 0)
+
+				;This is for /FULL
+FFDAT2:	.WORD	US.NOX,CONMSG	;Contiguous
+	.WORD	US.NOK,PRTMSG	;Protected
+	.WORD	US.PLC,PLAMSG	;Located/Placed
+	.WORD	0		;End of the list
+
+;Operating systems
+VMSTXT:	.ASCIZ	\VMS \		;VMS					;004
+RSTTXT:	.ASCIZ	\RSTS/E V\	;RSTS/E					;004
+UNKTXT:	.ASCIZ	\?????? \	;Unknown operating sytem name		;004
+
+OPIDTB:	.WORD	4,	RSTTXT	;RSTS/E					;004
+	.WORD	1024.,	VMSTXT	;VMS					;004
+	.WORD	0,	UNKTXT	;Unknown				;004
+
+.EVEN		; when we ain't
+
+	.PSECT	RWDATA,RW,D,LCL,REL,CON
+
+WORK:	.BLKB	10.		;Work area for number conversions
+PAD:	.WORD	0		;Pad Character
+FWIDTH:	.WORD	0		;Field Width (Used by DSKSIZ)
+TABSTO:	.WORD	0		;Tab stop memory			;004
+THRSEL:	.BLKW			;Thread to select			;007
+CURPOS:	.BLKB			;Current position
+
+
+.EVEN
+
+.SBTTL	Create a file entry in the list file
+
+;+
+;
+;	R5 -> Display area (looks like current file cells)
+;	
+;	This routine will write a line to the listing file
+;	containing  the data for the file passed to us.
+;	It will also send the logging line to the user's KB:
+;	if logging has been enabled.
+;
+;	All registers are preserved across this call.
+;
+;-
+				
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+.ENABL	LSB
+
+
+FILLSX::			;BACKUP					;012
+				;R5 already -> file name in dyn mem	;012
+	SAVREG			;Save all registers
+	MOV	#FILFIL,R4	;"File "				;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILNAM,R4	;"[m,n]filnam.typ"			;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILBRW,R4	;"backed up "				;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILVOL,R4	;"volume n"				;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILNLN,R4	;CRLF					;012
+	JMP	@(R4)+		;					;012
+
+FILLIS::			;RESTORE / VERIFY			;012
+	SAVREG			;Save all registers
+	BIT	#DO.IMA,C$FLAG	;Image or copy?				;012
+	BNE	5$		;Yes					;012
+	MOV	#$OLDFI,R5	;R5 -> file name from backup set	;012
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;012
+	BEQ	1$		;No, file pointer is OK			;012
+	MOV	#$CURFI,R5	;Yes, point to output file name		;012
+1$:	MOV	#FILFIL,R4	;"File "				;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILNAM,R4	;"[m,n]filnam.typ"			;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILBRW,R4	;"restored from / verified against "	;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILVOL,R4	;"volume n"				;012
+	CALL	@(R4)+		;					;012
+	MOV	#$CURFI,R5	;R5 -> output file			;012
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;012
+	BNE	2$		;Yes					;012
+	MOV	#FILTO,R4	;" to "					;012
+	CALL	@(R4)+		;					;012
+	BR	3$		;Don't change filenames			;012
+
+2$:	MOV	#$OLDFI,R5	;Point to source file name		;012
+	MOV	#FILSPC,R4	;SPACE					;012
+	CALL	@(R4)+		;					;012
+3$:	MOV	#FILNAM,R4	;"[m,n]filnam.typ"			;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILNLN,R4	;CRLF					;012
+	JMP	@(R4)+		;					;012
+
+5$:				;IMAGE / COPY / VERIFY			;012
+	MOV	#$IMGFI,R5	;Point to source file cells		;012
+	BIT	#IM$COP,IMGSUB	;Copy?					;012
+	BEQ	7$		;No, so source is OK			;012
+	BIT	#RS$VFY,RESSUB	;Verify?				;012
+	BEQ	7$		;No, so source is OK			;012
+	MOV	#$OLDFI,R5	;Point to output file cells		;012
+7$:	MOV	#FILFIL,R4	;"File "				;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILNAM,R4	;"[m,n]filnam.typ"			;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILBRW,R4	;"written to / verified against "	;012
+	CALL	@(R4)+		;					;012
+	BIT	#IM$COP,IMGSUB	;/COPY?					;012
+	BEQ	8$		;Yes, use source file name		;012
+	MOV	#$OLDFI,R5	;Point to output file cells		;012
+	BIT	#RS$VFY,RESSUB	;Verify?				;012
+	BEQ	8$		;No, so output is OK			;012
+	MOV	#$IMGFI,R5	;Point to source file cells		;012
+8$:	MOV	#FILNAM,R4	;"[m,n]filnam.typ"			;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILNLN,R4	;CRLF					;012
+	JMP	@(R4)+		;					;012
+
+FILLDR::SAVREG			;Save the registers - Directory entry point
+	MOV	#$CURFI,R5	;Point to current file cells
+	BIT	#DIR.FU,C$FLAG	;Full directory?
+	BEQ	20$		;No, do the brief
+	MOV	#FULTHR,R4	;R4 -> Thread for a full directory
+	JMP	@(R4)+		;Do it
+
+20$:	BIT	#GF.BHD,GENFLG	;Has the line header been printed yet?	;007
+	BNE	30$		;Yes, continue
+	CALL	BRFHDR		;No, print it
+30$:	MOV	#BRFTHR,R4	;R4 -> Thread for a brief directory
+	JMP	@(R4)+		;Do it
+
+LISEXI:	RETURN			;Now we're done
+
+.DSABL	LSB
+
+GLOBAL	<C$FLAG,$CURFI,RESSUB,GENFLG,$IMGFI>				;009
+GLOBAL	<$OLDFI,IMGSUB>							;012
+
+.SBTTL	Execute threads for /BRIEF directory header
+
+;+
+;
+;-
+
+BRFHDR::
+	SAVREG			;Save our registers
+	BIS	#GF.BHD,GENFLG	;Say we did the /BRIEF file header	;007
+	MOV	#BHDTHR,R4	;Point at the thread list
+	JMP	@(R4)+		;and do it.
+
+
+.SBTTL	Execute threads for /FULL directory header
+
+;+
+;	FULHD1 - Save set summary info
+;	FULHD2 - Optional volume summary
+;-
+
+.ENABL	LSB
+
+FULHD1::MOV	#FHDTH1,THRSEL	;Summary Thread				;007
+	BR	10$							;007
+FULHD2::MOV	#FHDTH2,THRSEL	;Volume Summary Thread			;007
+	.BR	10$							;007
+
+10$:	SAVREG			;Save our registers
+	CLR	R5		;Allow full tread to use offset routines with
+				; an offset of zero
+	MOV	#19.,TABSTO	;Set a tapstop where we will write data fields
+	MOV	THRSEL,R4	;Point at selected thread list		;007
+	JMP	@(R4)+		;and do it.
+
+.DSABL	LSB
+
+.SBTTL	Define file list threads [old format log-file type entry]
+
+.SAVE
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+FILFIL:	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"File ">	;Set up the "File" text
+
+	THREAD	LISEXI		;Now exit from thread land		;012
+
+FILTO:	THREAD	ASCIIM		;Display ascii immediate		;012
+	 .ASCIC	<" to ">	;" to " text				;012
+
+	THREAD	LISEXI		;Exit from thread land			;012
+
+FILNAM: THREAD	ASCIIM		;Display ascii immediate		;012
+	 .ASCIC	<"[">		;"["					;012
+
+	THREAD	BYTOFF		;Display a byte passed offset
+	 .BYTE	C$PPN+1,3	;From project code, field size = 3
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<",">		;Text is a comma
+
+	THREAD	BYTOFF		;Display a byte passed offset
+	 .BYTE	C$PPN,3		;From programmer number, field size = 3
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"]">		;Text is close bracket
+
+	THREAD	ASCIOF		;Display ASCII at some offset
+	 .WORD	6		;Length is 6
+	 .WORD	C$NAME		;From the file name area
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<".">		;We want a '.'
+
+	THREAD	ASCIOF		;Display ASCII at some offset
+	 .WORD	3		;Length is 3
+	 .WORD	C$NAME+7	;From the file type area
+
+	THREAD	LISEXI		;Now exit from thread land		;012
+
+FILBRW:	THREAD	BCKRST		;" backed up to " (BACKUP)		;012
+				;" restored from " (RESTORE)		;012
+				;" written " (IMAGE, COPY)		;012
+				;" verified against " (any VERIFY)	;012
+
+	THREAD	LISEXI		;Now exit from thread land		;012
+
+FILVOL:	THREAD	ASCIIM		;Display ascii immediate		;012
+	 .ASCIC	<"volume ">	;"volume"				;012
+
+	THREAD	WRDIND		;Display a word indirect		;012
+	 .WORD	BBHDAT+BBH$VL	;Say the volume number			;012
+
+	THREAD	LISEXI		;Now exit from thread land		;012
+
+FILNLN:	THREAD	NEWLIN		;New line				;012
+
+	THREAD	LISEXI		;Now exit from thread land		;012
+
+FILSPC:	THREAD	ASCIIM		;Display ascii immediate		;012
+	 .ASCIC	<" ">		;SPACE					;012
+
+	THREAD LISEXI		;Exit from thread land			;012
+
+.RESTORE
+
+GLOBAL	<BBHDAT>
+
+.SBTTL	Define file list threads for /BRIEF directory
+
+.SAVE
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+BRFTHR:
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"[">		;Set up the "File" text
+
+	THREAD	BYTOFF		;Display a byte passed offset
+	 .BYTE	C$PPN+1,3	;From project code, field size = 3
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<",">		;Text is a comma
+
+	THREAD	BYTOFF		;Display a byte passed offset
+	 .BYTE	C$PPN,1		;From programmer number, field size = 3
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	8.		;Where
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"]">		;Text is close bracket
+
+	THREAD	ASCIOF		;Display ASCII at some offset
+	 .WORD	6		;Length is 6
+	 .WORD	C$NAME		;From the file name area
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<".">		;We want a '.'
+
+	THREAD	ASCIOF		;Display ASCII at some offset
+	 .WORD	3		;Length is 3
+	 .WORD	C$NAME+7	;From the file type area
+
+	THREAD	DSKSIZ		;Display filename size
+	 .WORD	8.		;Field size = 8.
+	 .WORD	C$SIZ		;Pointer to size field (2 words)
+
+	THREAD	FFLAGS		;File flags
+	 .WORD	C$STAT		;File flag address
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	31.		;Where					;010
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .BYTE	1		;One byte
+	 .ASCII	/</		;Text is less-then
+
+	THREAD	BYTOFF		;Display a byte passed offset function	;010
+	 .BYTE	C$PCOD,3	;Text is protection code		;010
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .BYTE	2		;Two bytes
+	 .ASCII	/> /		;Text is greater-then and space
+
+	THREAD	FILDAT		;Display Date
+	 .WORD	C$MDAT		;Text is Accessed Date
+
+	THREAD	SPACE		;Output a space character
+	THREAD	FILDAT		;Display Date		
+	 .WORD	C$CDAT		;Text is File Create Date
+
+	THREAD	SPACE		;Output a space character
+	THREAD	FILTIM		;Display a time
+	 .WORD	C$CTIM		;Text is creation time
+
+	THREAD	SPACE		;Output a space character
+	THREAD	DSPCLU		;Display a cluster size
+	 .WORD	C$CLUS		;Text is cluster size
+
+	THREAD	SPACE		;Output a space character
+	THREAD	DSPRTS		;Display RAD50 RTS NAME
+	 .WORD	C$RTS		;Text is runtime system name
+
+	THREAD	NEWLIN		;New line
+
+	THREAD	LISEXI		;Now exit from thread land
+
+.RESTORE
+
+
+.SBTTL	Define file list threads for /FULL directory			;004
+
+.SAVE
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+FULTHR:
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"[">		;Text is open bracket
+
+	THREAD	BYTOFF		;Display a byte passed offset
+	 .BYTE	C$PPN+1,3	;From project code, field size = 3
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<",">		;Text is a comma
+
+	THREAD	BYTOFF		;Display a byte passed offset
+	 .BYTE	C$PPN,1		;From programmer number, field size = 3
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	7.
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"]">		;Text is close bracket
+
+	THREAD	ASCIOF		;Display ASCII at some offset
+	 .WORD	6		;Length is 6
+	 .WORD	C$NAME		;From the file name area
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<".">		;Text is period
+
+	THREAD	ASCIOF		;Display ASCII at some offset
+	 .WORD	3		;Length is 3
+	 .WORD	C$NAME+7	;From the file type area
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"  Size:">	;Text is size
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	17.
+
+	THREAD	DSKSIZ		;Display filename size
+	 .WORD	1.		;Field size = 1(no justification)
+	 .WORD	C$SIZ		;Pointer to size field (2 words)
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"/">		;Text is file size seperator
+
+	THREAD	DSKSZ2		;Display filename size (type 2)
+	 .WORD	1.		;Field size = 1(no justification)
+	 .WORD	C$ATTR+4	;Pointer to size field (allocated size)
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	44.
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"Run time system:  ">	;Text is Run time system
+
+	THREAD	DSPRTS		;Display run time system name
+	 .WORD	C$RTS		;Text is rts name
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"  Created:">	;Text is created
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	17.
+
+	THREAD	FILDAT		;Display Date		
+	 .WORD	C$CDAT		;Text is File Create Date
+
+	THREAD	SPACE		;Output a space character
+	THREAD	SPACE		;Output a space character
+	THREAD	FILTIM		;Display a time
+	 .WORD	C$CTIM		;Text is creation time
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	44.
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"Last accessed:  ">	;Text is last accessed date
+
+	THREAD	FILDAT		;Display Date
+	 .WORD	C$MDAT		;Text is Accessed Date
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"  Protection:">	;Text is protection
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	17.
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .BYTE	1		;One byte
+	 .ASCII	/</		;Protection open bracket
+
+	THREAD	BYTOFF		;Display a byte passed offset function	;010
+	 .BYTE	C$PCOD,3	;Text is protection code		;010
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .BYTE	4		;4 bytes
+	 .ASCII	/>  (/		;Protection close bracket + TWO SPACE +
+				;Open of protection explanation
+
+	THREAD	EXPPRT		;Display protection code explanation
+	 .BYTE	C$PCOD		;Paramater is protection code		;010
+
+	THREAD	ASCIIM		;Display ASCII immedidate
+	 .ASCIC	<")">		;Close of protection explanation
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"  Organization:">	;Text is organization
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	17.
+
+	THREAD	DSPORG		;Display organization
+	 .WORD	C$ATTR		;Parameter is pointer to RMS info
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"  Attributes:">	;Text is attributes
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	17.
+
+	THREAD	ASCIIM		;Ascii immediate
+	 .ASCIC	<"Clustersize=">	;Text is clustersize=
+
+	THREAD	DSPCLU		;Display a cluster size
+	 .WORD	C$CLUS		;Text is cluster size
+
+	THREAD	FFLGS2		;Display file flags, format #2
+	 .WORD	C$STAT		;File flag address
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"  Record format:">	;Text is record format
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	25.
+
+	THREAD	DSPFMT		;Display record format
+	 .WORD	C$ATTR		;Parameter is pointer to RMS info
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"  Record attributes:">	;Text is record attributes
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	25.
+
+	THREAD	DSPATR		;Display record attributes
+	 .WORD	C$ATTR		;Parameter is pointer to RMS info
+
+	THREAD	NEWLIN		;New line
+	THREAD	NEWLIN		;New line
+
+	THREAD	LISEXI		;Now exit from thread land
+
+GLOBAL <BCKDAT,BCKTIM,BCKUNM,$GRPSZ,BCKPPN,BCKCOM,BCKOSI,BCKOSV,BCKNOD,BCKDEV>
+GLOBAL <BCKVER,$DSKLB,DSKCLU,BCKPCK>
+
+.RESTORE
+
+.SBTTL	Define threads /FULL header					;004
+
+.SAVE
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+FHDTH1:
+	THREAD	ASCIIL		;New line + Display ASCII immediate	;007
+	 .ASCIC <"Directory of save set:">
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC <"Save set:">  ;Text
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	ASCIIC		;Display ASCII counted at specified location
+	 .WORD	BBHDAT+BBH$SN	;Save set name pointer
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC <"Written by:">
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	ASCIIC		;Display ASCII counted at specified location
+	 .WORD	BCKUNM		;Name associated with backup set
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"PPN:"> 	;PPN/UIC text
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	ASCIIM		;Ascii immediate
+	 .ASCIC	<"[">		;We want a "["
+
+	THREAD	WRDIND		;Display word indirect
+	 .WORD	BCKPPN+2 	;From project number
+
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<",">		;Text is a comma
+
+	THREAD	WRDIND		;Display word indirect
+	 .WORD	BCKPPN		;From programmer number
+
+	THREAD	ASCIIM		;Ascii immediate
+	 .ASCIC	<"]">		;text is "]"
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"Date:"> 	;Date text
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	FILDAT		;Display Date		
+	 .WORD	BCKDAT		;Text is save set create date
+
+	THREAD	SPACE		;Output a space character
+	THREAD	FILTIM		;Display a time
+	 .WORD	BCKTIM		;Text is save set creation time
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"Command:"> 	;Text is command
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	ASCIIC		;Display ASCII counted at specified location
+	 .WORD	BCKCOM		;BACKUP command line text
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"Operating system:">
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	OPSYS		;Display operating system name
+	 .WORD	BCKOSI		;Operating system ID	
+
+	THREAD	ASCIIC		;Display ASCII counted at specified location
+	 .WORD	BCKOSV		;Operating system version
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC <"BACKUP version:">
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	ASCIIC		;Display ASCII counted at specified location
+	 .WORD	BCKVER		;Backup version
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"Node name:">
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	ASCIIC		;Display ASCII counted at specified location
+	 .WORD	BCKNOD		;Node name
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC <"Written on:">
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	ASCIIC		;Display ASCII counted at specified location
+	 .WORD	BCKDEV		;Device saveset was written on
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC <"Block size:">
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	WRDIND		;Display word indirect
+	 .WORD	BBHDAT+BBH$BS	;Block size
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC <"Group size:">
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	WRDIND		;Display word indirect
+	 .WORD	$GRPSZ		;XOR group size
+
+	THREAD	NEWLIN		;New line				;007
+	THREAD	NEWLIN		;New line				;007
+	THREAD	LISEXI		;Exit from thread			;007
+
+FHDTH2:									;007
+	THREAD	ASCIIM		;Display ASCII immediate		;007
+	 .ASCIC	<"Disk pack attributes">
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC	<"Label:">
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	ASCIIC		;Display ASCII counted at specified location
+	 .WORD	$DSKLB		;Disk label
+	
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC <"Clustersize:">
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	BYTOFW		;Display a byte passed location
+	 .WORD	DSKCLU		;Disk clustersize
+	 .BYTE	1		;Field size
+
+	THREAD	ASCIIL		;New line + Display ASCII immediate
+	 .ASCIC <"Pack size:">
+
+	THREAD	TAB		;Set horizontal position to fixed location
+	THREAD	DSKSIZ		;Display filename size
+	 .WORD	1.		;Field size = 1(no justification)
+	 .WORD	BCKPCK		;Pointer to size field (2 words)
+
+	THREAD	NEWLIN		;New line
+	THREAD	NEWLIN		;New line
+	THREAD	LISEXI		;Exit from thread
+
+.RESTORE
+
+.SBTTL	Define threads /BRIEF header
+
+.SAVE
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+BHDTHR:
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"Account">
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	9.
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"Name">
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	15.
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<".Typ">
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	23.
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"Size">
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	32.
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"Prot">
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	38.
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"Accessed">
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	50.
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"Date">
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	59.
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"Time">
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	67.
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"Clu">
+
+	THREAD	SETPOS		;Set horizontal position
+	 .WORD	72.
+	THREAD	ASCIIM		;Display ASCII immediate
+	 .ASCIC	<"RTS">
+	
+	THREAD	NEWLIN		;New line
+
+	THREAD	LISEXI		;Exit from thread
+
+.RESTORE
+
+.SBTTL	Log attribute creation
+
+;+
+; ACALIS - Log attribute creation
+;
+;	$CURFI+C$PPN = PPN to report
+;
+;	CALL	ACALIS
+;-
+.ENABL	LSB								;012
+
+ACALIS::SAVREG			;Save all registers			;001
+	MOV	#ACATHR,R4	;Point to thread list			;001
+	BR	10$		;Join up				;012
+
+.SBTTL	Log account creation
+
+;+
+; ACRLIS - Log account creation
+;
+;	$CURFI+C$PPN = PPN to report
+;
+;	CALL	ACRLIS
+;-
+
+ACRLIS::SAVREG			;Save all registers			;001
+	MOV	#ACRTHR,R4	;"Account "				;012
+10$:	CALL	@(R4)+		;					;012
+
+; First, figure out what it is						;012
+
+	BIT	#DO.RES,C$FLAG	;Restore?				;012
+	BNE	15$		;Yes					;012
+	BIT	#DO.IMA,C$FLAG	;Image or copy?				;012
+	BNE	20$		;Yes					;012
+
+; Backup								;012
+
+	MOV	#$CURFI,R5	;Must be backup then			;012
+	BIT	#RS$VFY,RESSUB	;Verify?				;012
+	BNE	16$		;					;012
+	MOV	#ACCACC,R4	;"[m,n]"				;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILBRW,R4	;"backed up to / verified against"	;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILVOL,R4	;"volume n"				;012
+	CALL	@(R4)+		;					;012
+	BR	40$		;And finish up				;012
+
+; Restore, verify							;012
+
+15$:	MOV	#$OLDFI,R5	;Point to source file cells		;012
+	BIT	#RS$VFY,RESSUB	;Verify?				;012
+	BEQ	16$		;Yes, use source file cells		;012
+	MOV	#$CURFI,R5	;Point to current file cells		;012
+16$:	MOV	#ACCACC,R4	;"[m,n]"				;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILBRW,R4	;"restored from / verified against"	;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILVOL,R4	;"volume n"				;012
+	CALL	@(R4)+		;					;012
+	MOV	#$OLDFI,R5	;Point to source file cells		;012
+	BIT	#RS$VFY,RESSUB	;Verify?				;012
+	BNE	17$		;Yes, use source file cells		;012
+	MOV	#$CURFI,R5	;Point to current file cells		;012
+	MOV	#FILTO,R4	;" to "					;012
+	CALL	@(R4)+		;					;012
+17$:	MOV	#ACCACC,R4	;"[m,n]"				;012
+	CALL	@(R4)+		;					;012
+	BR	40$		;And finish up				;012
+
+; Image, Copy, Verify							;012
+
+20$:	MOV	#$CURFI,R5	;Point to output file cells		;012
+	BIT	#IM$COP,IMGSUB	;Copy?					;012
+	BEQ	21$		;No, output is fine			;012
+	BIT	#RS$VFY,RESSUB	;Verify?				;012
+	BNE	21$		;Yes, output is fine			;012
+	MOV	#$OLDFI,R5	;Point to source file cells		;012
+21$:	MOV	#ACCACC,R4	;"[m,n]"				;012
+	CALL	@(R4)+		;					;012
+	MOV	#FILBRW,R4	;"written to / verified against"	;012
+	CALL	@(R4)+		;					;012
+	BIT	#IM$COP,IMGSUB	;Copy?					;012
+	BEQ	22$		;No, already using output		;012
+	MOV	#$OLDFI,R5	;Point to source file cells		;012
+	BIT	#RS$VFY,RESSUB	;Verify?				;012
+	BNE	22$		;Yes, output is fine			;012
+	MOV	#$CURFI,R5	;Point to output file cells		;012
+22$:	MOV	#ACCACC,R4	;"[m,n]"				;012
+	CALL	@(R4)+		;					;012
+	BR	40$		;And finish up				;012
+
+40$:	MOV	#FILNLN,R4	;CRLF					;012
+	JMP	@(R4)+		;And off...				;012
+
+.DSABL	LSB								;012
+
+ACATHR:									;001
+
+	THREAD	ASCIIM		;Display ASCII immediate		;001
+	 .ASCIC	<"Attributes for a">					;001
+
+	THREAD	JUMP		;Now jump to				;001
+	 .WORD	ACAACC		;The rest of the word account		;001
+
+ACRTHR:									;001
+
+	THREAD	ASCIIM		;Display ASCII immediate		;001
+	 .ASCIC	<"A">		;Now a capital "A"			;001
+
+ACAACC:	THREAD	ASCIIM		;Display ASCII immediate		;001
+	.ASCIC	<"ccount ">	;Set up the "account" text		;001
+
+	THREAD	LISEXI		;Outta here				;012
+
+ACCACC:	THREAD	ASCIIM		;Display ascii immediate		;012
+	 .ASCIC	<"[">		;"["					;012
+
+	THREAD	BYTOFF		;Display a byte passed offset		;001
+	 .BYTE	C$PPN+1,3	;From project code, field size = 3	;001
+
+	THREAD	ASCIIM		;Display ASCII immediate		;001
+	 .ASCIC	<",">		;Text is a comma			;001
+
+	THREAD	BYTOFF		;Display a byte passed offset		;001
+	 .BYTE	C$PPN,3		;From programmer number, field size = 3	;001
+
+	THREAD	ASCIIM		;Display ASCII immediate		;001
+	 .ASCIC	<"]">		;Text is close bracket			;001
+
+	THREAD	LISEXI		;Now exit from thread land		;012
+
+
+.SBTTL	JUMP thread
+
+;+
+; JUMP - Jump to another thread list
+;
+;	R4 -> Thread list
+;-
+
+JUMP:	MOV	(R4),R4		;Pick up pointer to next thread		;001
+	JMP	@(R4)+		;And go execute it			;001
+
+.SBTTL	Display "Backed up" or "Restored from"...
+
+;+
+; BCKRST - Say "Backed-up" or "Restored from"
+;
+;	R4 -> Thread list
+;-
+
+BCKRST:	MOV	#VFYMSG,R2	;R2 -> Verify message			;008
+	BIT	#RS$VFY,RESSUB	;Is this a verify of any type?		;008
+	BNE	10$		;Yes, print it				;008
+	MOV	#BCKMSG,R2	;R2 -> Backup message			;008
+	BIT	#DO.RES,C$FLAG	;Is this a restore?			;008
+	BEQ	9$		;No, not this time			;012
+	MOV	#RSTMSG,R2	;R2 -> Restore message			;008
+9$:	BIT	#DO.IMA,C$FLAG	;Is this an IMAGE or COPY?		;012
+	BEQ	10$		;No not this time			;012
+	MOV	#IMGMSG,R2	;R2 -> image message			;012
+10$:	MOVB	(R2)+,R3	;R3 = Count to output
+20$:	MOVB	(R2)+,R1	;Pick up a byte
+	CALL	OUTCHR		;Go display it
+	SOB	R3,20$		;And loop for the whole thing
+	JMP	@(R4)+		;Off to the next thread
+
+GLOBAL	<C$FLAG,GENFLG,RESSUB>
+GLOBAL	<$OLDFI,IMGSUB>							;012
+
+.SBTTL	Display ASCII text						;004
+
+;+
+; ASCIIL - Display ASCII immediate with new line first
+; ASCIIM - Display ASCII immediate
+;
+;	R4 -> Thread list
+;		.ASCIC	<"text">
+;
+; ASCIIC - Display ASCII counted
+;
+;	R4 -> Thread list
+;		.WORD	POINTER to .ASCIC
+;
+; ASCIOF - Display an ASCII string
+;
+;	R4 -> Thread list
+;		.WORD	LEN	(Length of string)
+;		.WORD	ADR	(Offset of string)
+;	R5 -> Display area
+;-
+
+
+ASCIOF:	MOV	(R4)+,R3	;R3 = Length of string
+	MOV	(R4)+,R2	;R2 = String offset
+	ADD	R5,R2		;R2 -> String
+	BR	ASCII1		;And jump into ASCIIC copy routine
+ASCIIC: MOV	(R4)+,R2	;String pointer
+	CLR	R3		;Clear the count			;005
+	BISB	(R2)+,R3	;R3 = Count				;005
+
+ASCII1:	TST	R3		;Is the length real?			;006
+	BEQ	ASCIIX		;No, skip the copy			;006
+ASCII2:	MOVB	(R2)+,R1	;Pick up a byte
+	CALL	OUTCHR		;Now output it
+	SOB	R3,ASCII2	;Now loop for the whole thing
+	BR	ASCIIX		;And exit
+
+ASCIIL:	CALL	WRTLIN		;Write a new line
+ASCIIM:	MOVB	(R4)+,R3	;R3 = Count to output
+	BEQ	ASCIIX		;No, skip the copy			;006
+ASCII3:	MOVB	(R4)+,R1	;Pick up a byte
+	CALL	OUTCHR		;Now output it
+	SOB	R3,ASCII3	;Now loop for the whole thing
+	.BR	ASCIIX		;And exit
+
+ASCIIX:	INC	R4		;Round up thread pointer
+	BIC	#1,R4		;And be sure it is even
+30$:	JMP	@(R4)+		;Now off to the next thread
+
+.SBTTL	Output a new line						;004
+
+;+
+; NEWLIN - Output a new line
+;
+;	R4 -> Thread list
+;
+; WRTLIN - callable form of NEWLIN
+;-
+
+NEWLIN:	CALL	WRTLIN		;Write the new line
+	JMP	@(R4)+		;Now off to the next thread
+
+WRTLIN:	MOVB	#15,R1		;CR
+	CALL	OUTCHR		;Output it
+	MOVB	#12,R1		;LF
+	CALL	OUTCHR		;Output it
+	RETURN
+
+.SBTTL	Display a space
+
+;+
+; SPACE - Display a space
+;
+;	R4 -> Thread list
+; -
+
+SPACE:	MOVB	#40,R1		;Space
+	CALL	OUTCHR		;Output it
+	JMP	@(R4)+		;Now off to the next thread
+
+.SBTTL	Display a byte
+
+;+
+; BYTOFF - Display a byte
+;
+;	R4 -> Thread list
+;		.BYTE	OFFSET,SIZE
+;	R5 -> Data area
+;
+; BYTOFW - Display a byte
+;
+;	R4 -> Thread list
+;		.WORD	OFFSET
+;		.BYTE	SIZE
+;-
+
+BYTOFW:	MOV	(R4)+,R3	;Format  .WORD LOCATION,SIZE
+	BR	GETBYT		;And jump into routine
+BYTOFF:	CLR	R3		;Get ready for offset value
+	BISB	(R4)+,R3	;R3 = Offset to data area
+	ADD	R5,R3		;R3 -> Byte to display
+GETBYT:	CLR	R0		;Now get ready to get the byte
+	BISB	(R3),R0		;Now R0 has byte to display
+	MOVB	(R4)+,R3	;And R3 has field size
+	JMP	DSPWRD		;Now display this byte
+	
+
+.SBTTL	Display a runtime system name
+
+;+
+; DSPRTS - Display a runtime system name
+;	R4 -> Thread list
+;	R5 -> Display area
+;		.WORD	OFFSET
+;-
+
+DSPRTS:
+	MOV	(R4)+,R1	;Get contents of the .WORD
+	ADD	R5,R1		;Add in the base
+	CALL	R50PRT		;Convert it.
+	ADD	#2,R1		;Next word of RTS
+	CALL	R50PRT		;Convert it.
+	JMP	@(R4)+		;Next THREAD
+
+; LOCAL SUBROUTINE TO CONVERT RAD50 INTO ASCII AND PRINT THE ASCII
+
+R50PRT:	MOV	R1,-(SP)	;Save R1
+	MOV	(R1),R1		; Get the value
+	MOV	#R50DIV,R3	; Point at the divisors
+10$:	CLR	R0		; Clear the high order
+	DIV	(R3)+,R0	;  And divide
+	BEQ	30$		; 0 is space, ignore it
+	ADD	#100,R0		; Guess at alpha correction
+	CMP	R0,#'Z		; Really alpha?
+	BLOS	20$		; Yes
+	ADD	#'0-36-100,R0	; No, correct for digit
+20$:	MOV	R1,-(SP)	; Save what remains
+	MOV	R0,R1		; Setup for write
+	CALL	OUTCHR		; Write out the character in R1
+	MOV	(SP)+,R1	; Restore R1
+30$:	TST	(R3)		; More?
+	BPL	10$		; Yes
+	MOV	(SP)+,R1	; Restore R1
+	RETURN			; No
+
+R50DIV:	.WORD	50*50,50,1,-1.	;USED FOR THE DIV
+
+.SBTTL	Display a cluster size
+
+;+
+; DSPCLU - Display a word indirect
+;	R4 -> Thread list
+;	R5 -> Display area
+;		.WORD	OFFSET
+;-
+
+DSPCLU:	MOV	(R4)+,R1	;Get contents of the .WORD
+	ADD	R5,R1		;Add in the base
+	MOV	(R1),R0		;And pick up the byte to display	;003
+	BIC	#176000,R0	;Clear out high order bits		;003
+	MOV	#3,R3		;Field size is 3	
+	JMP	DSPWRD		;And go do the display
+
+.SBTTL	Protection code explanation
+
+;+
+; EXPPRT - Display protection code explanation
+;	R4 -> Thread list
+;	R5 -> Display area
+;		.WORD	OFFSET
+;-
+
+EXPPRT:	MOV	(R4)+,R0	;Get contents of the .WORD
+	ADD	R5,R0		;Add in the base
+	MOVB	(R0),R0		;And pick up the byte to work with
+	MOV	#128.+64.,R1	;High order bits
+	BITB	R1,R0		;High bits set?
+	BEQ	100$		;No, just do RW stuff
+	BICB	R0,R1		;Both bits set?
+	BNE	10$		;No, only one
+	MOV	#PAEMSG,R2	;Point at the correct text
+	BR	90$		;Write it
+10$:	BITB	#128.,R0	;Erase on delete?
+	BEQ	20$		;No, must be executable
+	MOV	#ERAMSG,R2	;Yes, point to message
+	BR	90$		;Write it
+20$:	MOV	#EXEMSG,R2	;Executable message
+90$:	CALL	WRTSTR		;Write out the string	
+
+;Handle RWE bits for Owner,Group,World using tables EXEOFF, EXEON
+
+100$:	MOV	#EXEOFF,R3	;Assume file is not executable
+	BITB	#64.,R0		;Is the executable bit set?
+	BEQ	110$		;No, continue	
+	MOV	#EXEON,R3	;Yes, change the pointer
+
+110$:	MOV	(R3)+,R2	;Get the text to write
+	CALL	WRTSTR		;Write it out
+	MOV	(R3)+,R2	;Pick up the number of enties
+
+120$:	BITB	(R3)+,R0	;Is the Bit set?
+	BNE	130$		;No, nothing to print
+	MOVB	(R3),R1		;Pick up the character to print
+	CALL	OUTCHR		;And write it
+130$:	INC	R3		;Point past the character	
+	SOB	R2,120$		;Next Entry
+	TST	(R3)		;More?
+	BNE	110$		;Yes
+	JMP	@(R4)+		;No, Next Thread
+
+.SBTTL	Display file organization
+
+;+
+; DSPORG - Display file organization
+;	R4 -> Thread list
+;	R5 -> Display area
+;		.WORD	OFFSET
+;
+;-
+DSPORG:	MOV	(R4)+,R3	;Get the offset
+	ADD	R5,R3		;Add in the base
+	MOV	(R3),R0		;Pickup the first word
+	BIC	#177707,R0	;Isolate the second digit
+	MOV	#SEQMSG,R2	;Guess at sequential format
+	CMPB	#0,R0		;Are we right?
+	BEQ	10$		;Yes, we got it, first try!
+	MOV	#RELMSG,R2	;Guess at relative
+	CMPB	#20,R0		;Relative?
+	BEQ	10$		;Yes
+	MOV	#INDMSG,R2	;Must be indexed
+	CMPB	#40,R0		;Make sure...
+	BNE	20$		;We don't know the type
+10$:	CALL	WRTSTR		;Write it
+20$:	JMP	@(R4)+		;Next Thread
+
+.SBTTL	Display record format/Display file organization
+
+;+
+; DSPFMT - Display record format
+; DSPATR - Display record attributes
+;	R4 -> Thread list
+;	R5 -> Display area
+;		.WORD	OFFSET
+;-
+DSPATR:	MOV	#170077,R1	;Bits to clear
+	MOV	#FATR,R3	;Point at the record attribute table
+	BR	DSMAIN		;Branch to the main routine
+DSPFMT:	MOV	#177770,R1	;Bits to clear
+	MOV	#FFMT,R3	;Point at file record format table
+DSMAIN:	MOV	(R4)+,R0	;Get the offset
+	ADD	R5,R0		;Add in the base
+	MOV	(R0),R0		;Pickup the first word
+	BIC	R1,R0		;Isolate the digits we want
+				;Go through the table
+10$:	CMP	(R3)+,R0	;Do we have a match?
+	BEQ	100$		;Yes
+	TST	(R3)+		;No, pop off the text pointer
+	TST	(R3)		;More entries?
+	BNE	10$		;Yes, try the next
+	BR	110$		;Not found, but something was there.
+100$:	MOV	(R3),R2		;Get the text
+	CALL	WRTSTR		;Write it
+110$:	JMP	@(R4)+		;Next Thread
+
+.SBTTL	Write a string
+
+;+
+; WRTSTR - Write a string
+;	R2 -> string, terminated with 0
+;	CALL	WRTSTR
+;	R1 - trashed
+;-
+
+WRTSTR:	MOVB	(R2)+,R1	;Get a character
+	BEQ	190$		;All done
+	CALL	OUTCHR		;Write a character
+	BR	WRTSTR		;Next character
+190$:	RETURN
+
+.SBTTL	Display a word indirect
+
+;+
+; WRDIND - Display a word indirect
+;	R4 -> Thread list
+;		.WORD	ADDRESS OF WORD TO DISPLAY
+;-
+
+WRDIND:	MOV	@(R4)+,R0	;Pick up the word to display
+	CLR	R3		;Indicate no field size
+	.BR	DSPWRD		;And go do the display
+
+.SBTTL	Display a word
+
+;+
+; DSPWRD - Display a word
+;
+;	R0 = Word to display
+;	R3 = Field size (as a byte)
+;	R4 -> Thread list
+;	R5 -> Control area
+;
+;	JMP	DSPWRD
+;
+;	Return is through thread list
+;
+; This routine will output a number, left space filled.
+;-
+
+DSPWRD:	MOV	R5,-(SP)	;Save pointer to control area
+	MOV	#WORK,R5	;R5 -> Work area
+	MOV	R5,R2		;R2 -> Work area
+	CALLX	NUM$		;Convert the number
+	SUB	R2,R5		;R5 = Length of number
+5$:	CMPB	R5,R3		;Is field large enough?
+	BHIS	10$		;Yes, go for it
+	MOVB	#40,R1		;Get a space
+	CALL	OUTCHR		;And output it
+	DECB	R3		;Say we did another character
+	BR	5$		;And loop until we're done
+
+10$:	MOVB	(R2)+,R1	;Get a character
+	CALL	OUTCHR		;And output it
+	SOB	R5,10$		;Now loop for the whole thing
+	MOV	(SP)+,R5	;Restore pointer to control area
+	INC	R4		;Round up thread pointer
+	BIC	#1,R4		;And be sure it is even
+	JMP	@(R4)+		;Now we're done
+
+.SBTTL	Display operating system name					;004
+
+;+
+;OPSYS - Display operating system name
+;
+;	R4 -> Thread list
+;		.WORD	pointer to word that contains the information
+;-
+
+OPSYS:	MOV	@(R4)+,R1	;Get the number
+	MOV	#OPIDTB,R2	;Point to table
+10$:	CMP	@R2,R1		;Correct Entry? (Most of the time this is true)
+	BEQ	20$		;Yes
+	TST	@R2		;Is the entry zero?
+	BEQ	20$		;Yes, print what is in the entry
+	ADD	#4,R2		;Point at next entry
+	BEQ	10$
+20$:	MOV	2(R2),R2	;Point at the string
+	CALL	WRTSTR		;Write it
+	JMP	@(R4)+		;All done now	
+
+.SBTTL	Set horizontal position						;004
+
+;+
+; SETPOS - Set horizontal position
+;
+;	R4 -> Thread list
+;		.WORD	WHERE	(Desired position)
+;
+; TAB - Set horizontal position using the contents of TABSTO
+;
+;	R4 -> Thread list
+;	TABSTO = desired position
+;-
+
+TAB:	MOV	TABSTO,R3	;Use saved tab stop position
+	BR	SETPS2		;And continue inline
+
+SETPOS:	MOV	(R4)+,R3	;R3 = Desired position
+SETPS2:	BIT	#DO.LIS,C$FLAG	;Are we doing listings?			;011
+	BEQ	20$		;No, so don't do any			;011
+	MOVB	CURPOS,R2	;R2 = Current position
+	CMPB	R2,R3		;Are we there yet?
+	BHIS	20$		;Yes, we sure are
+	MOVB	#40,R1		;Get ready for a space
+	CALL	OUTCHR		;And output it
+	BR	SETPS2		;And try again
+
+20$:	JMP	@(R4)+		;All done now	
+
+GLOBAL	<C$FLAG>							;012
+
+.SBTTL	Display a file date
+
+;+
+; FILDAT - Display a file date
+;
+;	R4 -> Thread list
+;		.WORD	OFFSET	(Offset to locate date)
+;	R5 -> Display area
+;-
+
+FILDAT:	CALLX	CLRFQB		;Clear out the FIRQB
+	MOVB	#UU.CNV,@#FIRQB+FQFUN ;Function code is date/time conversion
+	MOV	(R4)+,R3	;R3 = Offset to locate date
+	ADD	R5,R3		;R3 -> Date to report
+	MOV	(R3),@#FIRQB+FQFIL ;Set date to report
+	.UUO			;Now go for it
+	CRASH			;And die on errors
+	MOV	#FIRQB+10,R2	;R2 -> Returned date
+10$:	MOVB	(R2)+,R1	;Pick up a byte
+	BEQ	20$		;No more, all done
+	CALL	OUTCHR		;Display the character
+	BR	10$		;And loop
+
+20$:	JMP	@(R4)+		;All done for now
+
+.SBTTL	Display a file time
+
+;+
+; FILTIM - Display a file time
+;
+;	R4 -> Thread list
+;		.WORD	OFFSET	(Offset to locate time)
+;	R5 -> Display area
+;-
+
+FILTIM:	CALLX	CLRFQB		;Clear out the FIRQB
+	MOVB	#UU.CNV,@#FIRQB+FQFUN ;Function code is date/time conversion
+	MOV	(R4)+,R3	;R3 = Offset to locate date
+	ADD	R5,R3		;R3 -> Time to report
+	MOV	(R3),@#FIRQB+FQMODE ;Set time to report
+	.UUO			;Now go for it
+	CRASH			;And die on errors
+	MOV	#FIRQB+26,R2	;R2 -> Returned time
+10$:	MOVB	(R2)+,R1	;Pick up a byte
+	BEQ	20$		;No more, all done
+	CALL	OUTCHR		;Display the character
+	BR	10$		;And loop
+
+20$:	JMP	@(R4)+		;All done for now
+
+.SBTTL	FIXED FIELD DECIMAL NUMBER CONVERSION - SPACE PADDED (DISK SIZE)
+
+;+
+; DSKSIZ - EMIT DOUBLE PRECISION FIXED FIELD DECIMAL NUMBER (DISK SIZE)
+; DSKSZ2 - EMIT DOUBLE PRECISION FIXED FIELD DECIMAL NUMBER (DISK SIZE)
+;
+;	R4 -> THREAD LIST
+;		.WORD	FILL SIZE
+;		.WORD	OFFSET
+;	R5 -> DISPLAY AREA
+;-
+
+DSKSZ2:	MOV	(R4)+,FWIDTH	;Save field width
+	MOV	(R4)+,R0	;Get the offset
+	ADD	R5,R0		;Add in the base
+	MOV	(R0),R1		;Get the msb
+	MOV	2(R0),R0	;And now the lsb
+	BR	DSKWRK		;Do some work
+DSKSIZ:	MOV	(R4)+,FWIDTH	;Save field width
+	MOV	(R4)+,R0	;Get the offset
+	ADD	R5,R0		;Add in the base
+	MOV	2(R0),R1	;Get the msb
+	MOV	(R0),R0		;And now the lsb
+DSKWRK:	MOV	#40*400+40,PAD	;Set the padding character
+	MOV	R0,R3		;Copy lsb to an odd register
+	MOV	R4,-(SP)	;Save R4
+	CLR	R4		;No digits saved yet
+40$:	CLR	R0		;Clear for divide
+	DIV	#10.,R0		;Divide msb by 10
+	MOV	R1,R2		;Propagate remainder to msb of low order
+	MOV	R0,R1		;Copy the quotient as new msb
+	DIV	#20.,R2		;Divide low order quotient by 20.
+	ASL	R2		;To obtain 15 bit result
+	CMP	#10.,R3		;And then correct
+	BGT	45$		;To obtain division by 10.
+	SUB	#10.,R3		;Get remainder less than 10.
+	INC	R2		;Add carry to quotient
+45$:	BIS	#'0,R3		;Make remainder ascii
+	MOV	R3,-(SP)	;Save a byte
+	INC	R4		;One more byte saved
+	MOV	R2,R3		;Copy quotient as new lsb
+	BIS	R1,R2		;Entire number now 0?
+	BNE	40$		;No, more to do
+	MOV	FWIDTH,R0	;Get field width
+	SUB	R4,R0		;Compute number of blanks to fill
+	BLE	80$		;If none, don't fill
+60$:	MOVB	PAD,R1		;Pad
+	CALL	OUTCHR		;Write out the pad characters
+	SOB	R0,60$		;
+80$:	MOVB	(SP)+,r1	;Move
+	CALL	OUTCHR		;Write out the disk size
+	SOB	R4,80$		; Number
+	MOV	(sp)+,r4	;Restore r4
+	JMP	@(R4)+		;Next thread
+
+.DSABL	LSB
+
+.SBTTL	Write out file flags for /BRIEF directory
+
+;+
+; FFLAGS - Write out file flags
+;
+;	R4 -> THREAD LIST
+;		.WORD	OFFSET
+;	R5 -> DISPLAY AREA
+;-
+
+FFLAGS:
+	MOV	(R4)+,R2	;Get the offset
+	ADD	R5,R2		;Add in the base
+	MOVB	@R2,R2		;Get the value
+	MOV	#FFDAT,R3	;Point at flags
+
+5$:	MOVB	#32.,R1		;Default output is a space
+	BITB	(R3)+,R2	;Is the bit set?
+	BEQ	10$		;No.
+	MOVB	(R3),R1		;Pick up the flag ascii
+10$:	TSTB	(R3)+		;Pop off the ascii
+	CALL	OUTCHR		;And write the character
+	TSTB	(R3)		;Are there more flags to check?
+	BNE	5$		;Yes, do the next
+	JMP	@(R4)+		;No, do the next thread
+
+.DSABL	LSB
+
+.SBTTL	Write out file flags for /FULL directory
+
+;+
+; FFLGS2 - Write out file flags
+;
+;	R4 -> THREAD LIST
+;		.WORD	OFFSET
+;	R5 -> DISPLAY AREA
+;-
+
+FFLGS2:
+	MOV	(R4)+,R0	;Get the offset
+	ADD	R5,R0		;Add in the base
+	MOVB	@R0,R0		;Get the value
+	MOV	#FFDAT2,R3	;Point at flags
+
+5$:	BIT	(R3)+,R0	;Is the bit set?
+	BEQ	10$		;No.
+	MOVB	#',,R1		;Comma into R1
+	CALL	OUTCHR		;Write it
+	MOVB	#32.,R1		;Space into R1
+	CALL	OUTCHR		;Write it
+	MOV	(R3),R2		;Pick up the address of the string to print
+	CALL	WRTSTR		;Write out the string
+10$:	TST	(R3)+		;Pop off the string address
+	TST	(R3)		;Are there more flags to check?
+	BNE	5$		;Yes, do the next
+	JMP	@(R4)+		;No, do the next thread
+
+.DSABL	LSB
+
+.SBTTL	Write a byte to the output device
+
+;+
+; OUTCHR - Write a byte to the output device
+;
+;	R1 = Character to write
+;	$LISSZ = Size of output buffer
+;	$LISFL = Flags of output device
+;	$LISPT -> Next byte to write into output buffer
+;	$LISBF -> List file I/O buffer
+;	LISFIL = List file channel number
+;
+;	CALL	OUTCHR
+;
+;	$LISPT -> Next byte to write into output buffer
+;
+;	Buffer is written if necessary
+;-
+
+
+OUTCHR::TSTB	C$FLAG		;Are we doing listing?
+.ASSUME	DO.LIS	EQ	200
+	BPL	20$		;No, nothing to do
+	SAVREG			;Save all registers
+	INCB	CURPOS		;Say we did one more character
+	MOV	$LISPT,R2	;R2 -> Output buffer
+	MOVB	R1,(R2)+	;Now write the character
+	MOV	R2,$LISPT	;And update the buffer pointer
+	SUB	$LISBF,R2	;R2 = Number of characters in output buffer
+	CMPB	R1,#LF		;Did we just write a linefeed?
+	BNE	5$		;No, so nothing to do
+	CLRB	CURPOS		;Yes, so clear out our position
+	BIT	#FLGFRC,$LISFL	;Should we treat this device line-at-a-time?
+	BNE	10$		;Yes, so do a write now
+5$:	CMP	R2,$LISSZ	;Is it time to do a write?
+	BNE	20$		;No, not this time
+10$:	CALLX	WRTBUF		;Write out the buffer
+	MOV	$LISBF,$LISPT	;Reset log file buffer pointer
+
+20$:	RETURN			;And we're done
+
+GLOBAL	<C$FLAG,$LISPT,$LISBF,$LISSZ,$LISFL>
+
+;+
+; OUTCLS - Close the output buffer
+;
+;	$LISBF -> Start of output buffer
+;	$LISPT -> Where to place next character
+;	$LISSZ =  Recordsize of list file device
+;	LISFIL = Log file channel number
+;
+;	CALL	OUTCLS
+;
+; Partial buffers are written.
+; List file is closed.
+;-
+
+OUTCLS::TSTB	C$FLAG		;Are we doing listing?
+.ASSUME	DO.LIS	EQ	200
+	BPL	20$		;No, not this time
+	SAVREG			;Save all registers
+	MOV	$LISPT,R3	;R3 -> Next character in output buffer
+	MOV	R3,R2		;Copy pointer to free area of output buffer
+	SUB	$LISBF,R2	;R2 = Count of characters remaining
+	BEQ	10$		;Nothing to do, skip it
+	BIT	#FLGFRC,$LISFL	;Do we need to pad the record?
+	BNE	5$		;No, not this time
+3$:	CMP	R2,$LISSZ	;Are we done yet?
+	BEQ	5$		;Yes, go to write the buffer
+	CLRB	(R3)+		;Clear out a byte
+	INC	R2		;Update count
+	BR	3$		;And loop
+
+5$:	CALL	WRTBUF		;Write out the buffer
+
+10$:	CALLX	CLRFQB		;Clear out the FIRQB
+.ASSUME	CLSFQ	EQ	0	;Get ready to close the file
+	MOVB	#LISFIL,@#FIRQB+FQFIL ;On the list file channel
+	CALFIP			;Now go for it
+	CRASH			;Now die on errors
+20$:	RETURN			;Now we're done
+
+GLOBAL	<C$FLAG,$LISPT,$LISBF,$LISFL,$LISSZ>
+
+;+
+; WRTBUF - Write out the output buffer
+;
+;	$LISBF -> Output buffer
+;	R2 = Byte count
+;
+;	CALL	WRTBUF
+;
+;	R0 = Undefined
+;-
+
+WRTBUF:	MOV	R1,-(SP)	;Get a work register
+	CALLX	CLRXRB		;Clear out the XRB
+	MOV	#XRB,R0		;Now R0 -> XRB
+	MOV	R2,(R0)+	;Set up byte count
+	MOV	R2,(R0)+	;In both places
+	MOV	$LISBF,(R0)+	;Set up address of output buffer
+	MOVB	#LISFIL,(R0)	;And the channel number
+	.WRITE			;Now write it out
+	MOVB	@#FIRQB,R1	;Pick up returned error code
+	BEQ	10$		;None, that's good
+	CMESSAGE #ERRWLF	;Report error writing to list file
+	CMESSAGE R1		;And be specific
+10$:	MOV	(SP)+,R1	;Restore work register
+	RETURN			;Now we're done
+
+GLOBAL	<$LISBF,ERRWLF>
+
+.END

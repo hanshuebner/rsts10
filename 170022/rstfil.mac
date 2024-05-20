@@ -1,0 +1,1334 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	RSTFIL,<File Restoring>,0C,19-JUL-91,KPH/ACG/GPK/BGN/FEK
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for RSTFIL
+
+;+
+;
+;			[RSTS V9.0]
+;  000	KPH  16-Nov-83  Creation for Version 9.0
+;  001	GPK  20-Aug-84	Bugfix in file length setup
+;  002	KPH  06-Mar-85	Add /PLACED_POSITION
+;			Always make executable files contiguous
+;			Add small buffer waits
+;			Add waits on GETMEM
+;			Report "has been restored..." after it has been
+;			Support /REPLACE=QUERY
+;  003  KPH  19-Apr-85	Support VMS behavior of not saving unwritten blocks
+;			Make /NOOPTIMIZE work for VMS savesets
+;
+;			[RSTS V9.1]
+;  004  KPH  23-Aug-85	Check protection code on restore
+;
+;  005  BGN  13-Jul-87	Backup/Directory support
+;  006  BGN   1-Sep-87  Allow the use of /SELECT, etc with /Directory
+;
+;			[RSTS V10.0]
+;  007  BGN  26-Oct-89  Add support for image mode
+;  008	FEK  02-Nov-89	Add support for /[NO]BACKUP/[NO]IGNORE attributes
+;  009  BGN  10-Nov-89  Major revisions for image mode
+;  010	REG  07-Dec-89	Add /COPY option
+;  011	REG  19-Dec-89	Suppress warning for [NO]BACKUP files
+;  012	REG  27-Dec-89	Change DO.COP to IM$COP
+;  013	REG  01-Feb-90	Make /image use flgnov when appropriate
+;  014  REG  27-Mar-90  Make sure we copy the IGNORE attribute
+;  015  REG  03-Apr-90	Add big blocks
+;  016  REG  03-APR-90	Add /QUERY=ASSIST
+;  017  REG  26-Apr-90	Add Y/N/ALL for /QUERY
+;  018  REG  29-Aug-90	Don't return XOR blocks in WRTCMP
+;
+;			[RSTS V10.1]
+;  019  REG  07-Jan-91	Free up one APR
+;  020  REG  16-Apr-91	Fix "?Some file data ... may be missing" error
+;  021  REG  18-Apr-91  Suppress errors on 0-length file data records
+;  022  REG  06-May-91	Improve handling of VMS file names
+;  023  REG  26-Jun-91	Improve handling of per-file messages
+;-
+
+.SBTTL	Notes on these routines
+
+.REM	*
+
+These routines contain several attribute processors. Entry to an attribute
+processor is declared using the ATRENT macro. The following is the format
+of the ATRENT macro:
+
+	ATRENT	TYPE,ATTR,USER,MIN,MAX
+
+Where:
+
+	TYPE is the record type this attribute belongs in
+	ATTR is the attribute code to process
+	USER is a parameter which will be passed to the attribute routine
+	MIN is the minimum length permissible for this attribute
+	MAX is the maximum length permissible for this attribute
+
+The default for USER is zero, MIN is no minimum, and MAX is no maximum.
+
+On entry to an attribute processor:
+
+	R1 = Attribute type
+	R2 = Attribute length
+	R3 -> Attribute data (not necessarily an even value)
+	R4 = User data from ATRENT macro
+
+Attribute processors exit with a RETURN instruction. They are free to
+use any register.
+
+These routines also contain record processors. Record processors begin
+with the RECENT MACRO. The format of the RECENT macro is:
+
+	RECENT	TYPE
+
+Where:
+
+	TYPE is the record type to handle
+
+On entry:
+
+	R3 -> Record header of record to process
+
+Record processors may use any register. Then exit with a RETURN instruction.
+
+*
+
+.SBTTL	Call any required MACROs
+
+.MCALL	CALBX,.ASCIC,$CUI,ENAR$S,DSAR$S
+
+$CUI	MSG
+
+.SBTTL	Define our private Data Section
+
+	.PSECT	RWDATA,RW,D,LCL,REL,CON
+
+ZERSTA:				;Start of area to zero
+FILSIZ::.BLKW	2		;Size of file filled in here		;007
+FILUIC:	.BLKW	2		;UIC filled in here
+FILPRO::.BLKW			;VMS style protection code filled in	;007
+FILSTR::.BLKW			;File structure level filled in here	;007
+RSSAVE:				;RSTS specific attributes are copied here
+RSTSTR::.BLKW			;Structure level of RSTS attributes	;007
+ZERLEN	=:	.-ZERSTA/2	;Count of words to zero
+FILDCN::.BLKW			;Start DCN of file			;007
+FILRTS::.BLKW	2		;RTS of file in RAD-50			;007
+FILCLU::.BLKW			;Clustersize of file			;007
+FILPRR::.BLKB			;Protection code in RSTS format		;007
+FILFLG::.BLKB			;File flags				;009
+FILSAV:	.BLKB	128.		;File name is saved here as a .ASCIC string
+NXTBLK:	.BLKW	2		;Next expected block number goes here
+LSTBLK:	.BLKW	2		;Last expected block number +1 goes here
+IMGCH1::.BLKW	1		;Image channel * 1			;009
+IMGDAT::.BLKW	4		;Image date information			;009
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+MODNAM:	.ASCIC	<"RSTFIL">	;Module name
+ASKRPL::.ASCIC	<"Do you want to replace"> ;Replacement question message;017
+SELRES::.ASCIC	<"Do you want to restore"> ;Restore question message	;017
+
+.EVEN	;Cowgirls get the blues
+
+.SBTTL	Define attribute dispatch table
+
+	.PSECT	ATRTBL,RO,D,GBL,REL,OVR,SAV
+
+ATRTBL::			;Attribute table
+
+.REPT	ATRMAX-1
+
+	.WORD	0		;Type code is anything may match
+	.WORD	0		;User defined code is zero
+	.WORD	1		;May be as short as you like
+	.WORD	-1		;Or as long as you like
+	.WORD	DEFRAT		;And we go to DEFRAT
+
+.ENDR	;ATRMAX-1
+
+.SBTTL	Define record dispatch table
+
+	.PSECT	RECTBL,RO,D,GBL,REL,OVR,SAV
+
+RECTBL::			;Record dispatch table
+
+.REPT	BRTMAX
+	.WORD	DEFRAT		;Off to default handler
+.ENDR	;BRTMAX
+
+GLOBAL	<DEFRAT>
+
+.SBTTL	Define EOF table
+
+; Note: The definitions below work because TKB sorts P-sections in
+; alphabetical order!
+
+	.PSECT	EOFTBK,RO,D,GBL,REL,CON,SAV
+
+EOFTBL::			;Start of EOF table
+
+	.PSECT	EOFTBL,RO,D,GBL,REL,CON,SAV
+
+				;EOF table filled in here
+
+	.PSECT	EOFTBM,RO,D,GBL,REL,CON,SAV
+
+EOFTBE::			;End of EOF table + 1
+
+.SBTTL	Process a file attribute record
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+	RECENT	BRT$FL		;File attribute record
+
+	NOP			;For debugging
+	CALL	CHKCLS		;Check to see if there is a file to close ;003
+10$:	BIC	#RS.FIL!RS.OPN!RS.NOS!RS.IBH,RSTFLG ;Ensure flags are cleared
+
+	MOV	#ZERSTA,R2	;R2 -> Context area that needs zeroing
+	MOV	#ZERLEN,R1	;R1 = Count of words to zero
+20$:	CLR	(R2)+		;Clear out a word
+	SOB	R1,20$		;For the whole area
+	MOV	#$CURFI,R2	;R2 -> Current file cells
+	MOV	#C$SIZE/2,R1	;R1 = Length of current file cells
+30$:	CLR	(R2)+		;Clear out a word
+	SOB	R1,30$		;For all the current file cells
+	CALBX	ATRDSP		;Now parse all the attributes
+	MOV	#$CURFI+C$PPN,R2 ;R2 -> Current file cells
+	TST	(R2)		;Did they specify a PPN	
+	BNE	50$		;Yes, so that's good
+	CMP	FILUIC+2,#254.	;Does this fit well within RSTS PPNs?
+	BHI	40$		;No, it doesn't fit
+	CMP	FILUIC,#254.	;Does it really fit?
+	BHI	40$		;No, we can't do it
+
+	MOVB	FILUIC,(R2)+	;Get member number from UIC
+	MOVB	FILUIC+2,(R2)+	;Now get group number from UIC
+	MOV	#$CURFI+C$PPN,R2 ;R2 -> Current file cells		;022
+	TST	(R2)		;Do we have a PPN now?
+	BNE	50$		;Yes, we got it from the UIC
+
+40$:	MOV	$MYPPN,(R2)	;No, so use the PPN that we're logged into
+50$:	TSTB	C$NAME-C$PPN(R2) ;Did we ever find a file name?
+	BNE	60$		;Yes, that's good
+	CMESSAGE <#NONAME>	;Tell them we never found a file name
+	BR	70$		;So we can't really restore it
+
+60$:	CALLR	CREFIL		;Create this file please
+
+70$:	BIS	#RS.FIL,RSTFLG	;Indicate we've encountered attributes
+	RETURN			;Now we're done
+
+GLOBAL	<RSTFLG,$MYPPN,$CURFI,NONAME>					;003
+
+.SBTTL	Process file name attribute
+
+;+
+; PRSNAM - Parse a file name
+;
+;	R2 = Length of file name
+;	R3 -> File name
+;
+;	CALL	PRSNAM
+;
+;
+;	All registers are undefined.
+;
+;	$CURFI is set up with PPN and name of file
+;
+;	$CURFI+C$PPN  = 0 if PPN wasn't valid
+;	$CURFI+C$NAME = 0 if filename wasn't valid (C$PPN is random)
+;-
+
+	ATRENT	BRT$FL,BFA$FN,,1.,127. ;File name attributes
+
+PRSNAM:	MOV	R3,R0		;R0 -> File name
+	MOV	R2,R4		;R4 = Length of file name
+	BIC	#RS.NAM,RSTFLG	;Init the name change flag to off	;022
+	MOV	#FILSAV+1,R5	;R5 -> File name save area
+10$:	MOVB	(R0)+,R1	;Pick up a character of the file name
+	CMPB	R1,#40		;Is it a space?
+	BEQ	20$		;Yes, so ignore it
+	MOVB	R1,(R5)+	;No, so place it in the save area
+20$:	SOB	R4,10$		;And loop for the whole name
+	SUB	#FILSAV+1,R5	;R5 = Length of file name - spaces
+	MOVB	R5,FILSAV	;Now save it as an .ASCIC string
+
+	CMPB	(R3),#'[	;Does file name begin with directory string?
+	BNE	70$		;No, not this time, really easy
+	CMPB	R2,#11		;Is name long enough for [abcdef]g
+	BLO	50$		;No, so can't map directory string
+	CMPB	7(R3),#']	;Is the length correct?
+	BNE	50$		;No, not this time
+
+; Note: the code below is guaranteed to be passed a string in the form
+; [ABCDEF]G, so we don't need to do any checking on counts
+
+	MOV	#$CURFI+C$PPN,R0 ;Now R0 -> Current file cells @ PPN area
+	CLR	(R0)+		;Guess at invalid, point past current PPN
+30$:	MOV	#3,R4		;Now set up field count
+	CLR	R5		;And set up field accumulator
+40$:	CMPB	(R3)+,-(R2)	;Skip previous character and fix count
+	MOVB	(R3),R1		;Pick up character of string
+	SUB	#'0,R1		;Convert to numeric
+	BLO	50$		;Not numeric, forget it
+	CMP	R1,#9.		;Really within range?
+	BHI	50$		;No, forget it
+	MUL	#10.,R5		;Multiply accumulator by 10.
+	ADD	R1,R5		;Add this current value in
+	CMP	R5,#254.	;Within range for RSTS/E?
+	BHI	50$		;No, forget this	
+	SOB	R4,40$		;Yes, so loop for this field
+	MOVB	R5,-(R0)	;Save this field
+	CMP	R0,#$CURFI+C$PPN ;Are we done yet?
+	BNE	30$		;No, off to the next field
+	ADD	#2,R3		;Offset to first character of file name
+	SUB	#2,R2		;And fix count
+	BR	70$		;Now join up
+
+; Come here if we need to skip past the directory string
+;
+; The code below is guaranteed to have at least one character to check
+;
+;	R2 = Count remaining
+;	R3 -> Some part of directory string
+
+50$:	BIS	#RS.NAM,RSTFLG	;The output file name is now different	;022
+	CLR	$CURFI+C$PPN	;Be sure we don't pass some strange PPN
+	CMPB	(R3)+,#']	;Have we found the end of the string?
+	BEQ	60$		;Yes, that's good
+	SOB	R2,50$		;No, so loop for the whole thing
+	BR	180$		;Indicate invalid name attribute
+
+60$:	DEC	R2		;Fix count for closing "]"
+70$:	TST	R2		;Do we have anything in the filename area?
+	BEQ	180$		;No, so this is invalid
+	MOV	#$CURFI+C$NAME,R4 ;R4 -> Current file cells at filename area
+80$:	MOVB	(R3)+,R0	;Pick up a character from the filename
+	CMPB	R0,#40		;Is this a space?
+	BEQ	150$		;Yes, ignore it
+	CMPB	R0,#';		;Version number indicator?
+	BEQ	160$		;Yes, so we're done
+	CMPB	R0,#'.		;File type indicator?
+	BEQ	110$		;Yes, so go handle that
+	CMPB	R0,#'0		;Numeric?
+	BLO	85$		;No, not this time			;022
+	CMPB	R0,#'9		;Really numeric?
+	BLOS	90$		;Yes, we can handle this
+	CMPB	R0,#'A		;Alphabetic?
+	BLO	85$		;No, name is invalid			;022
+	CMPB	R0,#'Z		;Really alphabetic?
+	BHI	85$		;No, we don't know what to do		;022
+	BR	90$		;
+
+85$:	MOVB	#'X,R0		;Replace the invalid char with an 'X'	;022
+90$:	MOVB	R0,(R4)+	;Store a byte in the current file cells
+	CMP	R4,#$CURFI+C$NAME+6 ;Are we done with the file name
+	BNE	140$		;No, not this time
+	BIS	#RS.NAM,RSTFLG	;We truncated the name			;022
+	DEC	R2		;Forget about the last character of file name
+	BEQ	160$		;No more, we're done
+
+100$:	CMPB	(R3),#';	;Are we done yet?
+	BEQ	160$		;Yes, that's good, no file type
+	CMPB	(R3)+,#'.	;Are we at the file type indicator?
+	BEQ	130$		;Yes, we sure are
+	SOB	R2,100$		;Loop 'til we reach the file type
+	BR	160$		;None there, no file type
+
+110$:	CMP	R4,#$CURFI+C$NAME+7 ;Are we already doing file type?
+	BHIS	180$		;Yes, that's an error
+120$:	MOVB	#40,(R4)+	;Write a space into current file cells
+	CMP	R4,#$CURFI+C$NAME+6 ;Are we at the end of the file name?
+	BNE	120$		;No, so loop
+
+130$:	INC	R4		;Done with file name, advance to type
+	BR	150$		;And loop
+
+140$:	CMP	R4,#$CURFI+C$NAME+12 ;Are we done with the file type
+	BEQ	170$		;Yes, we're almost done!
+150$:	BIS	#RS.NAM,RSTFLG	;We are truncating the type		;022
+	SOB	R2,80$		;Loop for the entire file name
+
+; We've parsed the entire file specification, hitting either a ; or the
+; end of the string, or three characters in the file type.
+;
+;	R4 -> Current file cells
+
+160$:	CMP	R4,#$CURFI+C$NAME+12 ;Are we done with everything?
+	BEQ	170$		;Yes, that's good
+	MOVB	#40,(R4)+	;Set up a space
+	BR	160$		;And loop for the whole thing
+
+170$:	MOVB	#'.,$CURFI+C$NAME+6 ;Go and stash the file type indicator
+	MOV	#$CURFI+C$NAME,R4 ; R4 -> start of file name		;022
+	CMPB	#40,(R4)	; Do we have a legal name?		;022
+	BNE	178$		; Yes, all done				;022
+	MOV	#6,R2		; Do this for all 6 name characters	;022
+175$:	MOVB	#'X,(R4)+	; Fill in an 'X' in place of a space	;022
+	SOB	R2,175$		; Until we have "XXXXXX"		;022
+
+178$:	RETURN			;And we're done
+
+180$:	CLRB	$CURFI+C$NAME	;Be sure name is invalid
+	CMESSAGE <#INVFNL>	;Tell them about it
+	RETURN			;And we're done
+
+GLOBAL	<$CURFI,INVFNL>
+
+.SBTTL	Define attributes that are simple moves
+
+	ATRENT	BRT$FL,BFA$SL,FILSTR,2,2 ;Structure level attribute
+	ATRENT	BRT$FL,BFA$FS,FILSIZ,4,4 ;File size attribute
+	ATRENT	BRT$FL,BFA$AC,FILUIC,4,4 ;UIC attribute
+	ATRENT	BRT$FL,BFA$FP,FILPRO,2,2 ;Protection code in VMS format
+	ATRENT	BRT$FL,BFA$FA,$CURFI+C$ATTR,32.,32. ;File attributes
+	ATRENT	BRT$FL,BFA$RS,RSSAVE,BRSSIZ,BRSSIZ ;RSTS specific attributes
+
+10$:	MOVB	(R3)+,(R4)+	;Move a byte to the save field
+	SOB	R2,10$		;And loop for the whole thing
+	RETURN			;Now we're done
+
+GLOBAL	<$CURFI>
+
+.SBTTL	Define date and time attributes
+
+	ATRENT	BRT$FL,BFA$CD,$CURFI+C$CDAT,8.,8.,PRSDAT ;Creation date/time
+	ATRENT	BRT$FL,BFA$RD,$CURFI+C$MDAT,8.,8.,PRSDAT ;Mod. date/time
+
+GLOBAL	<$CURFI,PRSDAT>
+
+.SBTTL	File open subroutine
+
+;+
+; CREFIL - Check for creating a file
+;
+;	$CURFI -> File to open
+;	FILSIZ = size of file to create
+;	FILPRO = VMS sytle protection code
+;
+;	CALL	CREFIL
+;
+;	LSTBLK is set up for EOF/MISSING data check
+;	If file is zero length, it is closed automatically
+;
+;	All registers are preserved.
+;-
+
+CREFIL::MOV	IMGCHN,IMGCH1		;Image channel * 2		;009
+	ASR	IMGCH1			;*1 (for use by uuo calls)	;009
+	MOV	FILSIZ,$CURFI+C$SIZ	;LSB of file size		;005
+	MOV	FILSIZ+2,$CURFI+C$SIZ+2	;MSB of file size		;005
+	MOV	FILRTS,$CURFI+C$RTS	;Setup the runtime system name	;005
+	MOV	FILRTS+2,$CURFI+C$RTS+2	;Setup the runtime system name	;005
+	MOV	FILCLU,$CURFI+C$CLUS	;Setup the clustersize		;005
+	MOVB	FILFLG,$CURFI+C$STAT	;File's flags			;005
+	BIT	#RS$DIR,RESSUB		;Is this a directory		;005
+	BEQ	5$			;No, continue			;005
+	CALLX	CHKCOM			;Does this file match?		;006
+	BCS	2$			;No, continue			;006
+	CALL	CVTVRP			;Setup the prot. code		;005
+	CALLX	FILLDR			;Output the data		;005
+2$:	JMP	400$			;Skip the open			;005
+
+5$:	CLR	NXTBLK+2	;Next block MSB is zero			;005
+	MOV	#1,NXTBLK	;And next block LSB is one
+	BIS	#RS.FIL,RSTFLG	;Say that we're doing a file
+	BIC	#RS.OPN,RSTFLG	;But guess that we didn't open it
+	BIT	#DO.IMA,C$FLAG	;Image mode?				;007
+	BNE	6$		;Yes, continue				;007
+	BIT	#DO.FIL,C$FLAG	;Are we supposed to restore files?	
+	BEQ	50$		;No, so forget it
+	CALLX	CHKCOM		;Does this file match?
+	BCS	50$		;No, so forget it
+	;CLC
+6$:	SAVREG			;Save all registers			;007
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;005
+	BNE	10$		;Yes, so check on restoring this (C = 0)
+
+	BIT	#C2$QER,C$FLG2	;Did they say "N/ALL"?			;017
+	BEQ	7$		;No, proceed				;017
+	SEC			;Yes					;017
+	BR	10$		;Skip the query				;017
+7$:									;017
+	TST	C$FLAG		;Are we supposed to query?
+.ASSUME	DO.QRY	EQ	100000
+	BPL	10$		;No, so check on restoring this (C=0)
+	MOV	#SELRES,R3	;R3 -> "Restore this file" prompt
+	CALLX	FILYNO		;Clear carry if they want to restore this
+10$:	BIT	#DO.IMA,C$FLAG	;Image mode?				;007
+	BEQ	12$		;No, do next section			;010
+	BIT	#IM$COP,IMGSUB	;/COPY mode?				;012
+	BEQ	35$		;No, skip next section			;013
+12$:									;010
+	ROR	-(SP)		;Save the C-bit on the stack
+
+; The code below handles the output rename operation
+;
+; Note: Carry is saved in bit 15 of the stack. If the C-bit is set,
+; then this is a query-style restore and the user selected "no" to
+; restoring the file. We go through the rename code since it will
+; be necessary to store the filename after the rename in the "no-verify"
+; list. Note that if this is a verify or a no-query restore, the C-bit
+; will be clear.
+
+	MOV	#$CURFI+C$NAME,R2 ;R2 -> Current file name		;023
+	MOV	#$OLDFI+C$NAME,R1 ;R1 -> Copy of current file name	;023
+	MOV	#$RESMSK+C$NAME,R3 ;R3 -> Restore rename mask
+	MOV	#10.,R4		;R4 = Length of a file name
+20$:	MOVB	(R2),(R1)+	;Copy file name				;023
+	MOVB	(R3)+,R5	;Pick up character from output file name
+	CMPB	R5,#'?		;Is it a wildcard character?
+	BEQ	30$		;Yes, so we can use it directly
+	MOVB	R5,(R2)		;No, so use it as a character of output name
+30$:	INC	R2		;Point to next character		;023
+	SOB	R4,20$		;And loop for the entire file name
+	CALL	RENPPN		;Now do the PPN rename			;010
+	ROL	(SP)+		;Restore carry (C=0 if we should restore)
+35$:									;013
+	BCS	40$		;We aren't supposed to restore this
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;005
+	BEQ	60$		;No, not this time
+
+; The following code checks to see if the file is in the no-verify list.
+
+	MOV	$VERIF,R1	;R1 -> List to check
+	CALLX	CHKLST		;Is it in the list?
+	BCS	60$		;No, so we can verify it
+	BR	50$		;We can't verify it, go skip it
+
+40$:	CALL	FLGNOV		;Indicate we shouldn't restore this
+50$:	JMP	390$		;Go skip this file
+
+60$:	BIT	#DO.IMA,C$FLAG	;/IMAGE or /COPY mode?			;013
+	BNE	65$		;Yes, no need for disk init		;010
+	CALLX	CHKINI		;Check for initializing the output disk
+65$:	CALL	CVTVRP		;Convert VMS prot code to RSTS prot code;007
+
+; Now R5 has RSTS style protection code in high byte, and real flag in low
+; byte
+
+110$:	CALLX	CLRFQX		;Set up the FIRQB and XRB		;002
+	MOV	#XRB,R2		;R2 -> XRB				;002
+	MOV	#10.,(R2)	;Set up length				;002
+	MOV	(R2)+,(R2)+	;In both places				;002
+	MOV	#$CURFI+C$NAME,(R2) ;Now set up the address of the name	;002
+	.FSS			;And convert it to RAD-50		;002
+	CRASH			;This FSS better not fail... we've checked it! ;002
+
+	MOV	#FIRQB+FQPPN,R2	;R2 -> FIRQB @ FQPPN
+	MOV	$CURFI+C$PPN,(R2) ;Set up PPN to use
+	MOV	#DSKFIL,-(R2)	;And use output file channel
+	MOV	$DSKDEV,@#FIRQB+FQDEV ;Set up device name		
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;Set up the device unit number
+	BIT	#DO.IMA,C$FLAG	;Image mode?				;007
+	BEQ	111$		;No, continue				;007
+	MOVB	IMGCHN,(R2)	;Reset channel number			;007
+	MOV	$SAVDEV,@#FIRQB+FQDEV; Reset device			;007
+	MOV	$SAVUNT,@#FIRQB+FQDEVN; and unit number			;007
+111$:	BIT	#RS$VFY,RESSUB	;Is this a verify?			;005
+	BEQ	120$		;No, so we are creating files
+	MOVB	#UU.ONX,-(R2)	;Open the file using open next (for date info)
+	MOV	#100000!4096.!16.,@#FIRQB+FQMODE ;Mode is read-regard, no dates
+	.UUO			;Now do the open
+	BR	190$		;Now join up
+
+120$:	MOVB	#CREFQ,-(R2)	;Set up create function
+	MOVB	FILSIZ+2,@#FIRQB+FQSIZM	;Set up MSB of file size
+	MOV	FILSIZ,@#FIRQB+FQSIZ ;Set up LSB of file size
+	MOV	#100000!1024.!32.,@#FIRQB+FQMODE			;002
+				;Mode is tentative, end of dir
+	MOV	R5,@#FIRQB+FQPFLG ;Set up protection code/real flag
+	MOV	#-1,@#FIRQB+FQCLUS ;Default to clustersize of one	;003
+	TST	RSTSTR		;Do we have RSTS attributes?
+	BEQ	160$		;No, so don't set them up
+	MOV	FILCLU,@#FIRQB+FQCLUS ;Set the requested clustersize
+	NEG	@#FIRQB+FQCLUS	;But indicate that PCS will do also
+	BIT	#<100*400>,R5	;Are we restoring something executable?
+	BEQ	130$		;No, not this time
+	MOVB	#CRBFQ,(R2)	;Yes, so function is create binary
+	BR	140$		;And go try making this contiguous	;002
+
+130$:	BITB	#BFF$CO,FILFLG	;Is this a contiguous file?
+	BEQ	150$		;No, not this time
+140$:	BIS	#64.,@#FIRQB+FQMODE ;Create this file conditionally contiguous
+150$:	BITB	#BFF$PL,FILFLG	;Is this a placed file?
+	BEQ	160$		;No, so don't place it on restore
+	MOV	PLADCN,@#FIRQB+FQNENT ;Yes, so set the DCN to use	;002
+	BNE	160$		;There was one, all set up		;002
+	MOV	FILDCN,@#FIRQB+FQNENT ;No special DCN, use the old one
+
+160$:	BIT	#C2$CLU,C$FLG2	;Are we optimizing clustersize?
+	BEQ	165$		;No, so clustersize is all set		;003
+	CLR	@#FIRQB+FQCLUS	;Yes, so set up the clustersize		;003
+165$:	TST	R4		;Is this our first time through?	;003
+	BNE	180$		;Second time, must be /REPLACE=QUERY	;002
+	BIT	#REP.S,C$FLAG	;Is this an explicit /REPLACE or /NOREPLACE? ;002
+	BEQ	170$		;No, /REPLACE=QUERY, don't supercede this time ;002
+	INC	R4		;Indicate explicit replace		;002
+	BIT	#DO.REP,C$FLAG	;Is this a /REPLACE?			;002
+	BNE	180$		;Yes, don't set up nosupercede		;002
+
+170$:	BIS	#128.,@#FIRQB+FQMODE ;Yes, set up to inhibit supercede	;002
+180$:	CALFIP			;Now open up the file
+190$:	CALLX	BUFWAT,R5	;Small buffer wait?			;002
+	 BR	195$		;Yes, do it again...			;007
+	MOVB	@#FIRQB,R1	;Pick up error code			;002
+	BEQ	240$		;None, that's great!
+	CMPB	R1,#FIEXST	;Did we get a supersede failure?
+	BNE	210$		;No, not this time
+	TST	R4		;Is this explicit or pass two /REPLACE=QUERY?
+	BNE	200$		;Yes, so don't ask about replacement
+	MOV	#ASKRPL,R3	;R3 -> Question about replacing file
+	CALLX	FILYNO		;Ask them if they want to replace file
+	BCS	200$		;They said no, so tell them about it
+	DEC	R4		;Set supersede flag
+195$:	JMP	110$		;And try the create again		;007
+
+200$:	CMESSAGE #NOREPL,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Tell them about the failure
+	CALL	FLGNOV		;Indicate we shouldn't verify this file
+	BR	230$		;And we're done
+
+210$:	MOV	#ERROPO,R2	;Guess at error opening for output
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;005
+	BEQ	220$		;No, so we picked the correct message
+	MOV	#ERROVE,R2	;Yes, so error opening file for verify
+220$:	CMESSAGE R2,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Report the error message
+	CMESSAGE R1		;Now say the RSTS error code
+230$:	JMP	390$		;And we'll skip this file
+
+240$:	BIS	#RS.OPN,RSTFLG	;Indicate we've opened a file
+	SWAB	R5		;Get protection code file should be	;004
+	MOVB	@#FIRQB+FQPROT,R3 ;Get protection code file is		;004
+	CMPB	R3,R5		;Does file have correct protection code? ;004
+	BEQ	244$		;Yes, that's good			;004
+	CMESSAGE #BADPRO,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME,R3,R5> ;004
+				;No, tell the user about it		;004
+244$:	BIT	#RS$VFY,RESSUB	;Is this a verify?			;005
+	BEQ	270$		;No, so we don't need to verify file attributes
+	CMPB	@#FIRQB+FQSIZM,FILSIZ+2 ;How about filesize MSB?
+	BNE	260$		;No, verify failure
+	MOV	#FIRQB+FQSIZ,R3	;R3 -> FIRQB @ FQSIZ
+	CMP	(R3)+,FILSIZ	;How about filesize LSB?
+	BNE	260$		;No, verify failure
+	MOV	#$CURFI+C$MDAT,R2 ;R2 -> Current file cells @ modification date
+	CMP	(R2)+,(R3)+	;How about modification date?
+	BNE	260$		;They don't match, error
+	TST	(R2)+		;Skip modification time
+	CMP	(R2)+,(R3)+	;How's creation date?
+	BNE	260$		;They don't match, error
+	CMP	(R2)+,(R3)+	;Finally, how is creation time?
+	BNE	260$		;That's wrong, give an error
+	TST	RSTSTR		;Are we verifying a RSTS save set?
+	BNE	245$		;Yes, so get ready for file utilities
+	JMP	290$		;No, nothing to do
+
+245$:	CALLX	CLRFQB		;Set up the FIRQB
+	MOV	#FIRQB+FQFUN,R2	;R2 -> FIRQB @ FQFUN
+	MOVB	#UU.FIL,(R2)+	;Function is file utilities
+	MOVB	#DSKFIL/2,(R2)	;On the disk file channel
+	BIT	#DO.IMA,C$FLAG	;Image?					;007
+	BEQ	246$		;No, continue				;007
+	MOVB	IMGCH1,(R2)	;Yes, reset channel number		;009
+246$:	.UUO			;Now get the information		;007
+	MOVB	@#FIRQB,R1	;Did it work?
+	BEQ	250$		;Yes, it seems that way
+	CMESSAGE #ERRVFR,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;No, tell them error verifying RTS/Cache
+	CMESSAGE R1		;And be specific
+	
+250$:	MOVB	-(R2),R3	;Pick up the flags
+	BICB	#^C<BFF$CS!BFF$CA!BFF$ND!BFF$NB>,R3 ;And leave only our flags ;008
+	MOVB	FILFLG,R4	;Pick up flags from save set
+	BICB	#^C<BFF$CS!BFF$CA!BFF$ND!BFF$NB>,R4 ;And leave only cache bits ;008
+	CMPB	R3,R4		;Are file flags correct?
+	BNE	260$		;No, so report an error
+	CMP	@#FIRQB+34,FILRTS ;How does RTS name look?
+	BNE	260$		;Bad, that's an error
+	CMP	@#FIRQB+36,FILRTS+2 ;Is it really ok?
+	BNE	260$		;No, it doesn't match
+255$:	JMP	290$		;Yes, off to check other attributes
+
+260$:	CMESSAGE #ERRVDI,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Tell them error verifying directory info
+	JMP	380$		;And go off to set up for this file
+
+270$:	TST	RSTSTR		;Do we have to set RSTS attributes?
+	BEQ	255$		;No, nothing to do
+	MOVB	FILFLG,R2	;Pick up file flags
+	BITB	#BFF$CO,R2	;Were we supposed to make this file contiguous?
+	BEQ	275$		;No, not this time
+	CALLX	CLRFQB		;Yes, so clear the FIRQB
+	MOVB	#UU.FCB,@#FIRQB+FQFUN ;Function is get FCB information
+	MOV	#<DSKFIL/2>+<400*1>,@#FIRQB+FQFIL ;Set channel number/subcode
+	BIT	#DO.IMA,C$FLAG	;Image?					;007
+	BEQ	272$		;No, continue				;007
+	MOV	IMGCH1,@#FIRQB+FQFIL ;Reset channel number		;009
+	BIS	#400,@#FIRQB+FQFIL ;It's real				;009
+272$:	.UUO			;Now go for it				;007
+	CRASH			;Errors should not be possible for this call
+	BITB	#20,@#FIRQB+6	;Is file contiguous?
+	BNE	275$		;Yes, it sure is
+	CMESSAGE #NOTCTG,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;No, so tell the user about that
+
+275$:	BICB	#^C<BFF$CS!BFF$CA!BFF$ND!BFF$NB!BFF$IG>,R2 ;Leave only flags	;008;014
+				;  that we set in UU.FIL		;008
+	BEQ	280$		;No flags, nothing to do
+	CALLX	CLRFQB		;Set up the FIRQB
+	MOVB	#UU.FIL,@#FIRQB+FQFUN ;Function is file utilities
+	MOV	#<DSKFIL/2>+<400*300>,@#FIRQB+FQFIL ;Set channel number and
+				;function code as set caching flags
+	BIT	#DO.IMA,C$FLAG	;Image?					;007
+	BEQ	277$		;No, continue				;007
+	MOVB	IMGCH1,@#FIRQB+FQFIL ;Reset channel			;009
+277$:	MOVB	R2,@#FIRQB+20	;Set the file flags			;007
+	MOVB	#17,@#FIRQB+34	;Set change "p-bit", [NO]BACKUP bit,	;008
+				; clear the IGNORE bit and don't return PRVIOL
+	.UUO			;Now go for it
+	MOVB	@#FIRQB,R1	;Pick up returned error code
+	BEQ	280$		;None, that's good
+	CMESSAGE #ERRSCF,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Tell them error setting cache flags
+	CMESSAGE R1		;And be specific
+
+280$:	TSTB	FILSIZ+2	;Is this a large file?
+	BNE	290$		;Yes, so don't try to set a RTS name
+	CALLX	CLRFQB		;Small file, clear out the FIRQB
+	MOVB	#UU.FIL,@#FIRQB+FQFUN ;Function code is file utilities
+	MOV	#<DSKFIL/2>+<10*400>,@#FIRQB+FQFIL ;Set function and channel #
+	BIT	#DO.IMA,C$FLAG	;Image?					;007
+	BEQ	285$		;No, continue				;007
+	MOVB	IMGCH1,@#FIRQB+FQFIL					;009
+285$:	MOV	FILRTS,@#FIRQB+16 ;Set LSB of RTS name			;007
+	MOV	FILRTS+2,@#FIRQB+20 ;And MSB of RTS name
+	.UUO			;Now go for it
+	MOVB	@#FIRQB,R1	;Pick up error code
+	BEQ	290$		;None, that's good
+	CMESSAGE #ERRSRN,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Tell them error setting RTS name
+	CMESSAGE R1		;And be specific
+
+290$:	TST	FILSTR		;Do we want to write/verify attributes?
+	BEQ	380$		;No, they aren't real
+	MOV	#11.,R2		;R2 will hold count of attributes to write
+	MOV	#$CURFI+C$ATTR+<11.*2>,R3 ;R3 -> Last attribute + 1
+300$:	TST	-(R3)		;Is this attribute in use?
+	BNE	310$		;Yes, we know how many to write
+	SOB	R2,300$		;Loop until we find a non-zero attribute
+	BR	380$		;No attributes, nothing to do
+
+310$:	CALLX	CLRFQB		;Set up the FIRQB
+	MOV	#FIRQB+FQFUN,R1	;R1 -> FIRQB @ FQFUN
+	MOVB	#UU.ATR,(R1)+	;Function is read/write attributes
+	MOVB	#DSKFIL/2,(R1)	;On the output file channel
+	BIT	#DO.IMA,C$FLAG	;Image?					;007
+	BEQ	315$		;No, continue				;007
+	MOVB	IMGCH1,(R1)	;Load the channel			;009
+315$:	INC	R1		;Point past channel number		;007
+	MOV	#$CURFI+C$ATTR,R3 ;R3 -> Attribute data to copy/verify
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;005
+	BNE	330$		;Yes, so don't set up to write attributes
+	MOVB	R2,(R1)+	;Set up number of attributes to write
+320$:	MOV	(R3)+,(R1)+	;Copy a word
+	SOB	R2,320$		;For all the attributes
+330$:	.UUO			;Go and write the attributes
+	MOVB	@#FIRQB,R1	;Did we get an error?
+	BEQ	350$		;No, not this time
+	CMESSAGE #ERRATR,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Yes, so tell them about the problem
+	CMESSAGE R1		;And tell them what the RSTS error was
+	BR	380$		;Now skip attribute verification
+
+350$:	BIT	#RS$VFY,RESSUB	;Is this a verify?			;005
+	BEQ	380$		;No, not this time
+	MOV	#FIRQB+FQPPN,R1	;Yes, so point to attributes to verify
+360$:	CMP	(R3)+,(R1)+	;Do attributes match?
+	BEQ	370$		;Yes, this one seems to
+	CMESSAGE #ATRMIS,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;No, so give an error
+	BR	380$		;And go join up
+370$:	SOB	R2,360$		;Loop for all the attributes
+
+380$:	TST	FILSIZ		;Is this a zero-length file?		;002
+	BNE	390$		;No, not this time
+	TST	FILSIZ+2	;Maybe, is it a large file?
+	BNE	390$		;Yes, that's too bad
+	BIT	#DO.IMA,C$FLAG	;Image mode?				;009
+	BNE	390$		;Yes, please don't close files for image;009
+	CALL	CLSFIL		;Zero length file, close it now
+
+390$:	MOV	FILSIZ,LSTBLK	;Set up last block used LSB		;001
+	MOV	FILSIZ+2,LSTBLK+2 ; and last block used MSB		;001
+	ADD	#1,LSTBLK	;Make last block be last block + 1
+	ADC	LSTBLK+2	;Double precision	
+400$:	RETURN			;Now we're done
+
+GLOBAL	<$CURFI,$RESMSK,$DSKDEV,$DSKUNT,C$FLAG,FIEXST,NOROOM,RSTFLG,NOREPL>
+GLOBAL	<ERROPO,ERROVE,ERRATR,ERRVDI,ATRMIS,ERRVFR,ERRSCF,ERRSRN>
+GLOBAL	<$VERIF,GENFLG,NOTCTG,C$FLG2,PLADCN,BADPRO,RESSUB>		;004
+GLOBAL	<IMGCHN,$SAVUNT,$SAVDEV>					;007
+GLOBAL	<IMGSUB>							;012
+GLOBAL	<$OLDFI>							;023
+
+.SBTTL CVTVRP Convert VMS protection code to RSTS protection code	;005
+
+;+
+; CVTVRP - converts a VMS protection code to a RSTS protection code (if needed)
+; 
+;		FILPRO - VMS protection code
+;
+;	CALL	CVTVRP
+;
+;		R1 - VMS protection code
+;		R4 - Cleared
+;		R5 - RSTS protection code
+;		$CURFI+C$PCOD - RSTS protection code
+;		
+;-
+
+CVTVRP:	MOVB	FILPRR,R5	;Pick up the RSTS protection code	;005
+	TST	RSTSTR		;Are RSTS attributes real?
+	BNE	100$		;Yes, so use them
+	MOV	FILPRO,R1	;R1 = VMS protetion code
+	CLR	R5		;R5 = RSTS protection code
+	MOV	#3,R4		;R4 = Count of protection code fields
+70$:	BIT	#^B<00010000>,R1 ;Is read protect set?
+	BEQ	80$		;No, not this time
+	BIS	#100,R5		;Yes, so set RSTS style read-protect
+80$:	BIT	#^B<10100000>,R1 ;Is write or delete protect set?
+	BEQ	90$		;No, not this time
+	BIS	#200,R5		;Yes, so set write protect
+90$:	ASR	R5		;Shift RSTS protection
+	ASR	R5		;Two places
+	ASH	#-4,R1		;And shift VMS protection
+	SOB	R4,70$		;Now loop for the entire protection code
+100$:	MOVB	R5,$CURFI+C$PCOD ;Save the RSTS protection code
+	SWAB	R5		;Get RSTS protection code in the high byte
+	BIS	#1,R5		;And set the protection is real flag
+	CLR	R4		;Set first time through supersede flag
+	RETURN								;005
+
+GLOBAL	<$CURFI>
+
+.SBTTL	Close the currently open file
+
+;+
+; CLSFIL - Close the currently open file
+;
+;	CALL	CLSFIL
+;
+; And the file is closed. Flag bits RS.OPN and RS.FIL are cleared.
+;-
+
+CLSFIL::BIT	#GF.DIR,GENFLG	;/Directory?				;005
+	BNE	20$		;No, no file is open, do the listing	;005
+	BIT	#RS.OPN,RSTFLG	;Do we need to do this?
+	BEQ	20$		;No, so take the quick way out
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;005
+	BNE	10$		;Yes, so don't play with dates
+	CALL	DATES		;Handle the day/time information	;009
+
+10$:	CALLX	CLRFQB		;Clear out the FIRQB
+.ASSUME	CLSFQ	EQ	0
+	MOVB	#DSKFIL,@#FIRQB+FQFIL ;Ready to close the file
+	CALFIP			;Now close the file
+	CRASH			;Die on errors... this should really work
+	CALLX	FILLIS		;Go and list this file			;002
+
+20$:	BIC	#RS.OPN!RS.FIL,RSTFLG ;We're no longer doing a file
+	RETURN			;We're done now
+
+GLOBAL	<RSTFLG,ERRDAT,GENFLG,BADFUO,RESSUB,GENFLG>			;005
+
+.SBTTL	Change date/time information					;009
+
+;+
+; DATES - Change date/time information
+;
+;	CALL	DATES
+;
+;-
+
+DATES::	MOV	R1,-(SP)	;Save R1
+	MOV	R2,-(SP)	;Save R2
+	CALLX	CLRFQB		;Clear out the FIRQB
+	MOV	#FIRQB+FQFUN,R1	;R1 -> FIRQB @ FQFUN
+	MOVB	#UU.BCK,(R1)+	;Function is change backup statistics
+	MOVB	#DSKFIL/2,(R1)+	;On the output file channel number times one
+	MOV	#$CURFI+C$MDAT,R2 ;R2 ->Current file cells @ modification date
+	BIT	#DO.IMA,C$FLAG	;Image mode?
+	BEQ	1$		;No, continue
+	MOVB	IMGCH1,-1(R1)	;Yes, reset channel number
+	MOV	#IMGDAT,R2	;Use image date information
+
+1$:	MOVB	(R2)+,(R1)+	;Copy modification date LSB
+	MOVB	(R2)+,(R1)+	;Copy modification date LSB
+	TST	(R2)+		;Skip modification time
+.ASSUME	C$MTIM	EQ	C$MDAT+2
+	MOVB	(R2)+,(R1)+	;Copy creation date LSB
+	MOVB	(R2)+,(R1)+	;Copy creation date MSB
+.ASSUME	C$CDAT	EQ	C$MTIM+2
+	MOVB	(R2)+,(R1)+	;Copy creation time LSB
+	MOVB	(R2)+,(R1)+	;Copy creation time MSB
+.ASSUME	C$CTIM	EQ	C$CDAT+2
+	.UUO			;Now go for it
+	MOVB	@#FIRQB,R1	;Now pick up the error code
+	BEQ	5$		;We didn't get one this time
+	CMPB	R1,#BADFUO	;Are we not privileged to do this?
+	BEQ	5$		;Yes, so don't report that
+	CMESSAGE #ERRDAT,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Tell them about it
+	CMESSAGE R1		;And tell them the error code
+
+5$:	MOV	(SP)+,R2	;Restore R2
+	MOV	(SP)+,R1	;Restore R1
+	RETURN			;Back to the caller
+
+.SBTTL	Restore a virtual block
+
+	RECENT	BRT$VB		;File virtual block
+
+	BIT	#777,(R3)	;Is this a legal length for file data?
+.ASSUME	BRH$RS	EQ	0
+	BEQ	20$		;Yes					;021
+	CMESSAGE <#BADRLN>	;Tell them about the bad record length	;021
+	JMP	220$		;And ignore this record			;021
+
+20$:	BIT	#RS.NOS,RSTFLG	;Is this a sequential block?
+	BNE	25$		;No, so off to our checks
+	JMP	120$		;Yes, it sure is
+25$:	BIC	#RS.NOS,RSTFLG	;No, but the flag is one-shot
+	BIT	#RS.FIL,RSTFLG	;Do we have valid file attributes?
+	BEQ	80$		;No, not this time
+
+; We got a non-sequential block, and we do have valid file attributes,
+; so now we need to verify that the file we have open is still the
+; current file.
+
+
+	BIT	#RS.IBH,RSTFLG	;Is block header valid?
+	BNE	30$		;No, so we can't figure out what's going on
+	MOV	QDBVA,R0	;R0 -> Block header of current block	;019
+	ADD	#BBH$FN,R0	;R0 -> File name of block header
+	MOVB	(R0)+,R1	;R1 = Length of file name
+	BNE	40$		;We have a valid name, that's good
+30$:	CMESSAGE <#NOHQUD>	;Tell them we have questionable data
+	BR	120$		;And continue processing the current file
+
+40$:	MOV	#FILSAV,R2	;R2 -> File name save area
+	MOVB	(R2)+,R4	;R4 = Size of save area
+
+50$:	MOVB	(R0)+,R5	;Pick up character of file name in header
+	CMPB	R5,#40		;Is it a space?
+	BEQ	60$		;Yes, just ignore it
+	TST	R4		;Anything left in save area?
+	BEQ	70$		;No, so file names are different
+	CMPB	R5,(R2)+	;Character match?
+	BNE	70$		;No, so this is a different file
+	DEC	R4		;Say one less character in save area
+60$:	SOB	R1,50$		;And loop for the whole thing
+	TST	R4		;Done with name in header, anything in save?
+	BEQ	120$		;No, so this seems like the same file
+
+70$:	CALL	CHKCLS		;Check on closing this file		;003
+
+; At this point, we will attempt to set up the current file attributes
+; using the subset of attributes stored in the file header.
+;
+;	R3 -> Current record
+
+
+80$:	BIT	#RS.IBH,RSTFLG	;Do we have an invalid block header?
+	BNE	90$		;Yes, just ignore this record
+	BIS	#RS.FIL,RSTFLG	;Pretend that we've hit file attributes
+	MOV	R3,-(SP)	;Save pointer to current block
+	MOV	QDBVA,R3	;R3 -> Block header of current block	;019
+	ADD	#BBH$FN,R3	;R3 -> Filename in header block
+	MOVB	(R3)+,R2	;R2 = Size of file name
+	CALL	PRSNAM		;Now parse the filename
+	MOV	(SP)+,R3	;R3 -> Current record again
+	TSTB	$CURFI+C$NAME	;Did we get a valid name?
+	BNE	100$		;Yes, we did
+90$:	JMP	220$		;No, so ignore the record
+100$:	TST	$CURFI+C$PPN	;How about a valid PPN?
+	BNE	110$		;Well, we did that much
+	MOV	$MYPPN,$CURFI+C$PPN ;No, so use our own
+110$:	MOV	QDBVA,R2	;R2 -> Current block			;019
+	ADD	#BBH$RT,R2	;R2 -> Attributes area in header
+	MOV	#$CURFI+C$ATTR,R4 ;R4 -> Attribute save area
+	MOV	(R2)+,(R4)+	;Save record type and attributes
+	MOV	(R2)+,(R4)+	;Save record size
+.ASSUME	BBH$RS	EQ	BBH$RT+2
+	MOV	(R2)+,$CURFI+C$ATTR+16 ;Save bucketsize/VFC area length
+.ASSUME	BBH$KS	EQ	BBH$RS+2
+.ASSUME	BBH$VS	EQ	BBH$KS+1
+	MOV	(R2)+,$CURFI+C$ATTR+20 ;Save maximum record size
+.ASSUME	BBH$MS	EQ	BBH$VS+1
+	MOV	(R2),$CURFI+C$ATTR+6 ;Save LSB of filesize as an attribute
+	MOV	(R2)+,FILSIZ	;And as our filesize indicator
+	MOV	(R2),(R4)+	;Save MSB of filsize as an attribute
+	MOV	(R2),FILSIZ+2	;And as our filesize indicator
+	MOV	(R2),(R4)+	;And save MSB of blocks in use
+	MOV	-(R2),(R4)+	;Now save LSB of blocks in use
+	MOV	#512.,(R4)+	;Now indicate the entire last block is in use
+	CLR	$CURFI+C$ATTR+22 ;Use the default DEQ
+	CLR	$CURFI+C$ATTR+24 ;And clear the unused word
+	MOV	#1,FILSTR	;Make sure we write the attributes
+	CLR	RSTSTR		;Indicate we don't have RSTS attributes
+	CALL	CREFIL		;Try to create the file
+	BIT	#RS.OPN,RSTFLG	;Did we actually open this file?
+	BEQ	120$		;No, so no special warning message
+	CMESSAGE #BADATR,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Yes, so tell them attributes may be wrong
+
+; Now we have valid file attributes, either because we saw an attribute
+; record or we got attributes from the block header.
+;
+;	R3 -> Record header
+
+120$:	MOV	(R3),R2		;Pick up number of bytes to transfer
+.ASSUME	BRH$RS	EQ	0
+	SWAB	R2		;Get number of blocks * 2 to transfer
+	ASR	R2		;Now R2 has number of blocks to transfer
+	MOV	#NXTBLK,R4	;R4 -> LSB of expected block
+	CMP	BRH$VB+2(R3),2(R4) ;Is this the correct block number?
+	BNE	130$		;No, doesn't seem to be
+	CMP	BRH$VB(R3),(R4) ;Really correct block?
+	BEQ	160$		;Yes, it sure is
+130$:
+
+; C = 0 if skipped block, C = 1 if duplicate block
+; BIT doesn't touch C
+
+	BIT	#RS.OPN,RSTFLG	;Do we have a file open?
+	BEQ	150$		;No, so nothing to say
+	BCC	140$		;We've missed a block somewhere
+	CMESSAGE #RPTBLK,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Tell them about the duplicated blocks
+	BR	150$		;And join up block-skipping code
+140$:	CMESSAGE #SKPBLK,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Tell them we've skipped some blocks
+150$:	MOV	BRH$VB(R3),(R4) ;Update block number LSB
+	MOV	BRH$VB+2(R3),2(R4) ;And block number MSB
+
+160$:	MOV	#CLSFIL,-(SP)	;Guess that we should close the output file
+	ADD	R2,(R4)+	;Update block number to transfer
+	ADC	(R4)		;Double precision
+	CMP	(R4),LSTBLK+2	;Are we at EOF
+	BNE	170$		;Doesn't seem to be, maybe after it?
+	CMP	-(R4),LSTBLK	;Maybe, are we?
+	BEQ	190$		;Yes, last transfer before closing file
+170$:	BLO	180$		;We aren't at EOF yet
+	BIT	#GF.DIR,GENFLG	;Is the extra data due to /Directory?	;005
+	BNE	180$		;yes, forget about it.			;005
+	TST	$CURFI+C$NAME	;Do we have a valid file name?		;022
+	BEQ	175$		;No, so don't give the error		;022
+	CMESSAGE #XTRDTA,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;After EOF, tell them we've got extra data
+175$:	JMP	220$		;And we're done (close is on the stack)	;022
+
+180$:	TST	(SP)+		;Not at EOF yet, forget about closing file
+190$:	BIT	#RS.OPN,RSTFLG	;Are we just skipping this file?
+	BEQ	175$		;Yes, we sure are, nothing to do	;022
+
+; We have concluded that we need to write data to the output file. We will
+; get a context buffer for error reporting, and then set up for the write.
+
+192$:	MOV	#<<12.+8.>+3>&^C<3>,R1 ;R1 = Desired size of entry	;002
+	CALLX	GETMEM		;Now get a context buffer
+	BCC	198$		;Got one, good				;002
+	CALLX	CHRACT		;Didn't get one, check for action routines ;002
+	MOV	#1,@#XRB	;Set up for a one second sleep		;002
+	.SLEEP			;Now wait...				;002
+	BR	192$		;And try again				;002
+
+198$:	MOV	R0,R2		;Use a more convenient register		;019
+	CLR	(R2)+		;Skip the link to next			;019
+	MOV	#ERWOFA,(R2)+	;Set up address of action routine	;019
+	MOV	#$CURFI+C$PPN,R1 ;R1 -> Current file cells @ C$PPN
+	MOV	(R1)+,(R2)+	;Copy PPN				;019
+	MOV	(R1)+,(R2)+	;And first two bytes of file name	;019
+	MOV	(R1)+,(R2)+	;Now we have first four bytes		;019
+	MOV	(R1)+,(R2)+	;Now we have the file name		;019
+	MOV	(R1)+,(R2)+	;Now copy "." and first byte of type	;019
+	MOV	(R1)+,(R2)+	;Now we have copied all of file type	;019
+	MOV	QD1BID,(R2)	;Now set the block ID of the I/O buffer	;019
+
+; The code below writes the data to the output file. We will update the
+; count of pending completions for this block and issue the .WRITA
+; directive to queue the block for writing.
+;
+;	R2 -> Context buffer @ block ID
+
+	CALBX	MAPBUF,<#QD1BID,#DTAAVL,#QDBVA> ; Map buffer header	;019
+	MOV	QDBVA,R4	;R4 -> Current block			;019
+	INCB	HB$PRC(R4) ;Say one more I/O request outstanding	;019
+	CALBX	MAPBUF,<#QD2BID,#DTAAVL,#QDBVA> ; Map current record	;019
+	CMP	QD1BID,QD2BID	;Are we still at square 1?		;019
+	BNE	200$		;No, don't add buffer header		;019
+	ADD	#HBSIZE,QDBVA	;Offset to data				;019
+200$:	CALLX	CLRFQX		;Clear out the FIRQB & XRB
+	MOV	#XRB,R1		;R1 -> XRB
+	MOV	(R3),(R1)	;Set up byte count
+.ASSUME	BRH$RS	EQ	0
+	MOV	(R1)+,(R1)+	;In both places
+	MOV	R3,(R1)		;Set up record address
+	ADD	#BRHSIZ,(R1)+	;And skip past the record header
+	MOVB	#DSKFIL,(R1)+	;Set up the output channel number
+	MOVB	BRH$VB+2(R3),(R1)+ ;Set up MSB of block number
+	MOV	BRH$VB(R3),(R1)+ ;Set up LSB of block number
+	CLR	(R1)+		;Clear unused word
+	CLR	(R1)		;And another unused word
+	MOV	#WRTCMP,@#FIRQB+FQFIL ;Set completion routine address
+	MOV	R2,@#FIRQB+FQPPN ;And context buffer @ I/O buffer ID	;019
+	DSAR$S			;Disable ASTs
+	BIT	#RS$VFY,RESSUB	;;Is this a verify?			;005
+	BEQ	202$		;;No, so the XRB is all set up now
+	INC	(R1)		;;Set the flag to indicate this is a read-check
+	CLR	@#XRB+XRBC	;;And set up for a .READA
+	.READA			;;Now issue it
+	BR	203$		;;And join up
+
+202$:	.WRITA			;;Queue the block to be written
+203$:	MOVB	@#FIRQB,R1	;;Did it work
+	BEQ	220$		;;Yes, that's good
+	CMPB	R1,#INUSE	;;Are we doing too much I/O?
+	BEQ	204$		;;Yes, so wait a while
+	CMPB	R1,#NOBUFS	;;Are we out of buffers?
+	BNE	205$		;;No, not this time
+204$:	MOV	#100000!1,@#XRB	;;Wait a second (conditionally)
+	.SLEEP			;;See y'a in a little bit
+	ENAR$S			;;Enable ASTs
+	CALLX	CHRACT		;Check for action routines
+	BR	200$		;And try again
+
+205$:	CALBX	MAPBUF,<#QD1BID,#DTAAVL,#QDBVA> ; Map buffer header	;019
+	MOV	QDBVA,R4	;Set up the virtual address		;019
+	DECB	HB$PRC(R4)	;Say one more I/O completed (in error)	;019
+	CALBX	MAPBUF,<#QD2BID,#DTAAVL,#QDBVA> ; Map current record	;019
+	CMP	QD1BID,QD2BID	;Still in 1st 8Kb?			;019
+	BNE	208$		;No, don't offset			;015
+	ADD	#HBSIZE,QDBVA	;Offset to data				;019
+208$:	MOV	#UNXWRO,R2	;Guess at restore error message
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;005
+	BEQ	210$		;No, so the error code is correct
+	MOV	#UNXVRO,R2	;Yes, so use the correct error
+
+210$:	CMESSAGE R2,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Give our error message
+	CMESSAGE R1		;Say what it was
+
+220$:	ENAR$S			;Enable ASTs for sure
+	RETURN			;Now we're done
+
+GLOBAL	<$CURFI,$MYPPN,RSTFLG,BADRLN,QDBVA,BADATR,RPTBLK,SKPBLK>	;019
+GLOBAL	<XTRDTA,UNXWRO,NOHQUD,ERRVFD,UNXVRO,GENFLG>			;003
+GLOBAL	<NOBUFS,INUSE,RESSUB,GENFLG>					;015
+GLOBAL	<QD1BID,QD2BID,DTAAVL>						;019
+
+.SBTTL	Handle asynchronous completions for output file writes
+
+;+
+; WRTCMP - Handle asynchronous completions for output file writes
+;
+; We are the completion routine for the .WRITAs for the output
+; file. When we come here, we update the count of pending
+; I/O requests for the block.
+;-
+
+WRTCMP:	CALLX	ASYSAV,R5	;;Save the world, I completed here...
+	MOV	@#FIRQB+FQPPN,R2 ;;R2 -> Context buffer @ I/O buffer ID
+	MOV	(R2)+,CS1BID	;;Set the current asynch block #	;019
+	MOVB	@#FIRQB,(R2)	;;Set up returned error code
+	BNE	3$		;;We got one, oh well
+	MOV	#<<12.+8.>+3>&^C<3>,R1 ;;R1 = Size of context buffer
+	SUB	#12.+8.-2,R2	;;R2 -> Start of context buffer
+	CALLX	RETMEM		;;Return this buffer
+	BR	5$		;;And join up
+
+3$:	SUB	#12.+8.-2,R2	;;R2 -> Start of context buffer
+	MOV	R2,@ACRTAL	;;Queue this to the tail
+	MOV	R2,ACRTAL	;;And update the tail pointer
+
+5$:	CALBX	MAPBUF,<#CS1BID,#DTAAVL,#CSBVA> ;;Map this buffer	;019
+	MOV	CSBVA,R2	;;R2 -> Block just completed		;019
+	DECB	HB$PRC(R2)	;;Say one more I/O has been done
+	BNE	10$		;;More to do, return it later
+	CMP	(R2),#-1	;;Is this an XOR recovery block?	;018
+	BEQ	10$		;;Yes, let the EOF code return it	;018
+	TSTB	(R2)		;;Does this block need to be dumped?
+.ASSUME	HB$FLG	EQ	0
+.ASSUME	HBF$RB	EQ	200
+	BPL	10$		;;No, not this time
+	CALBX	RETBUF,<#CS1BID> ;;Yes, so return it			;019
+10$:	RETURN			;;Now we're done	
+
+GLOBAL	<CS1BID,XORAVL,CSBVA,ACRTAL>					;019
+
+.SBTTL	Check to see if a file needs to be closed
+
+;+
+; CHKCLS - Check to see if a file needs to be opened
+;
+;	CALL	CHKCLS
+;
+; This routine will close the current file, if one is open. If the current
+; block number within the file is less than the RMS attribute for last
+; written block, we will report that there is missing data. If the
+; block number is within an unallocated block, no message will be printed.
+;
+; This routine uses the RMS attribute USED:'block':'bytes' to determine	;020
+; if all the file's data blocks have been transferred.			;020
+; If NXTBLK > 'block' then they have.					;020
+; If NXTBLK = 'block' and 'bytes' = 0 then they have.			;020
+; Otherwise, there may be missing data.					;020
+; NOTE:  NXTBLK is always 1 more than the last block # transferred.	;020
+;-
+
+	EOFENT	RS.OPN		;Come here if file is open at saveset end
+
+CHKCLS:	BIT	#RS.OPN,RSTFLG	;Are we transferring a file?		;003
+	BEQ	20$		;No, so we don't have a problem		;003
+	BITB	#BFF$NB,FILFLG	;Is this a NOBACKUP file?		;011
+	BNE	20$		;Yes, missing data is expected		;011
+	CMPB	NXTBLK+2,$CURFI+C$ATTR+10 ;MSB size the same?		;003
+	BNE	10$		;No, don't bother to check LSB		;003
+	CMP	NXTBLK,$CURFI+C$ATTR+12 ;LSB same as RMS end?		;020
+	BNE	10$		;No, so don't bother to check 'bytes'	;020
+	TST	$CURFI+C$ATTR+14 ;Check 'bytes'				;020
+	BEQ	20$		;Zero, don't give an error		;020
+	BR	15$		;Not 0, error				;020
+
+10$:	BHI	20$		;Higher, so nothing is missing		;020
+15$:	CMESSAGE #MISDTA,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME> ;003
+				;Tell them that we've got some missing data ;003
+20$:	CALL	CLSFIL		;Close the current file			;003
+30$:	RETURN			;All done				;003
+
+GLOBAL	<MISDTA>
+
+.SBTTL	Indicate a file shouldn't be verified
+
+;+
+; FLGNOV - Flag a file for no verification
+;
+;	$CURFI = File to flag
+;	NOVTAL -> Last entry in no-verify list
+;
+;	CALL	FLGNOV
+;
+;	NOVTAL -> Entry just added
+;
+;	All registers are preserved.
+;
+; File is added to the tail of the no-verify list.
+;-
+
+FLGNOV:	BIT	#DO.VER,C$FLAG	;Are they doing a verify?
+	BEQ	20$		;No, so nothing to do
+	SAVREG			;Get some work registers
+2$:	MOV	#<S$SIZE+3>&^C<3>,R1 ;R1 = Desired size of entry
+	CALLX	GETMEM		;Now get memory for this entry
+	BCC	8$		;Got some, good				;002
+	CALLX	CHRACT		;None, check for action routines	;002
+	MOV	#1,@#XRB	;Set up for a one second sleep		;002
+	.SLEEP			;Now do it				;002
+	BR	2$		;And try again				;002
+
+8$:	MOV	R0,@NOVTAL	;Link this entry to the end of the list	;002
+	MOV	R0,NOVTAL	;And make this the end of the list
+	CLR	(R0)+		;Now clear the link to next
+.ASSUME	S$NEXT	EQ	0
+.ASSUME	S$PPN	EQ	S$NEXT+2
+	MOV	#$CURFI+C$PPN,R1 ;R1 -> Current file @ PPN
+	MOV	#6,R2		;R2 = Number of bytes to copy PPN + NAME
+10$:	MOV	(R1)+,(R0)+	;Copy a word
+	SOB	R2,10$		;For all the words
+20$:	RETURN			;And now we're done
+
+GLOBAL	<NOVTAL>
+
+;+
+; ERWOFA - Handle error writing file action routine
+;
+;	R5 -> Action routine control block
+;		-4(R5) = Link to next
+;		-2(R5) = Our address
+;		  (R5) = PPN
+;		 2(R5) = File name.typ
+;		14(R5) = Context buffer address
+;		16(R5) = Returned error code
+;-
+
+ERWOFA:	MOVB	16(R5),R1	;R1 = Returned error code
+	MOV	#UNXWRO,R2	;Guess at restore error message
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;005
+	BEQ	10$		;No, so the error code is correct
+	MOV	#UNXVRO,R2	;Yes, so use the correct error
+	CMPB	R1,#DATERR	;Was this a verification failure?
+	BNE	10$		;No, so let it stand
+	MOV	#ERRVFD,R2	;Yes, so set the verification error code
+10$:	MOVB	(R5)+,R3	;R3 = Programmer number
+	MOVB	(R5)+,R4	;R4 = Project number, R5 -> File name
+	CMESSAGE R2,<<R4,B>,<R3,B>,#10.,R5> ;Report our error message
+	CMP	R2,#ERRVFD	;Is this a verification failure?
+	BEQ	20$		;Yes, so don't report the RSTS error code
+	CMESSAGE R1		;Report the error code
+20$:	MOV	#<<12.+8.>+3>&^C<3>,R1 ;R1 = Size of context buffer
+	SUB	#6,R5		;R5 -> Start of context buffer
+	MOV	R5,R2		;Match conventions
+	CALLRX	RETMEM		;Now exit returning the buffer
+
+GLOBAL	<DATERR,ERRVFD,UNXWRO,UNXVRO,RESSUB>				;005
+
+.SBTTL	Handle the PPN "rename" function
+
+;+						;Moved from RSTRMS	;010+
+; RENPPN - Handle the PPN "rename" function
+;
+;	$CURFI+C$PPN = PPN before rename
+;	$RESMSK+C$PPN = Rename wildcard mask
+;
+;	CALL	RENPPN
+;
+;	$CURFI+C$PPN = New PPN
+;	R1 = Undefined
+;-
+
+RENPPN::MOV	$CURFI+C$PPN,$OLDFI+C$PPN ;Copy the PPN			;023
+	MOVB	$RESMSK+C$PPN,R1 ;Pick up output programmer number
+	CMPB	R1,#377		;Is it specific?
+	BEQ	10$		;No, not this time
+	MOVB	R1,$CURFI+C$PPN	;Yes, so use it
+10$:	MOVB	$RESMSK+C$PPN+1,R1 ;Pick up output project number
+	CMPB	R1,#377		;Is it specific?
+	BEQ	20$		;No, not this time
+	MOVB	R1,$CURFI+C$PPN+1 ;Yes, so use it
+20$:	RETURN			;All done now
+
+GLOBAL	<$RESMSK,$CURFI>						;010-
+GLOBAL	<$OLDFI>							;023
+
+
+.END

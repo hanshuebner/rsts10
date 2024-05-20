@@ -1,0 +1,1645 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:LATDEF/
+.INCLUDE /CMN:KBDEF/
+.INCLUDE /CMN:FETDEF/
+TITLE	LATPRT,<LAT slot layer>,0A,10-MAY-91,SRC/DWF/KPH/JFM/DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for LATPRT
+
+;+
+;			[RSTS V9.6]
+;  000  KPH  24-Oct-87	Creation from SRC's and DWF's efforts
+;  001  KPH  07-Dec-87	Fix problems with virtual circuit flow control
+;			Fix slot count in messages when DWF is set
+;			Remove BF.VIR references
+;			Fix stop slot processing
+;  002	JFM  17-Feb-88	Change so counters use 32-bit counter routine
+;			Add start slot parsing to STRSLT
+;  003	DWF  19-Feb-88	Check recv'd messages more carefully, check
+;			start slots more carefully, clean up illegal
+;			slot processing, add autoprompt, add dialup/local
+;			detection
+;  004	JFM  03-Mar-88	Use INC32 instead of COU32
+;  005	DWF  10-Mar-88	Correct incomplete start slot transmit
+;  006	JFM  17-Mar-88	Bug fix:  Do correct parameter code check in start slot
+;  007	JFM  05-May-88	Be extra safe and look at status byte length in start 
+;			slot processing.  Servers which don't adhere to the
+;			architecture cause an infinite loop without this check.
+;  008	JFM  18-May-88	Implement fairness algorithm for output processing
+;  009	JFM  25-May-88	Store service name in upper case, fix comment in SLTDSP
+;  010	JFM  01-Jun-88	Handle modes 1 and/or 32 in XDATAB
+;
+;			[RSTS V9.7]
+;  011	JFM  07-Feb-89	Handle 0 attention slot sizes (= server doesn't support)
+;  012	JFM  27-Apr-89	Use feature bit to find out if we default to dialup or
+;			local in case no flag parameter is specified in the
+;			start slot
+;
+;			[RSTS V10.0]
+;  013	DRP  07-Nov-89	Add Solicitation support.
+;			Fix autoprompt supress bug
+;  014	DRP  09-Jan-90	Fix bugs found in code review.
+;			Moved pending close bit from S.FLAG to DDFLG3.
+;			Change Get port status routine
+;  015	JFM  19-Feb-90	Changed name of cell in DDB from DDFLG3 to TTFLG3
+;  016	DRP  17-Mar-90	Add check to KP$CON to check for LAT turned on.
+;			Fixed connection solicitation bug in STRTSLT.
+;  017	DRP  21-May-90	Fix comment in KP$LST routine.
+;			Fix bug in once a second service to exit if
+;			no circuit pointer.
+;			Check feature patch (modem/local) bit in STRSLT
+;			processing if it's an application terminal.
+;			Save some words in RIDPRM.
+;  018	DRP  04-Jun-90	Fix sign extend problem in the PROSLT routine.
+;			
+;-
+
+	DEFORG	LATPRT
+;                             
+; Dispatch Table for Slot Type Processing
+;
+; This table is offset by 8 from the slot type
+
+SLTDSP:
+	.WORD	DATAA		; Data_a slot       -  0		;009
+	.WORD	ILLSLT		; Invalid slot type -  1
+	.WORD	ILLSLT		; Invalid slot type -  2
+	.WORD	ILLSLT		; Invalid slot type -  3
+	.WORD	ILLSLT		; Invalid slot type -  4
+	.WORD	ILLSLT		; Invalid slot type -  5
+	.WORD	ILLSLT		; Invalid slot type -  6
+	.WORD	ILLSLT		; Invalid slot type -  7
+	
+	.WORD	ILLSLT		; Invalid slot type -  8 
+	.WORD	STRSLT		; Start slot        -  9
+	.WORD	DATAB		; Data_b slot       - 10
+	.WORD	ATTN		; Attention slot    - 11
+	.WORD	ILLSLT		; Reject slot       - 12 (Only sent by host!) 
+	.WORD	STPSLT		; Stop slot         - 13
+	.WORD	ILLSLT		; Start slot 16 bit - 14
+	.WORD	ILLSLT		; Invalid slot type - 15
+
+;
+; Dispatch table for Start Slot Parameter Code dispatching		;002
+;
+
+
+PRMDSP:									;002
+	.WORD	ENDPRM		; Code 0 = end of parameter list	;002
+	.WORD	FLGPRM		; Code 1 = Flag word parameter		;003
+	.WORD	SKIPRM		; Code 2 = Request Id (Preprocessed)	;014
+	.WORD	SKIPRM		; Code 3 = reserved			;002
+	.WORD	SKIPRM		; Code 4 = reserved			;002
+	.WORD	PRTPRM		; Code 5 = Subject port name		;002
+	.WORD	SKIPRM		; Code 6 = reserved			;002
+	.WORD	SKIPRM		; Code 7 = reserved			;002
+PRMMAX	= <.-PRMDSP>/2							;002
+
+
+.SBTTL	KP$SEC	Once a second service
+;+
+; KP$SEC - Once a second service
+;
+;	C  =  0 if no hangup
+;	C  =  1 if port driver should hangup modem
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> Session block
+;
+;	Priority is Pr3
+;
+; This routine is called once a second by the class driver for port
+; specific checking.
+;-
+.ENABL	LSB
+
+	PRTENT	SEC		;Once a second service
+
+	BCC	10$		;No hangup, nothing to do
+	TST	S.CIR(R3)	;Do we have a ciruit block ->?	;017
+	BEQ	10$		;No, nothing to do		;017
+	CALL	SIGXMT		;Signal something to transmit
+	CALLRX	TTHGLN		;Exit calling hangup service
+
+10$:	RETURN			;All done here
+
+.DSABL	LSB
+
+.SBTTL	KP$ABT	Abort pending output    
+;+  
+; KP$ABT - Abort pending output
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR (Session block)
+;
+;	Priority is PR5
+;
+; This routine is called by the class driver to abort any output
+; which has previously been issued by the class driver. We will
+; signal the need to send an abort slot.
+;-
+.ENABL	LSB
+
+	PRTENT	ABT		;;Abort pending output
+
+	BITB	#SF.ATT,S.FLAG(R3) ;;Does server support attention slots? ;011
+	BNE	10$		;; No, just return			;011
+	BISB	#SF.ABO,S.FLAG(R3) ;;Mark the need for an abort slot
+	BR	SIGXMT		;;And signal something to transmit
+
+10$:	RETURN			;;Return, without action		;011
+
+.DSABL	LSB
+
+.SBTTL	KP$PRM	Set line parameters
+;+
+; KP$PRM - Set line parameters
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R2 =  Requested parameter word  
+;	R3 -> CSR (Session block)
+;
+;	Priority is PR5
+;
+; This routine is called by the class driver to set line parameters.
+; It is used anytime the software-controllable port characteristics
+; are to be changed.
+;-         
+.ENABL	LSB
+
+	PRTENT	PRM		;;Set line parameters
+
+	TST	S.SOLB(R3)	;;Outbound LAT port?		;013
+	BEQ	10$		;;No, normal processing		;013
+	TST	S.CIR(R3)	;;Active session?		;013
+	BNE	10$		;;Yes, normal processing	;013
+	RETURN			;;Simply return			;013
+
+10$:	BISB	#SF.DAB,S.FLAG(R3) ;;Mark that we need a DATA_B slot
+	BR	SIGXMT		;;And signal that we have something to send
+
+.DSABL	LSB
+
+.SBTTL	KP$RSI	Resume input
+;+
+; KP$RSI - Resume input
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR (Session block)
+;	Priority is PR5
+;
+; This routine is called by the class driver to resume suspended input.
+; All we'll do is set the bit indicating that a Data_a slot must be sent,
+; then signal that there is something to do; the transmit code will then 
+; award credits if necessary.
+;-
+.ENABL	LSB
+                                 
+	PRTENT	RSI		;;Resume further input
+
+	BISB	#SF.DAA,S.FLAG(R3) ;;Signal a Data_a slot must be sent	;008
+	BR	SIGXMT		;;Nothing to do but signal transmit data
+
+.DSABL	LSB
+
+.SBTTL	KP$SRT	Start up output
+;+
+; KP$SRT - Start up output
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR (Session block)
+;	Priority is PR5
+;
+; This routine is called by the class driver to start up any output
+; which may have been bufferred by the port driver.
+;-
+.ENABL	LSB
+
+	PRTENT	SRT		;;Port specific routine to start output
+
+STOUTP:	CMP	DDBUFC+EP(R1),DDBUFC+FP(R1) ;;Any data to transfer?	;008
+	BEQ	20$		;;No, nothing to do			;008
+	BISB	#SF.DAA,S.FLAG(R3) ;;Signal a Data_a slot must be sent	;008
+	TSTB	S.LCRD(R3)	;;Do we have transmit data credits?	;008
+	BEQ	20$		;;No?  Get out				;008
+	.BR	SIGXMT		;;Signal that we have something to send	;008
+
+SIGXMT:	MOV	S.CIR(R3),R4	;Get pointer to circuit block
+	BIS	#CF.DWF,C.FLAG(R4) ;Indicate something to transmit
+	BITB	#SF.OUT,S.FLAG(R3) ;Is this session on output queue?	;008
+	BNE	10$		;Yes, don't link it again		;008
+.ASSUME	S.OUTL	EQ 4
+	CMP	(R3)+,(R3)+	;Point to pending tranmit link word	;008
+	MOV	R3,@C.OUTQ+2(R4);Make this session last in list		;008
+	MOV	R3,C.OUTQ+2(R4)	;Adjust tail pointer			;008
+	CLR	(R3)		;Clear link to next session in queue	;008
+	CMP	-(R3),-(R3)	;And point back to top of session block	;008
+	BISB	#SF.OUT,S.FLAG(R3) ;Set "Session on output queue" bit	;008
+
+10$:	BIT	#CF.RRF,C.FLAG(R4) ;In balanced mode?			;001
+	BNE	20$		;No, don't start the L3Q process	;008
+    	L3QSET	QLAT		;Yes, start the L3Q process for later	;003
+20$:	RETURN			;And we're done				;008
+
+.DSABL	LSB
+
+.SBTTL	KP$CON	Solicit a Connection
+;+									;013
+; KP$CON - Solicit a Connection
+;
+; Inputs:
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR (Session Block)
+;	Priority is 3
+;
+; Outputs:
+;	All registers preserved
+;
+; This routine is called when an application terminal is opened
+; or allocated. The routine first checks to make sure that it's
+; an application port by getting the address of the Solicit Block.
+; If we are dealing with an application port, we then check to see
+; if a session is currently active or if we're in the process of
+; closing the port.
+;
+; If a session is active and we're not in the process of closing
+; the device, then the user is probably opening this device on another
+; channel and there's no need to solicit another connection again, we
+; have one.
+;
+; If a session is active and we're in the process of closing the device,
+; then the close is probably being delayed because of pending output
+; and therefore we can't allow the user to initiate another one until
+; the current one is finished. So, we punt and return an error to the
+; user.
+;
+; Otherwise, it's not in use so we'll call on the application driver to
+; start a solicitation.
+;-									;013
+.ENABL	LSB
+
+	PRTENT	CON
+
+	TSTB	LATCTL+L.ACT		;LAT turned on?			;016
+	BNE	5$			;Yes				;016
+	ERROR	NOTAVL			;No, let user know		;016
+
+5$:	REGSCR				;Save all registers		;013
+	MOV	S.SOLB(R3),R4		;Get the Solicit Block pointer	;013
+	BEQ	50$			;None, interactive LAT		;014
+10$:	TST	S.CIR(R3)		;Active session?		;013
+	BEQ	20$			;No, go solicit			;013
+	BITB	#CLSPND,TTFLG3(R1)	;Active, close in progress?	;015
+	BEQ	50$			;No already connected, return	;014
+	ERROR	INUSE			;Yes, can't start one yet	;013
+
+20$:	CLR	R0			;Guess at using the defaults	;013
+	BISB	TTFLG3(R1),R0		;Set user specified flags	;015
+	CALLX	SOLCON			;Solicit a connection		;013
+	BR	40$			;Go finish up			;014
+
+GLOBAL	<LATCTL>							;016
+
+.SBTTL	KP$DSC	Disconnect an Outbound LAT Session
+;+									;013
+; KP$DSC - Disconnect an Outbound LAT Session
+;
+; Inputs:
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR (Session Block)
+;	Priority is 3
+;
+; Outputs:
+;	All registers preserved
+;
+; This routine is called when an application terminal is closed.
+; The routine checks to see if the port is an application port
+; and then calls on the application driver to terminate the session.
+;-									;013
+
+	PRTENT	DSC
+
+	REGSCR				;Save all registers		;013
+	MOV	S.SOLB(R3),R4		;Get the Solicit Block pointer	;013
+	BEQ	50$			;None, interactive LAT		;014
+	TST	S.CIR(R3)		;Got one, is it active?		;013
+	BEQ	30$			;No, reset the port		;014
+	BITB	#CLSPND,TTFLG3(R1)	;Close already in progress	;015
+	BNE	50$			;Yes, nothing more to do	;014
+	BISB	#CLSPND,TTFLG3(R1)	;Show close in progress		;015
+	MOV	#2.,MODCLK(R1)		;It's active, need to hangup	;013
+	BR	50$			; and let timeouts take care	;014
+					; of it after MODCLK counts down ;013
+
+30$:	CALLX	KILSOL			;Kill any solicits in progress	;014
+40$:	MAP	TERAP6,APR=6,CODE,DATA	;Remap the class driver		;014
+50$:	RETURN				; and return			;014
+
+
+.SBTTL	KP$LST	Get a Local LAT Port's Status
+;+									;013
+; KP$LST - Get a Local LAT Port's Status
+;
+; Inputs:
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR (Session Block)
+;	Priority is 3
+;
+; Output:
+;	No registers are saved
+;
+;	C  =  0	Status = Connected					;017
+;	R0 =  0								;017
+;
+;	C  =  1	Status = Not Connected					;017
+;	R0 =  0	Connection request failed				;017
+;
+;	C  =  1	Status = Not Connected					;017
+;	R0 <> 0 Connection in progress					;017
+;
+; This routine is called when a .WRITE is issued for an application 
+; terminal. The routine returns the status of the port.
+;-									;013
+
+	PRTENT	LST
+
+	MOV	S.SOLB(R3),R4		;Get the Solicit Block pointer	;013
+	BEQ	60$			;None, interactive LAT		;014
+	CALLX	SOLSTS			;Get solicit status		;013
+
+	;+
+	; On return from SOLSTS we have:
+	;	R0 = Status byte					;016
+	;-
+
+	CALL	40$			;Remap the class driver		;014
+	BITB	#SOS.CN,R0		;Connection established?	;013
+	BEQ	70$			;No, soliciting or it failed	;014
+60$:	TST	(PC)+			;Say connected (C = 0)		;014
+70$:	SEC				;Say not connected		;014
+	BICB	#<SOS.CN!SOS.ER>,R0	; and leave only solicit flags	;016
+	RETURN				;Return	to the class driver	;016
+
+.DSABL	LSB
+
+.SBTTL	PROSLT - Process slots
+;+
+; PROSLT - Process slots
+;             
+; Inputs:
+;	R1 -> Circuit Block
+;	R2 -> Pointer to first slot in message
+; 	R5 -> CCB
+;
+;-               
+.ENABL	LSB								;003
+
+10$:	CALL	ILLSLT		;We just found something illegal - tsk!	;003
+20$:	TST	(SP)+		;Dump slot count			;003
+	CALLX	SUPBFR		;Return buffer to DLL			;003
+	MOV	#ER.IVM,R3	;Reason code				;003
+	CALLRX	STPCIR		;Stop this circuit for illegal slot	;003
+
+PROSLT::MOVB 	CC.SLT(R5),-(SP) ;Save slot count in message		;001
+	BEQ	50$		;None, simply check for new transmits	;003
+	MOV	R1,CC.LLB(R5)	;Save Circuit Block address
+	MOV	#140000+BUFHDR,R0 ; Point to start of message		;003
+	ADD	@#140000+BF.CNT,R0 ; Find the end of message		;003
+30$:	CLR	R3		;Make sure the high byte is clear	;018
+	BISB	2(R2),R3	; and pick up the slot length		;018
+	ADD	#HDRLEN,R3	;Including length of slot header	;003
+	ADD	R2,R3		;Point to next slot			;003
+	INC	R3		;Align on even boundary			;003
+	BIC	#1,R3		; ...					;003
+	CMP	R3,R0		;Would we run off the end of the buffer?;003
+	BLO	40$		; No, continue processing		;003
+	CMPB	#1,(SP)		;We would?  Is this the last slot?	;003
+	BNE	10$		; Nope - bad news			;003
+
+40$:	MOV	R5,-(SP)	;Save CCB pointer			;003
+	MOV	R3,-(SP)	;Save the pointer to the next slot	;003
+	MOV	R0,-(SP)	;Save buffer end address		;003
+	MOVB	3(R2),R3	;Get slot type and credits
+	BIC	#177417,R3	;Isolate slot type
+	ASR	R3		;Shift right for table dispatch
+	ASR	R3		; ...
+	ASR	R3		; ...
+	CALL	@SLTDSP(R3)	;Dispatch to proper routine
+;
+; Registers when slot routines are called:
+; R0 -> First byte past end of Virtual Circuit buffer
+; R1 -> Circuit Block	(MUST BE PRESERVED)
+; R2 -> Slot to process
+; R3    Scratch
+; R5 -> CCB
+
+	MOV	(SP)+,R0	;Restore buffer end address		;003
+	MOV	(SP)+,R2	;Pick up pointer to next slot		;003
+	MOV	(SP)+,R5	;Restore CCB pointer			;003
+	BCS	20$		;There was an illegal slot-go handle it	;003
+	DECB	(SP)		;One less slot to process
+	BNE	30$		;Process next slot			;003
+50$:	TST	(SP)+		;Restore stack
+	CALLX	SUPBFR		;Give the buffer back to DLL
+	CALLX	XMTRTY		;Check for any re-transmissions		;001
+	.BR	XMTCHK		;Now check for transmits
+
+.DSABL	LSB
+
+.SBTTL	XMTCHK	Check for transmits
+;+
+; XMTCHK - Check for transmission on circuit
+;
+;	R1 -> Circuit block
+;-
+.ENABL	LSB
+
+XMTCHK::BIT	#CF.RRF,C.FLAG(R1) ;Are we waiting for a reply?		;001
+	BNE	150$		;Yes, nothing to transmit now		;001
+	MOV	C.CXMT(R1),R5	;Pick up transmit buffer pointer
+	BEQ	150$		;None, nothing to do			;001
+;// The above must change when we have static buffers
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ;Map the buffer
+	MOV	CC.FIL(R5),R4	;Point to I/O buffer
+	MOV	C.OUTQ(R1),R3	;Pick up first session (at S.OUTL) 	;008
+				; which has output			;008
+	BEQ	110$		;None, simply send an ACK
+	MOV	R1,R0		;Copy circuit block pointer
+
+; This is our main loop. We check each session in the order they were 	;008
+; placed in the output processing queue for the following:		;008
+;
+; 1. Sending an abort slot
+; 2. Sending a DATA_B slot
+; 3. Sending DATA_A slots (may be done multiple times)
+; 4. Sending a stop slot
+;
+;	R0 -> VCB (Virtual Circuit Block)
+;	R3 -> Session block + S.OUTL					;008
+;	R4 -> I/O buffer @ slot header (not written yet)
+;	R5 -> CCB
+
+20$:	MOV	(R3),-(SP)	;Save next session with pending transmit;008
+	MOV	(R3),C.OUTQ(R0)	;Make next session head of queue	;008
+	BNE	22$		;Branch if not last session		;008
+	MOV	R0,C.OUTQ+2(R0)	;Set up to make head pointer the tail	;008
+	ADD	#C.OUTQ,C.OUTQ+2(R0) ;Close up the list			;008
+22$:	CMP	-(R3),-(R3)	;Point to top of session block		;008
+.ASSUME	S.OUTL	EQ 4		;This assumes the link is at offset 4	;008
+	BICB	#SF.OUT,S.FLAG(R3) ;Session no longer on output queue 	;008
+
+	MOV	R0,-(SP)	;Save VCB pointer			;008
+	CALL	GETDDB		;Get DDB pointer (returns R1 -> DDB)	;008
+	MOV	(SP)+,R0	;Restore VCB pointer			;008
+
+	; Check for ABORT SLOT
+
+	BITB	#SF.ABO,S.FLAG(R3) ;Do we need to send an abort slot?
+	BEQ	30$		;No, not this time
+	CALL	XABORT		;Yes, send an abort slot
+	BCS	90$		;Buffer full, get out
+
+30$:	; Check for DATA_B SLOT
+
+	BITB	#SF.DAB,S.FLAG(R3) ;Need to send a DATA_B slot?
+	BEQ	40$		;No, not this time
+	TSTB	S.LCRD(R3)	;Yes, but do we have any credits?
+	BEQ	40$		;No, don't send the slot
+	CALL	XDATAB		;Yes, send a DATA_B slot
+	BCS	90$		;No room, get out    
+
+40$:	; Check for DATA_A SLOT
+
+	BITB	#SF.DAA,S.FLAG(R3);Do we need to send a Data_a slot?	;008
+	BEQ	70$		;Skip next part if we don't		;008
+	BIT	#TTXOFF,DDFLAG(R1) ;Is input stopped?
+	BNE	50$		;Yes, send DATA_A slots only for data
+	CMPB	S.RCRD(R3),#MAXCRD ;No, up to maximum credits?
+	BLO	60$		;No, send a DATA_A slot
+50$:	CMP	DDBUFC+EP(R1),DDBUFC+FP(R1) ;Any data to transfer?
+	BEQ	70$		;No, nothing to do
+	TSTB	S.LCRD(R3)	;Do we have any credits?
+	BEQ	70$		;No, don't send anything
+60$:	CALL	XDATAA		;Transmit the DATA_A slot
+	BCS	90$		;Buffer full, get out
+	BR	50$		;Loop in case there is more data
+
+70$:	TST	MODCLK(R1)	;Session awaiting disconnect?
+.ASSUME	TTDSBL	EQ	100000
+	BPL	80$		;No, not this time
+	CMP	DDBUFC+EP(R1),DDBUFC+FP(R1) ;Yes, more data to transfer?
+	BNE	80$		;Yes, don't disconnect yet
+	CALL	XSTOP		;No, send a disconnect slot
+	BCS	90$		;No room, get out
+	MOV	R0,R1		;Stopped it, match conventions
+	CALL	REMSES		;And remove the session
+80$:	MOV	(SP)+,R3	;Restore next session in pending xmt que;008
+	BNE	20$		;And loop until we're done
+
+	BIC	#CF.DWF,C.FLAG(R0) ;Indicate nothing more to transmit
+	BR	100$		;And we're done
+                         
+; If we get here, then we ran out of room while assembling slots.
+; We won't clear out the CF.DWF bit, which will cause us to try
+; more transmits later.
+
+90$:	MOV	R4,(SP)		;Save data ptr, destroying session link	;008
+	CALL	SIGXMT		;Put session at *end* of output queue	;008
+	MOV	(SP)+,R4	;Restore R4				;008
+
+; All slots have been assembled, so we'll send it out now.
+;
+;	R0 -> Circuit block
+;	R4 -> Data buffer past all slots
+;	R5 -> CCB
+        
+100$:	MOV	R0,R1		;Match conventions
+110$:	SUB	#140000+BUFHDR,R4 ;Calculate data length		;001
+	MOV	R4,@#140000+BF.CNT ;Set the message length
+	MOV	#140000+BUFHDR+<EP.SIZ-2>,R4 ;Point to message header
+	MOVB	#MT.RUN,(R4)+	;Fill in message header
+	MOVB	CC.SLT(R5),R2	;Get slot count in message		;001
+	BNE	120$		;Have some, always set RRF		;001
+	BIT	#CF.DWF,C.FLAG(R1) ;Anything more to transmit?
+	BNE	120$		;Yes, request a response
+	TST	C.XMTQ(R1)	;Do we already have a transmit going?	;001
+	BEQ	130$		;No, so no need for RRF			;001
+120$:	BISB	#BIT00,-1(R4)	;Indicate that we wanted a response
+	BISB	#CF.RRF,C.FLAG(R1) ;Save the fact we set it
+130$:	MOVB	R2,(R4)+	;Set the slot count in the message
+	CLR	C.CXMT(R1)	;Dump the transmit buffer pointer
+	CALLRX	XMTMSG		;And transmit our message
+
+150$:	RETURN			;All done here - no buffer available
+
+.DSABL	LSB
+
+.SBTTL	XABORT	Send attention slot to abort output
+;+              
+; XABORT - Send attention slot to abort output
+;
+; Inputs:
+;	R0 -> Circuit block
+;	R1 -> DDB
+;	R3 -> Session block
+;	R4 -> Slot buffer
+;	R5 -> CCB
+;
+; Format:
+;	CALL	XABORT
+;
+; Outputs:
+;	R2 =  Undefined
+;
+;	C = 0 if message sent
+;	C = 1 if no room for slot buffer
+;-
+.ENABL	LSB
+
+XABORT:	MOV	R4,R2		;Make a copy of buffer pointer
+	ADD	#HDRLEN+ATNLEN+1,R2 ;Point to where header will end
+.ASSUME	<ATNLEN&1> EQ 1
+	CMP	C.BEND(R0),R2	;Room for another slot?
+	BLO	10$		;No, all done here (C=1)
+	MOVB	S.RSID(R3),(R4)+ ;Fill in remote slot ID
+	MOVB	S.LSID(R3),(R4)+ ;Fill in source ID 
+	MOVB	#ATNLEN,(R4)+	;Length of slot data
+	MOVB	#ST.ATT,(R4)+	;Set in slot type code
+	MOVB	#AT.ABO,(R4)+	;Set abort bit
+	CLRB	(R4)+		;Put on even boundary (C=0)
+.ASSUME	ATNLEN	EQ	1
+	INCB	CC.SLT(R5)	;Show another slot in buffer
+	BICB	#SF.ABO,S.FLAG(R3) ;Indicate abort was sent out
+10$:	RETURN			;All done here
+
+.DSABL	LSB
+
+.SBTTL	XDATAA	Transmit a DATA_A slot
+;+
+; XDATAA - Transmit a DATA_A slot
+;
+; Inputs:
+;	R0 -> Circuit block
+;	R1 -> DDB
+;	R3 -> Session block
+;	R4 -> Slot buffer
+;	R5 -> CCB
+;
+; Format:
+;	CALL	XDATAA
+;
+; Outputs:
+;	R2 =  Undefined
+;	R4 -> Past assembled slots
+;
+;	C = 0 if successful
+;	C = 1 if slot not written due to lack of room
+;
+; Description:
+; 	This routine assembles DATA_A slots, fetching input data from
+; 	the output buffer chain, and moving it into the slot buffer.
+; 	Additionally, this routine is used to give credits to the
+; 	terminal server.
+;-
+
+XDATAA:	MOV	R4,R2		;Make a copy of buffer pointer
+	ADD	#HDRLEN,R2	;Point to where header will end
+	CMP	C.BEND(R0),R2	;Room for another slot?
+	BLO	50$		;No, all done here (C=1)
+	MOVB	S.RSID(R3),(R4)+ ;Store the remote ID for the session
+	MOVB	S.LSID(R3),(R4)+ ;And the local ID for the session
+	MOV	R4,-(SP)	;Save pointer to slot byte count
+	CLRB	(R4)+		;And clear it out initially
+ 
+; Now we'll figure out how many credits to give to the terminal server.
+; If the terminal driver has told us to stop input, we won't grant
+; any credits. Otherwise, we'll give them enough credits to get MAXCRD
+; worth of credits.
+;                                                       
+; Note that it would be better to use the value of TTINPT+BC instead
+; of the constant MAXCRD. If you do this, also change SLTSIZ to be
+; 28. bytes (the size of an input buffer). This will cause the
+; terminal server buffering policy to track our buffer policy,
+; at the cost of smaller input slots (not really a problem, though,
+; unless they are doing file transfers.)
+
+	CLR	R2		;Guess at not granting credits
+	BIT	#TTXOFF,DDFLAG(R1) ;Is input stopped?
+	BNE	10$		;Yes, don't give any credits
+	MOV	#MAXCRD,R2	;Get maximum credits we allow
+	CLR	-(SP)		;Prepare to get credits we've given
+	MOVB	S.RCRD(R3),(SP) ;Now pick it up
+	MOVB	R2,S.RCRD(R3)	;And update the count in session block
+	SUB	(SP)+,R2	;Now get credits to grant
+10$:	MOVB	R2,(R4)+	;Set number of credits (and DATA_A message)
+	TSTB	S.LCRD(R3)	;Do we have any credits?
+	BEQ	30$		;No, not this time
+20$:	CMP	R4,C.BEND(R0)	;Are we at the buffer end?
+	BEQ	30$		;Yes, go finish up
+	CMPB	@0(SP),S.SLSZ(R3) ;Any more room for this slot?
+	BEQ	30$		;No, all done here
+	MOV	R4,-(SP)	;Save message pointer
+	CALLX	FETCH,R5,DDBUFC+EP ;Get a byte of output
+	MOV	(SP)+,R4	;Restore message pointer
+	BCS	29$		;Done, on to the next step		;008
+	MOVB	R2,(R4)+	;Got a byte, store it
+	INCB	@0(SP)		;And update slot byte count
+	BR	20$		;And loop
+
+; We've finished assembling the DATA_A slot, so we'll finish off the
+; slot and notify the terminal driver that we moved some data.
+;
+;	R0 -> Circuit block
+;	R1 -> DDB
+;	R3 -> Session block
+;	R4 -> Slot buffer
+;	R5 -> CCB
+
+29$:	BICB	#SF.DAA,S.FLAG(R3) ;Data_a slot does not need to be sent;008
+30$:	INC	R4		;Be sure that the slot pointer is even
+	BIC	#1,R4		; ...
+	INCB	CC.SLT(R5)	;Indicate another slot in buffer
+	TSTB	@(SP)+		;Did we write out any data?
+	BEQ	40$		;No, not this time
+	DECB	S.LCRD(R3)	;Yes, one less credit here
+	MOV	R0,-(SP)	;Save circuit block pointer
+	MOV	R4,-(SP)	;And slot pointer
+	MOVB	DDUNT(R1),R0	;Pick up unit of keyboard
+	ASL	R0		;Now make that unit # * 2
+	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver
+	CALLX	TTSJST		;And indicate we output some data
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ;Restore APR6 mapping
+	MOV	(SP)+,R4	;Restore slot pointer
+	MOV	(SP)+,R0	;Restore circuit block pointer
+40$:	CLC			;Indicate success
+50$:	RETURN			;And we're done
+
+.SBTTL	XDATAB	Transmit a DATA_B slot
+;+
+; XDATAB - Transmit a DATA_B slot
+;
+; Inputs:
+;	R0 -> Circuit block
+;	R1 -> DDB
+;	R3 -> Session block
+;	R4 -> Slot buffer
+;	R5 -> CCB
+;
+; Format:
+;	CALL	XDATAB
+;
+; Outputs:
+;	R2 =  Undefined
+;	R4 -> Past assembled slot 
+;
+;	C = 0 if successful
+;	C = 1 if slot not written due to lack of room
+;
+; Description:
+; 	This routine assembles data_b slots.  When we reach here, it 	;010
+; 	is primarily because somebody opened the terminal, and we want	;010
+;	to let the server know about this change.  Even if that is 	;010
+;	not the reason why we're called, it's okay to assemble a data_b ;010
+;	slot anyway.							;010
+;-
+.ENABL	LSB
+
+XDATAB:	MOV	R4,R2		; Make a copy of buffer pointer
+	ADD	#HDRLEN+DABLEN+9.,R2 ;Point to where slot will end	;010
+	CMP	C.BEND(R0),R2	; Room for this slot?
+	BLO	20$		; No, all done here (C=1)
+
+	MOVB	S.RSID(R3),(R4)+ ;Store the remote ID for the session	;010
+	MOVB	S.LSID(R3),(R4)+ ;And the local ID for the session	;010
+	MOVB	#9.,(R4)+	; Indicate length of slot_data field	;010
+	MOVB	#ST.DTB+0,(R4)+	; Indicate data_b slot type, 0 credits	;010
+
+	; This starts the beginning of the SLOT_DATA field		;010
+
+	MOVB	#BIT05,(R4)+ 	; Store control flags, parameter change	;010
+	MOVB	#XONOUT,(R4)+	; Store stop output channel character	;010
+	MOVB	#XOFOUT,(R4)+	; Store start output channel character	;010
+	MOVB	#XONIN,(R4)+	; Store stop input channel character	;010
+	MOVB	#XOFIN,(R4)+	; Store start input channel character	;010
+
+	; Set open mode							;010
+
+	MOVB	#5,(R4)+	; Indicate change in mode		;010
+	MOVB	#1,(R4)+	; Length of 1 byte			;010
+	CLRB	(R4)		; Assume NORMAL mode			;010
+	BIT	#TTBIN,TTMODE(R1); Is mode 1 (binary mode) set?		;010
+	BEQ	10$		; No, normal mode it is			;010
+	INCB	(R4)		; Yes, now let's assume PASSALL		;010
+	BIT	#TTPCOL,TTMODE(R1); Is mode 32 (enable XON/XOFF) set?	;010
+	BEQ	10$		; No, passall mode it is		;010
+	INCB	(R4)		; Yes, then it's PASSTHRU		;010
+10$:	INC	R4		; Finished playing around with mode	;010
+
+	; Finish up							;010
+
+	CLRB	(R4)+		; Parameter code 0 = end of parameters	;010
+
+; We've finished assembling the DATA_B slot, so we'll finish off the	;010
+; slot and return							;010
+;
+;	R0 -> Circuit block
+;	R1 -> DDB
+;	R3 -> Session block
+;	R4 -> Slot buffer
+;	R5 -> CCB
+
+	INC	R4		; Be sure that the slot pointer is even	;010
+	BIC	#1,R4		;  ...					;010
+	INCB	CC.SLT(R5)	; Indicate another slot in buffer	;010
+	DECB	S.LCRD(R3)	; Yes, one less credit here		;010
+	BICB	#SF.DAB,S.FLAG(R3) ;Data_B slot does not need to be sent;010
+	CLC			; Indicate success
+20$:	RETURN			; And we're done
+
+.DSABL	LSB
+
+.SBTTL	XSTOP	Transmit a stop slot
+;+
+; XSTOP - Transmit a stop slot
+;
+; Inputs:
+;	R0 -> Circuit block
+;	R1 -> DDB
+;	R3 -> Session block
+;	R4 -> Slot buffer
+;	R5 -> CCB
+;
+; Format:
+;	CALL	XSTOP
+;
+; Outputs:
+;	R2 =  Undefined
+;	R4 -> Past assembled slots
+;       
+;	C = 0 if successful
+;	C = 1 if slot not written due to lack of room
+;
+;-
+.ENABL	LSB
+
+XSTOP:	MOV	R4,R2		;Make a copy of buffer pointer
+	ADD	#STPLEN,R2	;Point to where header will end
+	CMP	C.BEND(R0),R2	;Room for another slot?
+	BLO	10$		;No, all done here (C=1)
+	MOVB	S.RSID(R3),(R4)+ ;Fill in remote slot ID		;001
+	CLRB	(R4)+		;Source ID must be zero!
+	CLRB  	(R4)+		;No status byte count (C=0)
+	MOVB	#ST.STP!ER.URD,(R4)+ ;Reason is user requested disconnect
+	INCB	CC.SLT(R5)	;Show one more slot in buffer
+10$:	RETURN			;All done here
+
+.DSABL	LSB
+
+.SBTTL	ILLSLT - Illegal slot processing
+;+
+; ILLSLT - Illegal slot processing
+;
+; Inputs:
+; 	R1 -> Circuit block
+;
+; Description:
+; 	This routine will simply count the illegal slot, and indicate
+; 	failure to PROSLT (C=1).
+;
+;-
+.ENABL	LSB
+
+ILLSLT:	MOV	#LATCTL,R3	; Point to LAT control region		;002
+	CALLX	INC32,R1,L.ILLS	; Increment number of illegal slots	;004
+	SEC			; Indicate failure			;003
+	RETURN			; PROSLT will stop the circuit		;003
+
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	REJECT	Reject a slot
+;+
+; REJECT - Reject a slot
+;
+;	R1 -> Circuit block
+;	R2 -> Message header of start slot
+;	R3 =  Reject code ! ST.REJ
+;	R5 -> CCB
+;-
+.ENABL	LSB
+
+REJECT:
+; // Check for enough room in buffer
+	MOVB	1(R2),R4	;Pick up source slot ID for turnaround
+	MAP	PUSH,APR=6,DATA	;And save APR6 mapping
+	MOV	C.CXMT(R1),R5	;Pick up transmit CCB
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ;And map it
+	INCB	CC.SLT(R5)	;One more slot in message   	
+	MOV	CC.FIL(R5),R0	;Get buffer pointer
+	MOVB	R4,(R0)+	;Set the destination slot ID
+;
+; The contents of the SRC_SLT_ID is still under debate. Currently, the
+; PLATO version of server must see a zero, so we have changed the code
+; in order to comply.
+;	MOVB	#-1,(R0)+	;ID from us
+	CLRB	(R0)+		;No ID from us
+	CLRB	(R0)+		;No status field count
+	MOVB	R3,(R0)		;Set in reason code for reject
+	MOV	R0,CC.FIL(R5)	;Save fill pointer for next time
+	MAP	POP,DATA,APR=6	;Restore receive buffer mapping      
+	;CLC			;Legal slot (C clear from CLRB above)	;003
+	RETURN			;Process next slot
+
+.DSABL	LSB
+
+.SBTTL	STRSLT - Start slot processing
+;+
+; STRSLT - Start slot processing
+;
+; Inputs:             
+;	R1 -> Circuit Block
+;	R2 -> Slot header
+;	R5 -> Receive CCB
+;
+; Description:
+;	Note that the Virtual Circuit Layer currently guarantees that
+;	the current transmit buffer is "fresh" when PROSLT is entered.
+;	This means that STRSLT will always be able to place rejects
+;	and start acknowledgments in that buffer for transmitting
+;	to the terminal server.  If that assumption changes, life
+;	will become much more difficult. . .
+;-
+.ENABL	LSB
+
+STRSLT:	MOV	#ST.REJ!ER.INV,R3 ;Assume invalid slot
+	TSTB	(R2)		;Is the destination slot zero?
+	BNE	REJECT		;Invalid, reject the connection
+	MOV	#ST.REJ!ER.CLS,R3 ;Assume invalid class
+	CMPB	#SC.ONE,4(R2)	;Make sure it is service class one   
+	BNE	REJECT		;It isn't, give an error
+	CMPB	2(R2),#6	;Slot long enough for a valid START?	;005
+	BLO	REJECT		; No, reject it				;003
+.ASSUME	ATNLEN	EQ 1		;Use next 4 lines if assumption changes	;011
+;	CMPB	5(R2),#ATNLEN	;Can this server handle our ATN slot?	;011
+;	BHIS	5$		;Yes, no problem			;011
+;	TSTB	5(R2)		;Zero (server doesn't support them?)	;011
+;	BNE	REJECT		;No, then we must reject the slot	;011
+5$:	CMPB	6(R2),#DABLEN	;Ok, but can it handle our DATA_B?	;011
+	BLO	REJECT		; No, so reject it			;003
+	MOV	R1,-(SP)	;Save circuit block pointer		;013
+	CALL	PRESCN		;Prescan slot for parm 2 data (solicit)	;014
+	BCC	6$		;Start slot not result of solicit	;014
+	TST	R3		;Solicited request, is it valid?	;014
+	BNE	8$		;No, go reject the slot			;014
+	BR	12$		;Valid, skip KB creation		;014
+				; R1 -> KB DDB				;014
+				; R4 -> Session Block			;014
+
+6$:	MOV	#ST.REJ!ER.CLS,R3 ;Assume invalid class			;013
+	TSTB	7(R2)		;Was a service name specified?		;013
+	BEQ	8$		; No - a null service name is illegal	;013
+	MOV	R2,-(SP)	;And slot header pointer
+	MOV	#S.LEN,R1	;Get size of session block
+	CALLM	CREKBD,KBDAP5	;And create a new terminal
+	MOV	(SP)+,R2	;Restore slot header pointer
+	BCC	10$		;It worked, great!
+	MOV	#ST.REJ!ER.INS,R3 ;Set insufficient resources
+8$:	MOV	(SP)+,R1	;Failed, restore circuit block pointer	;013
+	BR	REJECT		;And reject the connection
+
+10$:	CLR	S.SOLB(R4)	;Not a solicited connection		;013
+	MOV	#TTLT11,TTINTF(R1) ;Set as a (local) LAT terminal 	;012
+12$:	TSTFET	FB.LOC,FETPAT	;Do we assume LAT lines are local?	;017
+	BNE	14$		;Yes					;017
+	BIS	#TTMODM,TTINTF(R1) ;No, assume terminal is dialup 	;012
+14$:	MOV	(SP),R0		;Restore circuit block pointer		;017
+	MOV	R4,(SP)		; Save DDB extension (=session block)	;013
+	MOV	R4,@C.SESQ+2(R0) ;Que block on session queue
+	MOV	R4,C.SESQ+2(R0)	; ...
+	BIC	#CF.VIR,C.FLAG(R0) ;Indicate that link has been used
+	CLR	(R4)+		;Clear out link to next
+.ASSUME	S.LNK	EQ	0
+	MOV	R0,(R4)+	;Set link to circuit block
+.ASSUME	S.CIR	EQ	S.LNK+2
+	CLR	(R4)+		;Clear link to next session on output queue ;008
+.ASSUME	S.OUTL	EQ	S.CIR+2
+	TST	(R4)+		;Skip over Solicit Block ->		;014
+	MOVB	DDUNT(R1),(R4)+	;Set KB # as slot ID
+.ASSUME	S.LSID	EQ	S.SOLB+2					;014
+	INC	R2		;And skip that field in message
+	MOVB	(R2)+,(R4)+	;Save remote slot ID
+.ASSUME	S.RSID	EQ	S.LSID+1
+	CLR	R3		; Clear high byte			;007
+	BISB	(R2)+,R3	; Get status byte count (chk'd earlier)	;007
+	MOVB	(R2)+,(R4)	;Set number of local credits         
+.ASSUME	S.LCRD	EQ	S.RSID+1
+	BICB	#^C<CREDIT>,(R4)+ ;Clear Slot type
+	MOVB	#MAXCRD,(R4)+	;Indicate remote credits granted (done below)
+.ASSUME	S.RCRD	EQ	S.LCRD+1
+	MOVB	2(R2),(R4)+	;Set maximum slot size
+.ASSUME	S.SLSZ	EQ	S.RCRD+1
+	CLRB	(R4)+		;Clear out the flags
+	TSTB	1(R2)		;Check MIN_ATT_SLOT_SIZ			;011
+	BNE	15$		;Non-zero, nothing special		;011
+	BISB	#SF.ATT,-1(R4)	;Set attention bit in session flag	;011
+
+.ASSUME	S.FLAG	EQ	S.SLSZ+1
+15$:	ADD	R2,R3		; Calculate end of start slot		;007
+	DEC	R3		; Make it last byte in message		;007
+
+; R2 -> Start of Status field (SERVICE_CLASS)				;002
+; R3 =  Last byte used in the start slot.  After this address every-	;007
+;	thing is unpredictable.  This is more or less a sanity check,	;007
+;	because the protocol says that the parameter code 0 marks 	;007
+;	the end of the parameter code list.  However, LAT-11 does	;007
+;	not adhere to this protocol.  It uses the status byte count	;007
+;	to mark the end of the start slot.  So to avoid possibly 	;007
+;	hanging the system, we'll check for a parameter code of zero,	;007
+;	or the end of the start slot using the status byte count to 	;007
+;	mark the end of the message.					;007
+; R4 -> Byte after S.FLAG, which is S.SLEN				;002
+
+	ADD	#3,R2		; Point to OBJ_SRVC_LEN			;002
+	MOVB	(R2)+,R5	; Get OBJ_SRVC_LEN			;002
+.ASSUME	S.SLEN	EQ S.FLAG+1
+	MOVB	R5,(R4)+	; Copy the length into session block	;002
+.ASSUME	S.SRVC	EQ S.SLEN+1						;002
+	TST	R5		; Any service name?			;013
+	BEQ	25$		; No, nothing to move			;013
+	MOV	R1,-(SP)	; Save R1				;009
+
+20$:	MOVB	(R2)+,R1	; Get character in service name		;009
+	CALLX	UPCASE		; Upper case the character		;009
+	MOVB	R1,(R4)+	; Put character into service block	;009
+	SOB	R5,20$		; ... until all characters copied	;002
+
+	MOV	(SP)+,R1	; Restore R1				;009
+25$:	MOVB	(R2)+,R5	; Get length ...			;013
+	ADD	R5,R2		;  and skip over SUBJ_DSCR field	;002
+
+;+
+; At this point, R2 -> the first parameter code.  We parse		;002
+; the codes using the PRMDSP dispatch table.  When the			;002
+; parameter code is zero, there are no more parameters to		;002
+; look at.								;002
+;
+; Note that we rejected the start slot if the status byte count		;007
+; was not at least 6.  This ensures us that there is at least		;007
+; one parameter code, even if it is 0.					;007
+;-
+
+	MOV	(SP),R4		; Get pointer to the session block.	;007
+	CLRB	S.PLEN(R4)	; Clear Port Name field, assume none	;013
+30$:	MOVB	(R2)+,R5	; Get parameter code			;002
+	CMP	R5,#PRMMAX	; Is code one of users (in range 8-255) ;002
+	BHIS	40$		; Skip this code if it is		;006
+	ASL	R5		; Make code word offset			;002
+	CALL	@PRMDSP(R5)	; Call parameter parser			;002
+	BCC	30$		; Continue parsing if we are not at end ;002
+	BR	50$		; All done, continue on			;016
+
+40$:	CALL	SKIPRM		; This is one of the users, skip it	;002
+	BCC	30$		; Try next parameter code if more	;007
+	.BR	50$		; Continue on if no more parameters	;016
+
+
+; At this point, we have filled in the complete slot header. The next
+; thing to do is to build a start slot in the buffer.
+;
+; R0 -> Circuit block
+; R1 -> DDB
+; R2 =  undefined
+; R3 -> End of message
+; R4 =  undefined
+; R5 -> Message CCB
+;									;014
+; (SP) = Session Block ->						;014
+
+50$:	MOV	(SP)+,R3	; Get session block pointer		;016
+	TST	S.SOLB(R3)	; Solicited connection?			;016
+	BEQ	60$		; No, inbound connection		;016
+	BISB	#SF.DAB,S.FLAG(R3) ; Send a DATA_B slot			;016
+	BR	80$		;   and don't invoke login		;016
+
+60$:	TSTB	S.FLAG(R3)	; Does this user want autoprompt?	;016
+	BMI	80$		; No, skip				;003
+.ASSUME	SF.AUT EQ 200							;003
+	REGSAV			; Save the world (somebody has to)	;003
+	MOVB	DDUNT(R1),R0	; Pick up the unit number of the KB	;003
+	ASL	R0		;  and make it times 2			;003
+	MOV	#15,R2		; Set up a carriage return		;003
+	MAP	PUSH,APR=6,DATA ;Save DPAR6 mapping			;003
+	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver		;003
+	SPLC	5		; Raise to driver priority		;003
+	CALLX	TTIN09		;; Force a carriage return as input	;003
+	SPLC	3		;; Back to level 3			;003
+	MAP	POP,APR=6,DATA	;Restore DPAR6 mapping			;003
+	REGRES			; Restore the world			;003
+80$:	MAP	PUSH,DATA,APR=6	;Save current APR6 mapping		;003
+	MOV	R0,R1		;Get back circuit block pointer
+	MOV	C.CXMT(R1),R5	;Get the transmit CCB
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ;Map the buffer           
+	INCB	CC.SLT(R5)	;One more slot in message	
+	MOV	CC.FIL(R5),R0	;Point to beginning of slot	
+	MOVB	S.RSID(R3),(R0)+ ;Create a start message
+	MOVB	S.LSID(R3),(R0)+ ; ...
+	MOVB	#6,(R0)+	; Send six status bytes for now		;005
+	MOVB	#ST.STR!MAXCRD,(R0)+ ;Start message type with max credits
+	MOVB	#SC.ONE,(R0)+	;Service class one only!!!
+	MOVB	#SLTSIZ,(R0)+	;Attention slot size
+	MOVB	#SLTSIZ,(R0)+	;Slot size
+	CLRB	(R0)+		;Zero Object Service length		;005
+	CLRB	(R0)+		;Zero Subject Descriptor length		;005
+	CLRB	(R0)+		;Parameter code 0 is the end of the list;005
+	MOV	R0,CC.FIL(R5)	;Update buffer pointer		     
+	MAP	POP,DATA,APR=6	;Restore APR6 mapping          
+	CLC			;Legal slot				;014
+	RETURN			;Process next slot
+
+.DSABL	LSB
+
+GLOBAL	<FETPAT>							;012
+
+;+									;014
+; PRESCN - Prescan the Start Slot for Data Type 2
+;
+; Inputs:
+;	R2 -> Slot header
+;
+; Outputs:
+;	R0 =  Keyboard # * 2						;016
+;	R1 -> DDB (If parameter 2 data; otherwise random)
+;	R2 -> Preserved
+;	R3 =  Reject reson code; otherwise 0
+;	R4 -> Session Block (If parameter 2 data; otherwise random)
+;	R5 =  Preserved
+;
+;	C  =  0 - No data type 2 found
+;	C  =  1 - Data type 2 found
+;
+; This routine is called by STRSLT to prescan and process any parameter
+; 2 type data. Parameter 2 type data is how the server tells us this
+; start slot is the result of a solicited request and the data portion
+; contains our REQUEST_ID. If this start slot is the result of a solicited
+; request, we already have a DDB and Session Block and therefore do not
+; need to allocate these structures in STRSLT.
+;-
+
+.ENABL	LSB
+
+PRESCN:	PUSH	<R2,R5>		; Get a couple of scratch registers	;014
+
+	; The first order of business is to calculate the ending	;014
+	; address of this start slot.					;014
+
+	ADD	#2,R2		; R2 -> STATUS_BYTE_COUNT		;014
+	CLR	R3		; Make sure the high byte is cleared	;014
+	BISB	(R2)+,R3	; Get the byte count			;014
+	ADD	R2,R3		; Calculate the end of this slot	;014
+
+	; The next thing we need to do is to create a pointer to	;014
+	; the parameter list in the slot jumping over some variable	;014
+	; length fields.						;014
+
+	ADD	#4,R2		; R2 -> OBJ_SRVC_LEN			;014
+	MOVB	(R2)+,R5	; Get the length			;014
+	ADD	R5,R2		; R2 -> SUBJ_DSCR_LEN			;014
+	MOVB	(R2)+,R5	; Get the length			;014
+	ADD	R5,R2		; R2 ->	Parameter list			;014
+
+	; At this point we're pointing at the first parameter code	;014
+	; in the list. If the code is a 2, then we'll call RIDPRM	;014
+	; to process it. Otherwise, we'll skip the code and keep	;014
+	; searching until we reach the end.				;014
+
+10$:	MOVB	(R2)+,R5	; Get the parameter code		;014
+	BEQ	30$		; No more, no type 2 in this message	;014
+	CMP	#2,R5		; Type 2?				;014
+	BNE	20$		; No, skip this one			;014
+	CALL	RIDPRM		; Yes, process it			;014
+	BR	40$		;
+
+20$:	CALL	SKIPRM		; No, skip this one			;014
+	BCC	10$		; Continue searching if not at end	;014
+30$:	TST	(PC)+		; Indicate no type 2 found (C=0)	;014
+40$:	SEC			; Indicate type 2 data found		;014
+	POP	<R5,R2>		; Restore the saved scratch registers	;014
+	RETURN			;  and return to our caller		;014
+
+.DSABL	LSB
+
+.SBTTL	Start Slot Parameter code handlers
+;+
+; Start Slot Parameter code handlers
+;
+; The following routines parse entities in the start slot.		;002
+;
+; Input to each routine:
+;	R2 -> parameter length, followed by the parameter data		;007
+;	R3 -> Last byte used in the start slot				;007
+;
+; Output from each routine:						;007
+; 	R2 -> Next parameter code (the byte following			;014
+;	      PARAM_DATA plus PARAM_LEN).				;014
+;	R3 =  Last byte used in the start slot;				;014
+;	        except for RIDPRM - reject reason or 0			;014
+;									;014
+;	C = 0 - If this is not the last parameter.			;014
+;	C = 1 - Carry will be set for one of the following reason:	;014
+;		  1. We processed the last parameter in the start slot.	;014
+;		  2. If the parameter code is 0.			;014
+;-
+
+.ENABL	LSB
+
+SKIPRM:	MOVB	(R2)+,R5	; Get parameter length			;002
+	ADD	R5,R2		; Add the length to the buffer pointer	;002
+	CMP	R3,R2		; Set C if this is the last parameter	;007
+	RETURN			; Return with status			;007
+
+ENDPRM:	SEC			; Indicate the end of the parameter list;002
+	RETURN			; Return with carry set			;002
+
+PRTPRM:	MOV	R4,-(SP)	; Save the Session Block ->		;013
+	ADD	#S.PLEN,R4	; Point at the port length		;013
+	MOVB	(R2)+,R5	; Get port name length.  		;002
+	MOVB	R5,(R4)+	; Set length in session block.  	;002
+	BEQ	20$		; Return if no length 			;002
+10$:	MOVB	(R2)+,(R4)+	; Copy port name			;002
+	SOB	R5,10$		; ... until all characters copied	;002
+20$:	CMP	R3,R2		; Set C if this is the last parameter	;007
+	MOV	(SP)+,R4	; Restore the Session Block -> (C saved) ;013
+	RETURN			; Return with status			;007
+
+FLGPRM:	CLR	-(SP)		; Clear out high byte			;003
+	BISB	(R2)+,(SP)	; Pick up parameter length		;003
+	BIS	#TTMODM,TTINTF(R1) ;Assume flag indicates dialup	;012
+	BITB	#1,(R2)		; Does it?				;012
+	BNE	30$		; Yes, move on				;003
+	BIC	#TTMODM,TTINTF(R1) ; Tell the driver this is local	;003
+30$:	BITB	#2,(R2)		; Does this user want autoprompt?	;003
+	BEQ	40$		; Yes, move on				;003
+	BISB	#SF.AUT,S.FLAG(R4) ;Set the autoprompt supression flag	;013
+40$:	ADD	(SP)+,R2	; Point to the next parameter		;003
+	CMP	R3,R2		; Set C if this is the last parameter	;007
+	RETURN			; Return with status			;007
+
+RIDPRM:	CMPB	#2,(R2)+	; Length must = 2 bytes			;014
+	BEQ	50$		; It's a legal length			;014
+	MOV	#ST.REJ!ER.INV,R3 ; Say its an invalid slot		;014
+	BR	90$		;  and return				;014
+
+50$:	MAP	PUSH,APR=6,DATA	; Preserve APR 6 data mapping		;014
+	CLR	-(SP)		; Make a place to hold the ID		;014
+	BISB	(R2)+,(SP)	; Get the low byte of the ID		;014
+	BISB	(R2)+,1(SP)	;  and now the high byte		;014
+	MOV	R2,R5		; Save the slot pointer			;014
+	MOV	(SP)+,R2	; Get the Request Id			;014
+	CALLX	FNDSOL		; Now look for a match			;014
+	MOV	R5,R2		; Restore the pointer			;014
+	BCS	60$		; Not found, reject this slot		;014
+	BITB	#SOS.WS,SO.STS(R3); Are we waiting for a start slot?	;014
+	BNE	70$		; Yes, continue on			;014
+60$:	MOV	#ST.REJ!ER.SIU,R3 ; Say service is in use		;014
+	BR	85$		;  and return				;017
+
+70$:	CLR	SO.TMR(R3)	; Clear out the timer and retry count	;017
+.ASSUME	SO.RTC	EQ	SO.TMR+1					;017
+	CLR	SO.ERR(R3)	; Error code and reject reason too	;017
+.ASSUME	SO.RJR	EQ	SO.ERR+1					;017
+	CLR	SO.QUE(R3)	;  no queue position			;014
+	BICB	#SOS.WS!SOS.WR,SO.STS(R3) ; No longer waiting for a	;014
+				;   start slot or status message	;014
+	BISB	#SOS.CN,SO.STS(R3) ; Show we're connected now		;014
+	MOV	SO.CCB(R3),R5	; Any outstanding CCB?			;014
+	BEQ	80$		; No, nothing to be returned		;014
+	CALLX	COMRET		; Yes, go return it			;014
+	CLR	SO.CCB(R3)	;  and show none outstanding		;014
+80$:	MOV	SO.SES(R3),R3	; Get the Session Block pointer		;014
+	CALL	GETDDB		; Get the DDB pointer			;014
+	CALLX	IOFINI,R5,<JSTIM!JSTEL!JS.KB> ; Make the job runnable	;014
+	MOV	R3,R4		; Copy the Session Block ->		;017
+	CLR	R3		; Indicate slot not rejected		;017
+85$:	MAP	POP,APR=6,DATA	; Restore the saved APR 6 data mapping	;017
+90$:	RETURN			; Return to our caller			;014
+
+.DSABL	LSB
+
+.SBTTL	STPSLT - Stop slot processing
+;+
+; STPSLT - Stop slot processing
+; 
+; Inputs:
+;	R1 -> Circuit Block
+;	R2 -> Slot header
+;	R5 -> Receive CCB
+;
+; Outputs:
+;
+;-               
+.ENABL	LSB
+
+STPSLT: CALL	FNDSES		;Find the session block
+	BCS	10$		;None, just process the next slot
+	CALLR	REMSES		;Remove this session
+
+10$:	CLC			;A stop slot is always legal and valid	;003
+	RETURN			;And we're done
+
+.DSABL	LSB
+
+.SBTTL	DATAA - Data_a slot processing
+;+
+; DATAA - Data_a slot processing
+;   
+; Inputs:
+;	R1 -> Circuit Block
+;	R2 -> Slot header
+;	R5 -> Receive CCB
+;
+; Outputs:
+;               
+;-
+.ENABL	LSB
+
+DATAA:	CALL	DATHDR		;Check out the DATA_A/DATA_B header
+	BCS	20$		;Error or no data, get out
+
+; We have data in our DATA_A slot, and will now transfer it to the
+; terminal driver
+;
+;	R1 -> Circuit block
+;	R2 -> Slot header
+;	R3 -> Session block
+;	R5 =  Byte count
+
+	MOV	R2,R4		;Copy slot pointer
+	CMP	(R4)+,(R4)+	;Point to data itself
+.ASSUME	HDRLEN	EQ	4
+	MOV	R1,-(SP)	;Save circuit block pointer
+	MAP	PUSH,APR=6,DATA	;Save CCB mapping
+	CALL	GETDDB		;Get the DDB pointer
+10$:	CLR	R2		;Get ready to pick up character
+	BISB	(R4)+,R2	;Now pick it up (with no errors)
+	MOV	R4,-(SP)	;Save buffer pointer
+	MOV	R5,-(SP)	;And byte count
+	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver
+	SPLC	5		;Lock out interrupts
+	CALLX	TTINCH		;;And give it the slot data
+	SPLC	3		;;Enable interrupts
+	MOV	(SP)+,R5	;Restore byte count
+	MOV	(SP)+,R4	;And message pointer
+	MAP	(SP),APR=6,DATA	;Restore message buffer mapping
+	SOB	R5,10$		;Now loop for the whole thing
+	TST	(SP)+		;Dump the saved mapping
+	MOV	(SP)+,R1	;Restore circuit block pointer
+20$:	CLC			;Indicate a legal slot			;003
+	RETURN			;And we're done
+
+GLOBAL	<TERAP6,TTINCH>                  
+
+.DSABL	LSB
+
+.SBTTL	DATAB - Data_b slot processing                             
+;+
+; DATAB - Data_b slot processing
+;
+; Inputs:
+;	R1 -> Circuit Block
+;	R2 -> Slot header
+;	R5 -> Receive CCB
+;
+;-                      
+.ENABL	LSB
+
+DATAB:	CALL	DATHDR		;Check out the header			;003
+	CLC			;Indicate a legal slot			;003
+	RETURN			;That's all there is to it!		;003
+
+.DSABL	LSB
+
+.SBTTL	DATHDR	Check out a data message header
+;+
+; DATHDR - Check out a data message header
+;
+; Inputs:
+;	R1 -> Circuit block
+;	R2 -> Slot header
+;	R5 -> Receive CCB
+;
+; Format:
+;	CALL	DATHDR
+;                                        
+; Outputs:
+;	C=0 if header is valid and there is data to send
+;	C=1 if header is invalid or there is no data to send
+;
+;	R0 =  Undefined
+;	R3 -> Session block
+;	R5 =  Slot length
+;-
+.ENABL	LSB
+
+DATHDR:	CALL	FNDSES		;Find the session block
+	BCS	40$		;None, give an error
+
+; We have found the session block for this circuit, and will now      
+; process the credits field.
+;
+;	R1 -> Circuit Block
+;	R2 -> Slot header
+;	R3 -> Session block
+;	R5 -> Receive CCB
+
+10$:	MOVB	3(R2),R0	;Get credits extended
+	BIC	#^C<17>,R0	;Save only credit field
+	MOVB	S.LCRD(R3),-(SP) ;Get current credits
+	ADD	R0,(SP)		;Update the credit count
+	MOVB	(SP)+,S.LCRD(R3) ;And store it in session block
+	CLR	R5		;Get ready to pick up slot length
+	BISB	2(R2),R5	;Is there data in this slot?
+	BNE	20$		;Branch if there is			;008
+	TSTB	R0		;Were we extended any credits?		;008
+	BEQ	30$		;No, we're done 			;008
+	BITB	#SF.DAA!SF.DAB,S.FLAG(R3);Need to send any data slot?	;008
+	BEQ	30$		;No, we're done				;008
+	BR	25$		;Don't set bit, just signal transmit	;008
+
+20$:	DECB	S.RCRD(R3)	;Count remote system's use of credit	;008
+	BMI	27$		;Credit violation, error		;008
+	BISB	#SF.DAA,S.FLAG(R3) ;Signal a Data_a slot must be sent	;008
+25$:	CALL	SIGXMT		;Put this session on the output queue	;008
+	TST	R5		;Test byte count 			;008
+	BEQ	30$		;No data?  return failure		;008
+	BR	40$		;Otherwise return success (C=0 from TST);008
+;
+; More credits used than we extended - kill the session
+; 
+27$:	MOV	#ER.INV,R2	;Invalid slot error
+	CALLX	STPSES		;Send stop slot and kill session
+30$:	SEC			;Indicate failure
+40$:	RETURN			;All done
+
+.DSABL	LSB
+
+.SBTTL	ATTN - Attention slot processing
+;+
+; ATTN - Attention slot processing
+;
+; Inputs:
+;	R1 -> Circuit Block
+;	R2 -> Slot header
+;	R5 -> Receive CCB
+;
+; Outputs:
+;	R1 -> Circuit Block
+;	R2 -> Slot header       
+;	R5 -> Receive CCB
+;-
+.ENABL	LSB
+
+ATTN:	MOV	4(R2),R0	;Get Control flags
+	BIC	#^C<AT.ABO>,R0	;Save only abort flag
+	BEQ	10$		;If EQ, Not supported function
+	CALL	FNDSES		;Find the session block
+	BCS	10$		;None, ignore the slot
+	MOV	R1,-(SP)	;Save circuit block pointer
+	CALL	GETDDB		;Get DDB address and unit # * 2
+	CALLMI	CLRTIN,KBDAP5	;Clear out the buffer chain
+	MOV	(SP)+,R1	;Restore circuit block pointer
+10$:	RETURN			;All done
+
+.DSABL	LSB
+
+.SBTTL	FNDSES	Find a session block
+;+
+; FNDSES - Find a session block
+;
+; Inputs:
+;	R1 -> Circuit block
+;       R2 -> Message header
+;
+; Format:
+;	CALL	FNDSES
+;	
+; Outputs:
+;	C = 0 if session found; C = 1 otherwise
+;
+;	R3 -> Session block
+;-
+.ENABL	LSB
+
+FNDSES:	MOV	C.SESQ(R1),R3	;Get pointer to first session block
+	BEQ	20$		;No active sessions!
+10$:	CMPB	(R2),S.LSID(R3)	;Is this the session block for this slot?
+	BEQ	50$		;Yes, use it
+	MOV	(R3),R3		;Get link word to next block
+.ASSUME	S.LNK	EQ	0
+	BNE	10$		;And loop
+20$:	PUSH	<R3,R0>		;Save registers				;002
+	MOV	R1,R3		;Get pointer to virtual circuit block	;002
+	CALLX	INC32,R1,C.INVS	;Increment number VC invalid slot	;002
+	MOV	#LATCTL,R3	;Point to the LAT control region	;002
+	CALLX	INC32,R1,L.INVS	;Increment number host node invalid slot;002
+	POP	<R0,R3>		;Restore registers			;002
+	SEC			;Indicate failure
+50$:	RETURN			;All done
+
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	GETDDB	Get terminal DDB from session pointer
+;+
+; GETDDB  Get terminal DDB from session pointer
+;
+; Inputs:
+;	R3 -> Session block
+;
+; Format:
+;	CALL	GETDDB
+;
+; Outputs:
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;-
+.ENABL	LSB
+
+GETDDB:	MOV	R3,R1		;Copy session block pointer
+	SUB	KBDDBX,R1	;Calculate DDB pointer
+	SUB	KBDDBX,R1	; ...
+	SUB	#KBDDBS,R1	; ...
+	MOVB	DDUNT(R1),R0	;Pick up unit number
+	ASL	R0		;Now make that unit # * 2
+	RETURN			;And we're done
+
+GLOBAL	<KBDDBX>
+
+.DSABL	LSB
+
+.SBTTL	REMSES	Remove a session from the system
+;+
+; REMSES - Remove a session from the system
+;
+; Inputs:
+;	R1 -> VCB (Virtual Circuit Block)
+;	R3 -> Session block
+;
+; Format:
+;	CALL	REMSES
+;
+; Outputs:
+; 	All registers are preserved.
+;+
+.ENABL	LSB
+
+REMSES::REGSCR			;Save all registers
+	CALL	GETDDB		;Set up for the terminal driver
+	MAP	PUSH,APR=6,CODE,DATA ;Save APR 6 mapping		;014
+	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver
+	CALLX	TTHGLN		;Detach any users from the KB
+
+;
+; As the next thing in this routine, we'll delink it from the session 	;008
+; queue and the output processing queue.  We do this before the remove	;008
+; KB call in the terminal driver because when we do that call, the 	;008
+; session block is gone, and we can't get to the flag word.  		;008
+;
+; NOTE that we can't do the delinking first because the TTHGLN call 	;008
+; causes the class driver to call LAT at the abort entry point, and 	;008
+; that puts this session on the output processing queue, and we don't 	;008
+; want the session there after we just finished taking it off!		;008
+
+	MOV	TOS.R1+<2*2>(SP),R0; Get VCB ptr from saved R1 into R0	;014
+	MOV	TOS.R3+<2*2>(SP),R3;  and saved Session Block pointer	;014
+	MOV	R0,R2		;Copy VCB pointer			;008
+	ADD	#C.SESQ,R2	;And point to session list
+10$:	CMP	(R2),R3		;Is this the entry?
+	BEQ	20$		;Yes, found it, remove it from the list
+	MOV	(R2),R2		;Check next entry
+.ASSUME	S.LNK	EQ	0
+	BNE	10$		;Loop till found
+	CRASH			;Session list has been corrupted
+
+20$:	MOV	(R3),(R2)	;Remove this from the list
+.ASSUME	S.LNK	EQ	0
+	BNE	30$		;More sessions active
+	MOV	R2,C.SESQ+2(R0)	;Reset tail pointer			;008
+
+; 
+; Now that this session is no longer on the session list, we must also	;008
+; check to see if it is in the list of sessions waiting to output data	;008
+; i.e. check to see if this session is in the C.OUTQ list. Delink it if	;008
+; it is.
+;
+30$:	BITB	#SF.OUT,S.FLAG(R3);Is session in pending transmit queue?;014
+	BEQ	39$		;No?  No need to dequeue it		;008
+	MOV	R0,R2		;Copy VCB pointer			;008
+	ADD	#C.OUTQ,R2 	;Get pointer to first session at S.OUTL	;008
+	CMP	(R3)+,(R3)+	;Point to S.OUTL for comparison		;008
+.ASSUME	S.OUTL	EQ 4		
+
+31$:	CMP	(R2),R3		;Is this the entry?			;008
+	BEQ	32$		;Yes, found it, remove it from the list	;008
+	MOV	(R2),R2		;Point to next session block		;008
+	BNE	31$		;Check next session if one exists	;008
+	CRASH			;Crash if no more sessions 		;008
+
+32$:	MOV	(R3),(R2) 	;Remove this from the list		;008
+	BNE	39$		;This wasn't the last session in list	;008
+	MOV	R2,C.OUTQ+2(R0) ;Reset tail pointer			;008
+
+	; R1 -> DDB							;008
+
+39$:	MOV	TOS.R3+<2*2>(SP),R0;  and saved Session Block pointer	;014
+	MOV	S.SOLB(R0),R4	;Get Solicit Block ->			;014
+	BEQ	45$		;None, interactive return the KB	;014
+	CALLX	MAPBUF		;Got one, now map it			;014
+	TSTB	SO.FLG(R3)	;In the process of deleting this port?	;014
+	BPL	40$		;No, simply reset it			;014
+.ASSUME	SOF.PD	EQ	200						;014
+	CALLX	DELPRT		;Yes, go return the port		;014
+	BR	50$		; and finish up				;014
+
+40$:	CLR	MODCLK(R1)	;No longer awaiting disconnect		;013
+	BICB	#CLSPND,TTFLG3(R1) ; and no close pending		;015
+	MOV	R0,R3		;Copy the Session Block ->		;014
+	CALLX	RESPRT		;Go reset the port			;014
+	BR	50$		; and we don't return those		;013
+
+45$:	CALLM	REMKBD,KBDAP5	;Return the keyboard to the system	;014
+50$:	MAP	POP,APR=6,CODE,DATA ;Restore APR 6 mapping		;014
+	RETURN			;And exit
+
+.DSABL	LSB
+
+.END

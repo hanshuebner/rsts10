@@ -1,0 +1,894 @@
+.INCLUDE /CMN:COMMON/							;025
+.INCLUDE /CMN:KERNEL/							;025
+.INCLUDE /CMN:FLDEF/							;025
+.INCLUDE /CMN:PFBDEF/							;025
+.INCLUDE /CMN:KBDEF/							;025
+.LIBRARY /CMN:NETDEF.SML/						;025
+TITLE	TTSYST,<CTRL/T MINI-SYSTAT>,0A,13-MAY-91,MHB/ABC/RTW/TG/RRF/WJS/GPK/TPT/MNB/FRL/KPH/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR TTSYST
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	TG   19-Aug-80	Fixed ??? bug after adding NME
+;  002	MB/TG 09-Sep-80	Added code to find above bug early
+;  003  RRF  28-Apr-81	Changed CTRL/T to use NETDEF for node block info.
+;  004  WJS  19-Oct-82	J2CPUI globalized, for new JDB2 structure
+;  005  WJS  28-Oct-82	BL4 changes for EMT Logger
+;  006	GPK  21-Dec-82	Remove reference to NMEFQ
+;
+;				[RSTS V9.0]
+;  007	GPK  04-Mar-83	Job headers
+;  008	GPK  14-Apr-83	Multiple privileges
+;  009	GPK  17-May-83	Change J2HDRS to a byte
+;  010	GPK  21-Sep-83	Remove jobheaders
+;  011	BSB  27-Sep-83	Defined a FIP text for PFB work
+;  012  TPT  21-NOV-83  Fixed zeroing of kb# bug
+;  013	TPT  23-Jan-84	Fixed zeroing of kb# bug, correctly!
+;  014  MNB  22-Jan-84  Asynch changes in M.CTRL byte (done correctly)
+;  015	GPK  28-Feb-84	Rename SNDFQ, RCVFQ; add MTAFQ
+;  016	GPK  20-Apr-84	Privilege name changes
+;  017  FRL  20-Feb-84  V9.0 logicals
+;  018	GPK  27-Apr-84	Suppress mini-Systat for logged-out jobs
+;  019	KPH  08-Aug-84	Add DECFQ, EOVFQ
+;  020	KPH  29-Aug-84	Changes for APR5 FIP pool
+;  021	KPH  23-Oct-84	Display more stuff: I&D sizes, RN*, FP*, and
+;			PFB stuff, set up in columns
+;
+;			[RSTS V9.2]
+;  022  KPH  01-Aug-85	Add job control region
+;  023  KPH  23-Oct-85	Bugfixes
+;
+;			[RSTS V9.3]
+;  024  KPH  01-Oct-85	Changes for DECnet/E V4.0
+;
+;			[RSTS V9.5]
+;  025  KPH  13-Oct-87	Add .INCLUDEs
+;			Changes for new terminal driver mapping
+;			Add line editing support
+;			Add support for TRUFQ
+;
+;			[RSTS V9.6]
+;  026	DRP  25-Mar-88	Remove feature of retyping type-ahead text.
+;
+;			[RSTS/E V10.0]
+;  027	JFM  15-Nov-89	Fix bug where extra CRLF displayed before CTRL/T.
+;  028	JFM  04-Jan-90	Fix location of CPU field - with job header it can 
+;			run into the size field.  Removed commented out code
+;  029	JFM  22-Feb-90	Redisplay the command (if any) after CTRL/T, and
+;			only if there is a read pending.
+;  030	JFM  20-Apr-90	Disable displaying job header size 
+;			Removed unused local label
+;
+;			[RSTS/E V10.1]
+;  031	FEK  10-Apr-91	Add UU.USC function
+;-
+
+	.MCALL	$NOB
+	$NOB			;PULL IN NETWORK OFFSETS
+
+.MACRO	SETPOS	WHERE     
+	CALL	SETPOS,R5,<WHERE-1>
+.ENDM	SETPOS
+
+	ORG	TTSYST
+
+.SBTTL	^T ON INPUT PROCESSOR - DO A MINI-SYSTAT
+
+;+
+; TTSYS$ - DO A MINI-SYSTAT.
+;
+;	R0 =  LINE NUMBER TIMES 2
+;	R1 -> DDB
+;	R2 =  CTRL/T
+;
+;	CALL	MAPPED,R5,TTSYS$
+;
+;	IF C=0 THEN MINI-SYSTAT DONE; "RETURN"
+;		R2 =  UNDEFINED
+;		R3 =  UNDEFINED
+;		R4 =  UNDEFINED
+;
+;	IF C=1 THEN MINI-SYSTAT ILLEGAL; GO TO "TTNORM"
+;		R3 =  UNDEFINED
+;		R4 =  Undefined
+;-
+
+TTSYS$::MOVB	DDJBNO(R1),R4	;;GET OWNING JOB # *2			;022
+	BIC	#^C<127.*2>,R4	;; AND ENSURE A VALID JOB # *2		;022
+	BEQ	10$		;;NO JOB, SAY MINI-SYSTAT ILLEGAL
+	MOV	JOBTBL(R4),R3	;;GET JOB DATA BLOCK POINTER
+	BEQ	10$		;;NO JDB, SAY MINI-SYSTAT ILLEGAL
+	BIT	#DDCONS,DDCNT(R1) ;;REALLY THE CONSOLE TERMINAL?
+	BNE	DOSYST		;;YES, GO DO SOME REAL WORK
+10$:	SEC			;;INDICATE MINI-SYSTAT ILLEGAL
+	RETURN			;; AND RETURN
+
+GLOBAL	<JOBTBL>
+
+;	 R0	 R1	 R2	 R3	 R4	 R5
+;	2*KB#	->DDB	 ??	->JDB	 2*JOB#	 ??
+;
+;	SP -> ...
+
+.ENABL	LSB								;022
+
+DOSYST:	MOV	R5,-(SP)	;;SAVE AN IMPORTANT REGISTER
+	MOV	JDJDB2(R3),R5	;;GET 2ND JOB DATA BLOCK POINTER
+	TST	J2PPN(R5)	;;Is job currently logged in?		;018
+	BNE	5$		;;Yes, so we can show things		;018
+	COM	(SP)+		;;No, so clean stack and set carry	;018
+	RETURN			;; and exit without giving anything away ;018
+
+5$:	MOV	R4,R0		;;Copy job # * 2			;022
+	MOV	R1,R4		;;Save DDB pointer			;022
+	CALLX	MAPJCR		;;Map the JCR entry for this job	;022
+	CLR	-(SP)		;;Make a hole to get the priority	;025
+	MOVB	JCPRI(R1),(SP)	;;Pick up job's priority		;022
+	TSTPRV	TUNE,JCAPRV(R1) ;;Allowed control of priorities?	;022
+	BNE	10$		;;Yes, so display them			;008
+	COM	(SP)		;;If not, don't print them either	;008
+10$:	ADD	#JCCPU,R1	;;Point to CPU time in JCR		;022
+	MOV	(R1),-(SP)	;;Save total CPU time			;022
+	SUB	JCCPUI-JCCPU(R1),(SP) ;;And find difference since last ^T ;022
+	BPL	20$		;;It seems valid, use it
+	MOV	(R1),(SP)	;;Invalid, forget it			;022
+20$:	MOV	(R1),JCCPUI-JCCPU(R1) ;;Save the CPU time for this ^T	;022
+	CLR	-(SP)		;;MSB of elapsed CPU time is always zero
+	MOV	(R1),-(SP)	;;Save total CPU time LSB again		;022
+	ADD	#JCCPUM-JCCPU,R1 ;;Point to MSB of CPU time in JCR	;022
+	MOVB	(R1)+,-(SP)	;;And save total CPU time MSB		;022
+.ASSUME	JCNAME	EQ	JCCPUM+1
+	MOV	JDRTS(R3),R5	;;Pick up RTS block pointer		;022
+	MOVB	R.KSIZ(R5),-(SP) ;;Save RTS size in K			;022
+	MOVB	JCSIZM-JCNAME(R1),-(SP) ;;Save job's private memory max	;022
+	MOVB	JCHDRS-JCNAME(R1),R3 ;;Get job header size		;022
+	SUB	R3,(SP)		;;Get job's max size without header	;022
+	CMPB	(SP),R.MSIZ(R5)	;;Is priavte max >= RTS minimum size	;022
+	BHIS	22$		;;Yes, sure is				;022
+	MOVB	R.MSIZ(R5),(SP)	;;No, so use RTS minimum instead	;022
+22$:	CMPB	(SP),R.SIZE(R5)	;;Is private max smaller than RTS max	;022
+	BLOS	24$		;;Yes, sure is				;022
+	MOVB	R.SIZE(R5),(SP)	;;No, so set max as RTS max size	;022
+24$:	MOVB	JCDSIZ-JCNAME(R1),-(SP) ;;Save D-space size		;022
+	MOVB	JCISIZ-JCNAME(R1),-(SP) ;;Save I-space size		;022
+	MOVB	JCHDRS-JCNAME(R1),-(SP) ;;And save headersize		;022
+	MOVB	JCSWAP-JCNAME(R1),-(SP) ;;Save swap slot address	;022
+	MOV	R5,-(SP)	;;Save RTS block size			;022
+	MOV	2(R1),-(SP)	;;Save second part of program name	;022
+	MOV	(R1),-(SP)	;;Save first part of program name	;022
+	MAP	TERAP6,APR=6,DATA ;;Re-map the terminal driver		;025
+	MOV	R4,R1		;;Get back DDB pointer			;022
+	MOVB	DDUNT(R1),R0	;;Pick up keyboard number		;022
+	MOVB	R0,-(SP)	;;And save it				;022
+	ASL	R0		;;Now make it keyboard # * 2		;022
+	MOVB	DDJBNO(R1),-(SP) ;;GET JOB # TIMES 2
+	ASRB	(SP)		;; THEN TIMES 1
+	CMPB	DDHORZ(R1),DDHORC(R1) ;;IS CARRIAGE CURRENTLY RESTORED?
+	BEQ	30$		;;YES
+	CALLX	ASCOUT,R5,CRLF.0 ;;NO, SO RESTORE THE CARRIAGE
+30$:				;;NOW CONTINUE
+
+.DSABL	LSB								;022
+
+GLOBAL	<CRLF.0,JCCPUI,TERAP6>						;025
+
+;	 R0	 R1	 R2	 R3	 R4	 R5
+;	2*KB#	->DDB	 ??	 ??	 ??	 ??
+;
+;	SP -> J#,KB#,Name,RTS block addr,Swap slot,H-size,I-size,D-size,
+;		Max size,CPU(Msb),CPU,Inc(Msb),Inc,Pri
+
+.ENABL	LSB
+
+	CALL	OUTSIZ		;;OUTPUT THE JOB NUMBER
+	MOV	NODLST,R2	;;Pick up this node's node block	;024
+	BEQ	50$		;;NONE, SO NO NODE::
+	ADD	#N.NAME,R2	;;INDEX TO SIZE OF NODE NAME, NODE NAME ITSELF
+	MOV	#6,R5		;;ASSUME LENGHT OF NODE NAME IS 6
+	MOV	R2,-(SP)	;;SAVE POINTER TO NODE NAME
+	ADD	R5,R2		;;POINT AT END OF NODE NAME
+10$:	TSTB	-(R2)		;;LOOK FOR LAST NON NULL CHAR
+	BNE	20$		;;FOUND IT
+	SOB	R5,10$		;;KEEP LOOKING
+20$:	MOV	(SP)+,R2	;;RESTOR POINTER TO NODE NAME	
+	MOV	R5,-(SP)	;;SAVE COUNT FOR NODE NAME
+	MOV	R2,-(SP)	;;SAVE POINTER TO NODE NAME
+	SUB	#6,R5		;;FORM -(SPACE COUNT) [-5,-4,-3,-2,-1,0]
+30$:	MOV	#40,R2		;;SET CHARACTER AS A SPACE
+	CALLX	CHOUTE		;; AND OUTOUT IT
+	INC	R5		;;MORE TO DO?
+	BMI	30$		;;YES, LOOP...
+	MOV	(SP)+,R5	;;RESTORE POINTER TO NODE NAME
+40$:	MOVB	(R5)+,R2	;;FETCH NEXT CHARACTER TO PRINT
+	CALLX	CHOUTE		;; AND OUTPUT IT
+	DEC	(SP)		;;MORE TO DO?
+	BGT	40$		;;YES, LOOP...
+	TST	(SP)+		;;NO, POP THE COUNTER
+	CALL	OUTCHR,R5,<"::>	;;END NODE:: WITH "::"
+	BR	60$		;; THEN FOLLOW WITH KB NUMBER
+
+50$:	CALL	OUTCHR,R5,<11>	;;NOW OUTPUT A <TAB>
+60$:	CALL	OUTCHR,R5,<"KB>	;;NOW OUTPUT "KB"
+	CALL	OUTSIZ		;; THEN OUTPUT KB NUMBER
+	SETPOS	18.		;;And advance to colunn 18		;021
+
+.DSABL	LSB
+
+GLOBAL	<NODLST>							;024
+
+;	 R0	 R1	 R2	 R3	 R4	 R5
+;	2*KB#	->DDB	 ??	 ??	 ??	 ??
+;
+;	SP -> Name,RTS block addr,Swap slot,H-size,I-size,D-size,Max size,
+;		CPU(Msb),CPU,Inc(Msb),Inc,Pri
+
+.ENABL	LSB
+
+	MOV	SP,R5		;;Copy stack pointer			;022
+	CALL	OUTR50		;;OUTPUT THE JOB NAME (2 WORDS OF RAD50)
+	MOV	R5,SP		;;Now pop the job name			;022
+	CALL	OUTCHR,R5,<'+>	;;NOW OUTPUT A "+"
+	MOV	(SP)+,R5	;;Pick up RTS block pointer		;022
+	TST	(R5)+		;;And point to the name			;022
+.ASSUME	R.NAME	EQ	2
+	CALL	OUTR50		;;OUTPUT THE RTS NAME (2 WORDS OF RAD50)
+	SETPOS	32.		;;Now off to the state column		;021
+
+.DSABL	LSB
+
+;	 R0	 R1	 R2	 R3	 R4	 R5
+;	2*KB#	->DDB	 ??	 ??	 ??	 ??
+;
+;	SP -> Swap slot,H-size,I-size,D-size,Max size,CPU(Msb),CPU,
+;		Inc(Msb),Inc,Pri
+
+.ENABL	LSB
+
+	MOVB	DDJBNO(R1),R2	;;GET JOB NUMBER TIMES 2 AGAIN
+	MOV	JOBTBL(R2),R3	;;GET JOB DATA BLOCK POINTER
+	MOV	#STATES,R5	;;POINT TO THE TABLE OF STATUS NAMES
+	MOV	JBWAIT(R2),R4	;;GET JOB'S WAIT STATE
+	BIT	R4,JBSTAT(R2)	;;JOB RUNNABLE?
+	BNE	DOSTAT		;;"RN"
+	TST	(R5)+		;;NEXT STATE
+	TST	JDMCTL+M.PHYA(R3) ;;DOES JOB HAVE AN ADDRESS?
+	BNE	10$		;;YES, SO NOT IN RESIDENCY WAIT
+	CMPB	JDMCTL+M.CTRL(R3),#SWP!IN ;;NO, IS JOB SWAPPING IN?	;014
+	BEQ	DOSTAT		;;"RS" IF NO ADDRESS BUT COMING IN
+10$:	TST	(R5)+		;;NEXT STATE
+	CMP	R4,#JSBUF	;;STALLED FOR BUFFERS AND NOTHING ELSE?
+	BEQ	DOSTAT		;;"BF"
+	TST	(R5)+		;;NEXT STATE
+	BIC	#JSBUF,R4	;;IF NOT, REMOVE POSSIBLE STALL BIT
+	BEQ	DOSTAT		;;"HB" IF NOTHING LEFT
+	TST	(R5)+		;;NEXT STATE
+	BIT	R4,#JSFIP	;;WAITING FOR FIP?
+	BNE	DOSTAT		;;"FP"
+	TST	(R5)+		;;NEXT STATE
+	BIT	R4,#JSTEL	;;DOING TERMINAL OUTPUT?
+	BNE	DOSTAT		;;"TT"
+	TST	(R5)+		;;NEXT STATE
+	BIT	R4,#JSTIM	;;SLEEPING?
+	BEQ	30$		;;NO
+	TSTB	JDIOST(R3)	;;YES, IS AN ERROR CODE PENDING?
+	BEQ	DOSTAT		;;"SL" SIMPLE SLEEP IF NOT
+20$:	TST	(R5)+		;;NEXT IS "SR" FOR MESSAGE SLEEP
+	BR	DOSTAT		;; ALTERNATE STATE
+
+30$:	CMP	(R5)+,(R5)+	;;SKIP 2 STATES
+	MOV	JDWORK(R3),R2	;;GET WORK BLOCK POINTER
+	CMP	R4,#JS.KB	;;KEYBOARD WAIT?
+	BNE	40$		;;NO
+	TST	XRTIME(R2)	;;YES, IS IT KEYBOARD MONITOR TYPE?
+	BPL	DOSTAT		;;"KB" IF NOT
+	BR	20$		;;"^C" IF SO
+
+GLOBAL	<JOBTBL,JBWAIT,JBSTAT>
+
+40$:	CMP	(R5)+,(R5)+	;;SKIP 2 STATES
+	MOVB	XRCI(R2),R4	;;GET CHANNEL NUMBER FROM WORK BLOCK	;021
+	BIT	R4,#^C<15.*2>	;;VALID CHANNEL?			;021
+	BNE	DOSTAT		;;"??" IF NOT (TRANSITORY FOULNESS)
+	CMPB	XRBSAV(R2),#PFBRDO ;;Is this a PFBIO style wait?	;021
+	BNE	50$		;;No, not this time			;021
+	CMP	R4,#PF$DAT*2	;;Yes, is this a normal channel?	;021
+	BLO	DOSTAT		;;No, forget it				;021
+	CALL	GETPFB		;;PFB data channel, pick it up		;022
+	BR	60$		;;And join up				;022
+
+50$:	ADD	(R3),R4		;;Point to channel in IOB		;022
+.ASSUME	JDIOB	EQ	0
+	CALL	GETIOB		;;GET DEVICE INDEX AND UNIT NUMBER	;022
+60$:	TST	R2		;;WAS IT A DISK?
+	BEQ	80$		;;YES, GET THE NAME
+	BIT	#1,R2		;;NOT DISK, VALID INDEX?
+	BNE	DOSTAT		;;BOGUS IF NOT
+	CMP	R2,#DEVSYN-DEVNKB ;;IN BOUNDS?
+	BHI	DOSTAT		;;NO.
+	CMP	R2,#IDX.KB	;;In bounds, is this terminal I/O?	;021
+	BNE	70$		;;No, not this time			;021
+
+; Note: if we are here waiting for terminal I/O, this must be an ICFP
+; or logfile wait. This is because we check for KB and ^C waits explicitly
+; above. Now we will have to figure out the real device wait from the
+; terminal wait.
+
+	MOV	JDWORK(R3),R2	;;Pick up work block pointer		;023
+	CALL	GETICF		;;Now get ICF or log file pointer	;021
+	BR	80$		;;And join up				;021
+
+70$:	MOV	R2,R5		;;COPY DEVICE INDEX *2			;021
+	ADD	#DEVNKB-2,R5	;;POINT TO NAME IN THE DEVNAM TABLE
+	BR	DOSTAT		;;GO USE IT
+
+80$:	CMP	R4,#MAXUNT	;;IN RANGE?
+	BHI	DOSTAT		;;BOGUS IF NOT
+	MUL	#DL$SIZ,R4	;;COMPUTE OFFSET INTO DISK LOGICAL TABLE ;017
+	ADD	#DSKLOG+DL$DEV,R5 ;;POINT TO PHYSICAL DEVICE NAME	;017
+	.BR	DOSTAT		;; AND USE IT
+
+.DSABL	LSB
+
+;	 R0	 R1	 R2	 R3	 R4	 R5
+;	2*KB#	->DDB	 ??	->JDB	 ??	->STATE
+;
+;	SP -> SWAP,K-HDR,K-I,K-D,K-JOB,K-MAX,K-RTS,CPU(MSB),CPU,INC(MSB),INC,PRI,R5,... ;021
+
+DOSTAT:	MOV	R3,-(SP)	;;Save JDB pointer			;021
+	CALL	OUTPNT		;;Go and output the state		;021
+	MOV	(SP)+,R3	;;Restore JDB pointer			;021
+	MOV	JDWORK(R3),R4	;;GET WORK BLOCK POINTER (XRB OR FIRQB)
+	MOVB	XRCI(R4),-(SP)	;;SAVE CHANNEL # TIMES 2
+	ASR	(SP)		;;NOW MAKE IT PLAIN OLD CHANNEL #
+	BIC	#^C<15.>,(SP)	;; AND ENSURE IT IS VALID
+	MOVB	XRBSAV(R4),1(SP) ;;Save redo index in the high byte	;021
+20$:	MOVB	#'*,R2		;;Set up to display a star		;021
+	CMP	R5,#RUN+2	;;Is the state really RN?		;021
+	BNE	30$		;;No, not this time			;021
+	CMP	R3,@#JOBDA	;;Is this job presently JOB?		;021
+	BNE	80$		;;No, not this time			;021
+	CALLX	CHOUTE		;;Yes, so output that star		;021
+	BR	80$		;;And join up				;021
+
+30$:	CMP	R5,#FIP+2	;;IS THE STATE REALLY FIP?		;021
+	BNE	80$		;;NOPE
+	CMP	R4,@#FIQUE	;;FIP state, is FIP working on our job?	;021
+	BNE	50$		;;No, not this time			;021
+	CMP	SP,#SYSTAK	;;FIP state, is FIP running		;021
+	BHI	40$		;;Yes, sure is				;021
+	MOVB	#'-,R2		;;FIP waiting, set the character	;021
+40$:	MOV	R4,-(SP)	;;Save the work block pointer		;021
+	CALLX	CHOUTE		;;And output the character		;021
+	MOV	(SP)+,R4	;;And get work block pointer again	;021
+
+50$:	MOVB	FQFUN(R4),R2	;;GET THE FIP FUNCTION			;021
+	BIT	R2,#1		;;IS IT ODD??				;021
+	BNE	60$		;;YES, THAT'S ODD
+	CMPB	R2,#UUOFQ	;;Even, is it UUOFQ?			;021
+	BNE	55$		;;No, not this time			;021
+	MOV	FQNENT(R4),R4	;;Pick up the .UUO function code * 2	;021
+	CMP	R4,#UU$MIN*2	;;Is it within range?			;021
+	BLT	70$		;;No, call it a general UUO		;021
+	CMP	R4,#UU$MAX*2	;;Really in range?			;021
+	BGT	70$		;;No, call it UUO			;021
+	BIT	#1,R4		;;Is it even?				;021
+	BNE	70$		;;No, call it UUO			;021
+	MOV	UUOFUN(R4),(SP)	;;Stack the RAD50 of the function	;021
+	BR	80$		;;And join up				;021
+
+55$:	CMP	R2,#FIPLMT	;;NO, EVEN, BUT IS IT OVER THE LIMIT?	;021
+	BLO	70$		;;ALL O.K., USE THIS FIP FUNCTION	;021
+60$:	MOV	#FIPLMT,R2	;;BAD FIP FUNCTION, SET THE FUNNY ONE	;021
+70$:	MOV	FIPFUN(R2),(SP)	;;STACK THE RAD50 OF THE FUNCTION	;021
+80$:	TST	-(R5)		;;SOMETHING SPECIAL TO PRINT?
+	BMI	120$		;;NO
+	MOV	R5,-(SP)	;;YES, SAVE STATE TABLE POINTER
+	CALL	OUTCHR,R5,<'(>	;;PRINT A LEFT PAREN
+	CMP	(SP)+,#FIP	;;FIP FUNCTION?
+	BNE	90$		;;NOPE, A CHANNEL # & READ/WRITE
+	MOV	(SP),R3		;;YEP, GET THE RAD50 OF THE FUNCTION
+	CALL	OUTRAD		;; AND OUTPUT IT
+	BR	110$		;;  THEN CONTINUE
+
+90$:	MOV	(SP),-(SP)	;;REPLICATE CHANNEL # & READ/WRITE
+	CALL	OUTSIZ		;;OUTPUT THE CHANNEL #
+	MOV	#'R,R2		;;GUESS AT "READ"
+	CMPB	#REDRDO,1(SP)	;;GOOD GUESS (READ=2)??			;021
+	BEQ	100$		;;YES
+	MOV	#'W,R2		;;Now guess at write			;021
+	CMPB	#WRTRDO,1(SP)	;;Good guess?				;021
+	BEQ	100$		;;Yes, sure is				;021
+	MOV	#'S,R2		;;Now guess at a special function	;021
+	TSTB	1(SP)		;;Good guess?				;021
+.ASSUME	SPCRDO	EQ	0						;021
+	BEQ	100$		;;Yes, sure is				;021
+	CMPB	#PFBRDO,1(SP)	;;No, is it PFB I/O?			;021
+	BEQ	110$		;;Yes, don't display anything		;021
+	MOV	#'?,R2		;;No, can't figure it out, so say "?"	;021
+100$:	CALLX	CHOUTE		;;Now output R or W or S or ?
+110$:	CALL	OUTCHR,R5,<')>	;;PRINT A RIGHT PAREN
+120$:	TST	(SP)+		;;DUMP THAT STACK ITEM
+
+GLOBAL	<FIQUE,SYSTAK>							;021
+
+;	 R0	 R1	 R2	 R3	 R4	 R5
+;	2*KB#	->DDB	 ??	 ??	 ??	 ??
+;
+;	SP -> SWAP,K-I,K-D,K-JOB,K-MAX,K-RTS,CPU(MSB),CPU,INC(MSB),INC,PRI,R5,... ;021
+;
+.ENABL	LSB
+
+	MOVB	(SP)+,R2	;;GET THE SWAP PARAMETER
+	BEQ	10$		;;NOT SWAPPED OUT
+	MOV	R2,-(SP)	;;(RE-)SAVE SWAP PARAMETER
+	SETPOS	41.		;;Go and set up the position		;021
+	MOVB	(SP),R2		;;RE-FETCH THE PARAMETER
+	BICB	#^C<63.>,(SP)	;; TRIMMING TO SWAP SLOT NUMBER
+	BIC	(SP),R2		;;  AND ISOLATE SWAP FILE NUMBER HERE
+	ASH	#-6,R2		;;SHIFT NUMBER TO BITS <1-0>
+	ADD	#'A,R2		;; AND MAKE A, B, C, OR D
+	CALLX	CHOUTE		;;OUTPUT IT
+	CALL	OUTSIZ		;;PRINT SWAP SLOT NUMBER
+10$:	SETPOS	45.		;;And set up the position for job sizes ;021
+
+; Note: The following will print out the size of the header, followed
+; by a +, followed by the size of I-space, followed by a +, followed
+; by the D-size. If we release job header support, this will have to
+; change since there is no way to tell what field is for what if using
+; only two of the three possible sizes.
+
+	MOVB	(SP)+,R2	;;Get job header size			;021
+	BR	20$		;;Always skip printing this		;030
+..ctjh	==:.-2			;;**patch** to BEQ to enable this
+	MOV	R2,-(SP)	;;Push it back on			;013
+	CALL	OUTSIZ		;;Output job header size		;007
+	CALL	OUTCHR,R5,<'+>	;; and a "+"				;007
+20$:	CALL	OUTSIZ		;;Output the I-space size		;013
+	MOVB	(SP)+,R2	;;Get D-space size			;021
+	BEQ	30$		;;None, nothing to print		;021
+	MOV	R2,-(SP)	;;Push back D-space size		;021
+	CALL	OUTCHR,R5,<'+>	;; set up the plus sign			;021
+	CALL	OUTSIZ		;;And display the D-size		;021
+30$:	CALL	OUTCHR,R5,<'(>	;;NOW OUTPUT "("
+	CALL	OUTSIZ		;;OUTPUT JOB'S PRIVATE MAX K SIZE
+	CALL	OUTCHR,R5,<')>	;;NOW OUTPUT ")"
+	CALL	OUTCHR,R5,<"K+>	;;NOW OUTPUT "K+"
+	CALL	OUTSIZ		;;OUTPUT RTS K SIZE
+	CALL	OUTCHR,R5,<'K>	;;And follow it with a K		;021
+	SETPOS	61.		;;Now set up the position for CPU time	;028
+
+.DSABL	LSB
+
+;	 R0	 R1	 R2	 R3	 R4	 R5
+;	2*KB#	->DDB	 ??	 ??	 ??	 ??
+;
+;	SP -> CPU(MSB),CPU,INC(MSB),INC,PRI,R5,...
+
+.ENABL	LSB
+
+	CALL	OUTCPU		;;OUTPUT TOTAL CPU TIME
+	CALL	OUTCHR,R5,<"(+>	;;NOW OUTPUT "(+"
+	CALL	OUTCPU		;;OUTPUT ELAPSED CPU TIME
+	CALL	OUTCHR,R5,<')>	;;NOW OUTPUT ")"
+	MOV	(SP)+,R2	;;GET THE RUN PRIORITY
+	BMI	30$		;;DON'T PRINT IT IF HE'S NOT PRIVILEGED
+	MOVB	R2,-(SP)	;;CHECK SIGN OF RUN PRIORITY
+	BGE	10$		;;POSITIVE OR ZERO
+	NEGB	(SP)		;;NEGATIVE, MAKE POSITIVE
+	CALL	OUTCHR,R5,<'-*400+40> ;;OUTPUT " -"
+	BR	20$		;; AND CONTINUE
+
+10$:	CALL	OUTCHR,R5,<'+*400+40> ;;OUTPUT " +"
+20$:	CALL	OUTSIZ		;;OUTPUT THE RUN PRIORITY
+30$:	CALLX	ASCOUT,R5,CRLF.0 ;;FINALLY RESTORE THE CARRIAGE
+	CALLX	RETCU2		;;Retype the command line		;029
+	MOV	(SP)+,R5	;;Restore the important register	;030
+	CLC			;;SAY MINI-SYSTAT DONE
+	RETURN			;; AND EXIT
+
+.DSABL	LSB
+
+GLOBAL	<CRLF.0>
+
+.ENABL	LSB
+
+GETPFB:	MOV	R0,-(SP)	;;Get one work register			;022
+	MOV	R1,-(SP)	;;And another one			;022
+	MOVB	DDJBNO(R1),R0	;;Get job # * 2				;022
+	CALLX	MAPJCR		;;Map caller's JCR entry		;022
+	ADD	R1,R4		;;Bias JCR pointer for channel number	;022
+	MOV	(SP)+,R1	;;Restore one work register		;022
+	MOV	(SP)+,R0	;;And another one			;022
+	MOV	#1,R2		;;Guess that channel isn't open		;022
+	MOV	JCPFB(R4),R4	;;Pick up the WCB/DDB pointer		;022
+	BR	5$		;;And join up				;022
+
+GETIOB:	MAP	FIPPOL		;;Map FIP pool for the IOB		;022
+	MOV	#1,R2		;;Guess that channel won't be open	;021
+	MOV	(R4),R4		;;Pick up address of WCB or DDB		;021
+5$:	BEQ	20$		;;Channel closed, forget it		;021
+	MAP	FIPPOL		;;Assure that FIP pool is mapped	;022
+	MOVB	(R4),R2		;;GET DEVICE INDEX FROM WCB/DDB
+.ASSUME	DDIDX	EQ	0
+	BNE	20$		;;NOT A DISK
+10$:	MOV	W$FCB(R4),R4	;;GET THE FCB POINTER @ F$CLUS
+	MOVB	F$UNT-F$CLUS(R4),R4 ;; AND GET FIP UNIT NUMBER FROM THAT
+20$:	MAP	TERAP6,APR=6,DATA ;;Restore terminal driver mapping	;025
+	MAP	@#KISAR5,APR=5,DATA ;;Restore APR5 overmapped I&D	;020
+	RETURN			;;BACK INTO APR6
+
+GETICF:	MOV	R1,-(SP)	;;Get one work register			;022
+	MOV	R0,-(SP)	;;And another one			;022
+	MOVB	DDJBNO(R1),R0	;;Get job # * 2				;022
+	CALLX	MAPJCR		;;Map the JCR entry			;022
+	MOV	R1,R4		;;Copy pointer to JCR entry		;022
+	MOV	(SP)+,R0	;;Restore one work register		;022
+	MOV	(SP)+,R1	;;And another one			;022
+	ADD	#JCPFB,R4	;;Advance to PFB in JCR			;022
+	TST	PF$ICF*2(R4)	;;Do we have an ICF active?		;021
+	BEQ	30$		;;No, must be a logfile reference	;021
+	CMPB	XRBSAV(R2),#REDRDO ;;Is this a .READ request?		;021
+	BNE	30$		;;No, so must be a logfile reference	;021
+	TST	(R4)+		;;Seems like ICF request, advance to PF$ICF ;021
+.ASSUME	PF$ICF	EQ	1
+30$:	MOV	(R4),R4		;;Get CBB pointer			;021
+	BEQ	40$		;;None, error!				;021
+	MOV	R3,-(SP)	;;Save JDB pointer			;021
+	CALLX	MAPBUF		;;Now map the CBB			;021
+	MOV	(SP)+,R3	;;Restore JDB pointer			;021
+	MOV	@#140000+PF.WCB,R4 ;;Pick up WCB pointer		;021
+	MAP	FIPPOL		;;And map it				;021
+	BR	10$		;;Now return the disk index		;021
+
+40$:	DEC	R4		;;Set up an impossible fip unit number	;021
+	BR	20$		;;And get out politely			;021
+
+.DSABL	LSB
+
+GLOBAL	<DEVSYN,DEVNKB,MAXUNT,DSKLOG,IDX.KB,TERAP6>			;022
+
+.SBTTL	JOB STATE NAMES
+
+STATES:
+RUN:	.ASCII	<'R><'N!200>	;RUN STATE				;021
+	.ASCII	<'R><'S!200>	;WAITING FOR RESIDENCY
+	.ASCII	<'B><'F!200>	;WAITING FOR BUFFER
+	.ASCII	<'H><'B!200>	;HIBERNATING (NEVER ON ^T!)
+FIP:	.ASCII	<'F><'P>	;IN FIP (PRINT FIP FUNCTION)
+	.ASCII	<'T><'T>	;TERMINAL OUTPUT (PRINT CHANNEL #)
+	.ASCII	<'S><'L!200>	;SLEEPING
+	.ASCII	<'S><'R!200>	;SLEEPING FOR RECEIVE
+	.ASCII	<'K><'B>	;TERMINAL INPUT (NON-KBM) (PRINT CHANNEL #)
+	.ASCII	<'^><'C>	;TERMINAL INPUT (KBM) (PRINT CHANNEL #)
+	.ASCII	<'?><'?!200>	;NOTHING
+
+.MACRO	FIPFUN	FUN
+.ASSUME	FUN'FQ	EQ	.-FIPFUN
+	 .RAD50	/FUN/
+.ENDM	FIPFUN
+
+FIPFUN:	FIPFUN	CLS		;CLOSE AN OPEN CHANNEL
+	FIPFUN	OPN		;OPEN A CHANNEL
+	FIPFUN	CRE		;CREATE/EXTEND/OPEN A CHANNEL
+	FIPFUN	DLN		;DELETE A FILE BY NAME
+	FIPFUN	REN		;RENAME A FILE
+	FIPFUN	DIR		;DIRECTORY INFORMATION
+	FIPFUN	UUO		;PROCESS UUO
+	FIPFUN	ERR		;GET ERROR MESSAGE TEXT
+	FIPFUN	RST		;RESET (CLOSE) [ALL] CHANNEL[S EXCEPT 0]
+	FIPFUN	LOK		;LOOKUP A FILE
+	FIPFUN	ASS		;ASSIGN A DEVICE
+	FIPFUN	DEA		;DEASSIGN A DEVICE
+	FIPFUN	DAL		;DEASSIGN ALL DEVICES
+	FIPFUN	CRT		;CREATE/EXTEND/OPEN A UNIQUE .TMP FILE ON DISK
+	FIPFUN	CRB		;CREATE/EXTEND/OPEN A COMPILED IMAGE FILE ON DISK
+	FIPFUN	RUN		;RUN A PROGRAM IMAGE
+	FIPFUN	PFB		; Performing a Permanent File Block oper.;011
+	FIPFUN	EOV		;End-of-volume handling			;019
+	FIPFUN	MTA		;Magtape I/O (MTU)			;015
+	FIPFUN	WIN		;WINDOW TURNER FOR DISK FILES
+	FIPFUN	EXT		;EXTEND AN OPEN DISK FILE
+	FIPFUN	NET		;NETWORK UTILITIES
+	FIPFUN	BYE		;LOGOUT A USER
+	FIPFUN	REM		;Receiver remove			;015
+	FIPFUN	DCL		;Receiver declare			;015
+	FIPFUN	STA		;START SYSTEM
+	FIPFUN	DEC		;Delayed close function			;019
+	FIPFUN	TRU		;Truncate function			;025
+	FIPFUN	DSP		;DO A GENERAL DISPATCH ON ADDRESS
+FIPLMT	=	.-FIPFUN	;FIRST ILLEGAL FIP FUNCTION CODE
+	.RAD50	<35><35><35>	;ILLEGALS PRINT AS '???'
+
+.MACRO	UUOFUN	FUN
+.ASSUME	UU.'FUN	EQ	<<.-UUOFUN>/2>
+	.RAD50	/FUN/
+.ENDM	UUOFUN
+
+.ASSUME	UU$MIN	EQ	<<.-UUOFUN>/2>					;021
+	UUOFUN	USC		; -30., Utility Synch Code		;031
+	UUOFUN	TB3		; -29., Monitor tables part 3		;021
+	UUOFUN	SPL		; -28., One-shot spooling request	;021
+	UUOFUN	DMP		; -27., Online monitor snapshot		;021
+	UUOFUN	FIL		; -26., File utility			;021
+	UUOFUN	ATR		; -25., Read/write file attributes	;021
+	UUOFUN	CCL		; -24., CCL command add/delete		;021
+	.RAD50	<35><35><35>	; -23., Illegals print as ???		;021
+	.RAD50	<35><35><35>	; -22., Illegals print as ???		;021
+	.RAD50	<35><35><35>	; -21., Illegals print as ???		;021
+	.RAD50	<35><35><35>	; -20., Illegals print as ???		;021
+	UUOFUN	LOG		; -19., Set number of allowed logins	;021
+	UUOFUN	RTS		; -18., Run-time system & resident library control ;021
+	UUOFUN	NAM		; -17., Set file's run-time system name	;021
+	UUOFUN	DIE		; -16., Special SHUTUP logout		;021
+	UUOFUN	ACT		; -15., Accounting information dump	;021
+	UUOFUN	DAT		; -14., Date/time changer		;021
+	UUOFUN	PRI		; -13., Priority, run burst, maximum changer ;021
+	UUOFUN	TB2		; -12., 2nd part of Monitor tables	;021
+	UUOFUN	BCK		; -11., Backup file accounting changer	;021
+	.RAD50	<35><35><35>	; -10., Illegals print as ???		;021
+	UUOFUN	HNG		;  -9., Hangup/enable a dataset		;021
+	UUOFUN	FCB		;  -8., Get FCB/DDB information		;021
+	.RAD50	<35><35><35>	;  -7., Illegals print as ???		;021
+	UUOFUN	POK		;  -6., Poke monitor memory		;021
+	.RAD50	<35><35><35>	;  -5., Illegals print as ???		;021
+	.RAD50	<35><35><35>	;  -4., Illegals print as ???		;021
+	UUOFUN	TB1		;  -3., 1st part of monitor tables	;021
+	UUOFUN	NLG		;  -2., Set number of allowed logins to 1 ;021
+	UUOFUN	YLG		;  -1., Set number of allowed logins to maximum ;021
+UUOFUN:	UUOFUN	PAS		;  +0., Create an account		;021
+	UUOFUN	DLU		;  +1., Delete an account		;021
+	UUOFUN	CLN		;  +2., Clean a disk pack		;021
+	UUOFUN	MNT		;  +3., Disk pack mount/dismount	;021
+	UUOFUN	LIN		;  +4., LOGIN				;021
+	UUOFUN	BYE		;  +5., LOGOUT				;021
+	UUOFUN	ATT		;  +6., ATTACH				;021
+	UUOFUN	DET		;  +7., DETACH				;021
+	UUOFUN	CHU		;  +8., Change password/quota		;021
+	UUOFUN	ERR		;  +9., Get error message text		;021
+	UUOFUN	ASS		; +10., ASSIGN				;021
+	UUOFUN	DEA		; +11., DEASSIGN			;021
+	UUOFUN	DAL		; +12., DEASSIGN all			;021
+	UUOFUN	ZER		; +13., Zero device			;021
+	UUOFUN	RAD		; +14., Read accounting information	;021
+	UUOFUN	DIR		; +15., Get directory information	;021
+	UUOFUN	TRM		; +16., Set terminal characteristics	;021
+	UUOFUN	LOK		; +17., Wildcard directory lookup	;021
+	.RAD50	<35><35><35>	; +18., Illegals print as ???		;021
+	UUOFUN	CHE		; +19., Cache enable/disable		;021
+	UUOFUN	CNV		; +20., Convert date/time to ASCII	;021
+	UUOFUN	SLN		; +21., Set/clear system-wide logical names ;021
+	.RAD50	<35><35><35>	; +22., Illegals print as ???		;021
+	UUOFUN	SWP		; +23., Add/remove swap, overlay, error msg files ;021
+	UUOFUN	JOB		; +24., Job creation			;021
+	UUOFUN	PPN		; +25., Wildcard PPN lookup		;021
+	UUOFUN	SYS		; +26., Return job status information	;021
+	UUOFUN	KMC		; +27., Connect KMC-11 to another device ;021
+	UUOFUN	PRV		; +28., Set/clear/read privilege bits	;021
+	UUOFUN	STL		; +29., Stall System			;021
+	UUOFUN	PRM		; +30., Add/remove permanent file/priv'd program ;021
+	UUOFUN	3PP		; +31., Set/drop third party privilege check ;021
+	UUOFUN	CHK		; +32., File access or privilege bit check ;021
+	UUOFUN	ONX		; +33., Open next disk file		;021
+	UUOFUN	CFG		; +34., Set system defaults/parameters	;021
+.ASSUME	UU$MAX	EQ	<<.-UUOFUN-2>/2>				;021
+
+.SBTTL	OUTPUT FORMATTERS FOR MINI-SYSTAT
+
+.ENABL	LSB
+
+;+
+; OUTR50 - PRINT 2 RAD50 WORDS.
+;
+;	R5 -> 2 WORDS TO PRINT
+;
+;	CALL	OUTR50
+;
+;	R2,R3,R4 RANDOM
+;	R5 -> PAST THE 2 WORDS
+;-
+
+OUTR50:	MOV	PC,-(SP)	;;OUTPUT 2 WORDS OF RAD50
+	MOV	(R5)+,R3	;;GET THE RAD50 WORD
+
+;+
+; OUTRAD - PRINT RAD50 WORD.
+;
+;	R3 =  RAD50 WORD
+;
+;	CALL	OUTRAD
+;
+;	R2,R3,R4 RANDOM
+;-
+
+OUTRAD:	CALL	DODIVS,R5,10$	;;NOW GO DO THE DIVISIONS (C-BIT NOT USED...)
+	  .WORD	50*50,50
+	RETURN			;;EXIT
+
+10$:	TST	R2		;;CHECK THE RAD50 CODE
+	BEQ	70$		;;IT IS SPACE (CODE=0), IGNORE IT
+	ADD	#'A-1,R2	;;ADJUST FOR ALPHABETICS
+	CMP	R2,#33+<'A-1>	;;IS IT IN FACT ALPHABETIC?
+	BLO	30$		;;YES, GO USE IT
+	SUB	#36+<'A-1>,R2	;;ADJUST FOR NUMERIC (ZERO = 0)
+20$:	MOVB	40$(R2),R2	;;GET NUMERIC OR SPECIAL CHARACTER
+30$:	CALLRX	CHOUTE		;;GO OUTPUT THE CHARACTER
+
+	.ASCII	"$.?"		;;SPECIAL RAD50 CHARACTERS
+40$:	.ASCII	"0123456789"	;;RAD50 DIGITS
+	.EVEN
+
+;+
+; OUTCPU - PRINT DOUBLE PRECISION CPU TIME.
+;
+;	SP -> TIME MSB (HIGH BYTE IGNORED), TIME LSB, ...
+;
+;	CALL	OUTCPU
+;
+;	R2-R5 = RANDOM
+;	SP -> ...
+;-
+
+OUTCPU:	MOV	(SP)+,R5	;;SNAG THE RETURN ADDRESS FROM THE STACK
+	CLR	R2		;;CLEAR A HIGH ORDER
+	BISB	(SP)+,R2	;; AND GET THE HIGH ORDER CPU TIME
+	MOV	(SP)+,R3	;;GET THE LOW ORDER CPU TIME
+	MOV	R5,-(SP)	;;REPLACE THE RETURN ADDRESS
+	DIV	#10000.,R2	;;SPLIT THE NUMBER
+	MOV	R2,-(SP)	;;SAVE THE HIGH ORDER RESULT
+	BEQ	50$		;;NO HIGH ORDER
+	MOV	R3,-(SP)	;;SAVE LOW PART
+	;CLC			;;C-BIT=0 FROM 'DIV' ABOVE
+	CALL	60$		;;OUTPUT THE HIGH PART
+	MOV	(SP)+,R3	;;RESTORE LOW PART
+50$:	CLR	R2		;;CLEAR THE HIGH ORDER
+	DIV	#10.,R2		;; AND DIVIDE FOR TENTHS
+	NEG	(SP)+		;;SET C-BIT=1 IF HIGH ORDER EXISTED
+	MOV	R3,-(SP)	;;SAVE TENTHS
+	CALL	60$		;;OUTPUT THE CPU TIME (C-BIT CORRECT)
+	CALL	OUTCHR,R5,<'.>	;;PRINT THE DECIMAL POINT
+	MOV	(SP)+,R2	;;GET THE TENTHS
+	BR	20$		;;GO PRINT A DIGIT
+
+;+
+; OUTSIZ - PRINT A NUMBER 0-255 WITH LEADING ZERO SUPPRESSION.
+;
+;	SP -> NUMBER (HIGH ORDER BYTE IGNORED), ...
+;
+;	CALL	OUTSIZ
+;
+;	R2-R4 = RANDOM
+;	SP -> ...
+;-
+
+OUTSIZ:	CLR	R2		;;CLEAR THE BUCKET
+	BISB	2(SP),R2	;; AND GET THE K SIZE
+	MOV	(SP)+,(SP)	;;MOVE THE RETURN ADDRESS DOWN
+	;CLC			;;C-BIT=0 FROM 'CLR' ABOVE
+60$:	MOV	R2,R3		;;COPY THE NUMBER
+	CALL	DODIVS,R5,20$	;;GO DO THE DIVISIONS, PRINTING ASCII DIGITS
+	  .WORD	100.,10.
+70$:	RETURN			;;EXIT
+
+;+
+; OUTCHR - PRINT ONE OR TWO CHARACTERS.
+;
+;	CALL	OUTCHR,R5
+;	 .BYTE	BYTE1,BYTE2	(BYTE2 NOT PRINTED IF 0)
+;
+;	R2-R5 = RANDOM
+;-
+
+OUTCHR:	MOV	R5,(SP)		;;CLOBBER SAVED R5 WITH RETURN ADDRESS -2
+	ADD	#2,(SP)		;; THEN UPDATE TO REAL RETURN ADDRESS
+
+;+
+; OUTPNT - PRINT ONE OR TWO CHARACTERS (VARIABLE).
+;
+;	R5 -> 2 BYTES TO PRINT
+;
+;	CALL	OUTPNT
+;
+;	R2-R4 = RANDOM
+;	R5 -> PREVIOUS + 2
+;-
+
+OUTPNT:	MOVB	(R5)+,R2	;;GET FIRST CHARACTER
+	CALLX	CHOUTE		;; AND OUTPUT IT
+	MOVB	(R5)+,R2	;;GET SECOND CHARACTER (IF ANY)
+	BIC	#^C<177>,R2	;; AND TRIM THE SIGN BIT
+	BNE	30$		;;OUTPUT SECOND CHARACTER IF ONE EXISTS
+	RETURN			;;ELSE JUST EXIT
+
+.DSABL	LSB
+
+;+
+; DODIVS - DO A SERIES OF DIVISIONS AND EMIT THE QUOTIENTS.
+;
+;	R3 = NUMBER TO DIVIDE
+;	C=1 IF LEADING ZEROS ARE TO BE PRINTED
+;
+;	CALL	DODIVS,R5
+;	 .WORD	ROUTINE TO CALL TO EMIT A QUOTIENT
+;		(QUOTIENT IS IN R2, MAY NOT ALTER R0, R1, OR R5)
+;	 .WORD	DIVISOR 1, DIVISOR 2, ...
+;	RETURN
+;
+;	R2-R4 = RANDOM
+;
+;	NOTE: (DIVISOR N & 200) MUST BE 0 FOR N >= 2
+;-
+
+DODIVS:	MOV	(R5)+,-(SP)	;;SAVE THE OUTPUT ROUTINE ADDRESS
+	BIC	-(SP),(SP)	;;SAY NOT INTO SIGNIFICANCE YET
+	ADC	(SP)		;;FORCE SIGNIFICANCE IF NEEDED
+10$:	CLR	R2		;;CLEAR A HIGH ORDER
+	DIV	(R5)+,R2	;; AND DIVIDE
+	BNE	20$		;;RESULT <> 0, SAY SIGNIFICANCE STARTS
+	TST	(SP)		;;RESULT = 0, IS IT SIGNIFICANT?
+	BEQ	30$		;;NOT YET...
+20$:	INC	(SP)		;;INDICATE RESULTS ALL NOW SIGNIFICANT
+	MOV	R3,-(SP)	;;SAVE REMAINDER
+	CALL	@4(SP)		;;CALL THE OUTPUT ROUTINE
+	MOV	(SP)+,R3	;;RESTORE REMAINDER
+30$:	TSTB	(R5)		;;MORE?
+	BPL	10$		;;YES, LOOP
+	MOV	R3,R2		;;NO MORE DIVISIONS, SET FINAL RESULT
+	TST	(SP)+		;;DUMP THE SIGNIFICANCE INDICATOR
+	CALL	@(SP)+		;;GO OUTPUT FINAL RESULT
+	RETURN	R5		;; AND EXIT
+
+.SBTTL	Go to a specified position
+
+;+
+; SETPOS - Go to a specified position
+;
+;	R0 = KB # * 2
+;	R1 -> DDB
+;
+;	SETPOS	WHERE
+;	CALL	SETPOS,R5,<WHERE-1>
+;
+;	R2 = Undefined
+;	R3 = Undefined
+;	R4 = Undefined
+;-
+
+SETPOS:	MOVB	DDHORC(R1),R2	;;Pick up width + 1			;021
+	MOVB	DDHORZ(R1),R4	;;Pick up present "position"		;021
+	SUB	R4,R2		;;Now R2 has 0-based position		;021
+	BCS	30$		;;Negative? Something is strange	;021
+	BIC	#^C<377>,R2	;;Forget any sign extension		;021
+	MOV	(R5)+,-(SP)	;;Push the desired zero-based position	;021
+	SUB	R2,(SP)		;;Now (SP) has number of spaces needed	;021
+10$:	DEC	(SP)		;;Say another space done		;021
+	BMI	20$		;;All done...				;021
+	MOVB	#40,R2		;;Set up a space			;021
+	CALLX	CHOUTE		;;And go output it			;021
+	BR	10$		;;And loop				;021
+
+20$:	TST	(SP)+		;;Dump space counter			;021
+30$:	RETURN	R5		;;And we're done			;021
+
+.END
+

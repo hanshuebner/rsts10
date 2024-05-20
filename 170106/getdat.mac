@@ -1,0 +1,121 @@
+.INCLUDE	%CMN:COMMON.MAC%
+
+TITLE	GETDAT,<OMS/OMSMGR get date/time routine>,01,15-Feb-89,DBM
+
+;
+;		COPYRIGHT (c) 1974, 1989 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	PBSKEY Edit History
+;+
+; EDIT	BY   DATE	REASON
+; 001	DBM  15-Feb-89	Creation
+; 002	DLS  08-Nov-89	Change delta time from minutes to seconds
+;
+;-
+
+.SBTTL	Define and order the PSECTS
+
+	.PSECT	GETDAT,RO,I,GBL,REL,OVR
+
+;+
+;
+; GETDAT is used to retreive the current date/time in RSTS/E internal
+; format.  GETDAT will optionally invert the values for use by OMS when
+; dealing with the RMS indexing keys.  GETDAT will also compute a delta
+; time from the current so that timers can be set to off at a later time.
+;
+; CALL:
+;
+;	CALL GETDAT BY REF (TIMBUF$ BY DESC, INVFLG% [, DELTA%])
+;
+;	where:
+;		TIMBUF$ is a 4- or 6- character string in which the date/time
+;		is returned.
+;
+;		INVFLG% is a word integer flag telling GETDAT to invert the
+;		bytes returned so that the string can be used as a key field.
+;
+;		DELTA% is a word integer that specifies the number of seconds
+;		to be added to the current time.  Common use will be to add
+;		300 seconds for reminder messages, and 3600 seconds for work
+;		file timestamps.  If this parameter is not specified, or has a
+;		value of zero, then the current time is returned.
+;
+;-
+
+	.ENABL	LSB
+
+GETDAT::NOP			; For debugging
+	.DATE			; Get current date/time
+	MOV	#XRB,R0		; Get pointer to XRB
+	MOV	(R0)+,-(SP)	; Get current date
+	MOV	(R0)+,R4	; Get current time
+	CMPB	(R5),#3		; Delta time requested?
+	BLT	20$		; Nope, just return current date/time
+	MOV	@6(R5),R3	; Get delta seconds. 		begin edit 002
+	SXT	R2		; Sign extend into R2
+	DIV	#60.,R2		; R2 = Delta minutes , R3 = Delta seconds
+	MOVB	(R0),R1		; Low byte = secs until min, High byte = 0 (SXT)
+	SUB	R3,R1		; Adjust current secs until min by delta seconds
+	BGT	5$		; Didn't go past next minute
+	INC	R2		; Add a minute to delta minutes
+	ADD	#60.,R1		; Calculate correct seconds until minute
+	MOVB	R1,(R0)		; Update with correct seconds until minute
+5$:	SUB	R2,R4		; Adjust current time by delta.    end edit 002
+	BGT	20$		; Midnight wasn't crossed, check INVFLG%
+	ADD	#60.*24.,R4	; Set time to correct point in day
+	INC	(SP)		; Increment day of year
+	MOV	#365.,R1	; Assume year has 365 days
+	BIT	#3,(SP)		; Correct assumption?
+	BNE	10$		; Uh-huh
+	INC	R1		; Nope.  It has 366 days.
+10$:	MOV	(SP),R3		; Get copy of current year
+	SXT	R2		; Sign extend into R2
+	DIV	#1000.,R2	; R2 = Year, R3 = day
+	CMP	R1,R3		; Is new day within year?
+	BGE	20$		; Sure 'nuf
+	SUB	R1,(SP)		; Set correct day of year
+	ADD	#1000.,(SP)	; Adjust year for overflow
+20$:	MOV	2(R5),R3	; Get pointer to TIMBUF$ descriptor
+	MOV	(R3)+,R1	; Now get pointer to TIMBUF$
+	TST	@4(R5)		; Should we invert?
+	BEQ	30$		; Yes, go do it
+	MOV	(SP)+,(R1)+	; Return date
+	MOV	R4,(R1)+	; Return time
+	CMP	(R3),#6		; Should we return seconds/ticks?
+	BLO	40$		; Nope.  String isn't big enough
+	MOV	(R0)+,(R1)+	; Return seconds/ticks
+	BR	40$		; Return to caller
+
+30$:	SWAB	(SP)		; Swap bytes for key value
+	MOV	(SP)+,(R1)+	; Store inverted date
+	NEG	R4		; 1440 - x = -x + 1440 (Simple algebra)
+	ADD	#60.*24.,R4	; Convert mins to midnite -> mins since midnite
+	SWAB	R4		; Swap bytes for key value
+	MOV	R4,(R1)+	; Store inverted time
+	CMP	(R3),#6		; Should we return seconds/ticks?
+	BLO	40$		; Nope.  String isn't big enough
+	MOV	(PC)+,R2	; Pick up second/tick converter value
+	.BYTE	60.		; 60 seconds/minute
+..50HZ::.BYTE	60.		; 60 ticks/second
+	SUB	(R0)+,R2	; Convert "to next" into "since last" values
+	MOV	R2,(R1)+	; Store inverted seconds and ticks
+40$:	RETURN			; Return to caller
+
+.END

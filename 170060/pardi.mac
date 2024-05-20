@@ -1,0 +1,187 @@
+	$BEGIN	PARDI,<31.3>,<Get default directory ID>
+
+;
+; THIS  SOFTWARE  IS FURNISHED UNDER A LICENSE AND MAY
+; BE USED OR COPIED ONLY IN ACCORDANCE WITH THE  TERMS
+; OF SUCH LICENSE.
+;
+; COPYRIGHT (c) 1985, 1981 BY DIGITAL EQUIPMENT CORPORATION.
+; ALL RIGHTS RESERVED.
+;
+; Previously modified by
+;	Peter H. Lipman
+;	Shao-Sun Chien
+;	Andrew C. Goldstein
+;	Geoff Kuenning
+;	B. Leavitt
+;	Loni Brown
+;	S. Ruzich
+;
+; Modified:
+;
+;	S. M. Thomas		30-April-1983
+;		SMT033 - Named directory support based on
+;			Simon Szeto's changes
+;
+;	S. M. Thomas		1-July-1983
+;		SMT040 - Handle [] and <> as default directory string
+;
+;	Michael Pettengill	10-October-1983
+;		MLP106 - Make .GTDID and .GTDIR function properly
+;
+;	P. K. M. Weiss		24-September-1984
+;		PKW065 - Add logical name support
+;
+;	T. Schoeller	29-MAY-85	The default directory string is now
+;					constructed in .FINIT now. TMS016 Ident
+;					31.3.
+;
+
+; **-..PDI-Get default directory
+;
+; The name and original title of this module don't describe very well
+; what this module actually does.  I don't really know why that is.
+;
+; What this routine does currently is
+;
+;	1) If the default directory string returned by the system is
+;	   "[]" or "<>", then we are in explicit /NONAME mode, and
+;	   the default UIC is used to create the default directory
+;	   string.
+;	2) If the default directory ID is valid for the device being
+;	   referenced, the this value is used without performing the
+;	   lookup.  This is provides a generally helpful caching
+;	   effect.
+;	3) After the lookup is complete, if there was no error, the
+;	   device and DID are saved in the directory cache in the FSR.
+;
+; The current actions of this routine seem to be incorrect in some
+; respects.  See notes elsewhere on this issue.
+;
+; Input:
+;	R0=FDB
+;	R1=FNB
+;
+; Output:
+;	Carry set if error, otherwise carry clear
+;	F.ERR is status
+;
+;	Directory ID field in FNB filled in
+;	Filename, type, and version cleared
+;
+; Registers R0 and R1 are preserved
+;
+
+..PDI::	MOV	@#.FSRPT,R2	; Get address of impure area
+	ADD	#A.DFDR,R2	; Then default directory string desc
+	MOV	R2,-(SP)	; Save pointer to default string desc
+	TST	(R2)
+	BGT	30$		; If GT default directory string setup
+
+;
+; Null default directory descriptor; default to MFD
+;
+
+	.IF	EQ,R$RSTS
+
+	MOV	#4,N.DID(R1)	; Set to MFD File ID
+	MOV	#4,N.DID+2(R1)	;
+	CLR	N.DID+4(R1)	; Also CLC
+
+	.IFF
+
+	CLR	N.DID(R1)	; IF PPN EXISTS THEN LEAVE IT BE
+				; Huh???
+	.ENDC
+
+	BR	50$		; Join common exit
+
+;
+; Some basic caching here; if the device name and unit agree with the
+; last default directory lookup, then use the result from that.
+;
+
+30$:	CALL	100$		; Setup registers
+	CMP	-(R2),-(R3)	; Same unit?
+	BNE	40$		; If NE no
+	CMP	-(R2),-(R3)	; Same device?
+	BNE	40$		; If NE no
+	MOV	-(R2),-(R3)	; Use the saved directory ID
+	MOV	-(R2),-(R3)	;
+	MOV	-(R2),-(R3)	;
+	BR	50$		; Join common exit
+
+;
+; Look up the directory
+;
+
+40$:	MOV	(SP),R2		; Restore default directory desc pointer
+	CALL	..DIRF		; Find directory
+	BCC	45$		; If CC we found the directory
+	INC	R1		; Increment the FNB to show failure
+	BR	50$		; Go put the directory in the FNB anyway
+
+;
+; Save the ID for quicker handling of default directory.  It will keep
+; changing if bouncing around to different devices with the default
+; directory name on each but the general case is worth the minimal
+; code required.
+;
+
+45$:	MOV	(SP),R2		; Restore pointer again
+	CALL	100$		; Setup registers, then copy into cache
+	MOV	-(R3),-(R2)	; Unit
+	MOV	-(R3),-(R2)	; Name
+	MOV	-(R3),-(R2)	; DID
+	MOV	-(R3),-(R2)	; DID
+	MOV	-(R3),-(R2)	; DID
+50$:	MOV	(SP)+,R2	; Boy, do we ever restore this pointer often
+	MOV	F.EXT(R0),R4	; Is there an extension?
+	BEQ	65$		; Nope
+	MOV	(R2)+,R3	; Move the directory length into R3
+	CMPB	R3,FX.DMX(R4)	; Is the length longer than the max?
+	BLE	55$		; No, continue
+	MOVB	FX.DMX(R4),R3	; Use the max length as the length
+55$:	MOVB	R3,FX.DLN(R4)	; Copy it into the Extension
+	BEQ	65$		; If no length, exit
+	MOV	(R2),R2		; Get the address of the default string
+	MOV	FX.DIR(R4),R4	; Get the address of the string 
+60$:	MOVB	(R2)+,(R4)+	; Move the string
+	SOB	R3,60$		; All of it
+65$:	CLC			; Assume success
+	BIT	#1,R1		; Is the FNB odd?
+	BEQ	70$		; Nope, success
+	DEC	R1		; Fix the FNB
+	SEC			; Show failure
+70$:	RETURN
+
+;
+; A little utility routine to setup pointer to cache and DID area in
+; name block
+;
+; Inputs:
+;	R2=default directory string descriptor in FSR
+;	R1=FNB
+;
+; Outputs:
+;	R2=pointer to end of cache area
+;	R3=pointer past unit in FNB
+;	Carry clear
+;
+
+	ASSUME	D.DFDV,D.DFID+6
+	ASSUME	D.DFUN,D.DFDV+2
+	ASSUME	N.DVNM,N.DID+6
+	ASSUME	N.UNIT,N.DVNM+2
+100$:	ADD	#D.DFUN+2,R2	; Point to cache save area
+	MOV	R1,R3		; And point to DID information
+	ADD	#N.UNIT+2,R3	; in name block
+	CLC			; Ensure carry clear
+	RETURN			;
+
+;
+;
+	$END	PARDI
+;
+;
+	.END

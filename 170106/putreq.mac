@@ -1,0 +1,257 @@
+.INCLUDE	%CMN:COMMON%
+.INCLUDE	%SYSTEM:CMNDEF%
+
+TITLE	PUTREQ,<Sequential Request Put Routine>,0F,13-NOV-89,DBM
+
+;
+;		COPYRIGHT (c) 1974, 1989 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	PUTREQ Edit History
+;+
+; EDIT	BY	DATE		REASON
+; 000	DBM	11-Jan-90	Creation
+;-
+
+.SBTTL	Program description
+
+;+
+; The PUTREQ routine is called by OMS to add a request record to the
+; OMS log file.  The length of the record is computed from REQ.LEN
+;
+; Format:	CALL PUTREQ BY REF (BUFFER$)
+;
+; If the log file is not yet open, PUTREQ will open it.
+;
+; The PUTCLS routine can be called to close the log file.
+; (Since a CLOSE statement from BP2 will have no effect)
+;-
+
+.SBTTL	Define the PSECTS
+
+	.PSECT	PUTDAT,RW,D,GBL,REL,OVR	; Data area for PUT routine
+	.PSECT	PUTREQ,RO,I,GBL,REL,CON	; Code area for PUT routine
+
+.SBTTL	Main program logic
+
+OFFLEN	=: REQLEN-OMSREQ		; Compute offset to *.LEN field
+
+	.ENABL	LSB
+
+PUTREQ::NOP				; For debugging, *** remove ***
+	MOV	#FUNERR,R0		; Preset "?Arguments don't match" error
+	CMP	(R5)+,#1		; We expect only one argument
+	BNE	BNE.ER			; Uh oh!  Better check your code
+	CALLX	CLRFQB			; Clear out the FIRQB
+	MOVB	#UU.FCB,FIRQB+FQFUN	; Get open file statistics
+	MOVB	LOG.CH,FIRQB+FQFIL	; For log file channel
+	.UUO				; Do it
+	MOVB	FIRQB,R0		; Any error?
+	BEQ	10$			; No, so file is already open
+	CALL	90$			; Yes, so we need to open the file
+10$:	MOV	#HDRSIZ,R3		; Fetch length of header
+	MOV	(R5),R2			; Fetch pointer to OMSREQ buffer
+	CMP	OFFLEN(R2),#-1		; Is this an open file call?
+	BEQ	65$			; Yes, just return
+	CMP	OFFLEN(R2),#REQSIZ	; Value request size?
+	BLOS	15$			; Yes, accept it
+	MOV	#BADCNT,R0		; No, set error code
+	BR	BNE.ER			; And return it to BP2
+
+15$:	ADD	OFFLEN(R2),R3		; Compute total size of record
+	CMP	R3,AT.LRL		; Current record > Largest record?
+	BLOS	20$			; No, continue
+	MOV	R3,AT.LRL		; Yes, update the attribute
+20$:	MOV	#BUFBEG,R1		; Fetch pointer to I/O buffer
+	ADD	AT.OFF,R1		; Compute pointer into I/O buffer
+	MOV	R3,(R1)+		; Store length of record into buffer
+	INC	R3			; Round record length up...
+	ASR	R3			; To compute length in words
+30$:	CMP	R1,#BUFEND		; Is this buffer full?
+	BLO	40$			; Nope, go add a word
+	CALL	60$			; Yes, write current buffer
+	CALL	70$			; Increment size and zero buffer
+40$:	MOV	(R2)+,(R1)+		; Copy a word of data
+	SOB	R3,30$			; Loop until record is copied
+	CALL	60$			; Write out current buffer
+	CMP	R1,#BUFEND		; Is buffer full now?
+	BLO	50$			; No
+	CALL	70$			; Yes, increment size and zero buffer
+50$:	SUB	#BUFBEG,R1		; Convert pointer back into offset
+	MOV	R1,AT.OFF		; Store offset back in attribute area
+	MOV	#AT.CNT,R4		; Set count of attributes
+	CALLR	140$			; Write them out, then return to caller
+
+60$:	CALLX	CLRXRB			; Clear out the XRB
+	MOV	#XRB,R0			; Get handy pointer
+	MOV	#BUFEND-BUFBEG,(R0)	; Length of output buffer
+	MOV	(R0)+,(R0)+		; Number of bytes to write
+	MOV	#BUFBEG,(R0)+		; Starting address of buffer
+	MOVB	LOG.CH,(R0)		; Channel number * 1
+	ASLB	(R0)+			;                * 2
+	MOVB	AT.USZ,(R0)+		; MSB of block number
+	MOV	AT.USZ+2,(R0)		; LSB of block number
+	.WRITE				; Do it
+	MOVB	FIRQB,R0		; Any error?
+BNE.ER:	BNE	ERROR			; Yes, return it to BP2
+65$:	RETURN				; No, all done
+
+70$:	ADD	#BUFSIZ,AT.USZ+2	; Update low order blocks used
+	ADC	AT.USZ			; Update high order blocks used
+	MOV	AT.USZ,AT.FSZ		; Update file size to match used
+	MOV	AT.USZ+2,AT.FSZ+2	; Both words
+80$:	CLR	-(R1)			; Zero out the buffer
+	CMP	R1,#BUFBEG		; Back at beginning yet?
+	BNE	80$			; No, keep looping
+	RETURN				; Back to caller
+
+90$:	CALL	130$			; Run log file name thorugh .FSS
+	MOVB	#OPNFQ,FIRQB+FQFUN	; Set OPEN FOR INPUT function
+	MOVB	LOG.CH,FIRQB+FQFIL	; Channel number * 1
+	ASLB	FIRQB+FQFIL		;                * 2
+	MOV	#100010,FIRQB+FQMODE	; Set special extend mode
+	CALFIP				; Try to open the file
+	MOVB	FIRQB,R0		; Any errors?
+	BEQ	100$			; No, read/verify attributes
+	CMP	R0,#NOSUCH		; File not found?
+	BNE	ERROR			; No, return error to BP2
+	CALL	130$			; FSS file name again
+	MOVB	#CREFQ,FIRQB+FQFUN	; Set OPEN FOR OUTPUT function
+	MOVB	LOG.CH,FIRQB+FQFIL	; Channel number * 1
+	ASLB	FIRQB+FQFIL		;                * 2
+	MOV	#1,FIRQB+FQSIZ		; Set file size
+	MOV	#-16.,FIRQB+FQCLUS	; Set clustersize for file
+	MOV	#100210,FIRQB+FQMODE	; Special extend, no supersede modes
+	CALFIP				; Create the file
+	MOVB	FIRQB,R0		; Any error?
+	BNE	ERROR			; Yes, return it to BP2
+	CLR	OMSNUM			; No, start seq # at 1 for this log file
+	MOV	#AT.BEG,R0		; Get handy pointer
+	MOV	#1003,(R0)+		; Set SEQ, VFC, and CC:IMP attributes
+	CLR	(R0)+			; No largest record (yet)
+	CLR	(R0)+			; MSB of filesize
+	CLR	(R0)+			; LSB of filesize
+	CLR	(R0)+			; MSB of last used block
+	MOV	#1,(R0)+		; LSB of last used block
+	CLR	(R0)+			; Last used byte in block
+	CLRB	(R0)+			; Bucket size of file
+	MOVB	#HDRSIZ,(R0)+		; Length of fixed control area
+	CLR	(R0)+			; No preset maximum record length
+	MOV	#AT.CNT,R4		; Set count of attributes
+	CALLR	140$			; Write them out and return
+
+100$:	BIT	#DDWLO,FIRQB+FQFLAG	; Check for write access to file
+	BEQ	110$			; Have it, check attributes
+	MOV	#PRVIOL,R0		; Set "Protection violation" error
+ERROR:	TRAP	377			; Return error in R0 to BP2
+
+110$:	CLR	R4			; Set flag for read attributes
+	CALL	140$			; Do it
+	MOV	#240,R0			; Preset "?Attributes not matched" error
+	CMP	AT.BEG,#1003		; Correct file/record format?
+	BNE	ERROR			; No
+	CMPB	AT.VFC,#HDRSIZ		; Correct header size?
+	BNE	ERROR			; No
+	TST	AT.MRL			; Correct record size? (Must be 0)
+	BNE	ERROR			; No
+	CALLX	CLRXRB			; File is good, clear out XRB
+	MOV	#XRB,R0			; Get handy pointer
+	MOV	#BUFEND-BUFBEG,(R0)+	; Size of input buffer
+	CLR	(R0)+			; Must be zero
+	MOV	#BUFBEG,(R0)+		; Address of input buffer
+	MOVB	LOG.CH,(R0)		; Channel number * 1
+	ASLB	(R0)+			;                * 2
+	MOVB	AT.USZ,(R0)+		; MSB of EOF block
+	MOV	AT.USZ+2,(R0)+		; LSB of EOF block
+	.READ				; Read the last block in file
+	MOVB	FIRQB,R0		; Any error?
+	BEQ	120$			; Nope, return to caller
+	CMP	#EOF,R0			; Was it "?End of file" ?
+	BNE	ERROR			; Nope, some unknown problem
+120$:	RETURN				; All's well that ends well
+
+130$:	CALLX	CLRFQX			; Clear out FIRQB and XRB
+	MOV	#XRB,R0			; Get handy pointer
+	MOV	#LOGNML,(R0)		; Length of file name string
+	MOV	(R0)+,(R0)+		; Two places
+	MOV	#LOGNAM,(R0)		; Pointer to file name
+	.FSS				; Run it through .FSS
+	RETURN
+
+140$:	CALLX	CLRFQB			; Clear out the FIRQB
+	MOV	#FIRQB+FQFUN,R0		; Get handy pointer
+	MOVB	#UU.ATR,(R0)+		; Function is file attributes
+	MOVB	LOG.CH,(R0)+		; For log file channel
+	MOVB	R4,(R0)+		; Set # of attributes
+	BEQ	160$			; Zero means read current
+	MOV	#AT.BEG,R1		; Point to beginning of attribute area
+150$:	MOV	(R1)+,(R0)+		; Copy a word of attributes
+	SOB	R4,150$			; Loop until done
+	INC	R4			; Flag this as a write attributes call
+160$:	.UUO				; Read/Write the attributes
+	MOVB	FIRQB,R0		; Any error?
+	BNE	ERROR			; Yes, return it to BP2
+	TST	R4			; No, was this a write attributes call?
+	BNE	180$			; Yes, so we're done
+	MOV	#AT.BEG,R1		; Point to attributes area
+	MOV	#FIRQB+FQPPN,R0		; Point to returned attributes
+	MOV	#AT.CNT,R4		; Set count of attributes
+170$:	MOV	(R0)+,(R1)+		; Copy a word out of the FIRQB
+	SOB	R4,170$			; Loop until done
+180$:	RETURN				; Return to caller
+
+	.GLOBL	EOF,NOSUCH,PRVIOL,FUNERR,BADCNT
+	.DSABL	LSB
+
+PUTCLS::				; SUB to close the log file
+	CALLX	CLRFQB			; Clear out the FIRQB
+	MOVB	LOG.CH,FIRQB+FQFIL	; Set channel # * 1
+	ASLB	FIRQB+FQFIL		;               * 2
+	CALFIP				; Close the file
+	MOVB	FIRQB,R0		; Any error (Shouldn't be, but...)
+	BNE	ERROR			; Yes???????????
+	RETURN				; Nope.  Back to caller
+
+	.PSECT	PUTDAT			; Data section for PUTREQ
+
+; Log file name
+
+LOGNAM:	.ASCII	"OMS$:REQLOG.OMS<188>"
+LOGNML	=: .-LOGNAM
+
+; Attribute area:
+
+AT.BEG:					; Beginning of attribute area
+AT.RFM:	.BLKW0				; Record format/attr and file org
+AT.LRL:	.BLKW0				; Largest record length in file
+AT.FSZ:	.BLKW0	2			; File size
+AT.USZ:	.BLKW0	2			; Current # of blocks in use
+AT.OFF:	.BLKW0				; Offset to next available byte in block
+AT.BKT:	.BLKB0				; Bucket size
+AT.VFC:	.BLKB0				; Fixed header size (VFC format)
+AT.MRL:	.BLKW0				; Maximum record length
+AT.END:
+AT.CNT	=: <AT.END-AT.BEG>/2		; # of attributes
+
+; I/O buffer
+
+BUFBEG:	.BLKB0	512.			; One block buffer
+BUFEND:
+BUFSIZ	=: <.-BUFBEG>/512.		; Size of buffer in blocks
+
+	.END

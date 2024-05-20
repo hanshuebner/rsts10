@@ -1,0 +1,4419 @@
+.INCLUDE	%CMN:COMMON%
+.LIBRARY	%SYSTEM:PBSMAC%
+.LIBRARY	%LB:RMSMAC%
+.NLIST
+.INCLUDE	%SYSTEM:QMDEF%
+.LIST
+TITLE	QMCMD,<QMAN COMMAND PROCESSOR>,0J,27-MAR-92,SJM/PRL/KCG/TJK/DBM/DLS
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR QMCMD
+;+
+;
+;  000	KCG  18-Apr-81	Creation for V9.0
+;  001	PRL  19-Apr-84	Change FB$xxx symbols to FF$xxx
+;  002	PRL  23-Apr-84	Save sender's job no. & KB no.
+;  003	PRL  27-Apr-84	Fix bugs in URPMSG
+;  004	PRL  02-May-84	Save MSGEND in GETMSG routine
+;  005	PRL  09-May-84	Use MOVBYT macro
+;			Remove UU.SPL checks in GETMSG
+;  006	PRL  12-May-84	Update to use REMV, DCLR routines
+;  007	PRL  14-May-84	Add support for EXQTA privilege
+;  008	PRL  17-May-84	Reference EXQTA as a global symbol
+;  009	PRL  21-May-84	Remove CHKOPR calls
+;  010	PRL  27-May-84	Change CHKPRV macro call
+;			Update DEFJOB to use CHKPRI routine
+;  011	KCG  05-Jun-84	Put in code to support priv queues in DEFJOB
+;  012	KCG  12-Jun-84	Put in support for entering a job /HOLD in DEFJOB
+;  013	PRL  14-Jun-84	Remove STSREQ (process STATUS REQUEST) routine
+;  014	KCG  18-Jun-84	Add support for URP acking to Rcvr ID and Job no.
+;  015	KCG  22-Jun-84	Put in support for Unique ID in INIDEV & INIQUE
+;  016	KCG  25-Jun-84	Add code for SETSRP and CLRSRP ( special run prior )
+;  017	KCG  20-Jul-84	Fix SPONL to not accept an ONL unless spawning
+;  018	PRL  27-Sep-84	Rename QMCMD, fix to work as own .OBJ file
+;  019	KCG  05-Oct-84	Fix state transition for servers with no SDB
+;  020	PRL  16-Oct-84	Add code to INISER to mark TENTATIVE status
+;  019	KCG  19-Oct-84	Add code to INIDEV and INIQUE to check queue type range
+;  020	PRL  22-Oct-84	Check for proper queue type in MQ routines
+;  021	PRL  22-Oct-84	Return ER$DNR if queue marked for del in MODQUE
+;  022	PRL  24-Oct-84	Add dispatch table for MD (modify job) routines
+;  023	KCG  26-Oct-84	Add call to entrcv for declaration of all receivers
+;  024	PRL  29-Oct-84	Add CLRNIU call when scheduling job starter in MODJOB
+;  025	PRL  30-Oct-84	Change QT$ symbol names
+;  026	PRL  23-Nov-84	Fix SET ENTRY/FORMS bug in MDFRM routine
+;  027	KCG  10-Jan-85	Add modify server code for /NOFEED /FEED servers
+;  028	KCG  16-Jan-85	Fix SPONL to accept onls only from job numbers in SKDB
+;  029	KCG  16-Jan-85	Cancel /FEED and /NOFEED servers
+;  030	KCG  01-Feb-85	Add support for /NOSHAREABLE batch severs in INIDEV
+;  031	KCG  04-Feb-85	Put in upgraded SPNJOB routine
+;  032	KCG  21-Feb-85	Return error for servers already started/stopped
+;			when they get a start/stop command.
+;  033	KCG  14-Mar-85	Add ER$IOP error for already start/stop/open/close ques
+;  034	KCG  10-Apr-85	Make msg max 30 for the server message receiver
+;  035  TJK  20-Dec-85  Start job should call schj, not itself
+;  036  TJK  07-May-86  Fix bug in DELJOB
+;  037  TJK  09-May-86  Fix calls to GETREC
+;  ********* V9.3 **********
+;  038	PRL  07-Nov-86	Remove extra DEFJOB code to set JB.IPR
+;
+;			[RSTS/E V9.6]
+;  039	DBM  03-Feb-88	Return ER$LBY on multiple deletes
+;  040	DBM  19-Feb-88	Add /[NO]WRAP support
+;  041	DBM  21-Feb-88	Add dynamic PK support
+;
+;			[RSTS/E V10.0]
+;  042	DBM  27-Jun-89	Add OMS, notify, and FORMS_WAIT support
+;  043	DBM  27-Jan-90	Outbound LAT support
+;
+;			[RSTS/E V10.1]
+;  044	PRL  17-Mar-91	Add SET ENTRY/[NO]NOTIFY support
+;  045	DBM  25-Jun-91	Fix "?Numeric image for string" error in DELJOB
+;  046	DBM  25-Jun-91	Fix "?Packet error -1600" (ER$SEQ) errors
+;  047	DLS  17-Mar-92	Re-establish record context after FORMS_WAIT to READY
+;			update in strjob.
+;-
+
+.SBTTL	QMCMD	- INITIALIZE QMCMD PSECT
+
+	.PSECT	QMCMD,RO,CON		;init QMCMD psect
+
+.SBTTL	DEFINE PBS TASK FILE-SPEC
+
+	.SAVE
+	.PSECT	PURE
+
+PNAM:	.ASCII	%PB%<$$PKLO>%$:PBS.TSK%	;$$PKLO is defined in QMDEF
+	PNAML = .-PNAM
+
+	.EVEN
+	.RESTORE
+
+.SBTTL	LENTBL	- TABLE OF MINIMUM MESSAGE LENGTHS
+
+	.SAVE
+	.PSECT	PURE
+
+	.EVEN
+
+LENTBL:	.WORD	NP.LEN+HD.LEN		;  0 = NO-OP command
+	.WORD	BP.LEN+HD.LEN		;  1 = BREAKPOINT TRAP command
+	.WORD	ST.LEN+HD.LEN		;  2 = STATUS REQUEST command
+	.WORD	SR.LEN+HD.LEN		;  3 = STATUS RESPONSE command
+	.WORD	SU.LEN+HD.LEN		;  4 = STATUS UPDATE command
+	.WORD	AK.LEN+HD.LEN		;  5 = ACKNOWLEDGEMENT command
+	.WORD	NK.LEN+HD.LEN		;  6 = NEG-ACKNOWLEDGEMENT command
+	.WORD	PD.LEN+HD.LEN		;  7 = PAUSE SERVER command
+	.WORD	CD.LEN+HD.LEN		; 10 = CONTINUE SERVER command
+	.WORD	JB.LEN+HD.LEN		; 11 = DEFINE JOB command
+	.WORD	MD.LEN+HD.LEN		; 12 = MODIFY JOB command
+	.WORD	KL.LEN+HD.LEN		; 13 = KILL JOB command
+	.WORD	EJ.LEN+HD.LEN		; 14 = END OF JOB command
+	.WORD	FT.LEN+HD.LEN		; 15 = DEFINE FONT command
+	.WORD	ON.LEN+HD.LEN		; 16 = ON-LINE command
+	.WORD	OC.LEN+HD.LEN		; 17 = ON-LINE CONFIRM command
+	.WORD	OF.LEN+HD.LEN		; 20 = OFF-LINE command
+	.WORD	SY.LEN+HD.LEN		; 21 = SYNCH ERROR command
+	.WORD	ID.LEN+HD.LEN		; 22 = INITIALIZE SERVER command
+	.WORD	MS.LEN+HD.LEN		; 23 = MODIFY SERVER command
+	.WORD	DD.LEN+HD.LEN		; 24 = DELETE SERVER command
+	.WORD	IQ.LEN+HD.LEN		; 25 = INITIALIZE QUEUE command
+	.WORD	MQ.LEN+HD.LEN		; 26 = MODIFY QUEUE command
+	.WORD	DQ.LEN+HD.LEN		; 27 = DELETE QUEUE command
+	.WORD	PQ.LEN+HD.LEN		; 30 = PAUSE QUEUE command
+	.WORD	CQ.LEN+HD.LEN		; 31 = CONTINUE QUEUE command
+	.WORD	AS.LEN+HD.LEN		; 32 = ASSIGN QUEUE command
+	.WORD	DS.LEN+HD.LEN		; 33 = DEASSIGN QUEUE command
+					; 34 = FIRST ILLEGAL COMMAND
+
+.SBTTL	USRTBL	- STATE TABLE FOR ALL USER REQUESTS
+
+;+
+; This is the state table for all messages from users.  There are no
+; state transitions for user messages.
+;-
+
+;	NEXT STATE	ACTION
+
+USRTBL::				;start of user->QMAN state table
+
+	.WORD	0,	.NOP		;  0 = NO-OP command
+	.WORD	0,	.BPT		;  1 = BREAKPOINT TRAP command
+	.WORD	0,	0		;  2 = STATUS REQUEST command
+	.WORD	0,	0		;  3 = STATUS RESPONSE command
+	.WORD	0,	0		;  4 = STATUS UPDATE command
+	.WORD	0,	0		;  5 = ACKNOWLEDGEMENT command
+	.WORD	0,	0		;  6 = NEG-ACKNOWLEDGEMENT command
+	.WORD	0,	PAUDEV		;  7 = PAUSE SERVER command
+	.WORD	0,	CONDEV		; 10 = CONTINUE SERVER command
+	.WORD	0,	DEFJOB		; 11 = DEFINE JOB command
+	.WORD	0,	MODJOB		; 12 = MODIFY JOB command
+	.WORD	0,	DELJOB		; 13 = KILL JOB command
+	.WORD	0,	0		; 14 = END OF JOB command
+	.WORD	0,	0		; 15 = DEFINE FONT command
+	.WORD	0,	0		; 16 = ON-LINE command
+	.WORD	0,	0		; 17 = ON-LINE CONFIRM command
+	.WORD	0,	QMOFL		; 20 = OFF-LINE command
+	.WORD	0,	0		; 21 = SYNCH ERROR command
+	.WORD	0,	INIDEV		; 22 = INITIALIZE SERVER command
+	.WORD	0,	MODSER		; 23 = MODIFY SERVER command
+	.WORD	0,	DELDEV		; 24 = DELETE SERVER command
+	.WORD	0,	INIQUE		; 25 = INITIALIZE QUEUE command
+	.WORD	0,	MODQUE		; 26 = MODIFY QUEUE command
+	.WORD	0,	DELQUE		; 27 = DELETE QUEUE command
+	.WORD	0,	PAUQUE		; 30 = PAUSE QUEUE command
+	.WORD	0,	CONQUE		; 31 = CONTINUE QUEUE command
+	.WORD	0,	ASNQUE		; 32 = ASSIGN QUEUE command
+	.WORD	0,	DSNQUE		; 33 = DEASSIGN QUEUE command
+					; 34 = FIRST ILLEGAL COMMAND
+	.ASSUME	UQ.NOP EQ 0
+	.ASSUME	UQ.BPT EQ 1
+	.ASSUME	UQ.STA EQ 2
+;	.ASSUME	UQ.RSP EQ 3
+;	.ASSUME	UQ.STU EQ 4
+;	.ASSUME	UQ.ACK EQ 5
+;	.ASSUME	UQ.NCK EQ 6
+	.ASSUME	UQ.PDV EQ 7
+	.ASSUME	UQ.CDV EQ 10
+	.ASSUME	UQ.JOB EQ 11
+	.ASSUME	UQ.MOD EQ 12
+	.ASSUME	UQ.KIL EQ 13
+;	.ASSUME	UQ.EOJ EQ 14
+	.ASSUME	UQ.FNT EQ 15
+;	.ASSUME	UQ.ONL EQ 16
+;	.ASSUME	UQ.ONC EQ 17
+;	.ASSUME	UQ.OFL EQ 20
+;	.ASSUME	UQ.SYN EQ 21
+	.ASSUME UQ.IDV EQ 22
+	.ASSUME UQ.DDV EQ 24
+	.ASSUME UQ.IQU EQ 25
+	.ASSUME UQ.DQU EQ 27
+	.ASSUME UQ.PQU EQ 30
+	.ASSUME UQ.CQU EQ 31
+	.ASSUME UQ.AQU EQ 32
+	.ASSUME UQ.DSQ EQ 33
+	.ASSUME UQ.MAX EQ 34
+
+.SBTTL	SPLIDL	- IDLE LOOP STATE TABLE FOR SERVER MESSAGE
+;+
+; This is the idle loop state for a server.  In this state,
+; a server can accept a new job.
+;-
+
+;	NEXT STATE	ACTION
+
+SPLTBL::				;start of server->QMAN state table
+
+SPLIDL::.WORD	0,	.NOP		;  0 = NO-OP command
+	.WORD	0,	0		;  1 = BREAKPOINT TRAP command
+	.WORD	0,	0		;  2 = STATUS REQUEST command
+	.WORD	SPLSYN,	SPSYN		;  3 = STATUS RESPONSE command
+	.WORD	0,	SPSUP		;  4 = STATUS UPDATE command
+	.WORD	SPLSYN,	SPSYN		;  5 = ACKNOWLEDGEMENT command
+	.WORD	SPLSYN,	SPSYN		;  6 = NEG-ACKNOWLEDGEMENT command
+	.WORD	0,	0		;  7 = PAUSE SERVER command
+	.WORD	0,	0		; 10 = CONTINUE SERVER command
+	.WORD	0,	0		; 11 = DEFINE JOB command
+	.WORD	0,	0		; 12 = MODIFY JOB command
+	.WORD	0,	0		; 13 = KILL JOB command
+	.WORD	0,	0		; 14 = END OF JOB command
+	.WORD	0,	0		; 15 = DEFINE FONT command
+	.WORD	0,	SPONL		; 16 = ON-LINE command
+	.WORD	0,	0		; 17 = ON-LINE CONFIRM command
+	.WORD	SPLIDL,	SPOFL		; 20 = OFF-LINE command
+	.WORD	SPLSYN,	SPSYN		; 21 = SYNCH ERROR command
+	.WORD	0,	0		; 22 = INITIALIZE SERVER command
+	.WORD	0,	0		; 23 = MODIFY SERVER command
+	.WORD	0,	0		; 24 = DELETE SERVER command
+	.WORD	0,	0		; 25 = INITIALIZE QUEUE command
+	.WORD	0,	0		; 26 = MODIFY QUEUE command
+	.WORD	0,	0		; 27 = DELETE QUEUE command
+	.WORD	0,	0		; 30 = PAUSE QUEUE command
+	.WORD	0,	0		; 31 = CONTINUE QUEUE command
+	.WORD	0,	0		; 32 = ASSIGN QUEUE command
+	.WORD	0,	0		; 33 = DEASSIGN QUEUE command
+					; 34 = FIRST ILLEGAL COMMAND
+	.ASSUME	SQ.NOP EQ 0
+;	.ASSUME	SQ.BPT EQ 1
+;	.ASSUME	SQ.STA EQ 2
+	.ASSUME	SQ.RSP EQ 3
+	.ASSUME	SQ.STU EQ 4
+	.ASSUME	SQ.ACK EQ 5
+	.ASSUME	SQ.NCK EQ 6
+;	.ASSUME	SQ.PAU EQ 7
+;	.ASSUME	SQ.CON EQ 10
+;	.ASSUME	SQ.JOB EQ 11
+;	.ASSUME	SQ.MOD EQ 12
+;	.ASSUME	SQ.KIL EQ 13
+	.ASSUME	SQ.EOJ EQ 14
+;	.ASSUME	SQ.FRM EQ 15
+	.ASSUME	SQ.ONL EQ 16
+;	.ASSUME	SQ.ONC EQ 17
+	.ASSUME	SQ.OFL EQ 20
+	.ASSUME	SQ.SYN EQ 21
+;	.ASSUME SQ.IDV EQ 22
+;	.ASSUME SQ.DDV EQ 24
+;	.ASSUME SQ.IQU EQ 25
+;	.ASSUME SQ.DQU EQ 27
+;	.ASSUME SQ.PQU EQ 30
+;	.ASSUME SQ.CQU EQ 31
+;	.ASSUME SQ.ASQ EQ 32
+;	.ASSUME SQ.DSQ EQ 33
+	.ASSUME SQ.MAX EQ 34
+
+.SBTTL	SPLJOB	- JOB WAIT STATE TABLE FOR SERVER MESSAGE
+
+;+
+; This state indicates that a server has been sent a job start
+; packet, and QMAN is waiting for an acknowledgement.
+;-
+
+;	NEXT STATE	ACTION
+
+SPLJOB::.WORD	0,	.NOP		;  0 = NO-OP command
+	.WORD	0,	0		;  1 = BREAKPOINT TRAP command
+	.WORD	0,	0		;  2 = STATUS REQUEST command
+	.WORD	SPLSYN,	SPSYN		;  3 = STATUS RESPONSE command
+	.WORD	0,	SPSUP		;  4 = STATUS UPDATE command
+	.WORD	SPLIJO,	SPACK		;  5 = ACKNOWLEDGEMENT command
+	.WORD	SPLSYN,	SPNCK		;  6 = NEG-ACKNOWLEDGEMENT command
+	.WORD	0,	0		;  7 = PAUSE SERVER command
+	.WORD	0,	0		; 10 = CONTINUE SERVER command
+	.WORD	0,	0		; 11 = DEFINE JOB command
+	.WORD	0,	0		; 12 = MODIFY JOB command
+	.WORD	0,	0		; 13 = KILL JOB command
+	.WORD	0,	0		; 14 = END OF JOB command
+	.WORD	0,	0		; 15 = DEFINE FONT command
+	.WORD	SPLIDL,	SPONL		; 16 = ON-LINE command
+	.WORD	0,	0		; 17 = ON-LINE CONFIRM command
+	.WORD	SPLIDL,	SPOFL		; 20 = OFF-LINE command
+	.WORD	SPLSYN,	SPSYN		; 21 = SYNCH ERROR command
+	.WORD	0,	0		; 22 = INITIALIZE SERVER command
+	.WORD	0,	0		; 23 = MODIFY SERVER command
+	.WORD	0,	0		; 24 = DELETE SERVER command
+	.WORD	0,	0		; 25 = INITIALIZE QUEUE command
+	.WORD	0,	0		; 26 = MODIFY QUEUE command
+	.WORD	0,	0		; 27 = DELETE QUEUE command
+	.WORD	0,	0		; 30 = PAUSE QUEUE command
+	.WORD	0,	0		; 31 = CONTINUE QUEUE command
+	.WORD	0,	0		; 32 = ASSIGN QUEUE command
+	.WORD	0,	0		; 33 = DEASSIGN QUEUE command
+					; 34 = FIRST ILLEGAL COMMAND
+
+.SBTTL	SPLIJO	- END JOB WAIT STATE TABLE FOR SERVER MESSAGE
+
+;+
+; In this state, a server is processing a job.  QMAN is waiting
+; for the job to complete.
+;-
+
+;	NEXT STATE	ACTION
+
+SPLIJO::.WORD	0,	.NOP		;  0 = NO-OP command
+	.WORD	0,	0		;  1 = BREAKPOINT TRAP command
+	.WORD	0,	0		;  2 = STATUS REQUEST command
+	.WORD	SPLSYN,	SPSYN		;  3 = STATUS RESPONSE command
+	.WORD	0,	SPSUP		;  4 = STATUS UPDATE command
+	.WORD	SPLSYN,	SPSYN		;  5 = ACKNOWLEDGEMENT command
+	.WORD	SPLSYN,	SPSYN		;  6 = NEG-ACKNOWLEDGEMENT command
+	.WORD	0,	0		;  7 = PAUSE SERVER command
+	.WORD	0,	0		; 10 = CONTINUE SERVER command
+	.WORD	0,	0		; 11 = DEFINE JOB command
+	.WORD	0,	0		; 12 = MODIFY JOB command
+	.WORD	0,	0		; 13 = KILL JOB command
+	.WORD	SPLIDL,	SPEOJ		; 14 = END OF JOB command
+	.WORD	0,	0		; 15 = DEFINE FONT command
+	.WORD	SPLIDL,	SPONL		; 16 = ON-LINE command
+	.WORD	0,	0		; 17 = ON-LINE CONFIRM command
+	.WORD	SPLIDL,	SPOFL		; 20 = OFF-LINE command
+	.WORD	SPLSYN,	SPSYN		; 21 = SYNCH ERROR command
+	.WORD	0,	0		; 22 = INITIALIZE SERVER command
+	.WORD	0,	0		; 23 = MODIFY SERVER command
+	.WORD	0,	0		; 24 = DELETE SERVER command
+	.WORD	0,	0		; 25 = INITIALIZE QUEUE command
+	.WORD	0,	0		; 26 = MODIFY QUEUE command
+	.WORD	0,	0		; 27 = DELETE QUEUE command
+	.WORD	0,	0		; 30 = PAUSE QUEUE command
+	.WORD	0,	0		; 31 = CONTINUE QUEUE command
+	.WORD	0,	0		; 32 = ASSIGN QUEUE command
+	.WORD	0,	0		; 33 = DEASSIGN QUEUE command
+					; 34 = FIRST ILLEGAL COMMAND
+
+.SBTTL	SPLSYN	- RESYNC STATE TABLE FOR SERVER MESSAGE
+
+;+
+; In this state, either the server or QMAN has detected a sync
+; error.  QMAN has asked the server to return its current status,
+; and is waiting for a response.
+;-
+
+;	NEXT STATE	ACTION
+
+SPLSYN::.WORD	0,	.NOP		;  0 = NO-OP command
+	.WORD	0,	0		;  1 = BREAKPOINT TRAP command
+	.WORD	0,	0		;  2 = STATUS REQUEST command
+	.WORD	0,	SPSRS		;  3 = STATUS RESPONSE command
+	.WORD	0,	SPSUP		;  4 = STATUS UPDATE command
+	.WORD	0,	0		;  5 = ACKNOWLEDGEMENT command
+	.WORD	0,	0		;  6 = NEG-ACKNOWLEDGEMENT command
+	.WORD	0,	0		;  7 = PAUSE SERVER command
+	.WORD	0,	0		; 10 = CONTINUE SERVER command
+	.WORD	0,	0		; 11 = DEFINE JOB command
+	.WORD	0,	0		; 12 = MODIFY JOB command
+	.WORD	0,	0		; 13 = KILL JOB command
+	.WORD	0,	0		; 14 = END OF JOB command
+	.WORD	0,	0		; 15 = DEFINE FONT command
+	.WORD	SPLIDL,	SPONL		; 16 = ON-LINE command
+	.WORD	0,	0		; 17 = ON-LINE CONFIRM command
+	.WORD	SPLIDL,	SPOFL		; 20 = OFF-LINE command
+	.WORD	0,	SPSYN		; 21 = SYNCH ERROR command
+	.WORD	0,	0		; 22 = INITIALIZE SERVER command
+	.WORD	0,	0		; 23 = MODIFY SERVER command
+	.WORD	0,	0		; 24 = DELETE SERVER command
+	.WORD	0,	0		; 25 = INITIALIZE QUEUE command
+	.WORD	0,	0		; 26 = MODIFY QUEUE command
+	.WORD	0,	0		; 27 = DELETE QUEUE command
+	.WORD	0,	0		; 30 = PAUSE QUEUE command
+	.WORD	0,	0		; 31 = CONTINUE QUEUE command
+	.WORD	0,	0		; 32 = ASSIGN QUEUE command
+	.WORD	0,	0		; 33 = DEASSIGN QUEUE command
+					; 34 = FIRST ILLEGAL COMMAND
+
+.SBTTL	SPLCRA	- CRASH RESTART WAIT STATE TABLE FOR SERVER MESSAGE
+
+;+
+; QMAN has detected that it crashed and re-started. It has sent status
+; request messages to all of its servers, and is waiting for a response.
+;-
+
+;	NEXT STATE	ACTION
+
+SPLCRA::.WORD	0,	.NOP		;  0 = NO-OP command
+	.WORD	0,	0		;  1 = BREAKPOINT TRAP command
+	.WORD	0,	0		;  2 = STATUS REQUEST command
+	.WORD	0,	SPSRS		;  3 = STATUS RESPONSE command
+	.WORD	0,	SPSUP		;  4 = STATUS UPDATE command
+	.WORD	0,	0		;  5 = ACKNOWLEDGEMENT command
+	.WORD	0,	0		;  6 = NEG-ACKNOWLEDGEMENT command
+	.WORD	0,	0		;  7 = PAUSE SERVER command
+	.WORD	0,	0		; 10 = CONTINUE SERVER command
+	.WORD	0,	0		; 11 = DEFINE JOB command
+	.WORD	0,	0		; 12 = MODIFY JOB command
+	.WORD	0,	0		; 13 = KILL JOB command
+	.WORD	0,	0		; 14 = END OF JOB command
+	.WORD	0,	0		; 15 = DEFINE FONT command
+	.WORD	SPLIDL,	SPONL		; 16 = ON-LINE command
+	.WORD	0,	0		; 17 = ON-LINE CONFIRM command
+	.WORD	SPLIDL,	SPOFL		; 20 = OFF-LINE command
+	.WORD	0,	SPSYN		; 21 = SYNCH ERROR command
+	.WORD	0,	0		; 22 = INITIALIZE SERVER command
+	.WORD	0,	0		; 23 = MODIFY SERVER command
+	.WORD	0,	0		; 24 = DELETE SERVER command
+	.WORD	0,	0		; 25 = INITIALIZE QUEUE command
+	.WORD	0,	0		; 26 = MODIFY QUEUE command
+	.WORD	0,	0		; 27 = DELETE QUEUE command
+	.WORD	0,	0		; 30 = PAUSE QUEUE command
+	.WORD	0,	0		; 31 = CONTINUE QUEUE command
+	.WORD	0,	0		; 32 = ASSIGN QUEUE command
+	.WORD	0,	0		; 33 = DEASSIGN QUEUE command
+					; 34 = FIRST ILLEGAL COMMAND
+	.RESTORE
+
+.SBTTL	QTYTBL	- TABLE OF JOB PACKET CONSTANTS BY QUEUE TYPE
+
+;+
+; Table of various job constants, ordered by queue type.
+; QTYSIZ defines the size of each entry in the table.
+;-
+
+	.SAVE
+	.PSECT	PURE
+
+; Define the table entries:
+
+QTYTBL::				;start of table:
+
+					; print queue values:
+	.BYTE	1			;	default job copies
+	.BYTE	1			;	default file copies
+	.WORD	FF$SKP!FF$FHD!FF$RAP	;	default file flag word	;040
+	.RAD50	"LST"			;	default filetype in RAD50
+	.BYTE	5			;	length of default entry name
+	FIXSTG	<"PRINT">,NAM.LEN	;	default entry name string
+	.WORD	VALPRT			;	validation routine
+
+					; batch request defaults:
+	.BYTE	0			;	default job copies
+	.BYTE	0			;	default file copies
+	.WORD	0			;	default file flag word
+	.RAD50	"COM"			;	default filetype in RAD50
+	.BYTE	5			;	length of default entry name
+	FIXSTG	<"BATCH">,NAM.LEN	;	default entry name string
+	.WORD	VALBAT			;	validation routine
+
+	.EVEN
+	.RESTORE
+
+GLOBAL	<VALPRT,VALBAT>
+
+.SBTTL	MDQTBL	- MODIFY QUEUE (MQ) DISPATCH TABLE
+
+;+
+; The modify queue dispatch table contains the addresses of routines
+; used to update fields in a QDB from a MODIFY QUEUE packet.  Each
+; entry in the table consists of two words:
+;
+;	+0 Field ID
+;
+;		is a word containing a single set bit identifying
+;		a field in the MQ packet.  The MQ.FLG word contains
+;		a corresponding bit set for each field modified in
+;		the packet.
+;
+;	+2 Update routine
+;
+;		is the address of the routine to update the field
+;		defined by the corresponding bit in the field ID.
+;
+;	The table is terminated with a zero value in the Field ID
+;	word.
+;
+;-
+
+	.SAVE
+	.PSECT	PURE
+	.EVEN
+
+MDQTBL:					;start of modify queue table
+
+	.WORD	MQ$MCP,MQCPU		;  update maximum CPU_LIMIT field
+	.WORD	MQ$DCP,MQCPU		;  update default CPU_LIMIT field
+	.WORD	MQ$DFL,MQDFL		;  set DEFAULT flag bit
+	.WORD	MQ$NDF,MQNDF		;  clear NODEFAULT flag bit
+	.WORD	MQ$FRM,MQFRM		;  update FORMS fields
+	.WORD	MQ$MPG,MQPGL		;  update maximum PAGE_LIMIT field
+	.WORD	MQ$DPG,MQPGL		;  update default PAGE_LIMIT field
+	.WORD	MQ$MPR,MQPRI		;  update maximum PRIORITY field
+	.WORD	MQ$DPR,MQPRI		;  update default PRIORITY field
+	.WORD	MQ$PRV,MQPRV		;  update PRIVILEGES field
+	.WORD	MQ$MTM,MQTIM		;  update maximum TIME_LIMIT field
+	.WORD	MQ$DTM,MQTIM		;  update default TIME_LIMIT field
+	.WORD	0			;end of table
+
+	.EVEN
+	.RESTORE
+
+.SBTTL	MDSTBL	- MODIFY SERVER (MS) DISPATCH TABLE
+
+;+
+; The modify server dispatch table contains the addresses of routines
+; used to update fields in a SDB from a MODIFY SERVER packet.  Each
+; entry in the table consists of two words:
+;
+;	+0 Field ID
+;
+;		is a word containing a single set bit identifying
+;		a field in the MS packet.  The MS.FLG word contains
+;		a corresponding bit set for each field modified in
+;		the packet.
+;
+;	+2 Update routine
+;
+;		is the address of the routine to update the field
+;		defined by the corresponding bit in the field ID.
+;
+;	The table is terminated with a zero value in the Field ID
+;	word.
+;
+;-
+
+	.SAVE
+	.PSECT	PURE
+	.EVEN
+
+MDSTBL:					;start of modify server table
+
+	.WORD	MS$CTL,MSCTL		;  update /CONTROL bit
+	.WORD	MS$NCT,MSNCT		;  update /NOCONTROL bit
+	.WORD	MS$CUP,MSCUP		;  update /CONTROL=UPARROW bit
+	.WORD	MS$FRM,MSFRM		;  update FORMS fields
+	.WORD	MS$PRI,MSPRI		;  update PRIORITY field
+	.WORD	MS$RUN,MSRUN		;  update RUNBURST field
+	.WORD	MS$SHR,MSSHR		;  mark server as SHAREABLE
+	.WORD	MS$NSH,MSNSH		;  mark server as NOSHAREABLE
+	.WORD	0			;end of table
+
+	.EVEN
+	.RESTORE
+
+.SBTTL	MDJTBL	- MODIFY JOB (MD) DISPATCH TABLE
+
+;+
+; The modify job dispatch table contains the addresses of routines
+; used to update fields in a job from a MODIFY JOB (MD) packet.  Each
+; entry in the table consists of two words:
+;
+;	+0 Field ID
+;
+;		is a word containing a single set bit identifying
+;		a field in the MD packet.  The MD.FLG word contains
+;		a corresponding bit set for each field modified in
+;		the packet.
+;
+;	+2 Update routine
+;
+;		is the address of the routine to update the field
+;		defined by the corresponding bit in the field ID.
+;
+;	The table is terminated with a zero value in the Field ID
+;	word.
+;
+;-
+
+	.SAVE
+	.PSECT	PURE
+	.EVEN
+
+MDJTBL:					;start of modify job table
+
+	.WORD	MD$AFT,MDAFT		;  update after date/time fields
+	.WORD	MD$CPU,MDCPU		;  update CPU_LIMIT field
+	.WORD	MD$FRM,MDFRM		;  update FORMS fields
+	.WORD	MD$HLD,MDHLD		;  change job status to HOLD
+	.WORD	MD$COP,MDCOP		;  update JOC_COUNT field
+	.WORD	MD$PAG,MDPAG		;  update PAGE_LIMIT field
+	.WORD	MD$PRI,MDPRI		;  update PRIORITY field
+	.WORD	MD$RLS,MDRLS		;  release job from HOLD state
+	.WORD	MD$TIM,MDTIM		;  update TIME_LIMIT field
+	.WORD	MD$NOT,MDNOT		;  set NOTIFY flag		;044
+	.WORD	MD$NNT,MDNNT		;  clear NOTIFY flag 		;044
+	.WORD	0			;end of table
+
+	.EVEN
+	.RESTORE
+
+.SBTTL	SERSTS	- SERVER STATUS ROUTINE DISPATCH
+
+	.SAVE
+	.PSECT	PURE
+
+SERSTS:	.WORD	SEROFL		;Server is offline (SU$OFL)
+	.WORD	SERONL		;Server is online (SU$ONL)
+	.WORD	SERCAR		;Server lost carrier (SU$CAR)
+
+SERTLN = <.-SERSTS>
+
+	.RESTORE
+
+.SBTTL	QMCMD	- START OF QMCMD
+
+	.PSECT	QMCMD		;start of QMCMD psect
+
+.SBTTL	SETSRP	- SET SPECIAL RUN PRIORITY
+.SBTTL	CLRSRP	- CLEAR SPECIAL RUN PRIORITY
+
+;+
+;
+; SETSRP:
+; CLRSRP:
+;
+;
+; INPUTS:
+;
+;
+; CALL:
+;
+;	JSR	PC,SETSRP
+;	JSR	PC,CLRSRP
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+SETSRP:	MOV	#BIT8,@#XRB+XRLEN		;SET SPECIAL RUN PRIORITY BIT
+	.SET					; SET THE BIT
+	CLC					; AND THAT'S ALL
+	RETURN
+
+CLRSRP:	MOV	#BIT8,@#XRB+XRLEN		;SET SPECIAL RUN PRIORITY BIT
+	.CLEAR					; CLEAR THE BIT
+	CLC					; AND THAT'S ALL
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	SRVDCL	- REMOVE PREVIOUS RIB AND DECLARE QMAN'S SERVER RECEIVER
+
+;+
+;
+; SRVDCL:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCTION BITS TABLE
+;
+; CALL:
+;	JSR	PC,SRVDCL
+;
+;
+; BACK:
+;
+;		OUR RECEIVER ID DECLARED OR
+;		WE STALL AND RETRY OR
+;		WE CRASH IF WE GET AN UNEXPECTED ERROR
+;
+;
+;-
+
+	.ENABL LSB
+
+SRVDCL:	PUSH	R0			;SAVE FUNCTION TABLE POINTER
+	MOV	#SRVRCV,R1		;PUT POINTER TO NAME IN R1
+	MOVB	SRVRIB(R5),R3		;GET OUR SUBRIB NUMBER
+	REMV	R3			;remove receiver for our subrib	;006
+	DCLR	R1,R3,#LO.SRV,#BIT0!BIT1,#30. ;Declare receiver:	;034
+					; local object type = LO.SRV	;006
+					; local, prived senders		;006
+					; maximum 30. messages		;034
+	BR	10$			;AND JOIN COMMON
+
+.SBTTL	USRDCL	- REMOVE PREVIOUS RIB AND DECLARE QMAN'S USER RECEIVER
+
+;+
+;
+; USRDCL:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCTION BITS TABLE
+;
+; CALL:
+;	JSR	PC,USRDCL
+;
+;
+; BACK:
+;
+;		OUR RECEIVER ID DECLARED OR
+;		WE STALL AND RETRY OR
+;		WE CRASH IF WE GET AN UNEXPECTED ERROR
+;
+;
+;-
+
+USRDCL:	PUSH	R0			;SAVE FUNCTION TABLE POINTER
+	MOV	#USRRCV,R1		;PUT POINTER TO NAME IN R1
+	MOVB	USRRIB(R5),R3		;GET OUR SUBRIB NUMBER
+	REMV	R3			;remove receiver for our subrib	;006
+	DCLR	R1,R3,#LO.QMN,#BIT0!BIT1,#20. ;declare receiver:	;006
+					; local object type = LO.QMN	;006
+					; local, prived senders		;006
+					; maximum 20. messages		;006
+	BR	10$			;AND JOIN COMMON
+
+.SBTTL	URPDCL	- REMOVE PREVIOUS RIB AND DECLARE QMAN'S URP RECEIVER
+
+;+
+;
+; URPDCL:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCTION BITS TABLE
+;
+; CALL:
+;
+;	JSR	PC,URPDCL
+;
+; BACK:
+;
+;		OUR RECEIVER ID DECLARED OR
+;		WE STALL AND RETRY OR
+;		WE CRASH IF WE GET AN UNEXPECTED ERROR
+;
+;
+;-
+
+URPDCL:	PUSH	R0			;SAVE FUNCTION TABLE POINTER
+	MOV	#URPRVR,R1		;PUT POINTER TO NAME IN R1
+	MOVB	URPRIB(R5),R3		;GET OUR SUBRIB NUMBER
+	REMV	R3			;remove receiver for our subrib	;006
+	DCLR	R1,R3,#LO.URP,#BIT0,#10. ;declare receiver:		;006
+					; local object type = LO.URP	;006
+					; local, non-prived senders	;006
+					; maximum 10. messages		;006
+	.BR	10$			;AND JOIN COMMON
+
+.SBTTL	xxxDCL	- REMOVE RIB AND DECLARE RECEIVER (COMMON CODE)
+
+10$:	MOVBYT	FIRQB+0,R0		;R0 = error status		;006
+	BEQ	60$			;no errors, so exit		;006
+	CMP	R0,#FIEXST		;DID THE RIB NAME EXITS?
+	BEQ	50$			;YES CRAP OUT
+	.BR	20$			;NO SOME OTHER ERROR
+
+20$:	CMP	R0,#NOROOM		;DID WE FAIL CUZ OF NO BUFFERS?
+	BNE	50$			;NO-IS UNKNOW ERROR SO CRASH
+	POP	R0			;RESTORE POINTER TO FUNCTION BITS
+	CMPB	R3,USRRIB(R5)		;declaring user RIB?		;021
+	BNE	30$			;no, continue			;021
+	SETFUN	S.USRD,R0		;yes, ask for us again		;021
+	BR	40$			;and stall			;021
+
+30$:	CMPB	R3,SRVRIB(R5)		;declaring server RIB?		;021
+	BNE	35$			;no, continue			;021
+	SETFUN	S.SRVD,R0		;yes, ask for us again		;021
+	BR	40$			;and stall			;021
+
+35$:	SETFUN	S.URPD,R0		;ask for URP declare again	;021
+	.BR	40$			;and stall			;021
+
+40$:	STALL	#30.			;TRY AGAIN IN 30 SECONDS
+
+50$:	MOV	@#FIRQB,R1		;SHOW ERROR
+	MOV	#ER$DUP,R2		;MORE ERROR HELP
+	CRASH				;QMAN IS ALREADY RUNNING, SO I DON'T
+
+60$:	CALLX	ENTRCV			;ENTER THE RECEIVER INTO RIB LIST
+	TST	(SP)+			;TRASH SAVED R0 VALUE
+	RETURN				;AND BACK WE GO
+
+	GLOBAL	<FIEXST,NOROOM>
+
+	.DSABL	 LSB
+
+;+
+; Define names for QMAN's receivers.  Names must begin
+; on word boundaries, padded with blanks to 6 characters.
+;-
+
+	.SAVE
+	.PSECT	PURE
+	.EVEN
+
+USRRCV:	.ASCII	%Q%<$$RCNM>%$CMD%		;define rcvr name for PBSCMD
+SRVRCV:	.ASCII	%Q%<$$RCNM>%$SRV%		;define rcvr name for servers
+URPRVR:	.ASCII	%Q%<$$RCNM>%$URP%		;define rcvr name for URPs
+
+SPL.TYP:.BYTE	0			;WE ARE A PRINT SERVER **** DECLINING
+
+	.EVEN
+	.RESTORE
+
+.SBTTL	GETMSG	- GET MESSAGE AND DISPATCH ON IT
+
+;+
+;
+; GETMSG:
+;
+; INPUTS:
+;		R0 -> FUNCTION BITS TABLE
+;		R1 =  RIB NAME TO RECEIVE MSG
+;		R4 =  PRIVED SENDER ONLY FLAG
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,GETMSG
+;
+; BACK:
+;
+;		C=0 message received and set up
+;			MSGPTR(R5) -> message buffer
+;			MSGLEN(R5) =  message length
+;		C=1 none or bad message
+;		All regs preserved
+;
+;-
+
+	.ENABL	LSB
+
+GETMSG:	PUSH	<R0,R1>			;save some work regs
+	TST	MSGPTR(R5)		;do we already have a message?
+	BNE	80$			;yes so can't get another
+10$:	RECV	R1			;receive message without data	;006
+	MOVBYT	FIRQB+0,R0		;R0 = error status		;006
+	BEQ	30$			;no error, so continue
+	CMP	#NOSUCH,R0		;error of no message?
+	BEQ	80$			;yes, so exit with error
+	CMP	#BADFUO,R0		;no, rib not there?
+	BEQ	80$			;yes, so exit with error
+20$:	CRASH				;unexpected error, so crash
+
+30$:	MOV	@#FIRQB+12,R1		;get length of pending message
+	BEQ	80$			;nothing there, so exit with error
+	MOV	R1,-(SP)		;save pending message length	;004
+	GETBUF	R0,R1,CLEAR		;get a cleared buffer
+	BCS	20$			;failed, so crash
+	MOV	R0,MSGPTR(R5)		;save pointer to message buffer
+	MOV	R1,MSGLEN(R5)		;  and it's length
+	ADD	R0,(SP)			;compute byte past message	;004
+	DEC	(SP)			;point to last byte in message	;004
+	MOV	(SP)+,MSGEND(R5)	;save message end addr		;004
+	MOV	(SP),R1			;restore RIB number
+	RECV	R1,MSGPTR(R5),MSGLEN(R5),#BIT1 ;receive message data	;006
+	MOVBYT	FIRQB+0,R0		;R0 = error status		;006
+	BEQ	60$			;no error, so continue		;006
+40$:	RETBUF	MSGPTR(R5),MSGLEN(R5)	;return the wasted effort
+	CLR	MSGPTR(R5)		;show no message buffer
+	CLR	MSGLEN(R5)		;  and no buffer length
+50$:	BR	80$			;exit with error
+
+60$:	CMPB	#-11.,@#FIRQB+FQFIL	;was it a send with privs?
+	BNE	40$			;no, so go return buffer & fail
+	MOV	R5,R1			;get copy of impure area pointer
+	ADD	#PPN,R1			;R1 -> saved PPN in impure area
+	MOV	FIRQB+FQPPN,(R1)+	;save sender's PPN
+	MOVB	FIRQB+FQSIZM,(R1)+	;save sender's job no. times 2	;024
+.ASSUME	PPN+2	EQ	JBNO		;ensure JBNO follows PPN field	;024
+	MOVB	FIRQB+FQNAM1,(R1)+	;save sender's KB no.		;024
+.ASSUME	JBNO+1	EQ	KBNO		;ensure KBNO follows JBNO field	;024
+	MOVSTR	#FIRQB+FQEXT,R1,#<PRVSIZ*2.> ;store the sender's priv mask
+.ASSUME	KBNO+1	EQ	PRIV		;ensure PRIV follows KBNO field	;024
+	TST	R4			;are sender privs required?	;021
+	BEQ	70$			;no, so exit			;021
+	MOV	#PBSPRV,R1		;yes, get required privs mask	;021
+	MUTEXC	R1,#FIRQB+FQEXT,#<PRVSIZ*2.> ;is sender prived enough?	;021
+	BCS	40$			;no, so trash it		;021
+
+70$:	TST	(PC)+			;clear carry for success
+80$:	SEC				;set carry for error/no message
+	POP	<R1,R0>			;restore regs
+	RETURN				;and exit
+
+GLOBAL	<NOSUCH,BADFUO,PBSPRV>
+
+.SBTTL	URPMSG - PROCESS USER REQUEST PACKET MESSAGE
+;+
+;
+; URPMSG:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCTION BITS TABLE
+;
+; CALL:
+;	JSR	PC,URPMSG
+;
+;
+; BACK:
+;
+;		URP MESSAGE PROCESSED
+;
+;		RETURN AFTER PROCESSING OR NO MESSAGE
+;
+;-
+
+	.ENABL	LSB
+
+URPMSG:	SAVREG
+	MOVB	URPRIB(R5),R1		;set up RIB number for receive
+	CLR	R4			;sender need not be prived
+	CALLX	GETMSG			;go try to get the message
+	BCC	5$			;found one, go process it
+	JMP	80$			;none there, so exit
+
+; Process URP message
+
+5$:	SETFUN	S.URPM,R0		;got one, so ask for us again
+	MOV	MSGPTR(R5),URPPTR(R5)	;save URP buffer address
+	MOV	MSGLEN(R5),URPLEN(R5)	;save URP buffer length
+	MOV	MSGEND(R5),URPEND(R5)	;save URP end addr		;004
+	CLR	MSGPTR(R5)		;clear msg pointer
+	CLR	MSGLEN(R5)		;clear message length
+	CLR	MSGEND(R5)		;clear message end addr		;004
+	MOVB	FIRQB+24,URPTYP(R5)	;save user's URP type
+	MOV	R5,R3			;get base of impure area
+	ADD	#URPRCV,R3		;R3 -> user's rcvr ID
+	MOVSTR	#FIRQB+26,R3,#6		;save user's rcvr ID
+	MOV	FIRQB+34,URPCTX(R5)	;save user's context word
+	CALLX	URP			;call the URP processor
+	BCS	50$			;error, so don't queue a job
+
+; Set up to queue the request
+
+10$:	MOV	MSGPTR(R5),R1		;get base of job packet
+	ADD	#HD.LEN,R1		;R1 -> job packet (past header)
+	MOV	R1,R3			;save a copy of packet addr
+	MOV	MSGLEN(R5),R2		;get length of packet
+	SUB	#HD.LEN,R2		;R2 = packet length (minus header)
+	CALL	DEFJOB			;try to queue the request
+	BCS	15$			;error, so skip to handle error
+	MOV	JB.SEQ(R3),URPFLD(R5)	;success, return entry no. as field
+	BR	50$			;and skip to process confirmation
+
+; Convert RMS error code to URP error/field codes
+
+15$:	TSTB	URPRCV(R5)		;error, did user want a confirmation?
+	BEQ	60$			;no, so go return buffers
+	CLR	URPERR(R5)		;yes, clear error code word
+	CLR	URPFLD(R5)		;clear URP field code word
+	MOV	#URPERT,R2		;get base of RMS/URP error table
+20$:	TST	(R2)			;any more entries?
+	BNE	30$			;yes, so continue
+	MOV	R1,URPERR(R5)		;no, so return RMS error code
+	BR	50$			;and join common
+
+30$:	CMP	(R2)+,R1		;RMS error codes match?
+	BEQ	40$			;yes, so exit loop
+	TST	(R2)+			;no, skip to next code
+	BR	20$			;and try again
+
+40$:	MOVB	(R2)+,URPERR(R5)	;copy URP error code
+	MOVB	(R2),URPFLD(R5)		;copy URP field code
+
+; Set up to return confirmation message
+
+50$:	TSTB	URPRCV(R5)		;did user want confirmation?
+	BEQ	60$			;no, so go return buffers
+	MOV	#XM.LEN+6,R1		;yes, get length of XMIT buffer
+	GETBUF	R0,R1,CLEAR		;allocate an xmit buffer
+	MOV	R1,XMITLN(R0)		;save actual length of buffer
+	MOV	#1,XMITCT(R0)		;show one target
+	MOV	R0,R3			;get start of buffer
+	ADD	#XMITFX,R3		;point to start of target block
+	MOVB	#3,(R3)+		;load URP return code		;014
+	MOVB	JBNO(R5),(R3)+		;load job number to send to	;014
+	MOV	R5,R4			;get base of impure area
+	ADD	#URPRCV,R4		;point to user's rcvr ID
+	MOVSTR	R4,R3,#6		;load user's rcvr ID
+	MOV	R0,R3			;get start of buffer again
+	ADD	#XM.LEN,R3		;point to start of data section
+	MOV	URPCTX(R5),(R3)+	;copy context word for return
+	MOV	URPERR(R5),(R3)+	;copy error word for return
+	MOV	URPFLD(R5),(R3)		;copy field code for return
+	XMIT	R0			;queue up the confirmation message
+
+; Deallocate job packet buffer if any
+
+60$:	TST	MSGLEN(R5)		;any message buffer allocated?
+	BEQ	70$			;no, so continue
+	RETBUF	MSGPTR(R5),MSGLEN(R5)	;return the buffer
+	CLR	MSGPTR(R5)		;show no message buffer
+	CLR	MSGLEN(R5)		;  and no message length
+
+; Deallocate URP message buffer if any
+
+70$:	TST	URPLEN(R5)		;any URP buffer allocated?
+	BEQ	80$			;no, so exit
+	RETBUF	URPPTR(R5),URPLEN(R5)	;yes, return URP buffer
+	CLR	URPPTR(R5)		;show no URP buffer
+	CLR	URPLEN(R5)		;  and no buffer length
+
+; exit URP processing
+
+80$:	RETURN				;exit
+
+	.DSABL	LSB
+
+GLOBAL	<URPERT>
+
+.SBTTL	SRVMSG - GET MESSAGE FROM SERVER AND DISPATCH ON IT
+;+
+;
+; SRVMSG:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCTION BITS TABLE
+;
+; CALL:
+;	JSR	PC,SRVMSG
+;
+;
+; BACK:
+;
+;		OUR MESSAGE DECODED AND DISPATCHED
+;
+;		RETURN AFTER DECODE OR NO MESSAGE
+;
+;-
+
+	.ENABL	LSB
+
+SRVMSG:	MOVB	SRVRIB(R5),R1		;SET UP RIB NUMBER FOR RECEIVE
+	MOV	#-1,R4			;sender must be prived
+	CALL	GETMSG			;GO TRY TO GET THE MESSAGE
+	BCS	10$			;IF NONE THERE OR ERROR GO BACK
+	SETFUN	S.SRVM,R0		;SET TO TRY FOR ANOUTHER MESSAGE
+	MOV	#SPLTBL,R4		;GET BASE ADDR OF SERVER MSG TBL
+	BR	40$			;AND JOIN COMMON
+
+.SBTTL	USRMSG	- GET MESSAGE FROM USER AND DISPATCH ON IT
+;+
+;
+; USRMSG:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCTION BITS TABLE
+;
+; CALL:
+;	JSR	PC,USRMSG
+;
+;
+; BACK:
+;
+;		OUR MESSAGE DECODED AND DISPATCHED
+;
+;			RETURN AFTER DECODE OR NO MESSAGE
+;
+;-
+
+USRMSG:	MOVB	USRRIB(R5),R1		;SET UP RIB NUMBER FOR RECEIVE
+	MOV	#-1,R4			;sender must be prived
+	CALL	GETMSG			;GO TRY TO GET THE MESSAGE
+10$:	BCC	30$			;CONTINUE IF OK
+20$:	RETURN				;ELSE RETURN
+
+30$:	SETFUN	S.USRM,R0		;SET TO TRY FOR ANOTHER MESSAGE
+	MOV	#USRTBL,R4		;GET BASE ADDR OF SPOOLER MSG TBL
+	.BR	40$			;AND JOIN COMMON
+
+.SBTTL	COMMON USER/SPOOLER MESSAGE DISPATCH
+
+40$:	CMP	MSGLEN(R5),#HD.LEN	;IS MESSAGE AT LEAST THE MIN LENGTH?
+	BHIS	60$			;yes, so continue
+50$:	JMP	RETMSG			;no, so trash the message
+
+60$:	MOV	MSGPTR(R5),R1		;GET POINTER TO MESSAGE
+	CMPB	HD.VER(R1),#P.VER	;DO PROTOCALS MATCH?
+	BNE	50$			;NO, SO CHUCK IT
+	CLR	HD.FLG(R1)		;CLEAR OUT A HANDY CELL (FLG+VER)
+	CMPB	#1,HD.RTQ(R1)		;WAS RETURN BY JOB # REQUESTED?
+	BNE	MREDO			;NO
+	MOV	#1,HD.RTN(R1)		;YES SO SET FOR RETURN BY JNM
+	CLR	HD.RTN+2(R1)
+	MOVB	@#FIRQB+5,HD.RTN+2(R1)	;SAVE CALLER'S JOB NUMBER
+	CLR	HD.RTN+4(R1)		;ZERO
+	.BR	MREDO
+
+MREDO:	MOV	MSGPTR(R5),R1		;GET POINTER TO MESSAGE
+	MOVB	HD.CMD(R1),R3		;GET PACKET TYPE
+	CMP	R3,#UQ.MAX		;IS IT OUT OF RANGE?
+	BHIS	50$			;yes, SO DUMP IT
+	ASL	R3			;X2
+	CMP	MSGLEN(R5),LENTBL(R3)	;IS MESSAGE LONG ENOUGH?
+	BLO	50$			;NO, SO TRASH IT
+	ASL	R3			;X4 (4 BYTE TABLE ENTRIES)
+	TST	SAVSTA(R5)		;WAS THIS A RE-TRY?
+	BEQ	80$			;NO
+	MOV	SAVSTA(R5),R4		;YES, RESTORE THE SAVED STATE
+80$:	CMP	#SPLTBL,R4		;IS THIS FOR A SPOOLER?
+	BNE	95$			;NO
+	CLR	R1			;CLR IDLE SERVER FLAG (ASSUME NOT);019
+	CALLX	GETSPL			;YES, SO GO GET SPOOLER'S SDB BLOCK;019
+	BCC	90$			;FOUND IT, GET REAL STATE	;019
+;									;019
+; If the sever we just got a message from isn't currently working on a job,;019
+; we don't want to update any SDB's state.				;019
+;									;019
+	MOV	SP,R1			;SET IDLE SERVER FLAG		;019
+	BR	95$			;AND USE THE (DEFAULT) IDLE STATE TABLE
+
+90$:	MOV	SP.STA(R2),R4		;GET THE SPOOLERS TRUE STATE
+95$:	PUSH	R4			;SAVE TABLE BASE
+	ADD	R3,R4			;ADD OUR MESSAGE # OFFSET TO TABLE
+	POP	R3			;RESTORE TABLE BASE (FROM R4)
+	TST	2(R4)			;IS THIS A LEGAL COMMAND NOW?
+	BEQ	50$			;NO SO CHUCK IT
+	TST	SAVSTA(R5)		;IS THIS A REDO?
+	BNE	100$			;YES, NO NEED TO MUCK STATES
+	MOV	R3,SAVSTA(R5)		;SAVE THE STATE FOR A POSSIBLE RETRY
+100$:	CMP	#USRTBL,R3		;IS THIS FOR A USER?
+	BEQ	110$			;YES SO NO SPECIAL STATE STUFF
+	TST	R1			;WAS THIS SERVER IDLE?		;019
+	BNE	110$			;YES, DON'T SWITCH STATES ON ANYONE;019
+	TST	(R4)			;ARE WE GOING TO CHANGE STATES?
+	BEQ	110$			;NO SO NO CHANGE TO STATE COUNTERS
+	MOV	SP.STA(R2),SP.OSTA(R2)	;SAVE OLD STATE AS OLD STATE
+	MOV	(R4),SP.STA(R2)		;AND THE NEW STATE
+110$:	MOV	MSGPTR(R5),R1		;GET POINTER TO MESSAGE
+	MOV	MSGLEN(R5),R2		;AND LENGTH
+	ADD	#HD.LEN,R1		;POINT PAST MESSAGE HEADER
+	SUB	#HD.LEN,R2		;POINT PAST MESSAGE HEADER
+	CALL	@2(R4)			;AND GO CALL THROUGH DISPATCH TBL
+	BCC	SNDACK			;GO SEND ACK AND CHUCK MESSAGE
+	CMP	#ER$RLK,R1		;WAS ERROR DUE TO RECORD LOCK?
+	BNE	SNNAC			;NO SO SEND NACK AND CHUCK MESSAGE
+					;WHOOPS, RECORD WAS LOCKED
+	$FREE	QRAB(R5)		;UNLOCK ANY LOCKS
+	SETFUN	S.MRDO,R0		;REQUEST A RETRY
+	STALL	#2			;TAKE A SHORT NAP
+
+	.DSABL	LSB
+
+.SBTTL	SNDOC	- SEND BACK AN ONLINE CONFIRM
+
+;+
+;
+; SNDOC:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R2 -> SKDB ENTRY OF SERVER
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,SNDOC
+;
+; BACK:
+;
+;		ONLINE CONFIRM MESSAGE QUEUED TO SENDER OR CURRENT
+;		MESSAGE (IN MSGPTR(R5)) IF A RETURN RECIEPT WAS 
+;		REQUESTED.
+;
+;		ALL REGESTERS TRASHED
+;
+;-
+
+	.ENABL	LSB
+
+SNDOC: 	MOV	MSGPTR(R5),R1		;R1 -> MESSAGE
+10$:	CMP	SK.RID(R4),HD.CID(R1)	;IS THIS THE SERVER TO SEND TO?
+	BNE	20$			;NO, EXIT
+	MOV	R2,R4			;GET COPY OF SKDB ENTRY
+	MOV	#QS.ONC,R1		;SET FOR CONNECT CONFIRM
+	MOV	SK.RID(R4),R2		;STS FIELD IS OUR CID
+	CLR	R3			;NO FLAG
+	ADD	#SK.RNM,R4		;R4 -> RCVR NAME
+	CALL	SNDCMN			;GO SEND MESSAGE
+	CLC				;CLEAR CARRY FOR SUCCESS
+20$:	RETURN				;EXIT
+
+	.DSABL	LSB
+
+.SBTTL	SNDACK	- SEND BACK AN ACK
+
+;+
+;
+; SNDACK:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCTION BITS TABLE
+;
+; CALL:
+;	JSR	PC,SNDACK
+;
+;
+; BACK:
+;
+;		ACK MESSAGE QUEUED TO SENDER OR CURRENT MESSAGE
+;		(IN MSGPTR(R5)) IF A RETURN RECIEPT WAS REQUESTED.
+;
+;		ALL REGESTERS TRASHED
+;
+;-
+
+	.ENABL	LSB
+
+SNDACK:	MOV	#QU.ACK,R2		;SET FOR ACK
+	BR	10$			;JOIN COMMON
+
+.SBTTL	SNDNCK	- SEND BACK AN NACK
+
+;+
+;
+; SNDNCK:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCTION BITS TABLE
+;
+; CALL:
+;	JSR	PC,SNDNCK
+;
+;
+; BACK:
+;
+;		NACK MESSAGE QUEUED TO SENDER OR CURRENT MESSAGE
+;		(IN MSGPTR(R5)) IF A RETURN RECIEPT WAS REQUESTED.
+;
+;		ALL REGESTERS TRASHED
+;
+;-
+
+SNNAC: 	MOV	#QU.NCK,R2		;SET FOR NACK
+	.BR	10$			;JOIN COMMON
+
+.SBTTL	SNDACK/SNDNCK COMMON CODE
+
+10$:	CLR	SAVSTA(R5)		;CLEAR THE SAVED STATE
+	MOV	MSGPTR(R5),R4		;GET POINTER TO MESSAGE
+	BEQ	20$			;MESSAGE DISAPEARED, SO NO (N)ACK
+	TSTB	HD.RTQ(R4)		;WAS RETURN RECIEPT REQUESTED?
+	BEQ	20$			;NO
+	SWAPR	R1,R2			;R1 SB CMD, R2 SB STS
+	MOV	HD.FLG(R4),R3		;FLAG FIELD
+	ADD	#HD.RTN,R4		;USE THE PASSED NAME FOR RTN
+	CALL	SNDCMN			;GO SEND A COMMON FORMAT MESSAGE
+20$:	JMP	RETMSG			;AND RETURN THE ORIGINAL PACKET
+
+	.DSABL	LSB
+
+.SBTTL	SNDJOB	- SEND JOB DEF TO SERVER
+
+;+
+;
+; SNDJOB:
+;
+;
+; INPUTS:
+;
+;		R0 -> THE JOB BUFFER TO SEND
+;		R2 -> SERVER DEFINITON AREA
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,SNDJOB
+;
+;
+; BACK:
+;
+;		XMIT REQUSTED OR ERROR
+;		C=0 SUCCESS
+;		C=1 FAILURE
+;
+;
+;-
+
+SNDJOB:	SAVREG
+	MOV	#2,R1			;ASK FOR ACK RETURN BY ID
+	MOV	QRAB(R5),R3		;GET QRAB
+	$FETCH	R4,RSZ,R3		;GET THE SIZE OF PACKET
+	MOV	#QS.JOB,R5		;PACKET WILL BE JOB
+	CALL	SNDSPL			;GO SEND THE MESSAGE TO SERVER
+	BCS	10$			;ERROR, SO EXIT UNHAPPY
+	MOV	JB.SEQ(R0),SP.JBS(R2)	;SET JOB SEQ NUM INTO SDB
+	MOV	#SPLJOB,SP.STA(R2)	;SET NEW STATE TO 'WAIT' FOR JOB ACK
+	MOV	#JS$STR,JB.STS(R0)	;SET JOB STATE TO RUNNING
+	.DATE				;FIND OUT THE CURRENT TIME/DATE
+	MOV	@#XRB+0,JB.SDA(R0)	;SET CURRENT DATE INTO START DATE
+	MOV	#1440.,R1		;GET TIME BASE
+	SUB	@#XRB+2,R1		;GET THE TIME, MIDNIGHT=0 NOON=720
+	MOV	R1,JB.STI(R0)		;SET CURRENT TIME INTO START TIME
+	$UPDATE	R3			;AND WRITE THE JOB RECORD BACK TO DISK
+	TST	(PC)+			;CLC AND RETURN
+10$:	SEC				;SEC AND RETURN 
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	SNDCMN	- SEND COMMON FORMAT MESSAGE TO USER/SERVER
+
+;+
+;
+; SNDCMN:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCION BITS TABLE
+;		R1  = CMD TYPE
+;		R2  = STATUS
+;		R3  = FLAG VALUE
+;		R4  = ADDR OF TARGET NAME OR ZERO TO USER DEFAULT?
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,SNDCMN	(USED TO BE SNDONL)
+;
+;
+; BACK:
+;
+;		MESSAGE QUEUE FOR SEND TO QMAN
+;
+;
+;-
+
+SNDCMN:	PUSH	<R0,R2>
+	MOV	#CMNDAT,R0		;GET ADDRESS OF COMMON MESSAGE DATA
+	MOV	R2,JB.STS(R0)		;INSERT STATUS VALUE
+	MOV	R3,JB.FLG(R0)		;INSERT FLAG VALUE
+	TST	R4			;WAS A RTN PASSED?
+	BEQ	10$			;NO
+	CMPB	#1,(R4)			;WAS THIS A SEND BY JOB NUM?
+	BNE	5$			;NO MUST BE A RCVR NAME
+	MOVB	(R4)+,CMNTG		;MOVE IN SEND BY JOB NUM REQUEST;020
+	INC	R4			; R4 -> JOB NUMBER
+	MOVB	(R4),CMNTG+1		;MOVE IN THE JOB NUM TO SEND TO	;020
+	BR	10$			;AND SKIP ON			;020
+
+5$:	MOV	#2,CMNTG		;load code for send by rcvr ID	;020
+	MOVSTR	R4,#CMNTG+2,#6		;copy rcvr ID			;020
+10$:	MOV	#CMNHD,R0		;GET ADDRESS OF COMMON MESSAGE HEADER
+	MOVB	R1,HD.CMD(R0)		;INSERT COMMAND VALUE
+	PUSH	CMNDAT+JB.SEQ		;SAVE CURRENT SEQ
+	CALLX	GETSPL			;GO GET SERVER'S BLOCK
+	BCS	20$			;CAN'T FIND SO DON'T USE IT
+	MOV	SP.CTX(R2),HD.CTX(R0)	;AND THE CTX FIELD
+	MOV	SP.RCV(R2),R2		;R2 -> SKDB RCVR NAME ENTRY
+	MOV	SK.SID(R2),HD.CID(R0)	;INSERT THE TARGET CID
+	BR	40$
+
+20$:	MOV	MSGPTR(R5),R4		;GET ORIGINAL MESSAGE
+	BEQ	40$			;NONE THERE, GET OUT
+	MOV	HD.CTX(R4),HD.CTX(R0)	;AND RETURN THE RUNNING JOBS CTX
+	CMP	#HD.LEN+JB.QUE,MSGLEN(R5) ; IS THIS MSG LONG ENOUGH FOR QUE TYP
+	BGE	40$			;NO, DON'T GIVE .QUE, .SEQ, OR JOB INFO
+	MOV	JB.QUE+HD.LEN(R4),JB.QUE+HD.LEN(R0) ; RETURN THE QUEUE TYPE
+	TST	JB.SEQ+HD.LEN(R0)	;IS THERE ALREADY A SEQ #?
+	BNE	30$			;YES, SO USE IT
+	MOV	JB.SEQ+HD.LEN(R4),JB.SEQ+HD.LEN(R0) ;NO, RETURN JOBS SEQ #
+30$:	CMPB	#UQ.JOB,HD.CMD(R4)	;WAS THIS A DEFINE JOB MESSAGE?
+	BNE	40$			;NO, SEND WHAT WE HAVE
+	ADD	#JB.NML+HD.LEN,R4	;POINT TO JOB NAME
+	MOVSTR	R4,#CMNDAT+32		;MOV JOB NAME
+40$:	XMITM	#CMNMSG			;QUEUE UP THE UNMAPPED BUFFER
+	POP	CMNDAT+JB.SEQ		;RESTOR PREVIOUS SEQ
+	POP	<R2,R0>
+	RETURN
+
+.SBTTL	CMNMSG	- DEFINE COMMON MESSAGE BLOCK
+
+;+
+; NOTE:	THIS COMMON MESSAGE AREA IS USED BY THE ROUTINE SNDCMN.
+;	IT MAY BE USED TO SEND THE FOLLOWING COMMAND MESSAGES:
+;
+;		*	STATUS REQUEST
+;		*	STATUS RESPONSE
+;		*	STATUS UPDATE
+;			ACKNOWLEDGE
+;			NEG-ACKNOWLEDGE
+;		*	PAUSE
+;		*	CONTINUE
+;			KILL JOB
+;		*	END-OF-JOB
+;		*	ON-LINE
+;			ON-LINE CONFIRM
+;		*	OFF-LINE
+;		*	INITIALIZE DEVICE
+;		*	DELETE DEVICE
+;
+; * THESE COULD BE USED BUT ARE NOT IN THIS MODULE.
+;-
+
+	.SAVE
+	.PSECT	IMPURE
+	.EVEN
+
+CMNMSG:	
+10$:	.WORD	0			;LINK TO NEXT
+20$:	.WORD	XM.LEN+HD.LEN+AK.LEN	;LENGTH OF TOTAL MESSAGE
+30$:	.BYTE	1			;ONE TARGET
+40$:	.BYTE	0			;RETRY COUNT
+	.WORD	0			;Reserved for broadcast target
+50$:
+
+;
+;	ASSURE XMIT'S FIELDS ARE WHAT WE ARE SENDING
+;
+
+	.ASSUME	10$-CMNMSG EQ XMITNX
+	.ASSUME	20$-CMNMSG EQ XMITLN
+	.ASSUME	30$-CMNMSG EQ XMITCT
+	.ASSUME	40$-CMNMSG EQ XMITRT
+	.ASSUME	50$-CMNMSG EQ XMITFX
+	.ASSUME XM.LEN EQ XMITFX+XMITTL
+
+CMNTG:	
+10$:	.WORD	0			;broadcast/send code		;020
+	.ASCII	/  /			;TARGET RECVER ID
+	.ASCII	/  /			; WORD 2
+	.ASCII	/  /			; WORD 3	
+20$:
+
+;
+;	ASSURE THAT THE RID FIELD IS RIGHT
+;
+
+	.ASSUME	20$-10$ EQ XMITTL
+
+CMNHD:	
+10$:	.BYTE	0			;RESERVED FLAG
+20$:	.BYTE	P.VER			;PROTOCAL VERSION
+30$:	.WORD	0			;CID TO RETURN
+40$:	.BYTE	0			;RTQ FIELD
+50$:	.BYTE	0			;CMD FIELD
+60$:	.BLKW0	3			;RETURN ADDR
+70$:	.WORD	0			;CTX FIELD
+80$:
+
+;
+;	ASSURE THAT THE HEADER IS DEFINED CORRECTLY
+;
+
+	.ASSUME	10$-CMNHD EQ HD.FLG
+	.ASSUME	20$-CMNHD EQ HD.VER
+	.ASSUME	30$-CMNHD EQ HD.CID
+	.ASSUME	40$-CMNHD EQ HD.RTQ
+	.ASSUME	50$-CMNHD EQ HD.CMD
+	.ASSUME	60$-CMNHD EQ HD.RTN
+	.ASSUME	70$-CMNHD EQ HD.CTX
+	.ASSUME	80$-CMNHD EQ HD.LEN
+
+;
+;	ASSURE THAT WE'RE WORKING WITH THE RIGHT VERSION OF PBSMAC
+;
+
+	.ASSUME P.VER	EQ 7.
+
+CMNDAT:
+ 10$:	.WORD			; ??.SEQ
+ 20$:	.BYTE	0		; ??.QUE
+ 30$:	.BYTE			; ??.IPR
+ 40$:	.WORD			; ??.EDA
+ 50$:	.WORD			; ??.ETI
+ 60$:	.WORD			; ??.AFT
+ 70$:	.WORD			; ??.AFD
+ 80$:	.WORD			; ??.STS
+ 90$:	.WORD			; ??.FLG
+100$:	.BYTE			; ??.QNL
+110$:	.BLKB0	NAM.LEN		; ??.QNM
+999$:
+
+	.BYTE			; ??.NML  (* FOR ACK OF DEFJOB *)
+	.BLKB0	NAM.LEN		; ??.NAM
+
+;
+;	ASSURE THAT THE COMMON PACKET FIELDS MATCH UP
+;
+
+	.ASSUME	 20$-CMNDAT EQ JB.QUE
+	.ASSUME	 30$-CMNDAT EQ JB.IPR
+	.ASSUME	 40$-CMNDAT EQ JB.EDA
+	.ASSUME	 50$-CMNDAT EQ JB.ETI
+	.ASSUME	 60$-CMNDAT EQ JB.AFT
+	.ASSUME	 70$-CMNDAT EQ JB.AFD
+	.ASSUME	 80$-CMNDAT EQ JB.STS
+	.ASSUME	 90$-CMNDAT EQ JB.FLG
+	.ASSUME	100$-CMNDAT EQ JB.QNL
+	.ASSUME	110$-CMNDAT EQ JB.QNM
+;
+;	ENSURE THAT THE COMMON PACKET LENGTH WILL HOLD ALL OF THE FIELDS
+;	FOR THE MESSAGES THAT USE IT:
+;
+
+	.ASSUME	999$-CMNDAT GE NP.LEN	; CMD #0
+	.ASSUME	999$-CMNDAT GE BP.LEN	; CMD #1
+;	.ASSUME	999$-CMNDAT GE ST.LEN	; CMD #2  (* NOT DEFINED *)
+;	.ASSUME	999$-CMNDAT GE SR.LEN	; CMD #3  (* NOT DEFINED *)
+;	.ASSUME	999$-CMNDAT GE SU.LEN	; CMD #4  (* NOT DEFINED *)
+	.ASSUME	999$-CMNDAT GE AK.LEN	; CMD #5
+	.ASSUME	999$-CMNDAT GE NK.LEN	; CMD #6
+;	.ASSUME	999$-CMNDAT GE PD.LEN	; CMD #7  (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE CD.LEN	; CMD #10 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE JB.LEN	; CMD #11 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE MD.LEN	; CMD #12 (* NOT ALLOWED *)
+	.ASSUME	999$-CMNDAT GE KL.LEN	; CMD #13
+;	.ASSUME	999$-CMNDAT GE EJ.LEN	; CMD #14 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE FT.LEN	; CMD #15 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE ON.LEN	; CMD #16 (* NOT ALLOWED *)
+	.ASSUME	999$-CMNDAT GE OC.LEN	; CMD #17
+	.ASSUME	999$-CMNDAT GE OF.LEN	; CMD #20
+;	.ASSUME	999$-CMNDAT GE SY.LEN	; CMD #21 (* NOT DEFINED *)
+;	.ASSUME	999$-CMNDAT GE ID.LEN	; CMD #22 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE DD.LEN	; CMD #23 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE IQ.LEN	; CMD #24 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE DQ.LEN	; CMD #25 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE PQ.LEN	; CMD #26 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE CQ.LEN	; CMD #27 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE AS.LEN	; CMD #30 (* NOT ALLOWED *)
+;	.ASSUME	999$-CMNDAT GE DS.LEN	; CMD #31 (* NOT ALLOWED *)
+
+	.RESTORE
+
+.SBTTL	SNDSPL	- SEND CURRENT MESSAGE TO SERVER
+
+;+
+;
+; SNDSPL:
+;
+;	THIS ROUTINE IS USED TO COMMUNICATE TO SERVERS.  IF REQUEST IS TO
+;	SEND A JOB, THE DEVICE INFORMATION WILL BE 1) FILLED IN FROM SDB
+;	FOR PRINT, OR 2) FOUND OUT ( BY DETERMINING FIRST AVAILABLE PK ) FOR
+;	BATCH.
+;
+; INPUTS:
+;
+;		R0 -> START OF MESSAGE DATA (PAST HEADER)
+;		R1 =  RETURN REQUEST FLAG:
+;			0 = NO RETURN REQUESTED
+;			2 = RETURN BY RCVR ID
+;		R2 -> SERVER DEF BLOCK
+;		R4 =  LENGTH OF MESSAGE DATA (LESS HEADER)
+;		R5 =  MESSAGE COMMAND CODE
+;
+;
+; CALL:
+;	JSR	PC,SNDSPL
+;
+;
+; BACK:
+;
+;		C=0 MESSAGE DATA QUEUED FOR XMIT
+;		C=1 NO BUFFER SPACE AVAILABLE
+;		ALL REGISTERS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+SNDSPL:	SAVREG
+	TST	SP.RCV(R2)		;DOES THIS SDB HAVE A RCVR?
+	BNE	5$			;NO, DON'T ALLOCATE ONE
+	CALLX	ALOSPL			;ALLOCATE A RCVR ID
+	BCS	20$			;IF WE HAD TO SPAWN
+	MOV	R1,SP.RCV(R2)		;SET THE ADDRESS OF THE RCVR ID
+	MOV	R2,SK.SDB(R1)		;SET THE ADDRESS OF THE SDB
+	BISB	#SK$INU,SK.USE(R1)	;SHOW RCVR ID IN USE
+	BICB	#SK$NIU,SK.USE(R1)	;AND NOT IN USE
+5$:	MOV	#XM.LEN+HD.LEN,R1	;COMPUTE SIZE OF BUFFER OVERHEAD
+	ADD	R4,R1			;PLUS SIZE OF REAL DATA
+	GETBUF	R3,R1,CLEAR		;GO GET A MAPPED BUFFER
+	BCS	20$			;NO BUFS, RETURN ERROR TO CALLER
+	MOV	R1,XMITLN(R3)		;LENGTH OF TOTAL PACKET
+	MOV	#1,XMITCT(R3)		;One, count 'em... one target	;042
+	MOV	TOS.R1(SP),R1		;RESTORE REQUEST FLAG
+	PUSH	R3			;SAVE START ADDR FOR BUFFER	;042
+	ADD	#XM.LEN,R3		;R3 -> START OF HEADER
+	MOVB	#P.VER,HD.VER(R3) 	;LOAD VERSION
+	MOVB	R5,HD.CMD(R3)		;AND COMMAND TYPE
+	MOVB	R1,HD.RTQ(R3)		;AND RETURN REQUEST FLAG
+	MOV	SP.RCV(R2),R1		;GET POINTER TO RCVR ID ENTRY
+	MOV	SK.SID(R1),HD.CID(R3)	;AND RETURN ID
+	MOV	R3,R1
+	ADD	#HD.RTN,R1		;R1 -> START OF RTN FIELD
+	MOVSTR	#SRVRCV,R1,#6		;copy server rcvr into RTN field
+	ADD	#HD.LEN,R3		;R3 -> START OF MESSAGE DATA
+	CMP	#QS.JOB,R5		;IS THIS A JOB REQUEST?
+	BNE	10$			;NO, NO DEVICE RELATED INFO NEEDED
+	PUSH	R0
+	MOV	R0,R1			;GET COPY OF MSG PTR
+	MOV	R2,R0			;GET COPY OF SDB PTR
+	ADD	#SP.DVL,R0		;  R0 -> DEVICE RELATED INFO FROM SDB
+	ADD	#JB.DVL,R1		;  R1 -> DEVICE RELATED INFO TO JB PKT
+	MOVSTR	R0,R1,#<SP.DRI-SP.DVL+SP.SEQ> ;COPY DEVICE RELATED INFO
+	POP	R0
+10$:	MOVSTR	R0,R3,R4		;COPY MESSAGE DATA
+	MOV	SP.RCV(R2),R0		;R0 -> SKDB ENTRY
+	ADD	#SK.RNM,R0		;R0 -> SERVER RCVR ID
+	MOV	(SP),R3			;R3 -> Message buffer		;042
+	ADD	#XMITFX+XMITTG,R3	;R3 -> TARGET NAME
+	MOV	#2,(R3)+		;load send by rcvr ID code	;020
+	MOVSTR	R0,R3,#6		;load the rcvr ID		;020
+	POP	R3			;Restore message buffer pointer	;042
+	XMIT	R3			;SEND THE MESSAGE
+	TST	(PC)+			;SUCCESS, CLC
+20$:	SEC				;FAILURE, SEC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	SNDKIL	- SEND KILL JOB REQUEST TO SERVER FOR CURRENT JOB
+
+;+
+;
+; SNDKIL:
+;
+;
+; INPUTS:
+;
+;		R4 -> JOB DESCRIPTOR
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,SNDKIL
+;
+;
+;
+; BACK:
+;		C=0 KILL REQUEST SENT
+;		C=1 KILL REQUEST NOT SENT
+;		 ALL REGS PRESERVED
+;
+;
+;-
+
+SNDKIL:	SAVREG
+	MOV	R5,R3			;GET BASE OF IMPURE AREA
+	ADD	#SPLLST,R3		;NOW IS POINTER TO FIRST ADDR
+10$:	MOV	(R3),R3			;SET TO EXAMINE NEXT
+	BEQ	20$			;NO MORE?
+	CMP	SP.JBS(R3),JB.SEQ(R4)	;DOES THIS SERVER HAVE THE JOB?
+	BNE	10$			;NO
+	MOV	#QS.KIL,R1		;COMMAND IS KILL
+	CLR	R2			;NO STATUS
+	PUSH	CMNDAT+JB.SEQ		;SAVE AN SEQ
+	MOV	JB.SEQ(R4),CMNDAT+JB.SEQ;LOAD IN SEQ OF JOB TO DIE
+	MOV	SP.RCV(R3),R4		;GET ADDR OF SERVER DISC INTO R4
+	CLR	R3			;NO FLAG
+	ADD	#SK.RNM,R4		;POINT TO RECVID OF SERVER
+	CALL	SNDCMN			;SEND A COMMON MESSAGE
+	POP	CMNDAT+JB.SEQ		;PUT ANY OLD SEQ BACK
+	TST	(PC)+			;SUCCESS
+20$:	SEC
+	RETURN
+
+.SBTTL	SPNJOB	- SPAWN SECONDARY JOB
+.SBTTL	SPNWAI	- WAIT FOR SYSTEM TO ALLOW SECONDARY JOB TO START
+
+;+
+;
+; SPNJOB:
+; SPNWAI:
+;
+;	Spawns a secondary job to attain more servers.
+;
+;	SPNWAI periodically retries to spawn a secondary job after the initial
+;	spawn fails (this should only happen if the system runs out of job 
+;	slots).  Any servers in a "Resource-Wait" will not be serviced while
+;	QMAN is in this spawning state (STOP/QUEU/MANAGER will still work).
+;
+; INPUTS:
+;
+;	R0 -> FUNCTION BITS
+;	R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,SPNJOB
+;	JSR	PC,SPNWAI
+;
+; BACK:
+;
+;	Spawn done on success.
+;
+;	If spawn fails, SPNJOB will request SPNWAI be run again and go on. 
+; 
+;-
+
+	.ENABL	LSB
+
+SPNWAI::CALL	SPNJOB			;try to spawn the job now
+	BCC	50$			;succeed if ok
+	SETFUN	S.WAKE,R0		; request: the job wakeup routine
+	SETFUN	S.STAL,R0		;          staller
+	SETFUN	S.SRVM,R0		;          server message getter
+	SETFUN	S.USRM,R0		;          user message getter
+	SETFUN	S.URPM,R0		;          urp message getter
+	TST	SKDTIM(R5)		;are SKDB's timing?
+	BEQ	10$			; no, don't want to update any timers
+	SETFUN	S.UPDT,R0		; yes, request timer update
+10$:	STALL	#10.			;sleep for 10 seconds before re-try
+
+SPNJOB::TST	SPAWN(R5)		;has the spawn flag been set?
+	BEQ	50$			;no, so don't spawn ( called by fluke )
+	CALLX	CLRFQX			;clear the firqb and xrb
+	MOV	#PNAML,@#XRB+XRLEN	;first length count
+	MOV	#PNAML,@#XRB+XRBC	;second
+	MOV	#PNAM,@#XRB+XRLOC	;address of string
+	.FSS				;fss it
+	CALLX	CLRXRB			;clear the xrb
+	MOVB	#UU.JOB,@#FIRQB+FQFUN	;set create job sub fun
+	MOVB	#100+200,@#FIRQB+FQFIL	;set current ppn and spawn anyway
+	CLRB	@#FIRQB+FQSIZM		;set for detached job
+	CLR	@#FIRQB+FQSIZ		;clear the ppn to run under
+	CLR	@#FIRQB+FQBUFL		;default rb and pri
+	CLRB	@#FIRQB+FQMODE		;default job size
+	MOV	#<BIT15!BIT8!P.VER>,@#FIRQB+FQCLUS
+					;set param to tell job he is spawn
+	.UUO				;spawn away
+	TST	@#FIRQB			;any errors?
+	BEQ	20$			;no, we all done
+	SETFUN	S.SPN,R0		;yes, we need to try again
+	BR	60$			;come right back and try
+
+20$:	MOV	R5,R1			;get copy of impure area ptr
+	ADD	#SKDLST,R1		;r1 -> skdb list ptr
+30$:	TST	(R1)			;are we at the last (spawning) skdb?
+	BEQ	40$			;yes, fill in job number
+	MOV	(R1),R1			;no, get the next one
+	BR	30$			;and try again
+
+40$:	MOVB	@#FIRQB+FQFIL,SK.JOB(R1) ;load jobnum times two
+	ASRB	SK.JOB(R1)		;make jobnum times one
+	.DATE				;get current date/time
+	MOV	@#XRB+XRLEN,LASTDA(R5)	;set date for timer
+	MOV	@#XRB+XRBC,LASTTI(R5)	;set time for timer
+	MOV	SP,SKDTIM(R5)		;turn on timer
+	MOV	..IDLE,SK.TMR(R1)	;set timer interval
+50$:	TST	(PC)+
+60$:	SEC
+	RETURN
+
+	.DSABL	LSB
+
+GLOBAL	<..IDLE>
+
+.SBTTL	UPDTMR	- UPDATE INACTIVE SKDB'S TIMERS
+
+;+
+;
+; UPDTMR:
+;
+;	THIS ROUTINE WILL CALCULATE ELAPSED TIME FROM THE LAST TIME IT WAS 
+;	CALLED AND SUBTRACT THAT VALUE FROM ANY INACTIVE SKDB'S TMR VALUE.
+;	IF THE SKDB'S TMR <= ZERO, IT IS MARKED FOR DELETION AND THEN DELETED.
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R5 -> BLOCK
+;
+; CALL:
+;
+;	JSR	PC,UPDTMR
+;
+; BACK:
+;
+;	ALL SK.TMR FIELDS SET APPROPIATELY.
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+UPDTMR:	SAVREG
+	MOV	LASTTI(R5),R1		;GET COPY OF LAST TIME I WAS AWAKE
+	CALLX	CLRXRB			;CLR THE XRB
+	.DATE				;GET CURRENT DATE AND TIME NOW
+	CMP	@#XRB+XRLEN,LASTDA(R5)	;HAS MIDNIGHT OCCURED?
+	BEQ	10$			;NO, NO SPECIAL PROBLEMS
+	ADD	#1440.,R1		;YES, SPECIAL PROBLEM
+10$:	SUB	@#XRB+XRBC,R1		;R1 = ELAPSED MINUTUES SINCE LAST AWAKE
+	MOV	R5,R2			;GET COPY OF IMPURE AREA PTR
+	ADD	#SKDLST,R2		;R2 -> SKDB LIST POINTER
+	MOV	(R2),R2			;GET PTR TO FIRST SKDB
+	BEQ	50$			;WE MUST BE GOING OFL
+	CLR	SKDTIM(R5)		;ASSUME THERE IS NOTHING LEFT TO TIME
+	TST	(R2)			;IS THERE ONLY THE PRIMARY SKDB?
+	BEQ	50$			;YES, WE SHOULD HAVE NEVER GOT HERE
+	MOV	SP,SKDTIM(R5)		;SHOW THAT WE ARE IN FACT TIMEING
+20$:	MOV	(R2),R2			;GET A TIMING SKDB
+	BEQ	50$			;IF NONE LEFT
+	BITB	#<SK$MDL!SK$SPN>,SK.STS(R2) ;IS THIS SKDB MDL OR SPAWNING?
+	BNE	20$			;YES, SKIP IT.
+	MOV	R2,R3			;GET COPY OF SKDB PTR
+	BICB	#SK$TIK,SK.STS(R3)	;CLEAR TIMING BIT ( ASSUME ACTIVE )
+	ADD	#SK.ENT,R3		;R3 -> START OF ARRAY ENTRIES
+	MOV	.SPLER,R4		;NUMBER OF ENTRIES IN ARRAY
+30$:	BITB	#SK$INU,SK.USE(R3)	;IS THIS ENTRY ACTIVE?
+	BEQ	40$			;NOPE, GO TRY NEXT ENTRY
+	MOV	..IDLE,SK.TMR(R2)	;SET MAX SLEEP TIME ( FOR ASSURANCE )
+	BR	20$			;AND TRY NEXT SKDB
+
+40$:	ADD	#SK.ELN,R3		;R3 -> NEXT ARRAY ENTRY
+	SOB	R4,30$			;TRY ALL ENTRIES
+	BISB	#SK$TIK,SK.STS(R2)	;SHOW THAT WE ARE TIMING THIS SKDB.
+	TST	SK.TMR(R2)		;Is the timer already expired?
+	BEQ	45$			;Yes, ..IDLE must be zero
+	TST	R1			;IS THERE ANY TIME TO SUBTRACT?
+	BEQ	20$			;NO, BUT AT LEAST WE KNOW IT'S TIMING.
+	SUB	R1,SK.TMR(R2)		;TICK  ( IF NO ENTRIES ARE IN USE ).
+	BGT	20$			;TIME UPDATED, TRY NEXT SKDB
+45$:	PUSH	R3
+	CLR	R3			;SET FLAGS FOR OFL CMD TO SERVERS
+	CALL	SKOFL			;TURN OFF ALL SERVERS IN SKDB
+	POP	R3
+	BR	20$			;WITH ONE SKDB DELETED, TRY NEXT ONE
+
+50$:	MOV	@#XRB+XRLEN,LASTDA(R5)	;STORE NEW DATE
+	MOV	@#XRB+XRBC,LASTTI(R5)	;STORE NEW TIME
+	CLC				;SUCCESS
+	RETURN
+
+GLOBAL	<.SPLER,..IDLE>
+
+	.DSABL	LSB
+
+.SBTTL	DEFJOB	- ENTER JOB DEFINITION INTO QUEUE
+
+;+
+;
+; DEFJOB:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+;
+; CALL:
+;	JSR	PC,DEFJOB
+;
+;		MESSAGE SET UP IN MSGPTR/MSGLEN(R5)
+;
+;
+; BACK:
+;
+;
+;		C=0 JOB ENTERED ON QUEUE
+;		C=1 JOB NOT ENTERED (ERROR)
+;		R0,R5 PRESERVED, ERROR IN R1
+;
+;-
+
+	.ENABL	LSB
+
+DEFJOB:	SAVREG
+	MOV	JB.FIL(R1),R3		;get offset to 1st file-spec block
+	BEQ	10$			;none, so return error
+	CALLX	CHKOFF			;ensure file-spec offsets are valid
+	BCC	20$			;valid, so continue
+10$:	MOV	#ER$XTR,TOS.R1(SP)	;invalid, return EXTRANEOUS DATA error
+	BR	60$			;and fail
+
+20$:	MOV	#ER$RNF,TOS.R1(SP)	;init error to "bad queue name"
+	MOV	R1,R3			;get base of job packet
+	ADD	#JB.QNL,R3		;R3 -> queue name length byte
+	PUSH	R1			;save base of job packet
+	FNDQUE	R3,JB.QUE-JB.QNL(R3)	;see if queue name exists
+	MOV	R1,R4			;R4-> QDB for queue (if any)
+	POP	R1			;restore base of packet
+	BCS	60$			;no queue found, so fail
+	PUSH	<R2,R4>							;011
+	MOV	R1,R2			;get copy of message pointer	;011
+	ADD	#QU.PRV,R4		;R4 -> Queue's priv mask	;011
+	ADD	#JB.PRV,R2		;R2 -> Entry's priv mask	;011
+	MUTEXC	R4,R2,#<PRVSIZ*2>	;Does user have queue's privs?	;011
+	POP	<R4,R2>							;011
+	BCC	25$			;Yes, perform other checks	;011
+	MOV	#ER$PRV,TOS.R1(SP)	;Otherwise set priviol error	;011
+	BR	60$			; and fail			;011
+
+25$:	BIT	#QU$MDL,QU.STS(R4)	;is queue marked for deletion?
+	BNE	30$			;yes, so set up to fail
+	BIT	#QU$PIN,QU.STS(R4)	;is queue closed?
+	BEQ	40$			;no, so continue
+30$:	MOV	#ER$DNR,TOS.R1(SP)	;yes, return DEV NOT READY error
+	MOV	QU.STS(R4),HD.FLG-HD.LEN(R1) ;return queue's status in HD.FLG
+	BR	60$			;and skip on to fail
+
+40$:	MOV	QU.SEQ(R4),JB.QSQ(R1)	;copy queue seq no. into job packet
+	PUSH	<R1,R2,R3,R4>		;save regs for copy
+	MOV	#CMNDAT,R3		;get base of ACK/NACK packet data
+	ADD	#AK.QNL,R3		;R3 -> ACK'S queue name field	;042
+	ADD	#JB.QNL,R1		;R1 -> queue name field in packet
+	ADD	#QU.NML,R4		;R4 -> queue name field in QDB
+	MOVBYT	(R4)+,R2		;R2 =  length of queue name
+.ASSUME	QU.NAM	EQ QU.NML+1		;ensure queue name follows length byte
+	MOVB	R2,(R1)+		;copy length into job packet
+.ASSUME	JB.QNM	EQ JB.QNL+1		;ensure queue name follows length byte
+	MOVB	R2,(R3)+		;and into ACK/NACK packet
+.ASSUME	AK.QNM	EQ AK.QNL+1		;ensure queue name follows length byte
+50$:	MOVB	(R4),(R1)+		;copy queue name into job packet
+	MOVB	(R4)+,(R3)+		;and into ACK/NACK packet
+	SOB	R2,50$			;  until done
+	POP	<R4,R3,R2,R1>		;restore copy regs		;007
+	CALLX	CHKPRI			;check for valid priority	;010
+	BCC	70$			;valid, so continue		;010
+	MOV	R1,TOS.R1(SP)		;invalid, so return error code	;010
+60$:	JMP	140$			;and fail			;010
+
+70$:	MOVBYT	JB.QUE(R1),R3		;get entry's queue type		;005
+	DEC	R3			;make it 0-based
+	MUL	#QTYSIZ,R3		;R3 = offset into QTYTBL
+	MOV	QTYTBL+QT.VAL(R3),R3	;get addr of validation routine
+	BEQ	80$			;none there, so continue
+	CALL	(R3)			;call the validation routine
+	BCC	80$			;no error, so continue
+	MOV	R1,TOS.R1(SP)		;error, so return error code
+	BR	140$			;and fail
+
+80$:	MOVB	QU.QUE(R4),JB.QUE(R1)	;ensure queue type is correct
+	SETDAT	R1,JB.EDA,INVERT	;set entry date/time key fields
+.ASSUME	JB.ETI	EQ JB.EDA+2		;ensure time field follows date field
+	CLR	JB.SDA(R1)		;show no start date
+	CLR	JB.STI(R1)		;show no start time
+	CLR	JB.FDA(R1)		;show no finish date
+	CLR	JB.FTI(R1)		;show no finish time
+	CLR	JB.MDA(R1)		;show no modified date
+	CLR	JB.MTI(R1)		;show no modified time
+	CLR	JB.AFD(R1)		;clear internal after date
+	CLR	JB.AFT(R1)		;clear internal after time
+	CLRB	JB.DVL(R1)		;show no device name
+	MOV	#JS$RDY,R3		;init job status to 'ready'
+	MOV	JB.ATI(R1),JB.AFT(R1)	;copy AFTER time to key field
+	MOV	JB.ADA(R1),JB.AFD(R1)	;copy AFTER date to key field
+	BEQ	110$			;no AFTER date, so leave status alone
+	MOV	#JS$AFT,R3		;change job status to AFTER
+110$:	BIT	#JB$HLD,JB.FLG(R1)	;does the user want this job held? ;042
+	BEQ	115$			;no, continue                      ;042
+	MOV	#JS$NRD,R3		;yes, set STS as job not ready     ;012
+115$:	MOV	R3,JB.STS(R1)		;load status into packet
+	CALLX	CHKFRM			;Check entry for FORMS_WAIT state ;042
+	MOV	QRAB(R5),R3		;get pointer to Q RAB
+	$STORE	R1,RBF,R3		;set in pointer to packet
+	$STORE	R2,RSZ,R3		;and length
+	$STORE	#RB$KEY,RAC,R3		;Ensure keyed access to file	;046
+	MOV	R1,R2			;get copy of packet base
+120$:	ASNSEQ	#0,JB.SEQ(R2)		;assign a sequence number
+	$PUT	R3			;and write packet to disk
+	TST	O$STS(R3)		;any errors?
+	BPL	130$			;no, so continue
+	CMP	#ER$DUP,O$STS(R3)	;yes, was error duplicate key?
+	BEQ	120$			;yes, so inc the key & try again
+	MOV	O$STS(R3),TOS.R1(SP)	;no, return the error code
+	BR	140$			;and fail
+
+130$:	INC	QU.JOB(R4)		;inc no. jobs in the queue
+	CMP	#JS$RDY,JB.STS(R2)	;Is entry in READY state?	;042
+	BNE	135$			;No, don't bother clearing NIU bits ;042
+	MOV	R4,R1			;R1 -> job's QDB
+	CALLX	CLRNIU			;clear all assigned SDB's NOT-IN-USE bits
+	SETFUN	S.SCHJ,R0		;request the job scheduler
+135$:	TST	(PC)+			;clear carry for success	;042
+140$:	SEC				;set carry for failure
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+GLOBAL	<EXQTA>								;008
+
+.SBTTL	DELJOB	- REMOVE USER ENTRY FROM THE QUE
+
+;+
+;
+; DELJOB:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,DELJOB
+;
+;		MESSAGE SET UP IN MSGPTR/MSGLEN(R5)
+;
+;
+; BACK:
+;
+;
+;
+;		MESSAGE DELETED OR ERROR IN R1
+;		C=0 MESSAGE SET UP
+;		C=1 NO OR BAD MESSAGE OR ERROR
+;		R0,R5 PRESERVED, ERROR IN R1
+;
+;-
+
+	.ENABL LSB
+
+DELJOB:	SAVREG
+	MOV	QRAB(R5),R3		;Get pointer to Q RAB		;045
+	MOV	R1,R2			;Copy message pointer		;042
+	GETREC	#GETEQ,#SEQKEY,R2,#5	;Find entry via sequence number	;042
+	BCS	30$			;Error.  Return it to caller	;042
+	MOV	R1,R4			;Copy pointer to record		;042
+	MOV	R2,R1			;Restore message pointer to R1	;042
+	MOV	#ER$RNF,R2		;Preset not found error		;042
+	CMP	KL.SEQ(R1),JB.SEQ(R4)	;Is this the one we want?	;042
+	BNE	35$			;No, failure			;042
+	MOV	#ER$TYP,R2		;Set type error			;042
+	BITB	#^C<17>,JB.QUE(R4)	;Is this an entry record?	;042
+.ASSUME	QR$ENT	EQ 0			;Ensure entry record type is 0	;042
+	BNE	35$			;no, so don't delete it		;042
+	CMPB	JB.QUE(R4),KL.QUE(R1)	;Do the queue types match?	;042
+	BNE	35$			;No, failure			;042
+	MOV	#ER$LBY,R2		;Say we're busy doing it	;042
+	CMP	#JS$ABT,JB.STS(R4)	;Is job already being aborted?	;042
+	BEQ	35$			;Yes, signal failure		;042
+	CMP	JB.STS(R4),#JS$STR	;Is job running?		;042
+	BLO	10$			;Nope, never got the chance	;042
+	BNE	20$			;Nope, 'cause it's finished	;042
+	CALL	SNDKIL			;Tell the spooler to kill it	;042
+	BCC	40$			;No errors, continue		;042
+	MOV	#ER$ABO,R2		;Move in bogus error code	;042
+	BR	35$			; and fail			;042
+
+10$:	CALLX	SNDDEL			;Send /NOTIFY message if needed	;042
+	CMP	#JS$FRM,JB.STS(R4)	;Entry currently in FORMS_WAIT?	;042
+	BNE	20$			;Nope.  Go delete it		;042
+	DEC	CNT.FW(R5)		;Update the FORMS_WAIT count	;042
+20$:	CALL	DELENT			;Remove entry from the file	;042
+	BCC	50$			;Hope everything went well	;042
+30$:	MOV	O$STS(R3),R2		;'Fraid not.  Pass error back	;042
+35$:	MOV	R2,TOS.R1(SP)		;Return error code in R1	;042
+	BR	60$			;Signal fail and return		;042
+
+40$:	MOV	#JS$ABT,JB.STS(R4)	;Show job as "Aborting"		;042
+	.DATE				;Fetch current Date/Time	;042
+	MOV	@#XRB+0,JB.FDA(R4)	;Set in current date		;042
+	MOV	#1440.,R2		;Get time base			;042
+	SUB	@#XRB+2,R2		;Make current time key based	;042
+	MOV	R2,JB.FTI(R4)		;Set in current time (Keyed)	;042
+	$UPDATE	R3			;Update the record on file	;042
+	.BR	50$			; and succeed			;042
+
+50$:	TST	(PC)+			;Signal success			;042
+	SEC				;Signal failure			;042
+60$:	RETURN				;Back to caller			;042
+
+; CHECK ASSUMPTION ON FIELDS WE USE FOR KEY
+
+	.ASSUME	JB.QUE EQ KL.QUE
+	.ASSUME	JB.SEQ EQ KL.SEQ
+	.ASSUME	JB.STS EQ KL.STS
+
+	.DSABL	LSB
+
+;+
+; DELENT	Delete an entry from the queue file
+;
+;	CALL:	R1 -> EOJ or DEL message
+;		R4 -> Entry record
+;		R5 -> Impure area
+;
+;	BACK:	R3 -> RAB for queue file
+;		O$STS(R3) Error status for $DELETE
+;-
+
+	.ENABL	LSB
+
+DELENT:	PUSH	<R2,R1>			;Save R2 and R1			;042
+	MOV	JB.QSQ(R4),R1		;Get the QDB -> for this entry	;042
+	MOV	QRAB(R5),R3		;Get pointer to Q RAB		;042
+	$DELETE	R3			;Delete the entry		;042
+	FNDQSQ	R1			;Find the actual QDB		;042
+	BCS	20$			;Queue not found ( ??? )	;042
+	PUSH	O$STS(R3)		;Save the $DELETE error status	;042
+	DEC	QU.JOB(R1)		;One less active job for queue	;042
+	BNE	10$			;Still jobs in queue.  All done	;042
+	BIT	#QU$MDL,QU.STS(R1)	;Is queue marked for deletion?	;042
+	BEQ	10$			;No				;042
+	CLR	R2			;Yes, set wildcard ASB delete	;042
+	PUSH	R1			;Save the QDB pointer		;042
+	CALLX	DELASB			;Delete all of the queue's ASB's ;042
+	POP	R1			;Restore the QDB pointer	;042
+	CALLX	DELQDB			;Now delete the QDB		;042
+10$:	POP	O$STS(R3)		;Return status of the $DELETE	;042
+	BMI	20$			;Which was an error		;042
+	INC	KILCNT(R5)		;One more deleted record	;042
+   	TST	(PC)+			;Success			;042
+20$:	SEC				;Failure			;042
+	POP	<R1,R2>			;Restore registers		;042
+	RETURN				;Back to caller			;042
+
+.SBTTL	MODJOB	- PROCESS MODIFY JOB COMMAND
+
+;+
+;
+; MODJOB:
+;
+; Inputs:	R0 -> Function bits table
+;		R1 -> Message (past header)
+;		R2 =  Message length
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,MODJOB
+;
+; Back:		C=0 Job modified
+;		C=1 Job not modified
+;		    (error in R1)
+;		All registers perserved
+;
+;-
+
+	.ENABL	LSB
+
+MODJOB:	SAVREG
+	TST	JB.FLG(R1)		;any fields to change?
+	BEQ	80$			;no, so exit happy
+	TST	JB.SEQ(R1)		;any seq no.?
+	BEQ	20$			;no, so treat as not found record
+	MOV	R1,R2			;R2 -> buffer of record to get
+	GETREC	#GETEQ,#SEQKEY,R2,#5	;try to get record
+	BCC	30$			;no error, so continue
+20$:	MOV	#ER$RNF,R1		;return ER$RNF error
+	BR	90$			;and fail
+
+30$:	MOV	R2,R0			;R0 -> base of modify packet
+	CMP	JB.STS(R1),#JS$STR	;is job already started?
+	BLO	40$			;no, so continue
+	MOV	#ER$LBY,R1		;yes, return ER$LBY error
+	BR	90$			;and fail
+
+40$:	MOV	R1,R2			;save rec buffer addr
+	FNDQSQ	JB.QSQ(R0)		;get job's QDB by seq no.
+	BCS	20$			;not found, so treat as rec not found
+	MOV	R1,R4			;R4 -> QDB
+	MOV	R2,R1			;restore rec buffer addr
+	MOV	#MDJTBL,R3		;R3 -> modify job copy table
+50$:	MOV	(R3)+,R2		;get next field ID bit from table
+	BEQ	70$			;no more fields, so exit loop
+	BIT	R2,MD.FLG(R0)		;update this field?
+	BNE	60$			;yes, so skip to update field
+	TST	(R3)+			;no, skip over copy routine address
+	BR	50$			;and on to next field
+
+60$:	MOV	TOS.R0(SP),R2		;pass the function bit table pointer
+	CALL	@(R3)+			;go update field
+	BCS	90$			;error, so fail
+	BR	50$			;success, so on to next field
+
+70$:	MOV	QRAB(R5),R3		;get file's RAB pointer
+	SETDAT	R1,JB.MDA		;update last modified date/time
+.ASSUME	JB.MTI	EQ JB.MDA+2		;ensure time field follows date field
+	$UPDATE	R3			;update the entry record
+	MOV	O$STS(R3),R1		;get error status
+	BMI	90$			;error, so fail
+80$:	CLC				;no error, so clear carry for success
+	BR	100$			;and exit happy
+
+90$:	MOV	R1,TOS.R1(SP)		;error, return it in R1
+	SEC				;set carry for error
+100$:	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	MODJOB	- MDAFT - UPDATE AFTER DATE/TIME FIELDS
+.SBTTL	MODJOB	- MDCPU - UPDATE CPU LIMIT FIELD
+.SBTTL	MODJOB	- MDFRM - UPDATE FORM NAME FIELD
+.SBTTL	MODJOB	- MDHLD - HOLD JOB
+.SBTTL	MODJOB	- MDCOP - UPDATE JOB COPIES FIELD
+.SBTTL	MODJOB	- MDPAG - UPDATE PAGE LIMIT FIELD
+.SBTTL	MODJOB	- MDPRI - UPDATE PRIORITY FIELD
+.SBTTL	MODJOB	- MDRLS - RELEASE JOB
+.SBTTL	MODJOB	- MDTIM - UPDATE TIME LIMIT FIELD
+.SBTTL	MODJOB	- MDNTF - SET JOB'S NOTIFY FLAG				;044
+.SBTTL	MODJOB	- MDNNT - CLEAR JOB'S NOTIFY FLAG			;044
+
+;+
+;
+; MDAFT:
+; MDCPU:
+; MDFRM:
+; MDHLD:
+; MDJCP:
+; MDPAG:
+; MDPRI:
+; MDRLS:
+; MDTIM:
+; MDNOT:								;044
+; MDNNT:								;044
+;
+; Inputs:	R0 -> Message (past header)
+;		R1 -> Entry's record buffer
+;		R2 -> Function bits
+;		R4 -> Entry's QDB
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,MDxxx
+;
+; Back:		C=0 Entry updated
+;		C=1 Entry not updated
+;		    (error in R1)
+;		All registers perserved
+;
+;-
+
+	.ENABL	LSB
+
+MDAFT:	MOV	JB.ADA(R0),JB.ADA(R1)	;copy after date field
+	MOV	JB.ADA(R1),JB.AFD(R1)	;and update after date key
+	MOV	JB.ATI(R0),JB.ATI(R1)	;copy after time field
+	MOV	JB.ATI(R1),JB.AFT(R1)	;and update after time key
+10$:	CMP	#JS$NRD,JB.STS(R1)	;Is job on HOLD?		;042
+	BEQ	90$			;Yes, don't change its state	;042
+	CMP	#JS$FRM,JB.STS(R1)	;No, how about FORMS_WAIT?	;042
+	BNE	20$			;no, go assume its AFTER	;042
+	DEC	CNT.FW(R5)		;Yep, take it out for now	;042
+20$:	MOV	#JS$AFT,JB.STS(R1)	;Change to AFTER state		;042
+	TST	JB.AFD(R1)		;is there any after date?	;042
+	BNE	90$			;Yes, get out now		;042
+	MOV	#JS$RDY,JB.STS(R1)	;Change to READY state		;042
+	CALLX	CHKFRM			;See if its in FORMS_WAIT state	;042
+	BCS	90$			;It is.  Don't clear NIU bits	;042
+	PUSH	R1			;save R1			;042
+	MOV	R4,R1			;R1 -> job's QDB		;042
+	CALLX	CLRNIU			;clear assigned SDBs' NIU bits	;042
+	POP	R1			;restore R1			;042
+	SETFUN	S.SCHJ,R2		;ask for the job scheduler	;042
+	BR	90$			;and exit			;042
+
+MDCOP:	CMPB	#QT$PRI,QU.QUE(R4)	;is this a print queue?
+	BNE	90$			;no, so ignore update
+	MOVB	JB.COP(R0),JB.COP(R1)	;yes, copy JOB_COUNT field
+	BR	90$			;and exit
+
+MDCPU:	CMPB	#QT$BAT,QU.QUE(R4)	;is this a batch queue?
+	BNE	90$			;no, so ignore update
+	MOV	JB.CPU(R0),JB.CPU(R1)	;yes, copy CPU_LIMIT field
+	CALLX	CHKCPU			;check if exceeds queue's max
+	BR	100$			;exit with status in carry
+
+MDFRM:	CMPB	#QT$PRI,QU.QUE(R4)	;is this a print queue?
+	BNE	90$			;no, so ignore update
+	TSTB	JB.FML(R0)		;any form specified?
+	BEQ	90$			;no, so ignore update
+	PUSH	<R0,R1,R2>		;yes, save regs for copy
+	ADD	#JB.FML,R0		;R0 -> packet's form length
+	ADD	#JB.FML,R1		;R1 -> QDB's form length
+	MOV	#<NAM.LEN+1>,R2		;R2 = no. bytes to copy
+30$:	MOVSTR	R0,R1,R2		;copy field into rec buffer
+	POP	<R2,R1,R0>		;restore regs
+	BR	10$			;Go check for FORMS_WAIT state	;042
+
+MDHLD:	CMP	#JS$FRM,JB.STS(R1)	;Is entry in FORMS_WAIT state?	;042
+	BNE	40$			;Nope				;042
+	DEC	CNT.FW(R5)		;Yes.  Count will be one less	;042
+40$:	MOV	#JS$NRD,JB.STS(R1)	;change status to NOT READY	;042
+	BR	90$			;and exit
+
+MDPAG:	CMPB	#QT$PRI,QU.QUE(R4)	;is this a print queue?
+	BNE	90$			;no, so ignore update
+	MOV	JB.PGL(R0),JB.PGL(R1)	;yes, copy PAGE_LIMIT lsb field
+	MOV	JB.PGM(R0),JB.PGM(R1)	;copy PAGE_LIMIT msb field
+	CALLX	CHKPAG			;check if limit exceeds queue's max
+	BR	100$			;exit with status in carry
+
+MDPRI:	MOVB	JB.PRI(R0),JB.PRI(R1)	;copy PRIORITY field
+	CALLX	CHKPRI			;check if priority exceeds queue's max
+	BR	100$			;exit with error status
+
+MDTIM:	CMPB	#QT$BAT,QU.QUE(R4)	;is this a batch queue?
+	BNE	90$			;no, so ignore update
+	MOV	JB.TIM(R0),JB.TIM(R1)	;yes, copy TIME_LIMIT field
+	CALLX	CHKTIM			;check if limit exceeds queue's max
+	BR	100$			;exit with status in carry
+
+MDNOT:	BIS	#JB$NTF,JB.FLG(R1)	;set NOTIFY bit in job flag	;044
+	BR	90$			;exit with carry cleared	;044
+
+MDNNT:	BIC	#JB$NTF,JB.FLG(R1)	;clear NOTIFY bit in job flag	;044
+	BR	90$			;exit with carry cleared	;044
+
+MDRLS:	CMP	#JS$NRD,JB.STS(R1)	;Is job currently on hold?	;042
+	BEQ	20$			;Yes.  Go release it		;042
+	.BR	90$			;no, so ignore this update	;042
+
+90$:	CLC				;clear carry for success
+100$:	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	QMOFL	- OFF-LINE MESSAGE FROM USER (PACKAGE SHUTDOWN)
+
+;+
+;
+; QMOFL:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,QMOFL
+;
+; BACK:
+;		C=0 ALL SERVERS NOTIFIED OF SHUTDOWN
+;			R1 = # RUNNING JOBS
+;		C=1 SEND TO SERVER(S) FAILED
+;			ERROR STATUS IN R1
+;		ALL OTHER REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+QMOFL: 	SAVREG
+	MOV	R5,R2			;GET BASE OF IMPURE AREA
+	ADD	#SKDLST,R2		;R2 -> START OF SERVER DEF LIST
+20$:	MOV	(R2),R2			;GET NEXT SERVER DEF BLOCK
+	BEQ	30$			;NO MORE, SO FINISH UP
+	MOV	OF.FLG(R1),R3		;SET THE ABORT TYPE FLAG (OF$ABO OR 0)
+	CALL	SKOFL			;SEND OFFLINE TO ALL SERVERS IN SKDB
+	BCC	20$			;DO NEXT SKDB IF ALL OK
+	MOV	#ER$RLK,TOS.R1(SP)	;SEND FAILED, ASSUME RETRY NEEDED
+	BR	60$			;AND FAIL
+
+30$:	MOV	R5,R1			;GET COPY OF IMPURE AREA POINTER
+	ADD	#SPLLST,R1		;R1 -> SPL LIST PTR
+	CLR	R3			;USING R3 AS ACCUMLATOR
+40$:	MOV	(R1),R1			;R1 -> SDB
+	BEQ	50$			;WHEN NO MORE SDBS LEFT
+	BIS	#SP$OFL,SP.STS(R1)	;MARK THE SERVER GOING OFF-LINE
+	BIT	#SP$JOB,SP.STS(R1)	;DOES THIS SERVER HAVE A JOB?
+	BEQ	40$			;NO, SO ON TO NEXT SERVER
+	INC	R3			;YES, SO INC JOBS RUNNING COUNTER
+	BR	40$			;AND ON TO NEXT SERVER
+
+50$:	MOV	R3,TOS.R1(SP)		;RETURN RUNNING JOB COUNT IN R1
+					;(WILL BE RETURNED IN AK.STS WORD)
+	CLRFUN	S.SPN,R0		;DON'T TRY SPAWN IF WE GONNA END IT ALL
+	SETFUN	S.DIE,R0		;REQUEST SUICIDE
+	CALLX	KILSKD			;KILL ANY DEAD SKDBS
+	TST	(PC)+			;SUCCESS, CLC
+60$:	SEC				;FAILURE, SEC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	SKOFL	- SEND OFF-LINE MESSAGE TO ALL SERVERS IN SKDB
+
+;+
+;
+; SKOFL:
+;
+;
+; INPUTS:
+;
+;		R0 =  FUNCTION BITS
+;		R2 -> SKDB
+;		R3 =  MESSAGE FLAG ( ABORT OR NO ABORT )
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,SKOFL
+;
+; BACK:
+;		C=0 ALL SERVERS NOTIFIED OF SHUTDOWN
+;		C=1 SEND TO SERVER(S) FAILED
+;		ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+SKOFL: 	SAVREG
+	BICB	#SK$RUN,SK.STS(R2)	;THIS SKDB WILL NO LONGER BE ACTIVE
+	BISB	#SK$MDL,SK.STS(R2)	;MARK SKDB FOR DELETION
+	PUSH	R2			;SAVE COPY OF SKDB PTR
+	CLR	R1			;USE R1 FOR FLG FOR NO SERVERS IN SKDB
+	MOV	.SPLER,R4		;GET COUNT OF TOTAL NUMBER OF SERVERS
+	ADD	#SK.ENT,R2		;R2 -> FIRST ENTRY IN TABLE
+10$:	TSTB	SK.USE(R2)		;IS THERE A RCVR DEFINED HERE?
+	BEQ	20$			;NO, DON'T SEND OFF-LINE MESSAGE
+	PUSH	<R2,R4>			; (* NEVER SET CONSTANTS IN A LOOP *)
+	MOV	#QS.OFL,R1		;CMD IS OFF-LINE
+	MOV	R2,R4			;R4 -> SKDB ENTRY
+	CLR	R2			;CLR STS PARAMETER
+	ADD	#SK.RNM,R4		;R4 -> RCVR NAME
+	CALL	SNDCMN			;SEND THE MESSAGE
+	POP	<R4,R2>
+	BCS	40$			;IF SEND FAILED, WE FAIL
+20$:	ADD	#SK.ELN,R2		;R2 -> NEXT ENTRY IN TABLE
+	SOB	R4,10$			;DO ALL ENTRIES IN TABLE
+	POP	R2			;RESTORE SKDB PTR
+	TST	R1			;WERE THERE ANY RCVR IDS?
+	BNE	30$			;YES, OFL ACKS WILL CAUSE SKDB DEL
+	BISB	#SK$MDL,SK.STS(R2)	;NO, MARK THE SKDB FOR DELETION
+30$:	TST	(PC)+			;SUCCESS
+40$:	SEC				;FAILURE
+	RETURN
+
+GLOBAL	<.SPLER>
+
+	.DSABL	LSB
+
+.SBTTL	INIQUE	- INITIALIZE QUEUE
+
+;+
+;
+; INIQUE:
+;
+; INPUT
+;
+;		R0 -> function bits table
+;		R1 -> mesage (past header)
+;		R2 =  length of message (less header)
+;		R5 -> impure area
+;
+; CALL
+;
+;		JSR	PC,INIQUE
+;
+; BACK
+;
+;		C=0 queue initialized
+;		C=1 queue not initialized
+;		    (error status in R1)
+;
+;		All regs preserved
+;
+;-
+
+	.ENABL	LSB
+
+INIQUE:	SAVREG
+	MOV	R1,R0			;get base of msg packet
+	ADD	#IQ.QNL,R0		;R0 -> msg queue name
+	FNDQUE	R0,#0			;does queue already exist?
+					;(R1 -> last QDB in list)
+	BCS	10$			;no, so continue
+	MOV	#ER$FEX,TOS.R1(SP)	;yes, return queue exists error
+	BR	90$			;and fail
+
+10$:	MOV	R1,R4			;save last QDB addr
+	MOV	TOS.R1(SP),R1		;restore base of message packet
+	CALLX	CHKQUE			;check for valid packet fields
+	BCC	30$			;ok, so continue
+	MOV	R1,TOS.R1(SP)		;error, return error code in R1
+	BR	90$			;and fail
+
+30$:	MOV	#QU.LEN,R1		;set length of buffer needed
+	GETBUF	R0,R1,CLEAR		;get a cleared QDB buffer
+	BCC	40$			;got it, so continue
+	MOV	#ER$MEM,TOS.R1(SP)	;get failed, so show memory error
+	BR	90$			;and fail
+
+40$:	MOV	R1,QU.ILN(R0)		;set internal length to real value
+	MOV	TOS.R1(SP),R1		;restore base of message packet
+	BIT	#QU$DFL,IQ.STS(R1)	;is new queue a default queue?
+	BEQ	60$			;no, so skip undefaulting anything
+	MOV	IQ.QUE(R1),R3		;yes, set R3 = queue type
+	CALLX	UNDFLT			;go un-default any existing default
+	BCC	60$			;no problem, so continue
+	MOV	R1,TOS.R1(SP)		;error, return code in R1
+50$:	MOV	QU.ILN(R0),R1		;get length of QDB buffer
+	RETBUF	R0,R1			;deallocate it
+	BR	90$			;and fail
+
+60$:	SWAPR	R0,R1			;R0 -> msg, R1 -> QDB
+	MOV	R1,R3			;get base of QDB
+	ADD	#QU.SEQ,R3		;R3 -> QDB seq no.
+	MOVSTR	R0,R3,#IQ.LEN		;copy data into QDB
+	BISB	#QR$QDB,QU.QUE(R1)	;set QDB record type bit	;025
+	MOV	QRAB(R5),R2		;get pointer to QRAB
+	$STORE	#<QU.LEN-QU.SEQ>,RSZ,R2	;set length of record
+	$STORE	R3,RBF,R2		;set address of QDB buffer to put
+	$STORE	#RB$KEY,RAC,R2		;Ensure keyed access to file	;046
+70$:	ASNSEQ	#1,(R3)			;assign next internal seq no.
+	MOV	(R3),QU.UID(R1)		;copy seq no. into unique ID field
+	$PUT	R2			;put the QDB in queue file
+	TST	O$STS(R2)		;any errors?
+	BPL	80$			;no, so continue
+	CMP	#ER$DUP,O$STS(R2)	;yes, was it a duplicate key error?
+	BEQ	70$			;yes, try it again
+	MOV	O$STS(R2),TOS.R1(SP)	;no, return error status in R1
+	MOV	R1,R0			;set up for deallocating buffer
+	BR	50$			;and skip to error handler
+
+80$:	BICB	#QR$QDB,QU.QUE(R1)	;clear internal QDB type bit	;025
+;	CLR	(R1)			;clear link to next QDB
+	MOV	R1,(R4)			;link new QDB to last
+.ASSUME	QU.NXT	EQ 0			;ensure link word is first
+	TST	(PC)+			;clear carry for success
+90$:	SEC				;set carry for error
+	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	DELQUE	- DELETE QUEUE
+
+;+
+;
+; DELQUE:
+;
+; Inputs:	R0 -> function bits table
+;		R1 -> message (past header)
+;		R2 =  message length (less header)
+;		R5 -> impure area
+;
+; Call:		JSR	PC,DELQUE
+;
+; Back:		C=0 queue deleted
+;		C=1 queue not deleted
+;		    (error status in R1)
+;		All regs preserved
+;
+;-
+
+	.ENABL	LSB
+
+DELQUE:	SAVREG
+	MOV	R1,R3			;get base of message packet
+	ADD	#DQ.QNL,R3		;R3 -> queue name
+	FNDQUE	R3,DQ.QUE(R1)		;does queue exist?
+	BCC	20$			;yes, continue (R1 -> QDB)
+	MOV	#ER$RNF,R1		;no, set to return rec not found error
+10$:	MOV	R1,TOS.R1(SP)		;return error code in R1
+	BR	50$			;and fail
+
+20$:	MOVB	QU.QUE(R1),DQ.QUE-DQ.QNL(R3) ;set queue type for ACK/NACK msg
+	BIS	#QU$MDL,QU.STS(R1)	;show queue marked for deletion
+	TST	QU.JOB(R1)		;any jobs in the queue?
+	BNE	30$			;yes, don't kill the QDB yet
+	CLR	R2			;no, set up for wildcard ASB delete
+	CALLX	DELASB			;delete all ASB'S assigned to queue
+	BCS	10$			;error, so skip to error handler
+	CALLX	DELQDB			;success, so delete the QDB
+	BCS	10$			;error, so skip to error handler
+	CLR	TOS.R1(SP)		;success, so show no error
+	BR	40$			;and exit happy
+
+30$:	CALLX	UPDQDB			;go update QDB record
+	BCS	10$			;error, so skip to error handler
+	MOV	#ER$LBY,TOS.R1(SP)	;return marked for del err code
+40$:	TST	(PC)+			;clear carry for success
+50$:	SEC				;set carry for failure
+	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	PAUQUE	- PAUSE QUEUE (START OR OPEN)
+
+;+
+;
+; PAUQUE:
+;
+; Inputs:	R1 -> mesage (past header)
+;		R2 =  length of message (less header)
+;		R5 -> impure area
+;
+; Call:		JSR	PC,PAUQUE
+;
+; Back:		C=0 queue paused
+;		C=1 queue not paused
+;		    (error status in R1)
+;		all regs preserved
+;
+;-
+
+	.ENABL	LSB
+
+PAUQUE:	SAVREG
+	MOV	R1,R2			;get base of msg packet
+	ADD	#PQ.QNL,R2		;R2 -> queue name
+	FNDQUE	R2,PQ.QUE(R1)		;does queue exist?
+	BCC	20$			;yes, continue (R1 -> QDB)
+	MOV	#ER$RNF,TOS.R1(SP)	;no, return error code in R1
+	BR	30$			;and fail
+
+20$:	SUB	#PQ.QNL,R2		;restore base of msg
+	MOVB	QU.QUE(R1),PQ.QUE(R2)	;set queue type for ACK/NACK msg
+	MOV	QU.STS(R1),R3		;save current QDB status
+	MOV	R1,R4			;save QDB addr
+	MOV	PQ.FLG(R2),R2		;get packet flag word
+	BIC	#^C<QU$PIN!QU$POU>,R2	;clear undefined bits in flag
+	BIT	R2,QU.STS(R1)		;Is the queue already stopped/closed?
+	BEQ	25$			;no, then this action should succeed;033
+	MOV	#ER$IOP,TOS.R1(SP)	;return already whatevered error    ;033
+	BR	30$			;via the NACK                       ;033
+
+25$:	BIS	R2,QU.STS(R1)		;set bits in queue status
+	CALLX	UPDQDB			;go update QDB record on disk
+	BCC	40$			;no error, so exit happy
+	MOV	R1,TOS.R1(SP)		;error, so return err code in R1
+	MOV	R3,QU.STS(R4)		;and restore status word
+30$:	SEC				;set carry for error
+40$:	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	CONQUE	- CONTINUE QUEUE (STOP OR CLOSE)
+
+;+
+;
+; CONQUE:
+;
+; Inputs:	R0 -> function bits table
+;		R1 -> mesage (past header)
+;		R2 =  length of message (less header)
+;		R5 -> impure area
+;
+; Call:		JSR	PC,CONQUE
+;
+; Back:		C=0 queue continued
+;		C=1 queue not continued
+;		    (error status in R1)
+;		all regs preserved
+;
+;-
+
+	.ENABL	LSB
+
+CONQUE:	SAVREG
+	MOV	R1,R2			;get base of msg packet
+	ADD	#CQ.QNL,R2		;R2 -> queue name
+	FNDQUE	R2,CQ.QUE(R1)		;does queue exist?
+	BCC	20$			;yes, continue (R1 -> QDB)
+	MOV	#ER$RNF,TOS.R1(SP)	;no, return error code in R1
+	BR	40$			;and fail
+
+20$:	SUB	#CQ.QNL,R2		;restore base of message
+	MOVB	QU.QUE(R1),CQ.QUE(R2)	;set queue type for ACK/NACK msg
+	MOV	QU.STS(R1),R3		;save current status word
+	MOV	R1,R4			;save QDB addr
+	MOV	CQ.FLG(R2),R2		;get packet flag word
+	BIC	#^C<QU$PIN!QU$POU>,R2	;clear undefined bits
+	BIT	R2,QU.STS(R1)		;Was the queue already started/open?;033
+	BNE	25$			;nope, this action should succeed   ;033
+	MOV	#ER$IOP,TOS.R1(SP)	;return queue already whatevered error
+	BR	40$			;and fail                           ;033
+
+25$:	BIC	R2,QU.STS(R1)		;clear bits in queue status
+	CALLX	UPDQDB			;update QDB record on disk
+	BCC	30$			;success, so continue
+	MOV	R1,TOS.R1(SP)		;error, so return error code in R1
+	MOV	R3,QU.STS(R4)		;and restore QDB status word
+	BR	40$			;and fail
+
+30$:	CALLX	CLRNIU			;clear all asgned SDB's NIU flag
+	SETFUN	S.SCHJ,R0		;request the job scheduler
+	TST	(PC)+			;clear carry for success
+40$:	SEC				;set carry for error
+	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	MODQUE	- PROCESS MODIFY QUEUE COMMAND
+
+;+
+;
+; MODQUE:
+;
+; Inputs:	R0 -> Function bits table
+;		R1 -> Message (past header)
+;		R2 =  Message length
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,MODQUE
+;
+; Back:		C=0 Queue modified
+;		C=1 Queue not modified
+;		    (error in R1)
+;		All registers perserved
+;
+;-
+
+	.ENABL	LSB
+
+MODQUE:	SAVREG
+	TST	IQ.FLG(R1)		;any fields to update
+	BEQ	70$			;no, so exit happy
+	MOV	IQ.SEQ(R1),R0		;yes, get seq no. of QDB
+	BEQ	10$			;none, so treat as not found record
+	FNDQSQ	R0			;find QDB by sequence no.
+	BCC	20$			;no error, so continue
+10$:	MOV	#ER$RNF,R1		;error, return ER$RNF error
+	BR	60$			;and fail
+
+20$:	BIT	#QU$MDL,QU.STS(R1)	;is queue marked for deletion?	;021
+	BEQ	25$			;no, so continue		;021
+	MOV	#ER$DNR,R1		;yes, return ER$DNR error	;021
+	BR	60$			;and fail			;021
+
+25$:	MOV	R1,R0			;R0 -> QDB
+	MOV	TOS.R1(SP),R1		;R1 -> modify packet (past header)
+	CALLX	CHKQUE			;check for valid queue fields
+	BCS	60$			;error, so fail
+	SWAPR	R0,R1			;R0 -> packet, R1 -> QDB
+	MOV	#MDQTBL,R3		;R3 -> modify queue copy table
+30$:	MOV	(R3)+,R2		;get next field ID bit from table
+	BEQ	50$			;no more fields, so exit loop
+	BIT	R2,MQ.FLG(R0)		;update this field?
+	BNE	40$			;yes, so skip to update field
+	TST	(R3)+			;no, skip over copy routine address
+	BR	30$			;and on to next field
+
+40$:	CALL	@(R3)+			;go update field
+	BCS	60$			;error, so fail
+	BR	30$			;success, so on to next field
+
+50$:	CALLX	UPDQDB			;update QDB record on disk
+	BCC	70$			;no error, so exit happy
+60$:	MOV	R1,TOS.R1(SP)		;error, return it in R1
+	SEC				;set carry for error
+70$:	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	MODQUE	- MQCPU - UPDATE CPU LIMIT FIELDS
+.SBTTL	MODQUE	- MQDFL - SET DEFAULT QUEUE BIT
+.SBTTL	MODQUE	- MQNDF - CLEAR DEFAULT QUEUE BIT
+.SBTTL	MODQUE	- MQFRM - UPDATE FORMS FIELD
+.SBTTL	MODQUE	- MQPGL - UPDATE PAGE LIMIT FIELDS
+.SBTTL	MODQUE	- MQPRI - UPDATE PRIORITY FIELDS
+.SBTTL	MODQUE	- MQPRV - UPDATE PRIVILEGE MASK FIELD
+.SBTTL	MODQUE	- MQTIM - UPDATE TIME LIMIT FIELDS
+
+;+
+;
+; MQCPU:
+; MQDFL:
+; MQNDF:
+; MQFRM:
+; MQPGL:
+; MQPRI:
+; MQPRV:
+; MQTIM:
+;
+; Inputs:	R0 -> Message (past header)
+;		R1 -> QDB
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,MQxxxx
+;
+; Back:		C=0 QDB updated
+;		C=1 QDB not updated
+;		    (error in R1)
+;		All registers perserved
+;
+;-
+
+	.ENABL	LSB
+
+MQCPU:	CMPB	#QT$BAT,QU.QUE(R1)	;is this a batch queue?		;020
+	BNE	20$			;no, so ignore update		;020
+	MOV	MQ.MCP(R0),QU.MCP(R1)	;copy max CPU_LIMIT
+	MOV	MQ.DCP(R0),QU.DCP(R1)	;copy default CPU_LIMIT
+	BR	20$			;and exit happy
+
+MQDFL:	PUSH	R3			;save work reg
+	MOV	QU.QUE(R1),R3		;R3 = queue type
+	CALLX	UNDFLT			;undefault any existing dflt QDB
+	POP	R3			;restore work reg
+	BCS	40$			;error, so exit with carry set
+	BIS	#QU$DFL,QU.STS(R1)	;succes, so set DEFAULT bit in STS
+	BR	20$			;and exit happy
+
+MQNDF:	BIC	#QU$DFL,QU.STS(R1)	;clear DEFAULT bit in STS
+	BR	20$			;and exit happy
+
+MQFRM:	CMPB	#QT$PRI,QU.QUE(R1)	;is this a print queue?		;020
+	BNE	20$			;no, so ignore update		;020
+	PUSH	<R0,R1,R2>		;save regs for copy
+	ADD	#MQ.FML,R0		;R0 -> packet's form length
+	ADD	#QU.FML,R1		;R1 -> QDB's form length
+	MOV	#<NAM.LEN+1>,R2		;R2 = no. bytes to copy
+	BR	10$			;skip to common copy
+
+MQPGL:	CMPB	#QT$PRI,QU.QUE(R1)	;is this a print queue?		;020
+	BNE	20$			;no, so ignore update		;020
+	MOV	MQ.MP0(R0),QU.MP0(R1)	;copy max PAGE_LIMIT lsb
+	MOV	MQ.MP1(R0),QU.MP1(R1)	;copy max PAGE_LIMIT msb
+	MOV	MQ.DP0(R0),QU.DP0(R1)	;copy default PAGE_LIMIT lsb
+	MOV	MQ.DP1(R0),QU.DP1(R1)	;copy default PAGE_LIMIT msb
+	BR	20$			;and exit happy
+
+MQPRI:	MOV	MQ.MPR(R0),QU.MPR(R1)	;copy maximum PRIORITY
+	MOV	MQ.DPR(R0),QU.DPR(R1)	;copy default PRIORITY
+	BR	20$			;and exit happy
+
+MQPRV:	PUSH	<R0,R1,R2>		;save work regs
+	ADD	#MQ.PRV,R0		;R0 -> packet's priv mask
+	ADD	#QU.PRV,R1		;R1 -> QDB's priv mask
+	MOV	#<PRVSIZ*2>,R2		;R2 = no. bytes to copy
+10$:	MOVSTR	R0,R1,R2		;copy field into packet
+	POP	<R2,R1,R0>		;restore regs
+	BR	20$			;and exit happy
+
+MQTIM:	CMPB	#QT$BAT,QU.QUE(R1)	;is this a batch queue?		;020
+	BNE	20$			;no, so ignore update		;020
+	MOV	MQ.MTI(R0),QU.MTI(R1)	;copy maximum TIME_LIMIT
+	MOV	MQ.DTI(R0),QU.DTI(R1)	;copy default TIME_LIMIT
+	.BR	20$			;and exit happy
+
+20$:	TST	(PC)+			;clear carry for success
+30$:	SEC				;set carry for failure
+40$:	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	ASNQUE	- ASSIGN QUEUE TO SERVER
+
+;+
+;
+; ASNQUE:
+;
+; Inputs:	R1 -> mesage (past header)
+;		R2 =  length of message (less header)
+;		R5 -> impure area
+;
+; Call:		JSR	PC,ASNQUE
+;
+; Back:		C=0 queue assigned
+;		C=1 queue not assigned
+;		    (error status in R1)
+;		all regs preserved
+;
+;-
+
+	.ENABL	LSB
+
+ASNQUE:	SAVREG
+	MOV	R1,R0			;get base of msg packet
+	ADD	#AS.QNL,R0		;R0 -> queue name
+	FNDQUE	R0,AS.QUE(R1)		;does queue exist?
+	BCC	20$			;yes, continue (R1 -> QDB)
+	MOV	#ER$RNF,TOS.R1(SP)	;no, return error code in R1
+	BR	90$			;and fail
+
+20$:	SUB	#AS.QNL,R0		;restore base of packet
+	MOVB	QU.QUE(R1),AS.QUE(R0)	;set queue type for ACK/NACK msg
+	ADD	#AS.DVL,R0		;R0 -> assign server name
+	FNDSPL	R0			;does server exist?
+	BCC	30$			;yes, continue (R2 -> SDB)
+	MOV	#ER$FNF,TOS.R1(SP)	;no, return error code in R1
+	BR	90$			;and fail
+
+30$:	MOV	R1,R3			;get base of QDB
+	ADD	#QU.ASB,R3		;R3 -> ASB list pointer
+40$:	TST	(R3)			;any more ASB's?
+	BEQ	50$			;no, so exit loop
+	MOV	(R3),R3			;yes, get next ASB
+	CMP	AQ.SPL(R3),R2		;is server already assigned?
+	BNE	40$			;no, on to next ASB
+	MOV	#ER$FEX,TOS.R1(SP)	;yes, return error code in R1
+	BR	90$			;and fail
+
+50$:	MOV	#AQ.LEN,R4		;R4 = size of buffer needed
+	GETBUF	R0,R4,CLEAR		;allocate buffer for new ASB
+	BCC	60$			;got it, so continue
+	MOV	#ER$MEM,TOS.R1(SP)	;no room, so return error code in R1
+	BR	90$			;and fail
+
+60$:	MOV	R4,AQ.ILN(R0)		;set in real length
+	MOV	QU.QUE(R1),AQ.QUE(R0)	;set in queue type
+	MOV	QU.SEQ(R1),AQ.QSQ(R0)	;set in QDB seq no.
+	MOV	SP.SEQ(R2),AQ.SSQ(R0)	;set in SDB seq no.
+	MOV	R2,AQ.SPL(R0)		;set in SDB addr
+	MOV	R0,(R3)			;and link to last ASB
+	TST	QU.JOB(R1)		;Is the queue empty?		;042
+	BEQ	65$			;Yes. Don't SETFUN the scheduler ;042
+	BIC	#SP$NIU,SP.STS(R2)	;clear server's NOT-IN-USE flag
+	MOV	TOS.R0(SP),R3		;get function bits addr		;042
+	SETFUN	S.SCHJ,R3		;request the job scheduler	;042
+	CMPB	QU.QUE(R1),#QT$PRI	;Is this a print queue?		;042
+	BNE	65$			;No, don't schedule FORMS check	;042
+	MOV	SP,FRMCHK(R5)		;request FORMS_WAIT update	;042
+65$:					;Store ASB on disk...		;042
+
+; write ASB record to disk
+
+	BISB	#QR$ASB,AQ.QUE(R0)	;set ASB record type		;025
+	MOV	QRAB(R5),R3		;get pointer to RAB
+	MOV	R0,R2			;R2 -> ASB
+	ADD	#AQ.SEQ,R2		;point to start of record data
+	$STORE	R2,RBF,R3		;load buffer addr
+	$STORE	#AQ.LEN-AQ.SEQ,RSZ,R3	;load record size
+	$STORE	#RB$KEY,RAC,R3		;Ensure keyed access to file	;046
+70$:	ASNSEQ	#1,(R2)			;assign next internal seq no.
+	MOV	(R2),AQ.UID-AQ.SEQ(R2)	;copy seq no. into ID field
+	$PUT	R3			;write ASB rec to PBS file
+	TST	O$STS(R3)		;any errors?
+	BPL	80$			;no, so continue
+	CMP	#ER$DUP,O$STS(R3)	;yes, duplicate key error?
+	BEQ	70$			;yes, assign next key & try again
+	MOV	O$STS(R3),TOS.R1(SP)	;no, return error code in R1
+	BR	90$			;and fail
+
+80$:	BICB	#QR$ASB,AQ.QUE(R0)	;clear ASB record type		;025
+	TST	(PC)+			;clear carry for success
+90$:	SEC				;set carry for error
+	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	DSNQUE	- DEASSIGN QUEUE FROM SERVER
+
+;+
+;
+; DSNQUE:
+;
+; Inputs:	R1 -> mesage (past header)
+;		R2 =  length of message (less header)
+;		R5 -> impure area
+;
+; Call:		JSR	PC,DSNQUE
+;
+; Back:		C=0 queue deassigned
+;		C=1 queue not deassigned
+;		    (error status in R1)
+;		all regs preserved
+;
+;-
+
+	.ENABL	LSB
+
+DSNQUE:	SAVREG
+	MOV	R0,R4			;Copy function bits pointer	;042
+	MOV	R1,R0			;get base of msg packet
+	ADD	#AS.QNL,R0		;R0 -> queue name
+	FNDQUE	R0,AS.QUE(R1)		;does queue exist?
+	BCC	10$			;yes, continue (R1 -> QDB)
+	MOV	#ER$RNF,TOS.R1(SP)	;no, return error code in R1
+	BR	30$			;and fail
+
+10$:	SUB	#AS.QNL,R0		;restore base of msg
+	MOVB	QU.QUE(R1),DS.QUE(R0)	;set queue type for ACK/NACK msg
+	CLR	R2			;init SDB addr to deassign all servers
+	BIT	#DS$ALL,DS.FLG(R0)	;request deassign all?
+	BNE	20$			;yes, skip server lookup
+	ADD	#AS.DVL,R0		;no, R0 -> server name
+	FNDSPL	R0			;does server exist?
+	BCC	20$			;yes, continue (R2 -> SDB)
+	MOV	#ER$FNF,TOS.R1(SP)	;no, return error code in R1
+	BR	30$			;and fail
+
+20$:	CALLX	DELASB			;go delete the asb(s)
+	MOV	R1,TOS.R1(SP)		;R1 = err, unchanged if success	;042
+	BCS	40$			;Error, so exit unhappy		;042
+	CMPB	QU.QUE(R1),#QT$PRI	;Is it a print queue?		;042
+	BNE	25$			;Nope.  So we're all done	;042
+	TST	QU.JOB(R1)		;ASB deleted, was queue empty?	;042
+	BEQ	40$			;Yes, exit w/carry clr from TST	;042
+	SETFUN	S.SCHJ,R4		;Request the job scheduler...	;042
+	MOV	SP,FRMCHK(R5)		; to do a FORMS_WAIT update	;042
+25$:	TST	(PC)+			;Clear carry and skip		;042
+30$:	SEC				;set carry for failure
+40$:	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	INIDEV	- INITIALIZE DEVICE (SERVER)
+
+;+
+;
+; INIDEV:
+;
+;	This routine creates and links the SDB for the given device, writes
+;	the record to the queue file, and allocates the device if /NOSHAREABLE
+;	is selected (not necessarily in that order).
+;
+;	For /NOSHAREABLE devices; If the device cannot be allocated (either the
+;	device is busy for print servers or the system is out of PK's for batch
+;	servers), then the server is marked in a resource wait.  The resource 
+;	wait mechanism is described in more detail in the WAKWEN section in
+;	QMUTIL.
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,INIDEV
+;
+; BACK:
+;
+;		C=0 DEVICE ADDED TO AVAILABLE SERVER
+;		C=1 INIT DEVICE FAILED
+;		ERROR STATUS IN R1
+;		ALL OTHER REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+INIDEV:	SAVREG
+	MOV	R1,R0			;get base of msg packet
+	ADD	#ID.DVL,R0		;R0 -> msg dev name
+	FNDSPL	R0			;device already defined?
+	BCS	10$			;no, so continue
+	MOV	#ER$FEX,TOS.R1(SP)	;return dev exists error
+	BR	50$			;and fail
+
+10$:	CALLX	CHKSER			;check for valid server fields
+	BCC	20$			;fields ok, so continue
+	MOV	R1,TOS.R1(SP)		;error, so return error code
+	BR	50$			;and fail
+
+20$:	MOV	R5,R4			;get copy of impure ptr
+	ADD	#SPLLST,R4		;R4 -> the sdb list ptr
+30$:	TST	(R4)			;have we found the last sdb?
+	BEQ	40$			;yes
+	MOV	(R4),R4			;no, load the next one
+	BR	30$			;and try again
+
+40$:	MOV	#SP.LEN,R3		;R3 = the size of buffer for sdb
+	GETBUF	R0,R3,CLEAR		;get a cleared buffer
+	BCC	60$			;all ok, go on
+	MOV	#ER$MEM,TOS.R1(SP)	;return error
+50$:	JMP	170$			;and fail
+
+60$:	MOV	R3,SP.ILN(R0)		;set true length of buffer
+	MOV	QRAB(R5),R3		;get pointer to qrab
+	MOV	R0,R2			;R2 -> sdb
+	$STORE	#<SP.LEN-SP.SEQ>,RSZ,R3	;set length of record
+	ADD	#SP.SEQ,R2		;R2 -> sp.seq
+	$STORE	R2,RBF,R3		;set address of record
+	$STORE	#RB$KEY,RAC,R3		;Ensure keyed access to file	;046
+	PUSH	<R0,R1>
+	MOV	R1,R0			;R0 -> source (message)
+	MOV	R2,R1			;R1 -> destin (sdb)
+	MOVSTR	R0,R1,#SP.DRI		;copy id message to sdb (cmn info)
+	.ASSUME	ID.LEN EQ SP.DRI	; DRI = device related information
+	POP	<R1,R0>
+	SUB	#SP.SEQ,R2		;R2 -> sdb
+	CLR	SP.STS(R2)		;show no status
+	MOV	#SPLIDL,SP.STA(R2)	;show initial state
+	CLR	SP.OST(R2)		;show no old state
+	BIT	#ID$TEN,ID.FLG(R1)	;mark device as tentative?	;020
+	BEQ	70$			;no, so continue		;020
+	BIS	#SP$TEN,SP.STS(R2)	;yes, set tentative bit in status ;020
+70$:	BIT	#ID$ASN,ID.FLG(R1)	;allocate the device?
+	BEQ	140$			;no, put the record
+					;SP.JOB(SDB)=0 so qman will get dev.
+	CMPB	#QT$BAT,SP.QUE(R2)	;Batch server?
+	BNE	80$			;no, just allocate the physical device
+	MOV	#BIT8,SP.PKN(R2)	;yes, initialize to _PK0: (+unit real)
+80$:	CALLX	ALLOC			;yes, go allocate device
+	BCC	130$			;no error, so continue
+	CMPB	#QT$BAT,SP.QUE(R2)	;Are we searching for a PK?
+	BNE	100$			;No, we is seraching for a print dev
+	CMP	#NOROOM,R1		;Was is because of '?No Logins'?
+	BEQ	130$			;Yes, at least we have the device
+	MOV	#ER$LBY,R1		;Return device busy error
+	BR	110$			;We must wait for the PK
+
+100$:	CALLX	DEVDIS			;Is the device disabled?
+	BCC	110$			;No, it is just busy
+	BIS	#SP$DIS,SP.STS(R2)	;show device as disabled
+	BR	120$			;and continue with process
+
+110$:	BIS	#SP$RES,SP.STS(R2)	;show device as waiting for resource
+	MOV	SP,RESFLG(R5)		;tell qman to retry
+120$:	MOV	R1,TOS.R1(SP)		;return error status in R1
+	.BR	130$			;and continue
+
+130$:	BIS	#SP$ALC,SP.STS(R2)	;show device as allocated
+140$:	BISB	#QR$SDB,SP.QUE(R2)	;set SDB record type		;025
+	ADD	#SP.SEQ,R2		;R2 -> sp.seq
+150$:	ASNSEQ	#1,(R2)			;set internal sequence number in SP.SEQ
+	MOV	(R2),SP.UID-SP.SEQ(R2)	;set unique identifier
+	$PUT	R3			;put the SDB in queue file
+	TST	O$STS(R3)		;any errors?
+	BPL	160$			;no
+	CMP	#ER$DUP,O$STS(R3)	;was it a duplicate key error?
+	BEQ	150$			;yes, try it again
+	MOV	O$STS(R3),TOS.R1(SP)	;return error status in R1
+	BR	170$			;and fail
+
+160$:	SUB	#SP.SEQ,R2		;R2 -> SDB again
+	MOV	R2,(R4)			;link in new sdb into list
+	BICB	#^C<17>,SP.QUE(R2)	;clear record type bits 7:4	;025
+	MOV	TOS.R0(SP),R0		;restore the function bit table ptr
+	TST	(PC)+			;success
+170$:	SEC				;failure
+	RETURN
+
+	GLOBAL	<NOROOM>
+
+	.DSABL	LSB
+
+.SBTTL	DELDEV	- DELETE DEVICE (SERVER)
+
+;+
+;
+; DELDEV:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,DELDEV
+;
+;
+;
+; BACK:
+;
+;		C=0 DEVICE DELETED FROM SERVER
+;		C=1 DELETE DEV FAILED
+;		ERROR STATUS IN R1
+;		ALL OTHER REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+DELDEV:	SAVREG
+	MOV	R0,R4			;Copy function bits pointer	;042
+	MOV	R1,R0			;GET BASE OF MSG PACKET
+	ADD	#DD.DVL,R0		;R0 -> MSG DEV NAME
+	FNDSPL	R0			;SERVER WITH DEVICE FOUND?
+	BCC	10$			;YES, SO CONTINUE
+	MOV	#ER$RNF,TOS.R1(SP)	;RETURN DEV NOT FOUND ERROR
+	BR	40$			;AND SKIP ON TO FAIL
+
+10$:	TSTB	SP.DVL(R2)		;ANY DEVICE DEFINED?
+	BEQ	20$			;NO, SO NOTHING TO DEALLOCATE
+	BIT	#SP$ALC,SP.STS(R2)	;IS DEVICE ALLOCATED?
+	BEQ	20$			;NO, SO DON'T DEALLOCATE IT
+	BIT	#SP$RES,SP.STS(R2)	;Yes, but do we have it?	;041
+	BNE	20$			;No.  There's nothing to return	;041
+	CALLX	DALLOC			;GO DEALLOCATE SERVER'S DEVICE
+	BCC	20$			;NO ERROR, SO CONTINUE
+	MOV	R1,TOS.R1(SP)		;ERROR, SO RETURN IT IN R1
+	BR	40$			;AND FAIL
+
+20$:	BIC	#<SP$ALC!SP$RES>,SP.STS(R2) ;Mark the device as free	;041
+	BIS	#SP$MDL,SP.STS(R2)	;MARK THE SDB AS DELETED
+	MOV	R5,R1			;GET BASE OF IMPURE AREA
+	ADD	#QUELST,R1		;R1 -> QDB LIST
+30$:	MOV	(R1),R1			;GET NEXT QDB
+	BEQ	50$			;NO MORE, SO EXIT HAPPY
+	PUSH	R1			;SAVE CURRENT QDB
+	CALLX	DELASB			;DELETE ASB FOR THIS DEVICE
+	MOV	R1,R3			;R3 = ERROR STATUS (IF ERROR)
+	POP	R1			;RESTORE CURRENT QDB
+	BCS	35$			;Got an error.  Check it out	;042
+	CMPB	QU.QUE(R1),#QT$PRI	;Is it a print queue?		;042
+	BNE	30$			;Nope. On to next QDB		;042
+	TST	QU.JOB(R1)		;ASB deleted, is queue empty?	;042
+	BEQ	30$			;Yes.  On to next QDB		;042
+	SETFUN	S.SCHJ,R4		;Request the scheduler...	;042
+	MOV	SP,FRMCHK(R5)		; to do a FORMS_WAIT update	;042
+	BR	30$			;On to next QDB			;042
+
+35$:	CMP	#ER$FNF,R3		;WAS ERROR 'ASB NOT FOUND'?
+	BEQ	30$			;YES, ON TO NEXT QDB
+	MOV	R3,TOS.R1(SP)		;NO RETURN ERROR STATUS
+40$:	BR	80$			;AND FAIL
+
+50$:	BIT	#SP$JOB,SP.STS(R2)	;RUNNING A JOB?
+	BNE	60$			;YES, DON'T REMOVE SDB
+	CALLX	DELSDB			;NO, GET RID OF SDB
+	BR	70$			;SKIP THE UPDATE
+
+60$:	CALLX	UPDSDB			;Update the SDB on disk
+
+70$:	TST	(PC)+			;SUCCESS
+80$:	SEC				;FAILURE
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	PAUDEV	- PAUSE DEVICE (SERVER)
+
+;+
+;
+; PAUDEV:
+;
+;
+; INPUTS:
+;
+;	R0 -> Function bits table
+;	R1 -> Message (past header)
+;	R2 =  Length of message
+;	R5 -> Impure area
+;
+; CALL:
+;
+;	JSR	PC,PAUDEV
+;
+; BACK:
+;
+;	C=0 server placed in pause state
+;	C=1 pause command failed
+;	Error status in R1
+;	ALL OTHER REGISTERS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+PAUDEV:	SAVREG
+	MOV	R2,R4			;save message length
+	MOV	R1,R0			;get base of message packet
+	ADD	#PD.DVL,R0		;R0 -> msg dev name
+	FNDSPL	R0			;server with same device found?
+	BCC	20$			;yes, so continue
+	MOV	#ER$RNF,TOS.R1(SP)	;no, return not found error
+	BR	50$			;and fail
+
+20$:	BIT	#SP$PDV,SP.STS(R2)	;server already paused?
+	BEQ	25$			;no, we may have to do something
+	MOV	#ER$IOP,TOS.R1(SP)	;return server already stopped msg
+	BR	50$			;and fail
+
+25$:	BIT	#SP$JOB,SP.STS(R2)	;does server have a job?
+	BEQ	30$			;no, so no need to tell him
+	CMP	#SPLIJO,SP.STA(R2)	;really working on a job?
+	BNE	30$			;no, don't tell him
+	BIT	#PD$EOJ,PD.FLG(R1)	;request pause at eoj?
+	BNE	30$			;yes, no need to tell him
+	MOV	R1,R0			;R0 -> msg data (past header)
+	MOVB	#QS.PDV,R5		;R5 =  pause command code
+	CLR	R1			;don't ask for an ack
+	CALL	SNDSPL			;send message to server
+	BCC	30$			;no error, so continue
+	MOV	#ER$RLK,TOS.R1(SP)	;return lock error to force retry
+	BR	50$			;and fail
+
+30$:	BIS	#SP$PDV,SP.STS(R2)	;set server paused bit
+	MOV	TOS.R5(SP),R5		;restore impure area ptr
+	CALLX	UPDSDB			;update the sdb on disk
+40$:	TST	(PC)+			;success, clear carry
+50$:	SEC				;failure, set carry
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	CONDEV	- CONTINUE DEVICE (SERVER)
+
+;+
+;
+; CONDEV:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESSAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,CONDEV
+;
+;
+; BACK:		C=0 SERVER TAKEN OUT OF PAUSE STATE
+;		C=1 CONTINUE COMMAND FAILED
+;		ERROR STATUS IN R1
+;		ALL OTHER REGISTERS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+CONDEV:	SAVREG
+	MOV	R0,R3			;R3 = function bits table
+	MOV	R2,R4			;R4 = message length
+	MOV	R1,R0			;get base of message packet
+	ADD	#CD.DVL,R0		;R0 -> msg dev length
+	FNDSPL	R0			;server with same device found?
+	BCC	10$			;yes, so continue
+	MOV	#ER$RNF,TOS.R1(SP)	;no, return not found error
+	BR	60$			;and fail
+
+10$:	BIT	#SP$PDV,SP.STS(R2)	;is server now paused?
+	BNE	20$			;yes, continue
+	MOV	#ER$IOP,TOS.R1(SP)	;send back warning saying server started
+	BR	60$			;don't disturb an already started server
+
+20$:	BIT	#SP$JOB,SP.STS(R2)	;does server have a job?
+	BEQ	40$			;no, so no need to tell him
+	CMP	#SPLIJO,SP.STA(R2)	;really working on a job?
+	BNE	40$			;no, don't tell him
+30$:	MOV	R1,R0			;R0 -> msg data (past header)
+	MOVB	#QS.CDV,R5		;R5 =  continue command code
+	CLR	R1			;don't ask for an ack
+	CALL	SNDSPL			;send message to server
+	BCC	40$			;no error, so continue
+	MOV	#ER$RLK,TOS.R1(SP)	;return lock error to force retry
+	BR	60$			;and fail
+
+40$:	BIC	#SP$PDV,SP.STS(R2)	;clear server paused bit
+50$:	BIC	#SP$NIU,SP.STS(R2)	;clear server not-in-use bit
+	SETFUN	S.SCHJ,R3		;and request the job scheduler
+	MOV	TOS.R5(SP),R5		;restore impure area ptr
+	CALLX	UPDSDB			;update the sdb on disk
+	TST	(PC)+			;success, clear carry
+60$:	SEC				;failure, set carry
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	MODSER	- MODIFY SERVER
+
+;+
+;
+; MODSER:
+;
+; Inputs:	R0 -> Function bits table
+;		R1 -> Message (past header)
+;		R2 =  Message length
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,MODSER
+;
+; Return:	C=0 Server modified
+;		C=1 Server not modified
+;		    (error in R1)
+;		All registers perserved
+;
+;-
+
+	.ENABL	LSB
+
+MODSER:	SAVREG
+	TST	MS.FLG(R1)		;any fields to update?
+	BEQ	80$			;no, so exit happy
+	MOV	MS.SEQ(R1),R0		;get seq no. of SDB
+	BEQ	10$			;none, so treat as not found record
+	FNDSSQ	R0			;find SDB by sequence no.
+	BCC	20$			;no error, so continue
+10$:	MOV	#ER$RNF,R1		;error, return ER$RNF error
+	BR	55$			;and fail
+
+20$:	CALLX	CHKSER			;validate server fields
+	BCS	55$			;error, so fail
+	MOV	R1,R0			;R0 -> modify packet (past header)
+	MOV	R2,R1			;R1 -> SDB
+	MOV	#MDSTBL,R3		;R3 -> modify server table
+30$:	MOV	(R3)+,R2		;get next field ID bit from table
+	BEQ	50$			;no more fields, so exit loop
+	BIT	R2,MS.FLG(R0)		;update this field?
+	BNE	40$			;yes, so skip to update field
+	TST	(R3)+			;no, skip over copy routine address
+	BR	30$			;and on to next field
+
+40$:	MOV	TOS.R0(SP),R4		;pass the function bits table
+	MOV	(R3)+,R2		;R2 -> routine to update field
+	BEQ	30$			;no addr, so on to next field
+	CALL	(R2)			;go update field
+	BCC	30$			;no error, so on to next field
+	BR	55$			;and fail
+
+50$:	MOV	R1,R2			;R2 -> SDB
+	CALLX	UPDSDB			;update SDB record on disk
+	BCC	60$			;no error, so continue
+55$:	MOV	R1,TOS.R1(SP)		;error, return it in R1
+	BR	70$			;and fail
+
+60$:	TST	(PC)+			;clear carry for success
+70$:	SEC				;set carry for error
+80$:	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	MODSER	- MSCTL - UPDATE TO /CONTROL
+.SBTTL	MODSER	- MSCTL - UPDATE TO /NOCONTROL
+.SBTTL	MODSER	- MSCUP - UPDATE TO /CONTROL=UPARROW
+.SBTTL	MODSER	- MSFRM - UPDATE FORMS FIELDS
+.SBTTL	MODSER	- MSPRI - UPDATE PRIORITY FIELD
+.SBTTL	MODSER	- MSRUN - UPDATE RUNBURST FIELD
+.SBTTL	MODSER	- MSSHR - UPDATE SHAREABLE FIELD
+.SBTTL	MODSER	- MSNSH - UPDATE NOSHAREABLE FIELD
+
+;+
+;
+; MSCTL:
+; MSNCT:
+; MSCUP:
+; MSFRM:
+; MSPRI:
+; MSRUN:
+; MSSHR:
+; MSNSH:
+;
+; Inputs:	R0 -> Message (past header)
+;		R1 -> SDB
+;		R4 -> function bits
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,MSxxxx
+;
+; Return:	C=0 SDB updated
+;		C=1 SDB not updated
+;		    (error in R1)
+;		All registers perserved
+;
+;-
+
+	.ENABL	LSB
+
+MSCTL:	CMPB	#QT$PRI,SP.QUE(R1)	;is this a print server?
+	BNE	10$			;no, so ignore the update
+	BIC	#FM$CUP,SP.CHR(R1)
+	BIS	#FM$CTL,SP.CHR(R1)	;set /CONTROL
+	BR	10$
+
+MSNCT:	CMPB	#QT$PRI,SP.QUE(R1)	;is this a print server?
+	BNE	10$			;no, so ignore the update
+	BIC	#<FM$CTL!FM$CUP>,SP.CHR(R1) ; set /NOCONTROL
+	BR	10$
+
+MSCUP:	CMPB	#QT$PRI,SP.QUE(R1)	;is this a print server?
+	BNE	10$			;no, so ignore the update
+	BIS	#FM$CUP,SP.CHR(R1) 	;set /CONTROL=UPARROW
+	BIC	#FM$CTL,SP.CHR(R1)
+10$:	JMP	100$
+
+MSFRM:	CMPB	#QT$PRI,SP.QUE(R1)	;is this a print server?
+	BNE	10$			;no, so ignore the update
+	TSTB	MS.FML(R0)		;yes, any form name?
+	BEQ	10$			;no, so ignore the update
+	MOV	MS.CHR(R0),SP.CHR(R1)	;yes, copy characteristics
+	MOVB	MS.JHD(R0),SP.JHD(R1)	;copy no. job headers
+	MOVB	MS.JTR(R0),SP.JTR(R1)	;copy no. job trailers
+	MOVB	MS.FHD(R0),SP.FHD(R1)	;copy no. file headers
+	MOVB	MS.FTR(R0),SP.FTR(R1)	;copy no. file trailers
+	MOVB	MS.LNG(R0),SP.LNG(R1)	;copy form length
+	MOVB	MS.WID(R0),SP.WID(R1)	;copy form width
+	MOVB	MS.BOM(R0),SP.BOM(R1)	;copy bottom margin
+	MOVB	MS.TOM(R0),SP.TOM(R1)	;copy top margin
+	MOVB	MS.LEM(R0),SP.LEM(R1)	;copy left margin
+	MOVB	MS.RIM(R0),SP.RIM(R1)	;copy right margin
+	PUSH	<R0,R1>			;save regs for copy
+	ADD	#MS.FML,R0		;R0 -> packet's form length
+	ADD	#SP.FML,R1		;R1 -> SDB's form length
+	MOVSTR	R0,R1,#<NAM.LEN+1>	;copy form name field into packet
+	POP	<R1,R0>			;restore regs
+	BIC	#SP$NIU,SP.STS(R1)	;clear server's not-in-use bit	;042
+	SETFUN	S.SCHJ,R4		;ask for job scheduler		;042
+	MOV	SP,FRMCHK(R5)		;request FORMS_WAIT update	;042
+	BR	100$			;and exit			;042
+
+MSPRI:	CMPB	#QT$BAT,SP.QUE(R1)	;is this a batch server?
+	BNE	100$			;no, so ignore the update
+	MOVB	MS.FHD(R0),SP.RPR(R1)	;copy run priority (validated by CHKSER)
+	BR	100$			;and exit
+
+MSRUN:	CMPB	#QT$BAT,SP.QUE(R1)	;is this a batch server?
+	BNE	100$			;no, so ignore the update
+	MOVB	MS.FTR(R0),SP.RBR(R1)	;copy run-burst (validated by CHKSER)
+	BR	100$			;and exit
+
+MSSHR:	BIT	#SP$ALC,SP.STS(R1)	;is device marked as allocated?
+	BEQ	20$			;no, so nothing to deallocate
+	BIT	#SP$RES,SP.STS(R1)	;yes, are we in resource wait?
+	BNE	20$			;yes, so don't deallocate
+	BIT	#SP$JOB,SP.STS(R1)	;Server currently in use?	;041
+	BNE	20$			;Yes, return resource when done	;041
+	MOV	R1,R2			;R2 -> SDB
+	CALLX	DALLOC			;deallocate the device
+	MOV	R2,R1			;R1 -> SDB again
+	CMPB	#QT$BAT,SP.QUE(R1)	;Batch server?			;041
+	BNE	20$			;No, continue			;041
+	CLR	SP.PKN(R1)		;Mark server for dynamic PK use	;041
+20$:	BIC	#<SP$RES!SP$ALC>,SP.STS(R1) ;show device as not alloed/no res w
+	BR	100$			;and exit
+
+MSNSH:	BIT	#SP$ALC,SP.STS(R1)	;is device already allocated?
+	BNE	100$			;yes, so all done
+	PUSH	R1
+	MOV	R1,R2			;R2 -> SDB
+	CMPB	#QT$BAT,SP.QUE(R1)	;Batch server?			;041
+	BNE	30$			;No, continue			;041
+	TST	SP.PKN(R1)		;Yes.  Is the resource real?	;041
+	BNE	30$			;Yes.  Keep it around		;041
+	MOV	#BIT8,SP.PKN(R1)	;initialize PK number to _PK0:	;041
+	BR	40$			;and get an additional resource	;041
+
+30$:	BIT	#SP$JOB,SP.STS(R1)	;Server already has the resource? ;041
+	BNE	70$			;Yes.  Keep it around		;041
+40$:	CALLX	ALLOC			;try to allocate the device
+	BCC	70$			;got it, so continue
+	CMPB	#QT$BAT,SP.QUE(R2)	;Batch server?
+	BNE	50$			;No, it's an error on some other device
+	CMP	#NOROOM,R1		;Was error because of '?No Logins'
+	BEQ	70$			;Yes, we got us a PK
+	BR	60$			;Nope.  Put us in a wait-state	;041
+
+50$:	CALLX	DEVDIS			;Is the device disable?
+	BCC	60$			;No, just busy
+	BIS	#SP$DIS,SP.STS(R2)	;set disabled status
+	BR	80$			;and exit
+
+60$:	BIS	#SP$RES,SP.STS(R2)	;failed, so set resource-wait bit
+	MOV	SP,RESFLG(R5)		;and tell QMAN to keep trying
+70$:	BIS	#SP$ALC,SP.STS(R2)	;show device as allocated
+80$:	POP	R1
+	BR	100$			;and exit
+
+100$:	TST	(PC)+			;clear carry for success
+110$:	SEC				;set carry for failure
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	RETMSG	- RETURN MESSAGE BUFFER
+
+;+
+;
+; RETMSG:
+;
+; Inputs:	R0 -> funcion bits table
+;		R5 -> impure area
+;
+; Call:		JSR	PC,RETMSG
+;
+; Back:		Message buffer deallocated
+;		Message pointer/length zeroed
+;		All regs preserved
+;		Carry preserved
+;
+;-
+
+RETMSG:	PUSH	<R1,R2>			;save work regs
+	ROR	-(SP)			;save carry on stack
+	MOV	MSGPTR(R5),R2		;get pointer to message packet
+	MOV	MSGLEN(R5),R1		;get message length
+	BEQ	100$			;none, so nothing to return
+	RETBUF	R2,R1			;deallocate the buffer
+100$:	CLR	MSGPTR(R5)		;show buffer as returned
+	ROL	(SP)+			;restore carry from stack
+	POP	<R2,R1>			;restore work regs
+	RETURN				;exit
+
+.SBTTL	.NOP	- PROCESS .NOP (NO-OP) COMMAND
+
+;+
+;
+; .NOP:
+;
+; Inputs:	R1 -> mesage (past header)
+;		R2 =  length of message (less header)
+;		R5 -> impure area
+;
+; Call:		JSR	PC,.NOP
+;
+; Back:		C=0
+;		all regs preserved
+;
+;-
+
+	.ENABL	LSB
+
+.NOP:	CLC				;clear carry to show success
+	RETURN				;and exit (that was easy)
+
+	.DSABL	LSB
+
+.SBTTL	.BPT	- PROCESS BPT (BREAKPOINT) COMMAND
+
+;+
+;
+; .BPT:
+;
+;
+; INPUTS:
+;
+; CALL:
+;	JSR	PC,.BPT
+;
+;		DEBUGER CALLED IF THERE AND USER IS OPER
+;
+;
+; BACK:
+;
+;		C=0 DEBUGER CALLED
+;		C=1 NO DEBUGER
+;		ERROR IN R1
+;		 ALL OTHER REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+.BPT:	TST	@#R.ODTV		;is a debuger present?
+	BEQ	10$			;no, so fail
+	BPT				;yes, go to debuger
+	MOV	#SU$SUC,R1		;set status to success
+	TST	(PC)+			;set carry for success
+10$:	SEC				;set carry if no debugger
+	RETURN				;and exit
+
+R.ODTV=112				;define addr of ODT sst vector
+
+	.DSABL	LSB
+
+.SBTTL	SPSRS	- SERVER STATUS RESPONSE
+
+;+
+;
+; SPSRS:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,SPSRS
+;
+;
+;
+; BACK:
+;
+;
+;-
+
+SPSRS:	CALLX	GETSPL			;GO VERIFY SERVER,GET ADDR
+	BCS	10$			;NO KNOW SO EXIT
+	BPT
+10$:	RETURN
+
+
+.SBTTL	SPSUP	- SERVER STATUS UPDATE
+
+;+
+;
+; SPSUP:
+;
+;	Modify SDB status bits when the server has something to tell us.
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,SPSUP
+;
+; BACK:
+;
+;
+;-
+
+	.ENABL	LSB
+
+SPSUP: 	CALLX	GETSPL			;go verify server,get addr
+	BCS	10$			;no know so exit
+	SAVREG
+	MOV	SU.STS(R1),R1		;R1 = change of status from server
+	CALLX	BT2BIN			;Convert bit to value
+	ASL	R1			;make * 2 for table offset
+	CMP	#SERTLN,R1		;Check to see if offset is within table
+	BLOS	10$			; exit if bad
+	CALL	@SERSTS(R1)		;Set new status for SDB
+	CALLX	UPDSDB			;update the SDB on disk
+10$:	RETURN
+
+SERCAR: BIS	#<SP$OFL!SP$HNG!SP$PDV>,SP.STS(R2)
+					;Lost Carrier, Paused, Off-line	;042
+	BR	20$			;Join common off-line handler	;042
+
+SEROFL:	BIS	#<SP$OFL>,SP.STS(R2)	;Server is offline		;042
+20$:	MOV	TOS.R1+2(SP),R1		;Get message pointer back	;042
+	CALLRX	SNDOFL			;Send off-line message to OMS	;042
+
+SERONL:	BIC	#<SP$OFL!SP$HNG>,SP.STS(R2)	;Server is no longer offline
+	RETURN
+
+	GLOBAL	<BT2BIN>
+
+	.DSABL	LSB
+
+.SBTTL	SPACK	- SERVER ACK MESSGE RECIEVED
+
+;+
+;
+; SPACK:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,SPACK
+;
+;
+;
+; BACK:
+;
+;
+;-
+
+SPACK: 	CALLX	GETSPL			;GO VERIFY SERVER,GET ADDR
+	BCS	40$			;NO KNOW SO EXIT
+	CMP	HD.CTX-HD.LEN(R1),SP.CTX(R2) ;IS THIS THE ONE WE WERE LOOKING FOR?
+	BEQ	20$			;YES
+	REJECT	R2			;NO, REJECT THE STATE TRANSITION
+	BR 40$				;AND RETURN
+
+20$:	CMP	#SPLJOB,SP.OSTA(R2)	;WAS OLD STATE THE JOB WAIT STATE?
+	BNE	40$			;NO, DON'T KNOW WHAT IT WAS, BUT ?
+	BIS	#SP$JOB,SP.STS(R2)	;YES, SHOW JOB AS ACTIVE
+	CALLX	SNDSTR			;Send entry start message to OMS ;042
+	CALLX	UPDSDB			;REFLECT THE CHANGE ON DISK
+
+	TST	(PC)+			;CLC AND EXIT
+40$:	SEC
+	RETURN
+
+.SBTTL	SPNCK	- SERVER NACK MESSAGE RECIEVED
+
+;+
+;
+; SPNCK:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,SPNCK
+;
+;
+;
+; BACK:
+;
+;
+;-
+
+SPNCK: 	CALLX	GETSPL			;GO VERIFY SERVER,GET ADDR
+	BCS	10$			;NO KNOW SO EXIT
+	CMP	HD.CTX-HD.LEN(R1),SP.CTX(R2) ;IS THIS THE ONE WE WERE LOOKING FOR?
+	BEQ	10$			;YES
+	REJECT	R2			;NO, REJECT THE STATE TRANSITION
+10$:	RETURN
+
+.SBTTL	SPEOJ	- SERVER END OF JOB MESSAGE RECIEVED
+
+;+
+;
+; SPEOJ:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,SPEOJ
+;
+;
+;
+; BACK:
+;
+;
+;-
+
+	.ENABL	LSB
+
+SPEOJ:	SAVREG
+	MOV	#SU$SUC,TOS.R1(SP)	;PRESET TO SUCCESS
+	CALLX	GETSPL			;GO VERIFY SERVER,GET ADDR
+	BCS	80$			;NO KNOW SO EXIT
+	CMP	EJ.SEQ(R1),SP.JBS(R2)	;IS THIS THE ONE WE WERE LOOKING FOR?
+	BEQ	10$			;YES
+	REJECT	R2			;NO, REJECT THE STATE TRANSITION
+	MOV	#SPLSYN,SP.STA(R2)	;set new state to sync error
+	JMP	SPSYN			;and go handle it
+
+10$:	PUSH	<R1,R2>			;Save SDB and message pointer	;042
+	ADD	#SP.JBS,R2		;Offset to job sequence number	;042
+	GETREC	#GETEQ,#SEQKEY,R2,#5	;Look up the entry		;042
+	MOV	R1,R4			;Copy record pointer/error code	;042
+	POP	<R2,R1>			;Restore SDB and message pointer ;042
+	BCC	20$			;No error, continue		;042
+	MOV	R4,TOS.R1(SP)		;Return error code in R1	;042
+	BR	80$			;And go fail			;042
+
+20$:	SETFUN	S.SCHJ,R0		;Request the job scheduler	;042
+	CALLX	SNDEND			;Send entry end message to OMS	;042
+	CALL	DELENT			;Remove entry from the queue	;042
+	MOV	O$STS(R3),TOS.R1(SP)	;Save error code		;042
+	ROL	-(SP)			;Save error flag		;042
+	BIC	#SP$JOB,SP.STS(R2)	;Mark server as inactive	;042
+	CLR	SP.JBS(R2)		;AND THE JOB AIN'T NO MORE
+	MOV	SP.RCV(R2),R3		;GET SERVER NAME
+	BICB	#SK$INU,SK.USE(R3)	;CLEAR IN USE FLAG
+	BISB	#SK$NIU,SK.USE(R3)	;SHOW NOT IN USE
+	CLR	SK.SDB(R3)		;REMOVE ANY CONNECTION
+	CLR	SP.RCV(R2)		; BETWEEN SDB AND SKDB
+	CLR	SP.JOB(R2)		;SHOW THAT QMAN OWNS SERVER AGAIN
+	BIT	#SP$ALC,SP.STS(R2)	;IS THE DEVICE /NOSHARE?
+	BNE	60$			;YES, DON'T DEALLOCATE
+	CALLX	DALLOC			;NO, DEALLOCATE DEVICE
+60$:	CALLX	UPDSDB			;UPDATE SDB ON DISK
+	BIT	#SP$MDL,SP.STS(R2)	;IS THE SERVER MARKED FOR DELETION?
+	BEQ	70$			;NO
+	CALLX	DELSDB			;DELETE THE SDB
+70$:	ROR	(SP)+			;RESTORE CARRY
+80$:	RETURN				;GO BACK
+
+	.DSABL	LSB
+
+.SBTTL	SPONL	- SERVER ON LINE MESSAGE RECIEVED
+
+;+
+;
+; SPONL:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,SPONL
+;
+;
+;
+; BACK:
+;		C=0 SERVER PUT ON LINE
+;		C=1 NOT PUT ON LINE
+;		ERROR IN R1
+;		ALL OTHER REGS PRESERVED
+;
+;
+;-
+
+	.ENABL	LSB
+
+SPONL: 	SAVREG
+	TST	SPAWN(R5)		;Are we spawning?		;017
+	BNE	5$			;yes, continue			;017
+2$:	CLC				;no, we can't accept this	;017
+	JMP	100$			;ONL message since unexpected	;017
+
+5$:	MOV	R5,R3			;GET COPY OF IMPURE AREA POINTER
+	ADD	#SKDLST,R3		;R3 -> SKDB LIST
+	MOV	(R3),R3			;R3 -> FIRST SKDB
+
+;
+; NOTE: WE ARE ASSURED THAT THERE WILL BE AT LEAST ONE SKDB
+;
+
+10$:	TST	(R3)			;IS THIS THE LAST SKDB?
+	BEQ	20$			;YES
+	MOV	(R3),R3			;R3 -> NEXT SKDB
+	BR	10$			;TRY THE NEXT ONE
+20$:	MOVB	JBNO(R5),R4		;R4=job num that sent message	;028
+	ASR	R4			;R4=job num * 1			;028
+	CMPB	R4,SK.JOB(R3)		;message from expected job?	;028
+	BEQ	28$			;Yes, continue on		;028
+	TSTB	SK.JOB(R3)		;is this the primary SKDB?	;028
+	BNE	2$			;no, ignore the message		;028
+	CMPB	R4,JOBNUM		;message sent from primary?	;028
+	BNE	2$			;nope, ignore this message	;028
+28$:	MOVB	ON.QUE(R1),R4		;R4 = QUEUE TYPE OF SERVER
+	BIC	#^C<17>,R4		;clear record type bits 7:4
+	ASL	R4			;convert queue type to word offset
+	MOV	#..SPTB,R2		;R2 -> MAXIMUM SERVER COUNT TABLE
+	ADD	R4,R2			;R2 -> MAX SERVERS FOR THIS TYPE
+	ADD	R3,R4			;R4 -> FIXED AREA PART OF SKDB PLUS
+					;QUETYP.  USED FOR ARRAY REFERENCES.
+	CMP	SK.CTB(R4),(R2)		;HAVE WE EXCEDED THE MAXIMUM?
+	BGE	100$			;YES, PUNT
+	INC	SK.CTB(R4)		;NO, SHOW ONE MORE SERVER IN SKDB
+	MOV	SK.ETB(R4),R4		;R4 -> ARRAY OF RCVRS FOR TYPE
+	BEQ	100$			;PUNT IF NO ARRAY
+30$:	TSTB	SK.USE(R4)		;IS THIS RECIVER IN USE?
+	BEQ	40$			;NO, GO AHEAD AND USE IT
+	ADD	#SK.ELN,R4		;ADD ONE ENTRY LENGTH 
+	BR	30$			;AND TRY THE NEXT ONE *** TEST HERE???
+
+40$:	PUSH	<R3,R1,R4>
+	MOV	R3,R4			;GET COPY OF SKDB PTR
+	MOV	#QT$BAD,R1		;R1 =  number of queue types	;042
+	ADD	#SK.CTB,R3		;R3 -> COUNT/TYPE TABLE
+	CLR	R2			;CLEAR ACCUMULATOR (R2)
+50$:	ADD	(R3)+,R2		;SUM TOTAL SERVERS IN SKDB
+	SOB	R1,50$			;FOR ALL TYPES
+	CMP	.SPLER,R2		;ARE ALL SERVERS THERE?
+	BEQ	60$			;YEP, CLEAR SPAWN INFO
+	BITB	#SK$PRI,SK.STS(R4)	;IS THIS THE PRIMARY SKDB?
+	BEQ	80$			;NO, SO NO SPECIAL ATTENTION
+	CLR	R3			; CALCULATE THE
+	ADD	..PPRT,R3		;   NUMBER OF SERVERS
+	ADD	..PBAT,R3		;     IN THE PRIMARY JOB
+	CMP	R3,R2			;NOW ARE ALL SERVERS THERE?
+	BNE	80$			;NO, NEED TO WAIT A LITTLE LONGER
+60$:	CLR	SPAWN(R5)		;SPAWN DONE, CLEAR SPAWNING STATUS FLAG
+	BICB	#SK$SPN,SK.STS(R4)	;SHOW THAT THE SKDB IS NOT SPAWNING
+	SETFUN	S.SCHJ,R0		;MAKE SURE THAT THE JOB STARTER KNOWS
+	MOV	R5,R2			;GET COPY OF IMPURE AREA PTR
+	ADD	#SPLLST,R2		;R2 -> SDB LIST PTR
+70$:	MOV	(R2),R2			;R2 -> A SDB
+	BEQ	80$			;IF ALL DONE
+	BIT	#SP$SPN,SP.STS(R2)	;IS SPAWN BIT SET?
+	BEQ	70$			;NO, TRY NEXT SDB
+	BIC	#SP$SPN,SP.STS(R2)	;CLEAR WAITING FOR SPAWN BIT
+	CALLX	UPDSDB			;UPDATE THE SDB ON DISK
+	BR	70$			;AND TRY NEXT
+
+80$:	POP	<R4,R1>			;RESTORE MESSAGE PTR
+	MOV	(SP),R3			;RESTORE SKDB PTR
+	MOV	R1,R0			;GET COPY OF MESSAGE POINTER
+	ADD	#ON.RCL,R0		;R0 -> SOURCE RCVRID STRING
+	MOV	R4,R3			;GET COPY OF ARRAY ENTRY
+	ADD	#SK.RNL,R3		;R3 -> DESTIN RCVRID ADDR
+	MOVSTR	R0,R3			;MOVE THE NAME BLOCK
+	POP	R3
+	MOVB	ON.QUE(R1),SK.QUE(R4)	;SET QUEUE TYPE
+	MOVB	#SK$NIU,SK.USE(R4)	;SET USE FLAG FIELD
+	CLR	SK.SDB(R4)		;INSURE SDB FIELD IS BLANK
+	MOV	ON.STS(R1),SK.SID(R4)	;SAVE SERVER'S CONNECT ID
+	MOV	SPLSED(R5),SK.RID(R4)	;LOAD SERVER SEED VALUE
+	INC	SPLSED(R5)		;AND BUMP FOR UNIQUENESS
+	MOV	SK.RID(R4),HD.CID-HD.LEN(R1) ; RETURN OUR CID
+	MOV	R4,R2			;R2 -> SKDB FOR SNDOC CALL
+	CALL	SNDOC			;SEND ONLINE CONFIRM BACK
+	BCC	100$			;ALL WENT OK, SO RETURN SUCCESS
+90$:	MOV	#ER$RLK,TOS.R1(SP)	;SEND FAILED, SO FORCE RETRY
+	SEC
+100$:	RETURN
+
+GLOBAL	<.SPLER,..PPRT,..PBAT,..SPTB,JOBNUM>
+
+	.DSABL	LSB
+
+.SBTTL	SPOFL	- SERVER OFF LINE MESSAGE RECIEVED
+
+;+
+;
+; SPOFL:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,SPOFL
+;
+; BACK:
+;
+;
+;-
+
+	.ENABL	LSB
+
+SPOFL: 	SAVREG
+	CALLX	GETSPL			;GO VERIFY SERVER,GET ADDR
+	BCS	10$			;IS NOT KNOWN, GET SKDB
+	CALLX	KILSPL			;ABORT CURRENT JOB & DELINK SERVER
+	BCC	10$			;ALL IS DEAD CONTINUE
+	MOV	#ER$RLK,TOS.R1(SP)	;GUESS ERROR OF LOCK (CAUSE RETRY)
+	BR	30$			;AND FAIL
+10$:	CALLX	GETSKD			;GET THE SKDB
+	BCS	30$			;WE DON'T KNOW WHO THIS MESS CAME FROM
+	CLRB	SK.USE(R1)		;SHO SKDB ENTRY AS EMPTY (OFFLINE)
+	CLR	SK.RNL(R1)		;CLEAR RCVR NAME BLOCK
+	MOVB	SK.QUE(R1),R2		;R2 = QUEUE TYPE OF SERVER
+	BIC	#^C<17>,R2		;clear record type bits 7:4
+	ASL	R2			; * 2 FOR TABLE OFFSET
+	ADD	#SK.CTB,R2		;R2 = OFFSET TO COUNT TABLE ENTRY
+	ADD	R0,R2			;R2 -> COUNT TABLE ENTRY FOR TYPE
+	DEC	(R2)			;SHOW ONE LESS SERVER AVAILABLE
+20$:	CALLX	KILSKD			;KILL ANY SKDB THAT'S MDL AND EMPTY
+	TST	(PC)+
+30$:	SEC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	SPSYN	- SERVER SYNTAX ERROR MESSAGE RECIEVED
+
+;+
+;
+; SPSYN:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCTION BITS TABLE
+;		R1 -> MESAGE (PAST HEADER)
+;		R2 =  LENGTH OF MESSAGE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,SPSYN
+;
+;
+;
+; BACK:
+;
+;
+;-
+
+SPSYN:	CALLX	GETSPL			;GO VERIFY SERVER,GET ADDR
+	BCS	10$			;NO KNOW SO EXIT
+	BPT
+10$:	RETURN
+
+.SBTTL	DELSDB	- RETURN SDB DATA
+
+;+
+;
+;  DELSDB:
+;
+;	RETURNS AN SDB'S BUFFER UPON DELETION CONDITIONS BEING MET.
+;
+;  INPUT:
+;
+;	R2 -> SDB TO DELETE
+;	R5 -> IMPURE AREA
+;
+;  CALL:
+;
+;	JSR	PC,DELSDB
+;
+;  BACK:
+;
+;	BUFFER THAT ONCE USED TO BE AN SDB, GONE.
+;
+;-
+
+	.ENABL	LSB
+
+DELSDB:	SAVREG
+	MOV	R5,R0			;GET A COPY OF IMPURE AREA
+	ADD	#SPLLST,R0		;R0 -> SDB LIST PTR
+10$:	CMP	(R0),R2			;IS THIS THE POINTER TO THE DOOMED SDB?
+	BEQ	20$			;YES
+	MOV	(R0),R0			;NO, TRY THE NEXT ONE
+	BR	10$
+
+20$:	MOV	(R2),(R0)		;DELINK THE DOOMED SDB
+	MOV	QRAB(R5),R3		;GET COPY OF QRAB
+	ADD	#SP.SEQ,R2		;R2 -> SP.SEQ
+	GETREC	#FNDEQ,#SEQKEY,R2,#5	;find record via seq no.
+	BCC	30$			;NO ERROR, DELETE THE RECORD
+	CMP	#ER$RNF,O$STS(R3)	;WAS ERROR RECORD NOT FOUND?
+	BEQ	40$			;YES, THAT WAS EASY
+	MOV	O$STS(R3),TOS.R1(SP)	;RETURN ERROR STATUS
+	BR	60$			;AND FAIL
+
+30$:	$DELETE	R3			;DELETE RECORD
+40$:	SUB	#SP.SEQ,R2		;R2 -> SP.NXT
+	MOV	SP.ILN(R2),R3		;GET LENGTH OF BUFFER TO RETURN
+	MOV	SP.RCV(R2),R4		;GET RECEIVER
+	BEQ	50$			;THERE IS NO RCVR ID FOR THIS ONE
+	MOVB	#SK$NIU,SK.USE(R4)	;MAKE RCVR ID AVAILABLE
+	CLR	SK.SDB(R4)		;JUST IN CASE
+50$:	RETBUF	R2,R3			;RETURN BUFFER
+	TST	(PC)+
+60$:	SEC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	SCHJOB	- Entry scheduler/Forms_wait updater
+
+;+
+; SCHJOB:
+;
+; INPUTS:
+;
+;		R0 -> function bits table
+;		R5 -> impure area
+;
+; CALL:
+;	JSR	PC,SCHJOB
+;
+;	A complete rewrite of this code was done during edit 042 (DBM).
+;	The entry scheduler and entry starter are now combined to
+;	execute under the same SPLFUN subfunction.
+;
+;-
+
+	.ENABL	LSB
+
+SCHJOB:	SAVREG				;Save the world
+	MOV	#1,R3			;Build a flag mask for ...
+	ASH	#QT$BAD,R3		;... all the valid ...
+	TST	-(R3)			;... queue types (2 ^ QT$BAD - 2)
+					; (Queue type 0 is reserved)
+					; (Current mask should be 6)
+	MOV	R5,R4			;Get base of IMPURE area
+	ADD	#QUELST,R4		;R4 -> QDB list
+
+; Check FORMS_WAIT flag
+
+	TST	FRMCHK(R5)		;In the middle of a FORMS_WAIT check?
+	BEQ	10$			;Nope.  Normal scheduling.
+	MOVB	#QT$PRI,R1		;Yes.  Set print queue type
+	BR	30$			;Go look for print entries
+
+; Find a "ready" queue type...
+
+10$:	MOV	(R4),R4			;Get next QDB from list
+	BEQ	40$			;No more.  Set NIU server bits
+	MOVB	QU.QUE(R4),R1		;Yes.  Fetch the queue type
+	CALLX	BIN2BT			;Convert type to bit (In R1)
+	BIT	R1,R3			;Have we checked this type yet?
+	BEQ	10$			;Yep.  Don't do it again.
+	TST	QU.JOB(R4)		;Any jobs in this queue?
+	BEQ	10$			;Nope.  Try next QDB
+	BIT	#QU$POU,QU.STS(R4)	;Yes, is queue paused for output?
+	BNE	10$			;Yep.  Try next QDB
+	MOV	R4,R1			;Copy QDB address
+	ADD	#QU.ASB,R1		;R1 -> ASB list for queue
+20$:	MOV	(R1),R1			;Get next ASB in list
+	BEQ	10$			;No more, on to next QDB
+	MOV	AQ.SPL(R1),R2		;Get SDB of assigned server
+	CALLX	SPLRDY			;Is this server available?
+	BCS	20$			;No.  Check next ASB
+	MOVB	QU.QUE(R4),R1		;Pick up queue type
+30$:	CALL	STRJOB			;Try to start a job for queue type
+	BCC	70$			;Started a job, go reschedule us
+	CLR	FRMCHK(R5)		;Clear FORMS_WAIT check state
+	CALLX	BIN2BT			;Convert queue type to bit value
+	BIC	R1,R3			;Say we've done this queue type
+	BNE	10$			;More type to do, keep looking
+	.BR	40$			;All done, set server NIU bits
+
+	; Set server's NIU (Not-In-Use) bits
+
+40$:	MOV	R5,R2			;Get base of IMPURE area
+	ADD	#SPLLST,R2		;R2 -> SDB list
+50$:	MOV	(R2),R2			;Get next SDB from list
+	BEQ	60$			;No more, so we're done
+	BIC	#SP$NIU,SP.STS(R2)	;Assume this server is unavailable
+	CALLX	SPLRDY			;Is the server available?
+	BCS	50$			;Nope.  On to next SDB
+	BIS	#SP$NIU,SP.STS(R2)	;Yes.  Mark it as "Not-In-Use"
+	BPL	50$			;Look for another SDB		;037
+.ASSUME	SP$LAT LT 0
+	BIT	#SP$ALC,SP.STS(R2)	;Non-shared outbound LAT device?;037
+	BNE	50$			;Yes.  Better not deallocate it	;037
+	CALLX	DALLOC			;Release shared LAT device	;037
+	BR	50$			;Look for another SDB
+
+60$:	CLC				;All done
+	RETURN				;Back to caller
+
+70$:	SETFUN	S.SCHJ,R0		;Request us to run again
+	SETFUN	S.SRVM,R0		;But check server messages first...
+	SETFUN	S.USRM,R0		;... and user messages...
+	SETFUN	S.URPM,R0		;... and URP messages
+	STALL	#0			;Now let other sub-jobs run.
+
+	.DSABL	LSB
+
+;+
+; STRJOB	Job starter code
+;
+;	R1 =  Queue type to check
+;	R5 -> Impure area
+;
+;	C clear if a job started, otherwise set
+;-
+
+	.ENABL	LSB
+
+STRJOB:	SAVREG				;Save the world
+	CLRTMP				;Clear out temp work block
+	MOV	R1,R4			;Save queue type
+	MOV	R5,R2			;Get base of IMPURE area
+	ADD	#TMPBLK,R2		;R2 -> Temporary work block
+	MOV	R4,(R2)			;Set queue type to look for
+	MOV	QRAB(R5),R3		;Get pointer to queue RAB
+	$STORE	#GETGE,RAC,R3		;First get is keyed, GE
+10$:	GETREC	O$RAC(R3),#JOBKEY,R2,#5. ;Look for a record
+	BCC	30$			;No error, on with the show
+	CMP	R1,#ER$RLK		;Record locked error?
+	BNE	20$			;Nope.  Assume it was EOF
+	TST	(PC)+			;Record locked, we want a retry
+20$:	SEC				;EOF, we're done in here
+	RETURN				;Back to the scheduler
+
+30$:	CMPB	JB.QUE(R1),R4		;Same queue type?
+	BNE	20$			;No, all done with queue type
+	CALLX	CHKFRM			;See if entry changed states
+	BCC	40$			;Nope.
+			;Update entry on disk				;047
+	$UPDATE	R3			;Destroys current record context;047
+	$STORE	#FNDEQ,RAC,R3		;We've got to get it back	;047
+	GETREC	O$RAC(R3),#SEQKEY,R1,#5	;Now get it back again		;047
+
+40$:	$STORE	#GETNXT,RAC,R3		;Set next get as sequential	;047
+	MOV	R1,R0			;Move entry pointer to R0
+	CMP	#JS$RDY,JB.STS(R0)	;Is entry READY to start?
+	BNE	10$			;No, try next entry
+	FNDQSQ	JB.QSQ(R0)		;Find entry's queue (Returned in R1)
+	BCS	10$			;Queue not found, on to next entry
+	BIT	#QU$POU,QU.STS(R1)	;Queue paused for output?
+	BNE	10$			;Yes, on to next entry
+	MOV	R1,SAVQUE(R5)		;Save QDB ptr for possible ASB shuffle
+	ADD	#QU.ASB,R1		;R1 -> ASB list
+50$:	MOV	(R1),R1			;Get next ASB
+	BEQ	10$			;No more, on to next entry
+	MOV	AQ.SPL(R1),R2		;R2 -> current SDB
+	CALLX	SPLRDY			;Is this server available?
+	BCS	50$			;No, on to next ASB
+	MOV	R1,SAVASB(R5)		;Save the ASB ptr for possible shuffle
+	CMPB	#QT$PRI,SP.QUE(R2)	;Is this a print server?
+	BNE	60$			;No, don't worry about forms
+	PUSH	<R0,R2>			;Yes, save entry and ASB pointers
+	ADD	#SP.FML,R2		;R2 -> Server's form name
+	ADD	#JB.FML,R0		;R0 -> Entry's form name
+	CMPSTR	R0,R2			;Right forms for job?
+	POP	<R2,R0>			;Restore entry and ASB pointer
+	BCS	50$			;No, on to next ASB
+60$:	CALL	SNDJOB			;Yes, queue up job defintion to server
+	BCS	70$			;If nothing sent, just get out
+	CALLX	MOVASB			;Put ASB at end for balanced server use
+70$:	CLC				;CLC for "success"
+	RETURN				;exit
+
+	.DSABL	LSB
+
+;+
+; QCMPRS	Compress the queue file
+;
+;		This routine is called at the start of PBS to initialize
+;		and compress the queue file.  It will also be possible to
+;		implement automatic compress by dispatching to this routine.
+;
+;-
+
+QCMPRS::CALLX	CMPRSS			;Off to overlay land		;042
+	CLC				;If we came back, then all's well ;042
+	RETURN				;Back to caller			;042
+
+
+.SBTTL	NULJOB	- IDLE/STALL LOOP FOR SERVER
+
+;+
+;
+; NLJOB:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCTION BITS TABLE
+;
+; CALL:
+;	JSR	PC,NLJOB
+;
+;
+; BACK:
+;
+;			STALL QMAN UNTIL OUTSIDE EVENT OCCURES
+;			(TIMER EXPIRES, MESSAGE RECEIVED, ETC.)
+;
+;			NO RETURN TO HERE (FROM SKED)
+;			INSTEAD, QMAN GET RESCHEDULED
+;
+;-
+
+	.ENABL	LSB
+
+NLJOB:	SETFUN	S.WAKE,R0		;REQUEST THE JOB WAKER UPPER
+	SETFUN	S.STAL,R0		;WE MUST ALWAYS BE SET !!!!!
+	SETFUN	S.SRVM,R0		;ASK FOR NEW SERVER MESSAGES
+	SETFUN	S.USRM,R0		;ASK FOR NEW USER MESSAGES
+	SETFUN	S.URPM,R0		;ask for new URP messages	;021
+	TST	SKDTIM(R5)		;ARE WE TIMING SKDBS?
+	BEQ	10$			;NO, GO ON TO REST
+	SETFUN	S.UPDT,R0		;YES, REQUEST TIMER ON RETURN
+10$:	$FLUSH	QRAB(R5)		;FLUSH OUT ANY QUEUE BUCKETS
+	CALLX	WAKWEN			;FIND OUT HOW LONG A NAP TO TAKE
+	$FREE	QRAB(R5)		;AND UNLOCK ANY LOCKS
+	STALL	R1			;AND AWAY WE GO
+
+
+.SBTTL	DEATH	- SHUT DOWN QMAN AFTER ALL SERVERS OFF-LINE
+
+;+
+;
+; DEATH:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCTION BITS TABLE
+;
+; CALL:
+;	JSR	PC,DEATH
+;
+;
+; BACK:
+;
+;		IF NO SERVER DEF BLOCKS EXIST:
+;			SHUT DOWN QMAN
+;
+;		OTHERWISE:
+;			SCHEDULE US TO TRY AGAIN
+;
+;		ALL REGISTERS PRESERVED
+;
+;
+;-
+
+	.ENABL LSB
+
+DEATH:	TST	SKDLST(R5)		;ANY SERVERS ALIVE?
+	BNE	10$			;YES, SO WE HAVE TO HANG ON
+	SHUTUP				;NO, SAY GOODNITE CHET
+
+10$:	SETFUN	S.DIE,R0		;ASK FOR US AGAIN
+	SETFUN	S.SRVM,R0		;ASK FOR SERVER MESSAGES
+	SETFUN	S.USRM,R0		;ASK FOR USER MESSAGES
+	SETFUN	S.URPM,R0		;ask for URP messages		;021
+	$FLUSH	QRAB(R5)		;FLUSH OUT ANY QUEUE BUCKETS
+	$FREE	QRAB(R5)		;AND UNLOCK ANY LOCKS
+	STALL	#-1			;AND RE-SCHEDULE US
+					;(WE'RE WAITING FOR OFF-LINE MSGS)
+
+	.DSABL	LSB
+
+	.END

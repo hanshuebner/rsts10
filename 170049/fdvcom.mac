@@ -1,0 +1,829 @@
+	.INCLUDE	/CMN:COMMON/
+	.INCLUDE	/CMN:KERNEL/
+	.INCLUDE	/CMN:KBDEF/
+	.INCLUDE	/TER:RSTSPR/
+	.INCLUDE	/TER:FDVCHR/
+
+	.SBTTL	FDVCOM	- FORM DRIVER COMMON ROUTINES
+	.SBTTL	
+	.SBTTL	FDV COMMON SYSTEM INDEPENDENT CODE
+	.SBTTL
+	.SBTTL
+
+;
+;
+;		      COPYRIGHT (C) 1987 BY
+;		DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+;
+;
+; MODULE:	FDVCOM	- Form Driver routines also used by FDV kernel
+;		          (system independent)
+;
+; VERSION:	V2.1
+;
+; AUTHOR:	Cheryl Vedoe
+;
+; DATE:		12-November-81
+;
+
+	.SBTTL	FXDLEN	- Get Length of Left Part of Fixed Decimal Field
+
+;++
+; FXDLEN
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine determines the length of the left part (preceding
+;	the decimal point) of a fixed decimal field.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry for field
+;	R4 -> Field desc
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	R0 = Length of left part of field
+;
+;	R3, R4, R5 preserved
+;--
+
+	.ENABL	LSB
+FXDLEN:
+	MOV	R4,R1			; Field desc pointer
+	ADD	#D$PLEN,R1		; Pointer to picture length
+	CLR	R2			; Avoid sign extend
+	BISB	(R1)+,R2		; Get picture length
+	CLR	R0			; Clear to accumulate length
+10$:	CMPB	#'.,(R1)+		; Look for '.' in picture
+	BEQ	20$			; Br if found
+	INC	R0			; Else inc length
+	SOB	R2,10$			; Check next byte
+20$:	RETURN				;
+	.DSABL
+
+	.SBTTL	FILCHR	- Determine Fill Character for Field
+
+;++
+; FILCHR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine determines the fill character for the specified
+;	field and returns it in R0.
+;
+; INPUT:
+;
+;	R4 -> Field desc entry
+;
+; OUTPUT:
+;
+;	R0 = Fill character
+;--
+
+	.ENABL	LSB
+FILCHR:
+	MOVB	#SPC,R0			; Assume space
+	BIT	#D2$ZFL,(R4)		; (D$ATT2) Zero filled field?
+	BEQ	10$			; If eq no
+	MOVB	#'0,R0			; Else fill char = ASCII zero
+10$:	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	TXTCHR	- Test for Text Character
+
+;++
+; TXTCHR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine determines if the character passed is a
+;	text character. ASCII characters in the following ranges
+;	are considered text characters:
+;
+;		41-57 (octal)
+;		72-100 (octal)
+;
+; INPUT:
+;
+;	R2 = Character to test in low byte
+;
+; OUTPUT:
+;
+;	C-CLR if not text char
+;	C-SET if text char
+;--
+
+	.ENABL	LSB
+TXTCHR:
+	CMPB	#41,R2			; < 41?
+	BHI	10$			; If so, not text char
+	CMPB	R2,#60			; < 60?
+	BLO	10$			; If so, text char
+	CMPB	#72,R2			; < 72?
+	BHI	10$			; If so, not text char
+	CMPB	R2,#101			; < 101
+10$:	RETURN				; If so, text char
+	.DSABL	LSB
+
+	.SBTTL	CLRCHR	- Replace Space with Clear Character
+
+;++
+; CLRCHR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	Replace a space with the clear character for display
+;	in a field.
+;
+; INPUT:
+;
+;	R2 =  Character in low byte
+;	R4 -> Field desc
+;
+; OUTPUT:
+;
+;	R2 =  Character to be echoed in low byte
+;	All other registers preserved
+;--
+
+	.ENABL	LSB
+CLRCHR:
+	CMPB	#SPC,R2			; Check for space
+	BNE	10$			; Br if not
+	BIT	#D2$ZFL,(R4)		; Else check for blank fill field
+	BNE	10$			; Br if not
+	MOVB	D$CLRC(R4),R2		; Else display clear char
+10$:	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	VIDTBL	- Video Attributes Table
+
+;++
+; VIDTBL
+;
+; This table contains the parameters to output to the VT100 terminal
+; to set the bold, underline, blinking and reverse video attributes
+; and the bit setting in the video attributes byte corresponding to
+; each attribute.
+;--
+
+
+VIDTBL:	.BYTE	'1,DV$BLD		; Bold
+	.BYTE	'4,DV$UND		; Underline
+	.BYTE	'5,DV$BLK		; Blinking
+	.BYTE	'7,DV$REV		; Reverse video
+	.WORD	0			; End of table
+
+
+	.SBTTL	VIDEO	- Set Video Attributes
+
+;++
+; VIDEO
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine outputs the appropriate escape sequences
+;	to set the video attributes for the terminal.
+;
+;	The Form Driver provides support for the following attributes:
+;
+;		Bold
+;		Underline
+;		Blinking
+;		Reverse video
+;
+; INPUT:
+;
+;	R2 =  Video attributes byte
+;	R5 -> Data area
+;
+;	I$VATT(R5) = Current video attributes
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	I$VATT(R5) updated
+;--
+
+	.ENABL	LSB
+VIDEO:
+	BIT	#IM$TRM,I$MISC(R5)	; Terminal VT100?
+	BNE	60$			; Done if not
+	$SAV50				; Save all registers
+	TST	I$VATT(R5)		; Do we know the video attributes?
+	BLT	10$			; No so set them
+	CMPB	R2,I$VATT(R5)		; Same as current video attributes?
+	BEQ	60$			; If eq yes, done
+10$:	CLR	I$VATT(R5)		; Else update video attributes
+	MOVB	R2,I$VATT(R5)		; 
+
+	ESCSEQ	CTLSEQ			; Control sequence introducer
+	MOV	#VIDTBL,R4		; Pointer to attributes table
+	MOVB	#'0,R2			; Turn attributes off
+
+20$:	STRBYT				; Output attributes char
+	MOVB	#';,R2			; Separator char
+30$:	MOVB	(R4)+,R3		; Get parameter
+	BEQ	40$			; Br if end of table
+	BITB	(R4)+,I$VATT(R5)	; Attribute bit set?
+	BEQ	30$			; Br if not
+	STRBYT				; Else output separator
+	MOVB	R3,R2			; Get parameter
+	BR	20$			; Output it
+40$:	MOVB	#'m,R2			; Terminator char
+	STRBYT				; Output
+
+50$:	BIT	#IM$BUF,I$MISC(R5)	; Print it?
+	BNE	60$			; Br if not
+	PRTBUF				; Else do it
+60$:	RETURN				;
+	.DSABL	LSB
+
+
+	.SBTTL	FLDVAL	- Update Field Value
+
+;++
+; FLDVAL
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine moves the indicated data into the response buffer
+;	for the specified field and outputs the field. Data moved into
+;	the response buffer is left or right justified and zero- or
+;	blank-filled according to the field definition.
+;
+; INPUT:
+;
+;	R1 =  Length of data in bytes (if = 0, field is cleared)
+;	R2 -> Data 
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;--
+
+	.ENABL	LSB
+FLDVAL:
+	$SAV50				; Save all registers
+	CLRESP				; Clear response buffer for field
+	TST	R1			; Clear field?
+	BEQ	50$			; If length 0 yes
+	MOV	L$RESP(R3),R0		; Else get response buffer pointer
+
+10$:	BIT	#D2$RTJ,(R4)		; (D$ATT2) Right justified field?
+	BNE	30$			; If ne yes
+
+; Left justified
+
+20$:	MOVB	(R2)+,(R0)+		; Else move data
+	SOB	R1,20$			; Repeat until all data moved
+	BR	50$			;
+
+; Right justified
+
+30$:	ADD	D$RLEN(R4),R0		; Else point past response buffer
+	ADD	R1,R2			; Point past data 
+40$:	MOVB	-(R2),-(R0)		; Move data
+	SOB	R1,40$			;
+50$:	PRTRSP				; Print response buffer contents
+	RETURN
+	.DSABL	LSB
+
+	.SBTTL	CLRESP	- Clear Response Buffer
+
+;++
+; CLRESP
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine initializes the response buffer for a field
+;	with the appropriate fill character.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc
+;--
+
+	.ENABL	LSB
+CLRESP:
+	$SAV50				; Save all registers 
+	FILCHR				; Get fill char for field in R0
+	MOV	L$RESP(R3),R1		; Response buffer pointer
+	MOV	D$RLEN(R4),R2		; Response length
+10$:	MOVB	R0,(R1)+		; Move fill char to response buffer
+	SOB	R2,10$			; 
+
+	BIT	#D2$DEC,(R4)		; (D$ATT2) Fixed decimal field?
+	BEQ	30$			; Br if not
+	CMPB	#'0,R0			; Zero filled field?
+	BEQ	30$			; Br if so
+	FXDLEN				; Else get length of left part of fld
+	MOV	D$RLEN(R4),R1		; Get length of entire field
+	SUB	R0,R1			; Get length of right part of field
+	MOV	L$RESP(R3),R2		; Get response buffer pointer
+	ADD	R0,R2			; Pointer to right part of field
+20$:	MOVB	#'0,(R2)+		; Zero right part of field
+	SOB	R1,20$			; 
+
+30$:	RETURN
+	.DSABL	LSB
+
+	.SBTTL	PRTRSP	- Print Response Buffer Contents
+
+;++
+; PRTRSP
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine outputs the contents of the response buffer
+;	for the specified field. The cursor is left in the hanging
+;	position.
+;
+;	This routine optimizes output of blank fields if the form
+;	status byte indicates the screen is clear to display a form.
+;	In that case, fields for which all of the following are true
+;	are not output:
+;
+;		. The clear character is a space
+;		. No video attributes are applied to the field
+;		. The response buffer contains only spaces
+;		. The field does not contain any text characters
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	I$CURP(R5) = Cursor position
+;--
+
+	.ENABL	LSB
+PRTRSP:
+	$SAV50				; Save all registers
+	BIT	#D2$NEC,(R4)		; (D$ATT2) No echo field?
+	BNE	70$			; If so don't display
+
+; Optimize output of blank fields
+
+	BIT	#IS$CLR,I$FMST(R5)	; Screen clear?
+	BEQ	30$			; Br if not
+	CMPB	#SPC,D$CLRC(R4)		; Clear char for field = space?
+	BNE	30$			; Br if not
+
+
+	TSTB	D$VATT(R4)		; Video attributes for field?
+	BNE	30$			; Br if so
+
+
+	MOV	L$RESP(R3),R1		; Get response buffer pointer
+	MOV	D$RLEN(R4),R0		; Response length
+10$:	CMPB	#SPC,(R1)+		; Blank field?
+	BNE	30$			; Br out if not
+	SOB	R0,10$			; Else check next byte
+
+	MOV	R4,R1			; Field desc pointer
+	ADD	#D$PLEN,R1		; Pointer to picture length
+	BISB	(R1)+,R0		; Get pict length (avoid sign extend)
+	BEQ	70$			; If no pict, don't output blank field
+20$:	MOVB	(R1)+,R2		; Get char from picture
+	TXTCHR				; Text char?
+	BCS	30$			; If so, output field
+	SOB	R0,20$			; Else check next char
+	BR	70$			; Don't output field if all blank
+
+30$:
+	MOVB	D$VATT(R4),R2		; Video attributes byte
+	VIDEO				; Set video attributes for field
+
+	MOV	(R3),R2			; Line/col for start of field
+	MOVCUR				; Position cursor
+
+; Output field
+
+	MOV	L$RESP(R3),R1		; Response buffer pointer
+	MOV	R4,R0			; Field desc pointer
+	ADD	#D$PICT,R0		; Pointer to picture
+	CLR	R3			;
+	BISB	D$PLEN(R4),R3		; Picture length
+	BNE	40$			; If ne use picture length
+	MOV	D$RLEN(R4),R3		; Else use response length
+
+40$:	TSTB	D$PLEN(R4)		; Picture included?
+	BEQ	50$			; Br if not
+	MOVB	(R0)+,R2		; Get next char in picture
+	TXTCHR				; Text char?
+	BCS	60$			; If C-SET yes, output text char
+50$:	MOVB	(R1)+,R2		; Output next byte of response
+	CLRCHR				; Replace space with clear char
+60$:
+	PRTBYT				; Output char
+	INCB	I$CURC(R5)		; Update cursor position
+	SOB	R3,40$			; 
+70$:	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	ESCSEQ	- Print Escape Sequence
+
+;++
+; ESCSEQ
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine prints an ASCIZ escape sequence string at the
+;	terminal.
+;
+; CALLING SEQUENCE:
+;
+;	JSR	R3,ESCSEQ
+;	.WORD	ADDR		; Address of escape sequence
+;
+; INPUT:
+;
+;	R3 -> Address of esc seq string
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	All registers preserved
+;--
+
+	.ENABL	LSB
+ESCSEQ:
+	MOV	R2,-(SP)		; Save R2
+	MOV	R3,-(SP)		; Save R3
+	MOV	(R3),R3			; Get pointer to string
+	BIT	#IM$TRM,I$MISC(R5)	; Check terminal type
+	BNE	10$			; Br if VT52
+	MOV	ESC100(R3),R3		; Else get VT100 escape sequence
+	BR	20$			;
+10$:	MOV	ESC52(R3),R3		; Get VT52 escape sequence
+20$:	BIT	#IM$BUF,I$MISC(R5)	; Service entry?
+	BEQ	40$			; Br if not to print string
+30$:	MOVB	(R3)+,R2		; Else get a character
+	BEQ	50$			; Br if done
+	STRBYT				; Else store character in print buffer
+	BR	30$			; Get next character
+40$:	PRTZST				; Print ASCIZ string
+50$:	MOV	(SP)+,R3		; Restore R3
+	MOV	(SP)+,R2		; Restore R2
+	TST	(R3)+			; Get return address
+	RTS	R3			; And return
+	.DSABL	LSB
+
+	.SBTTL	MOVCUR	- Move Cursor
+
+;++
+; MOVCUR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine moves the cursor to the specified location.
+;
+; INPUT:
+;
+;	R2 =  Cursor position (low byte = line; high byte = column)
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	R2 modified
+;
+;	I$CURP(R5) = Cursor position
+;--
+
+	.ENABL	LSB
+MOVCUR:
+	SETCUR				; Update cursor position
+	PRTBUF				; And move the cursor there
+	RETURN				; 
+	.DSABL	LSB
+
+	.SBTTL	SETCUR	- Update Cursor Position 
+
+;++
+; SETCUR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine sets up the escape sequence to move the cursor
+;	to the specified position. This routine does not actually
+;	move the cursor; the escape sequence is stored in the print
+;	buffer.
+;
+; INPUT:
+;
+;	R2 =  Cursor position
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	R2 modified
+;
+;	I$CURP(R5) = Cursor position
+;--
+
+	.ENABL	LSB
+SETCUR:
+	CMP	R2,I$CURP(R5)		; Cursor already there?
+	BEQ	50$			; Br if so
+	MOV	R2,-(SP)		; Else save cursor position
+	ESCSEQ	DIRCUR			; Output start of esc seq
+	BIT	#IM$TRM,I$MISC(R5)	; Check terminal type
+	BEQ	30$			; Br if VT100
+
+; Move cursor for VT52
+
+	MOVB	(SP),R2			; Get line number
+	BNE	10$			; Ok if not 0
+	INC	R2			; Else make 1
+10$:	ADD	#37,R2			; Adjust for VT52
+	STRBYT				; Output it
+	MOVB	1(SP),R2		; Get column number
+	BNE	20$			; Ok if not 0
+	INC	R2			; Else make 1
+20$:	ADD	#37,R2			; Adjust for VT52
+	STRBYT				; Output it
+	BR	40$			; Done
+
+; Move cursor for VT100
+
+30$:	MOVB	(SP),R2			; Get line number
+	OUTPRM				; Convert for VT100
+	MOVB	#';,R2			; Separator
+	STRBYT				; Output it
+	CLR	R2			; Avoid sign extend
+	BISB	1(SP),R2		; Column number
+	OUTPRM				; Convert for VT100
+	MOVB	#'H,R2			; Terminator
+	STRBYT				; Output it
+40$:	MOV	(SP)+,I$CURP(R5)	; Update cursor position
+50$:	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	OUTPRM	- Output ANSI Line/Col Parameters
+
+;++
+; OUTPRM
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine converts a binary value into an ASCII string
+;	and stores the characters in the print buffer. The routine
+;	is used to convert line/column values to ASCII to output
+;	to the VT100 terminal.
+;
+; INPUT:
+;
+;	R2 =  Binary parameter
+;
+; OUTPUT:
+;
+;	All registers preserved
+;--
+
+	.ENABL	LSB
+OUTPRM:
+	$SAV50				; Save all registers
+	MOV	R2,R3			; Save parameter
+	SUB	#100.,R2		; > 100.?
+	BLT	10$			; Br if not
+	MOV	R2,R3			; Else save remainder
+	MOVB	#'1,R2			; Output ASCII 1
+	STRBYT				; Output it
+
+10$:	CLR	R2			; Clear for total
+20$:	MOV	R3,R4			; Save for remainder
+	SUB	#10.,R3			; > 10.?
+	BLT	30$			; Br if not
+	INC	R2			; Else inc total
+	BR	20$			; Subtract again (divide by 10.)
+30$:	ADD	#60,R2			; Convert to ASCII
+	STRBYT				; Output char
+
+	MOV	R4,R2			; Get remainder
+	ADD	#60,R2			; Convert to ASCII
+	STRBYT				; Output char
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	ERROR	- Print Error Message
+
+;++
+; ERROR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine prints the specified error message on the last
+;	line of the screen and returns to the caller's caller with
+;	the C-bit set to indicate an error.
+;
+; CALLING SEQUENCE:
+;
+;	JSR	R3,ERROR
+;	.WORD	ADDR		; Address of error message
+;
+; INPUT:
+;
+;	R3 -> Address of esc seq string
+;	R5 -> Data area
+;
+;	(SP)  = R3 value
+;	2(SP) = Return address to caller's caller
+;
+; OUTPUT:
+;
+;	R2 modified
+;
+;	C-SET indicating error
+;--
+
+	.ENABL	LSB
+ERROR:
+	MOV	(R3)+,R3		; Get pointer to string
+	MOV	R4,-(SP)		; Save R4
+	TSTB	(R3)			; Anything to print?
+	BEQ	10$			; Br if not (last line cleared
+					;   automatically on each character)
+	MOV	#-1,R4			; Else indicate ASCIZ string
+	PRTLST				; Print the string
+10$:	SGNLER				; Signal error
+	MOV	(SP)+,R4		; Restore R4
+	MOV	(SP)+,R3		; Restore R3
+	SEC				; Indicate error
+	RETURN				; Return to caller's caller
+	.DSABL	LSB
+
+	.SBTTL	PRTLST	- Print Text on Last Line
+
+;++
+; PRTLST
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine clears the last line of the screen and prints
+;	the specified text. The text is terminated with a null byte.
+;
+; INPUT:
+;
+;	R0 =  2 * terminal line number
+;	R1 -> DDB
+;	R3 -> Message string
+;	R4 =  Length of string (-1 if ASCIZ string; 0 if last line
+;	      to be cleared)
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	All registers preserved
+;--
+
+	.ENABL	LSB
+PRTLST:
+	$SAV50				; Save all registers
+	TST	R4			; Anything to print?
+	BNE	10$			; Br if so
+	BIT	#IS$LST,I$FMST(R5)	; Last line clear?
+	BEQ	70$			; If so done
+10$:	MOV	I$CURP(R5),-(SP)	; Else save cursor position
+	ESCSEQ	LSTLIN			; Move cursor to last line and erase
+	CLR	I$CURP(R5)		; Cursor moved
+	BIC	#IS$LST,I$FMST(R5)	; Indicate last line clear
+	TST	R4			; Anything to print?
+	BEQ	50$			; If not restore cursor
+
+	MOV	I$VATT(R5),-(SP)	; Save current video attributes
+	MOV	#DV$BLD,R2		; Use bold if terminal has AVO
+	BIT	#IM$AVO,I$MISC(R5)	; Does terminal have AVO?
+	BNE	20$			; Br if so 
+	MOV	#DV$REV,R2		; Else use reverse video
+20$:	VIDEO				; Set the video attribute
+	TST	R4			; ASCIZ string?
+	BLT	30$			; Br if so
+	PRTSTR				; Else print counted string
+	BR	40$			;
+30$:	PRTZST				; Print the string
+40$:	BIS	#IS$LST,I$FMST(R5)	; Indicate last line not clear
+	MOV	(SP)+,R2		; Original video attributes
+	VIDEO				; Restore video attributes
+50$:	MOV	(SP)+,R2		; Get original cursor position
+	BEQ	60$			; Br if 0,0
+	MOVCUR				; Reposition the cursor
+	BR	70$			; Done
+60$:	ESCSEQ	ENDLST			; Lower right corner if 0,0
+70$:	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	INITBF	- Initialize Print Buffer
+
+;++
+; INITBF
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine initializes the print buffer.
+;
+; INPUT:
+;
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	I$BPTR(R5) -> Start of print buffer
+;	I$BCNT(R5) =  0 for initial character count
+;--
+
+	.ENABL	LSB
+INITBF:
+	MOV	R5,I$BPTR(R5)		; FMS buffer pointer
+	ADD	#I$PBUF,I$BPTR(R5)	; Point to print buffer
+	CLR	I$BCNT(R5)		; Initialize character count
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	PRTBUF	- Print Contents of Print Buffer
+
+;++
+; PRTBUF
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine prints the contents of the print buffer.
+;
+; INPUT:
+;
+;	R5 -> Data area
+;
+;	I$PBUF(R5) = Start of print buffer
+;	I$BCNT(R5) = Character count
+;
+; OUTPUT:
+;
+; 	All registers preserved
+;
+;	I$BPTR(R5) initialized
+;	I$BCNT(R5) initialized
+;--
+
+	.ENABL	LSB
+PRTBUF:
+	$SAV50				; Save all registers
+	MOV	I$BCNT(R5),R4		; Get character count
+	BEQ	10$			; Forget it if nothing to print
+	MOV	R5,R3			; FMS buffer pointer
+	ADD	#I$PBUF,R3		; Pointer to print buffer
+	PRTSTR				; Else print the string
+	INITBF				; Initialize print buffer
+10$:	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	SGNLER	- Signal Error
+
+;++
+; SGNLER
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine signals the operator by ringing the terminal
+;	bell.
+;
+; OUTPUT:
+;
+;	R2 modified
+;--
+
+	.ENABL	LSB
+SGNLER:
+	MOVB	#BEL,R2			; Set up to output bell
+	PRTBYT				; And output it
+	RETURN				; 
+	.DSABL	LSB
+
+	.END
+

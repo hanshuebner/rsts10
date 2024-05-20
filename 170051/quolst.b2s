@@ -1,0 +1,646 @@
+5!		VERSION		: V10.1
+6!		EDIT		: A
+7!		EDIT DATE	: 10-MAY-91
+10	EXTEND
+11	!								      &
+									      &
+									      &
+	!		  C O P Y R I G H T				      &
+									      &
+									      &
+  !		      Copyright (C) 1974, 1991 by			      &
+  !	        Digital Equipment Corporation, Maynard, Mass.		      &
+  !									      &
+  !									      &
+  !	This software is furnished under a license and may be used and	      &
+  !	copied  only  in accordance with the terms of such license and	      &
+  !	with the  inclusion  of  the  above  copyright  notice.   This	      &
+  !	software  or  any  other copies thereof may not be provided or	      &
+  !	otherwise made available to any other person.  No title to and	      &
+  !	ownership of the software is hereby transferred.		      &
+  !									      &
+  !	The information in this software is subject to change  without	      &
+  !	notice  and should not be construed as a commitment by Digital	      &
+  !	Equipment Corporation.						      &
+  !									      &
+  !	DIGITAL assumes no responsibility for the use  or  reliability	      &
+  !	of its software on equipment that is not supplied by DIGITAL.	      &
+  !									      &
+  !*******************************************************************	      &
+									      &
+									      &
+
+20	!								      &
+									      &
+									      &
+	!	M O D I F I C A T I O N    H I S T O R Y		      &
+									      &
+									      &
+
+21	! VER/ED	EDIT DATE	REASON				      &
+	!								      &
+	! V9.0-14	16-Apr-85	Add support for 24-bit values	      &
+	!				and add Logged-in quotas	      &
+	! V10.0-D	03-Oct-89	Add /[NO]OUTPUT qualifier and fix     &
+	!				 bug when a default protection is set &
+	! V10.0-L	30-May-90	Trap any errors on Lookup SYS call    &
+	! V10.0-L4	27-Jun-90	Fix error in SHOW/OUTPUT with no arg  &
+	!								      &
+
+100	!								      &
+									      &
+									      &
+	!	G E N E R A L    D E S C R I P T I O N			      &
+									      &
+									      &
+
+110!	QUOLST ALLOWS THE USER TO DETERMINE WHAT PORTION OF HIS/HER	      &
+   !	DISK QUOTA IS CURRENTLY OCCUPIED AND THE NUMBER OF FREE		      &
+   !	BLOCKS REMAINING ON THE SYSTEM DISK.				      &
+
+200	!	i n c l u d e   r e q u i r e d   M A P s , C O M M O N s     &
+	!								      &
+	!								      &
+	%INCLUDE "CUI:CUICMN.B2S"		! include CUI data section    &
+	%INCLUDE "SYSTEM:QUOKEY.B2S"		! include CUI constants	      &
+
+	!******************************************************************** &
+	!								      &
+	!	D E F I N E   C O N S T A N T S				      &
+	!								      &
+	!******************************************************************** &
+									      &
+	EXTERNAL WORD CONSTANT			! Define RSTS error codes:    &
+						! (LB:ERR.STB)		      &
+						!			      &
+			CTRLCE,			!   ?programmable ^C trap     &
+			EOF,			!   ?End of file	      &
+			NODEVC,			!   ?Invalid device	      &
+			PRVIOL			!   ?Protection violation     &
+
+400	!								      &
+									      &
+									      &
+	!	V A R I A B L E    D E F I N I T I O N S		      &
+									      &
+									      &
+
+401!	VARIABLE NAME		USED FOR				      &
+   !
+900	!								      &
+									      &
+									      &
+	!	D I M E N S I O N    S T A T E M E N T S		      &
+									      &
+									      &
+
+910	DIM M%(30)							      &
+	! MONITOR TABLES - PART I					      &
+	! M%(3)		NULINE						      &
+	! M%(4)		MAXCNT						      &
+	! M%(5)		DEVCNT						      &
+	! M%(7)		DEVPTR						      &
+	! M%(9)		MEMLST						      &
+	! M%(11)	JOBTBL						      &
+	! M%(13)	JBSTAT						      &
+	! M%(15)	JBWAIT						      &
+	! M%(17)	UNTCLU						      &
+	! M%(19)	UNTCNT						      &
+	! M%(21)	SATCTL						      &
+	! M%(23)	JSBTBL						      &
+	! M%(25)	SATCTM						      &
+
+915	DIM M0%(30)							      &
+	! MONITOR TABLES - PART II					      &
+	! M0%(3)	FREES						      &
+	! M0%(5)	DEVNAM						      &
+	! M0%(7)	CSRTBL						      &
+	! M0%(9)	DEVOKB						      &
+	! M0%(11)	TTYHCT						      &
+	! M0%(13)	JOBCNT						      &
+	! M0%(15)	RTSLST						      &
+	! M0%(17)	ERRCTL						      &
+	! M0%(19)	SNDLST						      &
+	! M0%(21)	LOGNAM						      &
+	! M0%(23)	DEVSYN						      &
+	! M0%(25)	MEMSIZ						      &
+
+920	DIM READ.ACCT%(30%)						      &
+	! USED TO HOLD ACCOUNTING DATA					      &
+\	DIM G.MASK%(4%), W.MASK%(4%), P.MASK%(4%)			      &
+	! USED TO HOLD PRIVILEGE MASKS					      &
+									      &
+
+990	DECLARE LONG B.FREE, CURR.ALLOC, IN.QUOTA, OUT.QUOTA		      &
+\	DECLARE LONG CONSTANT 	UNLIM = 16777215			      &
+
+999	!								      &
+									      &
+									      &
+	!	M A I N    C O D I N G    A R E A			      &
+									      &
+									      &
+
+1000	ON ERROR GOTO 19000		! SET UP STANDARD ERROR TRAP.	      &
+\	JUNK$=FNPRIV.OFF$		! TURN PRIVS OFF		      &
+\	I$="V10.1-A"			! SET UP VERSION/EDIT NUMBER.	      &
+\	JUNK$=FNGET.TABLES$		! GET MONITOR TABLES		      &
+\	ZERO$=CVT%$(0%)			! HANDY CONSTANT		      &
+\	WILD.PROJ%, WILD.PROG%, PPN.FOUND% = 0% 	! CLEAR VARIOUS FLAGS &
+
+1100	REQD.PPN$=FNPPN$(PPN$)			!GET ANY PPN REQUEST	      &
+\	GOTO 19100 IF E%			!GET OUT IF WE HAD AN ERROR   &
+\	USER.PPN$=MID(SYS(CHR$(6%)+CHR$(26%)),21%,2%) !Get the user's PPN     &
+\	COMPAT%=-1% IF REQD.PPN$=ZERO$		!COMPATIBILITY MODE	      &
+\	REQD.PPN$=USER.PPN$ IF REQD.PPN$=ZERO$	!Default if none requested    &
+\	REQD.PPN$=FNPRIV$(REQD.PPN$,USER.PPN$)	!ADJUST IT FOR PRIVS	      &
+									      &
+
+1200	IF COMPAT% THEN				!COMPATIBILITY MODE	      &
+	DISK$=STRING$(4%,0%)			!USE SYSTEM DISK	      &
+\	INDEX%=0%				!GOOD PLACE TO START	      &
+\	PPN$=FNLOOKUP$(DISK$,REQD.PPN$,INDEX%)	!GET A PPN		      &
+\	JUNK$=FNHEADER$(DISK$,PPN$)		!PRINT THE HEADER	      &
+\	JUNK$=FNPRIV.ON$			!GIVE 'EM PRIVS (FOR PEEKS)   &
+\	JUNK$=FNPUBLIC$(PPN$,COMPAT%)		!PUBLIC STRUCTURE	      &
+\	JUNK$=FNPRIVATE$(PPN$,COMPAT%)		!PRIVATE DISKS		      &
+\	JUNK$=FNPRIV.OFF$			!TAKE 'EM AWAY		      &
+\	GOTO 32000				!DONE - GOTO COMMON EXIT      &
+	!								      &
+	! IF THIS IS A NON-PARAMETER REQUEST (COMPATIBILITY MODE) THEN:	      &
+	! Use user's PPN						      &
+	!	ppn lookup - FNLOOKUP(DISK$,PPN$)			      &
+	!	do header and titles - FNHEADER(DISK,PPN$)		      &
+	!		do name lookup - FNNAME(DISK,PPN$)		      &
+	!	do public structure - compat% mode - FNPUBLIC(PPN$,COMPAT%)   &
+	!	do private disks - compat% mode - FNPRIVATE(PPN$,COMPAT%)     &
+	! end								      &
+									      &
+									      &
+
+1300	IF COMPAT%=0% THEN		! They asked for it		      &
+	JUNK$=FNPRIV.ON$		! Give 'em privileges		      &
+\	JUNK$=FNPUBLIC$(REQD.PPN$,COMPAT%) ! Display their pubic structure    &
+\	JUNK$=FNPRIVATE$(REQD.PPN$,COMPAT%) ! And their privates	      &
+\	JUNK$=FNPRIV.OFF$		! Take away their privileges	      &
+\	GOTO 32000			! Done - goto common exit	      &
+	!								      &
+	! IF THIS IS A PARAMETER REQUEST THEN:				      &
+	! public structure loop - compat% off - FNPUBLIC(PPN,COMPAT)	      &
+	!	index loop with requested PPN spec			      &
+	!		do header and titles - FNHEADER(DISK,PPN)	      &
+	!		do quota info					      &
+	!	end index loop						      &
+	! end public structure loop					      &
+	! private structure loop - compat% off - FNPRIVATE(PPN,COMPAT)	      &
+	!	index loop with requested PPN spec			      &
+	!		do header with user's ppn, name, title lines	      &
+	!		do quota info					      &
+	!	end index loop						      &
+	! end private structure loop					      &
+									      &
+
+15000	!								      &
+	!								      &
+	!								      &
+	!	P R I V A T E    P A C K S				      &
+	!								      &
+	!								      &
+	DEF* FNPRIVATE$(PPN$,COMPAT%)					      &
+	\ PN$=PPN$							      &
+	\ UNTCNT%=M%(19%)						      &
+	\ SATCTL%=M%(21%)						      &
+	\ SATCTM%=M%(25%)						      &
+
+15010	FOR DISK.TYP%=0% TO M0%(9%)-2% STEP 2%				      &
+	\	DEV$=CVT%$(SWAP%(PEEK(M0%(5%)+DISK.TYP%)))		      &
+	\	FOR UNIT%=0% TO PEEK(M%(5%)+DISK.TYP%)			      &
+	\		J%=PEEK(UNTCNT%)				      &
+	\		IF J%<0% OR (J% AND 16384%)=0%			      &
+			OR (J% AND 4096%)<>0% THEN GOTO 15080		      &
+
+15020	GOTO 15030 IF COMPAT%			! Skip this if not needed     &
+	\ DISK$=DEV$+CHR$(UNIT%)+CHR$(-1%)	! Get a disk		      &
+	\ INDEX%=0%				! Good place to start	      &
+	\ PN$=FNLOOKUP$(DISK$,PPN$,INDEX%)	! Get a real PPN	      &
+	\ GOTO 15080 IF E%			! Get out if error	      &
+
+15030				S$=CHR$(6%)+CHR$(14%)	! Accounting	      &
+					+STRING$(4%,0%) ! Unused	      &
+					+PN$		! Account	      &
+					+CHR$(4%)	! Disk stats	      &
+					+STRING$(13%,0%)! Unused	      &
+	\			CHANGE SYS(S$+DEV$+CHR$(UNIT%)+		      &
+				 CHR$(-1%)) TO READ.ACCT%		      &
+	\			CURR.ALLOC=				      &
+				 256.*(256.*READ.ACCT%(16%)+READ.ACCT%(20%))  &
+				 +READ.ACCT%(19%)			      &
+	\			IN.QUOTA=				      &
+				 256.*(256.*READ.ACCT%(13%)+READ.ACCT%(12%))  &
+				 +READ.ACCT%(11%)			      &
+	\			OUT.QUOTA=				      &
+				 256.*(256.*READ.ACCT%(14%)+READ.ACCT%(10%))  &
+				 +READ.ACCT%(9%)			      &
+	\			JUNK$=FNHEADER$(DISK$,PN$) IF COMPAT%=0%      &
+	\			PRINT #OUT.CHN%, DEV$;NUM1$(UNIT%);":";	      &
+	\		       PRINT #OUT.CHN%, TAB(6%);FNPRINT.USING$(IN.QUOTA,-1%,-1%); &
+	\		     PRINT #OUT.CHN%, TAB(19%);FNPRINT.USING$(OUT.QUOTA,-1%,-1%); &
+	\		      PRINT #OUT.CHN%, TAB(31%);FNPRINT.USING$(CURR.ALLOC,0%,0%); &
+	\			B.FREE=PEEK(SATCTL%)			      &
+	\			B.FREE=B.FREE+65536. IF B.FREE<0.	      &
+	\			B.FREE=B.FREE+65536.*PEEK(SATCTM%)	      &
+
+15040	IF  (IN.QUOTA=UNLIM) OR						      &
+	     ((IN.QUOTA-CURR.ALLOC > B.FREE) AND			      &
+	      (IN.QUOTA >= CURR.ALLOC)) THEN				      &
+		PRINT #OUT.CHN%, TAB(43%);FNPRINT.USING$(B.FREE,0%,0%);	      &
+	  ELSE								      &
+		  IF (IN.QUOTA-CURR.ALLOC <= B.FREE) AND		      &
+		     (IN.QUOTA >= CURR.ALLOC) THEN			      &
+		     PRINT #OUT.CHN%, TAB(43%);FNPRINT.USING$(IN.QUOTA-CURR.ALLOC,0%,0%); &
+		  ELSE							      &
+		     PRINT #OUT.CHN%, TAB(43%);FNPRINT.USING$(0.,0%,0%);      &
+
+15050	  IF  (OUT.QUOTA=UNLIM) OR					      &
+	     ((OUT.QUOTA-CURR.ALLOC > B.FREE) AND			      &
+	      (OUT.QUOTA >= CURR.ALLOC)) THEN				      &
+		PRINT #OUT.CHN%, TAB(56%);FNPRINT.USING$(B.FREE,0%,0%);	      &
+	  ELSE								      &
+		  IF (OUT.QUOTA-CURR.ALLOC <= B.FREE) AND		      &
+		     (OUT.QUOTA >= CURR.ALLOC) THEN			      &
+		    PRINT #OUT.CHN%, TAB(56%);FNPRINT.USING$(OUT.QUOTA-CURR.ALLOC,0%,0%); &
+		  ELSE							      &
+		    PRINT #OUT.CHN%, TAB(56%);FNPRINT.USING$(0.,0%,0%);	      &
+
+15060	PRINT #OUT.CHN%, TAB(67%);FNPRINT.USING$(B.FREE,0%,0%)		      &
+
+15070	GOTO 15080 IF COMPAT%			! Skip this if not needed     &
+	\ INDEX%=INDEX%+1%			! Next account		      &
+	\ PN$=FNLOOKUP$(DISK$,PPN$,INDEX%)	! Get a real PPN	      &
+	\ GOTO 15080 IF E%			! Get out if error	      &
+	\ GOTO 15030				! Do some more		      &
+
+15080			UNTCNT%=UNTCNT%+2%				      &
+	\		SATCTL%=SATCTL%+2%				      &
+	\		SATCTM%=SATCTM%+2%				      &
+	\	NEXT UNIT%						      &
+	\ NEXT DISK.TYP%						      &
+	\ FNEND								      &
+									      &
+									      &
+
+15200	!								      &
+	!								      &
+	!								      &
+	!	P U B L I C    S T R U C T U R E			      &
+	!								      &
+	!								      &
+	DEF* FNPUBLIC$(PPN$,COMPAT%)					      &
+\	PN$=PPN$				!			      &
+\	GOTO 15210 IF COMPAT%			! Skip this if not needed     &
+\	DISK$=ZERO$+ZERO$			! System disk		      &
+\	INDEX%=0%				! Start at the beginning      &
+\	PN$=FNLOOKUP$(DISK$,PPN$,INDEX%)	! Get a real PPN	      &
+\	GOTO 15260 IF E%			! Get out if error	      &
+
+15210	CHANGE SYS(CHR$(6%)+CHR$(14%)		! Accounting		      &
+			+STRING$(4%,0%)		! Unused		      &
+			+PN$			! Account		      &
+			+CHR$(4%)		! Disk stats		      &
+			+STRING$(13%,0%)	! Unused		      &
+			+DISK$			! Disk			      &
+			+STRING$(2%,0%))	! Unused		      &
+		TO READ.ACCT%						      &
+	\ CURR.ALLOC=256.*(256.*READ.ACCT%(16%)+READ.ACCT%(20%))	      &
+			+READ.ACCT%(19%)				      &
+	\ IN.QUOTA=256.*(256.*READ.ACCT%(13%)+READ.ACCT%(12%))+READ.ACCT%(11%) &
+	\ OUT.QUOTA=256.*(256.*READ.ACCT%(14%)+READ.ACCT%(10%))+READ.ACCT%(9%) &
+	\ JUNK$=FNHEADER$(DISK$,PN$) IF COMPAT%=0%			      &
+	\ PRINT #OUT.CHN%, "SY:";					      &
+	\ PRINT #OUT.CHN%, TAB(6%);FNPRINT.USING$(IN.QUOTA,-1%,-1%);	      &
+	\ PRINT #OUT.CHN%, TAB(19%);FNPRINT.USING$(OUT.QUOTA,-1%,-1%);	      &
+	\ PRINT #OUT.CHN%, TAB(31%);FNPRINT.USING$(CURR.ALLOC,0%,0%);	      &
+	\ B.FREE=0.							      &
+	\ UNTCNT%=M%(19%)						      &
+	\ SATCTL%=M%(21%)						      &
+	\ SATCTM%=M%(25%)						      &
+
+15220	FOR DISK.TYP%=0% TO M0%(9%)-2% STEP 2%				      &
+	\	FOR UNIT%=0% TO PEEK(M%(5%)+DISK.TYP%)			      &
+	\		J%=PEEK(UNTCNT%)				      &
+	\		IF J%<0% OR (J% AND 20480%)<>0% THEN		      &
+				15230					      &
+			ELSE	B.FREE=B.FREE+PEEK(SATCTL%)		      &
+	\			B.FREE=B.FREE+65536. IF PEEK(SATCTL%)<0%      &
+	\			B.FREE=B.FREE+65536.*PEEK(SATCTM%)	      &
+
+15230			UNTCNT%=UNTCNT%+2%				      &
+	\		SATCTL%=SATCTL%+2%				      &
+	\		SATCTM%=SATCTM%+2%				      &
+	\	NEXT UNIT%						      &
+	\ NEXT DISK.TYP%						      &
+	\ IF  (IN.QUOTA=UNLIM) OR					      &
+	     ((IN.QUOTA-CURR.ALLOC > B.FREE) AND			      &
+	      (IN.QUOTA >= CURR.ALLOC)) THEN				      &
+		PRINT #OUT.CHN%, TAB(43%);FNPRINT.USING$(B.FREE,0%,0%);	      &
+	  ELSE								      &
+		  IF (IN.QUOTA-CURR.ALLOC <= B.FREE) AND		      &
+		     (IN.QUOTA >= CURR.ALLOC) THEN			      &
+		     PRINT #OUT.CHN%, TAB(43%);FNPRINT.USING$(IN.QUOTA-CURR.ALLOC,0%,0%); &
+		  ELSE							      &
+		     PRINT #OUT.CHN%, TAB(43%);FNPRINT.USING$(0.,0%,0%);      &
+
+15240	  IF  (OUT.QUOTA=UNLIM) OR					      &
+	     ((OUT.QUOTA-CURR.ALLOC > B.FREE) AND			      &
+	      (OUT.QUOTA >= CURR.ALLOC)) THEN				      &
+		PRINT #OUT.CHN%, TAB(56%);FNPRINT.USING$(B.FREE,0%,0%);	      &
+	  ELSE								      &
+		  IF (OUT.QUOTA-CURR.ALLOC <= B.FREE) AND		      &
+		     (OUT.QUOTA >= CURR.ALLOC) THEN			      &
+		    PRINT #OUT.CHN%, TAB(56%);FNPRINT.USING$(OUT.QUOTA-CURR.ALLOC,0%,0%); &
+		  ELSE							      &
+		    PRINT #OUT.CHN%, TAB(56%);FNPRINT.USING$(0.,0%,0%);	      &
+
+15250	PRINT #OUT.CHN%, TAB(67%);FNPRINT.USING$(B.FREE,0%,0%)		      &
+	\ GOTO 15260 IF COMPAT%			! Skip this if not needed     &
+	\ INDEX%=INDEX%+1%			! Next account		      &
+	\ PN$=FNLOOKUP$(DISK$,PPN$,INDEX%)	! Look it up		      &
+	\ GOTO 15260 IF E%			! Get out if error	      &
+	\ GOTO 15210				! Go do some more	      &
+
+15260	FNEND								      &
+									      &
+									      &
+
+15800	!								      &
+	!	P R I N T   U S I N G					      &
+	!								      &
+	!FNPrint.Using$ - format a quota (or general numeric) field	      &
+	def FNPrint.Using$(Q,Flag.Exceeded.Quota%,Allow.unlim%)		      &
+\	  D1$ = '*'				!Presume an exceeded quota    &
+\	  D1$ = ' ' unless (Curr.Alloc > Q) and				      &
+			    (Flag.Exceeded.Quota% <> 0)			      &
+						!Undo the flag if appropriate &
+\	  D$ = num1$(Q)				!Make argument into a string  &
+\	  D$ = left(D$, F%) + '' + right(D$, F%+1%)			      &
+		for F% = len(D$)-4% to 1% step -3%			      &
+						!GET RID OF THE COMMA FOR NOW &
+\	  D$ = 'Unlimited' if Q = UNLIM if Allow.unlim%			      &
+						!"Unlimited" is a special case &
+\	  FNPrint.Using$ = space$(10% - len(D$)) + D$ + D1$ !Space-pad it out &
+\	fnend								      &
+									      &
+									      &
+
+15900	! FNPPN$(PPN$) - Look for a PPN specification.			      &
+	! If one is found, return it, else return FNPPN$=""		      &
+	!								      &
+	!	INPUTS:		NONE					      &
+	!	OUTPUTS:	FNPPN% = PPN parameter input by user	      &
+	!			E%     =  0% if no error,		      &
+	!				 -1% if user input is invalid	      &
+	!			PPN$   = User's input			      &
+	!								      &
+	Def* FNPPN$(PPN$)			!Get PPN from core common     &
+\	FNPPN$=""				!Init function variable	      &
+\	E%=0%					!Init error flag	      &
+\	F.S.S$=SYS(CHR$(6%)+CHR$(-10%)+PPN$)	!Scan the parameter string    &
+\	Flag.1%=SWAP%(CVT$%(MID(F.S.S$,27%,2%))) !Get flag word #1	      &
+\	Flag.2%=SWAP%(CVT$%(MID(F.S.S$,29%,2%))) !Get flag word #2	      &
+\	Flag.1%=(Flag.1% AND NOT 1024%) 	!Ignore the protection bits   &
+\	Flag.2%=(Flag.2% AND NOT 1024%) 	! in case a default	      &
+\	Flag.2%=(Flag.2% AND NOT 2048%) 	! protection is enabled.      &
+\	Wild.Proj% = -1% if (Flag.2% AND 256%)  ! Wildcard project # [*,prog] &
+\	Wild.Prog% = -1% if (Flag.2% AND 512%)	! Wildcard programmer [proj,*] &
+
+15920	F1%=-32767%-1%+1024%			!BITS 10, 15		      &
+\	F2%=512%+256%+128%			!BITS 7, 8, 9		      &
+\	E%=-1% if (Flag.1% AND NOT F1%)	or (Flag.2% AND NOT F2%)	      &
+
+15930	FNPPN$=MID(F.S.S$,5%,2%)		!Get PPN from FSS	      &
+\	FNEND					!Done with FNPPN% function    &
+									      &
+									      &
+
+16000	! FNPRIV$(REQD.PPN$) - Checks user's privileges and restricts wildcard &
+	! PPN's appropriately.  This is because the read accounting	      &
+	! SYS() call which is used later will simply convert a PPN	      &
+	! for which the user does not have privs to the user's own PPN	      &
+	! and proceed normally.  A user without WACNT or GACNT who asked      &
+	! for quotas for [*,*] would get as many copies of the user's own     &
+	! data as there were accounts on the system.  Not nice. While we are  &
+	! here we might as well also substitute the user's PPN where	      &
+	! appropriate							      &
+	!								      &
+	!	INPUT		USER HAS	OUTPUT			      &
+	!								      &
+	!	[*, or ,*]	WACNT		no change		      &
+	!	[*,		GACNT		[USER'S PROJ,		      &
+	!	[*, or ,*]	neither		[0,0]			      &
+	!								      &
+	DEF* FNPRIV$(REQD.PPN$,USER.PPN$)				      &
+\	FNPRIV$=""							      &
+\	REQD.PPN%=SWAP%(CVT$%(REQD.PPN$))				      &
+\	USER.PPN%=SWAP%(CVT$%(USER.PPN$))				      &
+\	WACNT%,GACNT%=0%						      &
+\	REQD.PROJ%=SWAP%(REQD.PPN%) AND 255%				      &
+\	REQD.PROG%=REQD.PPN% AND 255%					      &
+\	USER.PROJ%=SWAP%(USER.PPN%) AND 255%				      &
+\	USER.PROG%=USER.PPN% AND 255%					      &
+	! SEPARATE OUT THE PROJECT AND PROGRAMMER NUMBERS FOR REQUESTED AND   &
+	! USER PPN'S							      &
+	!								      &
+\	W.MASK$=SYS(CHR$(6%)+CHR$(32%)+CHR$(1%)+STRING$(3%,0%)+"WACNT")	      &
+\	W.MASK%(I%)=SWAP%(CVT$%(MID(W.MASK$,2%*I%+5%,2%)))		      &
+		FOR I%=1% TO 4%						      &
+\	G.MASK$=SYS(CHR$(6%)+CHR$(32%)+CHR$(1%)+STRING$(3%,0%)+"GACNT")	      &
+\	G.MASK%(I%)=SWAP%(CVT$%(MID(G.MASK$,2%*I%+5%,2%)))		      &
+		FOR I%=1% TO 4%						      &
+\	P.MASK$=SYS(CHR$(6%)+CHR$(28%))					      &
+\	P.MASK%(I%)=SWAP%(CVT$%(MID(P.MASK$,2%*I%+1%,2%)))		      &
+		FOR I%=1% TO 4%						      &
+	! Get the privilege masks for GACNT, WACNT, and current user privs    &
+	!								      &
+\	WACNT%=-1% IF (W.MASK%(I%) AND P.MASK%(I%))<>0% FOR I%=1% TO 4%	      &
+\	GACNT%=-1% IF (G.MASK%(I%) AND P.MASK%(I%))<>0% FOR I%=1% TO 4%	      &
+\	GOTO 16010 IF WACNT%			!Privs all set		      &
+\	GOTO 16010 IF REQD.PPN% = USER.PPN%	!Requested own acct	      &
+\	IF NOT WILD.PROJ% THEN			!Didn't enter [*,prog]	      &
+\	   IF REQD.PROJ% <> USER.PROJ% THEN 	!Requested another group      &
+		CALL DISPLY ("?WACNT privilege required")		      &
+\		GOTO 32767						      &
+\	   END IF							      &
+\	END IF								      &
+\	IF NOT WILD.PROG% THEN			!Didn't enter [proj,*]	      &
+\	   IF REQD.PROG% <> USER.PROG% THEN 	!Same group, diff programmer  &
+		IF NOT GACNT% THEN					      &
+		   CALL DISPLY ("?GACNT privilege required")		      &
+\		   GOTO 32767						      &
+\		END IF							      &
+\	   END IF							      &
+\	END IF								      &
+\	REQD.PROJ%=USER.PROJ% UNLESS WACNT%				      &
+\	REQD.PROG%=USER.PROG% UNLESS WACNT% OR GACNT%			      &
+	! Adjust project and programmer # according to WACNT or GACNT priv    &
+
+16010	REQD.PPN%=SWAP%(REQD.PROJ%) OR REQD.PROG%			      &
+\	FNPRIV$=CVT%$(SWAP%(REQD.PPN%))					      &
+\	FNEND								      &
+									      &
+
+16100	DEF* FNPRIV.OFF$=SYS(CHR$(6%)+CHR$(-21%)+CHR$(255%))		      &
+	! Drop privs							      &
+
+16110	DEF* FNPRIV.ON$=SYS(CHR$(6%)+CHR$(-21%)+CHR$(0%))		      &
+	! Regain privs							      &
+									      &
+									      &
+
+16300	DEF* FNGET.TABLES$						      &
+\	CHANGE SYS(CHR$(6%)+CHR$(-3%)) TO M%	!MONITOR TABLES		      &
+\	M%(I%)=M%(I%)+SWAP%(M%(I%+1%))					      &
+		FOR I%=5% TO 25% STEP 2%				      &
+\	CHANGE SYS(CHR$(6%)+CHR$(-12%)) TO M0%	!MONITOR TABLES		      &
+\	M0%(I%)=M0%(I%)+SWAP%(M0%(I%+1%))				      &
+		FOR I%=3% TO 25% STEP 2%				      &
+\	FNEND								      &
+									      &
+									      &
+
+16400	! FNLOOKUP$(DISK$,REQD.PPN$,INDEX%) - Lookup a PPN by index	      &
+	! Used for all PPN lookups, whether wildcards or not.		      &
+	! DISK$ is 2-char ascii disk name, plus chr$ of unit and flag	      &
+	! REQD.PPN$ is the PPN we are looking up, in sys call format	      &
+	! INDEX% is for wildcard calls.					      &
+	!								      &
+	DEF* FNLOOKUP$(DISK$,PPN$,INDEX%)	!			      &
+\	FNLOOKUP$=""				! INIT FUNCTION		      &
+\	E%=0%					! Init error flag	      &
+\	JUNK$=		SYS(CHR$(6%)		!FIP CALL		      &
+			+CHR$(25%)		!WILDCARD PPN LOOKUP	      &
+			+CVT%$(SWAP%(INDEX%))	!INDEX (ADD 1 EACH TIME)      &
+			+PPN$			!PPN TO LOOK UP		      &
+			+STRING$(16%,0%)	!NOT USED		      &
+			+DISK$			!DISK NAME		      &
+			+ZERO$+ZERO$)		!UNUSED			      &
+\	FNLOOKUP$=MID(JUNK$,5%,2%)		!PULL OUT THE PPN STRING      &
+\	PPN.FOUND% = -1%			! SET FLAG FOR ERROR TRAPPING &
+\	GOTO 16420							      &
+
+16410	E%=-1%					!ERROR			      &
+
+16420	FNEND								      &
+									      &
+									      &
+
+16500	! FNNAME$(DISK$,PPN$) - Subroutine to do the quota lookups for each   &
+	! disk that has the requested user account			      &
+	!								      &
+	DEF* FNNAME$(DISK$,PPN$)					      &
+\	FNNAME$=' "'							      &
+	+CVT$$(MID(SYS(				!			      &
+			CHR$(6%)+CHR$(-25%)	! Lookup file attributes      &
+			+CHR$(-1%)		! Read account attributes     &
+			+CHR$(5%)		! Read name attribute	      &
+			+PPN$			! Account #		      &
+			+STRING$(16%,0%)	! Unused		      &
+			+DISK$			! Device		      &
+			+ZERO$+ZERO$		! Unused		      &
+				),8%,13%),132%) !			      &
+		+'"'				!			      &
+\	GOTO 16520							      &
+
+16510	FNNAME$ = " (No name)"						      &
+
+16520	FNEND								      &
+									      &
+									      &
+
+16600	DEF* FNHEADER$(DISK$,PPN$)					      &
+	\ FNHEADER$=""							      &
+	\ USER.PPN%=SWAP%(CVT$%(PPN$))					      &
+	\ PRINT #OUT.CHN%, IF CCPOS(OUT.CHN%)				      &
+	\ PRINT #OUT.CHN%						      &
+	\ PRINT #OUT.CHN%						      &
+	\ PRINT #OUT.CHN%, "Disk usage for user [";			      &
+	\ PRINT #OUT.CHN%, NUM1$(SWAP%(USER.PPN%) AND 255%);",";	      &
+		NUM1$(USER.PPN% AND 255%);"]";FNNAME$(DISK$,PPN$)	      &
+	\ PRINT #OUT.CHN%						      &
+	\ PRINT #OUT.CHN%, TAB(15%);"Quota";TAB(34%);"Blocks";		      &
+		TAB(53%);"Blocks available"				      &
+	\ PRINT #OUT.CHN%, "Disk";TAB(7%);"Logged-in";TAB(19%);"Logged-out";  &
+		TAB(32%);"Allocated";TAB(44%);"Logged-in";TAB(56%);	      &
+		"Logged-out";TAB(71%);"System"				      &
+	\ PRINT #OUT.CHN%, "----";TAB(7%);"---------";TAB(19%);"----------";  &
+		TAB(32%);"---------";TAB(44%);"---------";TAB(56%);	      &
+		"----------";TAB(71%);"------"				      &
+		! EXTRACT THIS PPN AND PRINT HEADER.			      &
+	\ FNEND								      &
+
+
+19000	!								      &
+									      &
+									      &
+	!	E R R O R    H A N D L I N G				      &
+									      &
+									      &
+
+19010	RESUME 16410 IF ERL=16400% 			! Lookup sys call     &
+\	IF ERR=5% THEN							      &
+		RESUME 15070 IF ERL=15030% 		! Private accting     &
+
+19020	IF ERR=2% AND ERL=15900% THEN RESUME 19100			      &
+		!Illegal file name (FSS) - user typed garbage		      &
+
+19050	IF ERR=11% AND ERL=16500% THEN A.NAME$="(No name)"		      &
+\	RESUME 16510							      &
+
+19090	ON ERROR GOTO 0			! Let system handle any other errors  &
+
+19100	PRINT								      &
+\	PRINT "?Invalid Account Specification - ";PPN$			      &
+\	PRINT								      &
+\	GOTO 32767							      &
+									      &
+
+30500	!	D C L   e n t r y   p o i n t				      &
+	!								      &
+	!								      &
+	ENT.TY% = 16%				!set DCL entry type	      &
+\	HDNG% = 0%				!no program heading	      &
+\	CALL U.INI BY REF (U.CMN%, ENT.TY%, INDENT.COLUMN%) ! init CUI tables &
+\	CALL U.DIA BY REF			! get the command	      &
+\	GOTO 32767 IF U.STAT%			! error, exit		      &
+\	CALL FET$P BY REF (PPN.T%)		! PPN specified?	      &
+\	IF U.PRES% THEN 			! IF PRESENT		      &
+\	    PPN$ = SEG$(U.STR$,1%,U.LEN%)	!   GET THE PPN		      &
+\	ELSE					! ELSE			      &
+\	    PPN$ = ""				!    CLEAR THE PPN STRING     &
+\	END IF					! ENDIF			      &
+\	OUT.CHN% = 0%				! Default output to KB:	      &
+\	CALL FET$CQ BY REF (OUT.Q%)		! /OUTPUT?		      &
+\	GOTO 1000 IF NOT U.PRES%		! No, so output to KB:	      &
+\	IF U.NO% THEN				! /NOOUTPUT?		      &
+	   OPEN "_NL:" FOR OUTPUT AS FILE 12% 	! Yes, so open null device    &
+	ELSE								      &
+	   CALL FET$A BY REF			! /OUTPUT=FILENAME?	      &
+\  	   GOTO 1000 IF NOT U.PRES%		! No, so output to KB:	      &
+\	   ON ERROR GOTO 30550			! Set up local error trap     &
+\	   OPEN SEG$(U.STR$,1%,U.LEN%) FOR OUTPUT AS FILE 12%	! Open file   &
+\	   CAUSE ERROR NODEVC			! Don't use it if...	      &
+		IF STATUS AND 256%              !     device is NFS...	      &
+		UNLESS STATUS AND 2048%		!     unless CCPOS() is valid &
+\	   CAUSE ERROR PRVIOL			! Don't use it if...	      &
+		IF STATUS AND 1024%             !       we don't have access  &
+\	   ON ERROR GOTO 19000			! Ensure standard error trap  &
+\	END IF					! File okay		      &
+\	OUT.CHN% = 12%				! Channel # to pass to TERSHO &
+\	GOTO 1000				! ENTER MAIN LINE CODE	      &
+
+30550	PRINT ERT$(ERR)  			! Print RSTS error	      &
+\	RESUME 32767				! Exit program		      &
+									      &
+
+32000	CALL DISPLY ("?Account does not exist") IF NOT PPN.FOUND% !Check flag &
+
+32767	END

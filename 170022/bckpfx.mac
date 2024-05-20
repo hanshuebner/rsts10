@@ -1,0 +1,1062 @@
+.INCLUDE /CMN:COMMON/
+.IIF	NDF	L$$IST,	.NLIST
+.IIF	NDF	L$$IST,	.DSABL	CRF
+TITLE	BCKPFX,<Backup Prefix File>,0B,21-JUN-91,KPH/BSB/FRL/BGN/FEK
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BCKPFX
+
+;+
+;  000	KPH  06-Mar-85  Creation for Version 9.0 RSTS/E
+;  001	KPH  29-Nov-84	Add C2$TEL
+;  002  KPH  06-Mar-85	Add /PLACED_POSITION
+;			Replace /OPTIMIZE=CONTIGUOUS with /OPTIMIZE=DIRECTORY
+;			Remove /LOG
+;			Add /REPLACE=QUERY
+;			Remove /DOS
+;			Add flag to place index at beginning of disk
+;			Add save set attribute for RAD-50 passwords
+;			Improve /END qualifier handling
+;			Bugfix in RECENT macro
+;
+;			[RSTS V9.1]
+;  003  KPH  05-Jun-85	High density support
+;
+;			[RSTS V9.3]
+;  004  KPH  21-Jan-86	Add CRC-32 calculation
+;  005  FRL  28-Apr-86  Add installation qualifiers and redefine /[NO]TELL
+;
+;			[RSTS V9.5]
+;  006	BGN  10-Jul-87	Add support for backup/directory
+;
+;			[RSTS V9.7]
+;  007  BGN   3-May-89	Add new flag for /[NO]HEADER
+;  008  BGN  22-May-89  Add new flag to GENFLG to indicate if we have printed
+;			the /BRIEF file data header
+;  009  BGN  25-May-89  Add a flag to indicate that we have a dynamic region
+;
+;			[RSTS V10.0]
+;  010  BGN  26-Oct-89  Add support for /IMAGE
+;  011	FEK  02-Nov-89	Add [NO]BACKUP/[NO]IGNORE support
+;  012	REG  30-Nov-89	Merge /INIT code from GPK
+;  013	REG  07-Dec-89	Add /COPY option
+;  014	REG  19-DEC-89	Add /VERIFY=ONLY
+;  015	REG  19-Dec-89	Allow /INIT=([NO]ERASE,[NO]EXERCISE=1,2,3) on prompt
+;  016	REG  19-Dec-89	Flag C2$HOK to say [0,1]INIT.SYS xferred, OK to hook
+;  017	REG  27-Dec-89	Add OMS interface, change DO.COP to IM$COP
+;  018	REG  18-Feb-90	/REPLACE=ASSIST
+;  019  REG  27-Mar-90  Enhancement to /ASSIST
+;  020  REG  27-Mar-90	Make sure OMS messages can all go together
+;  021  REG  03-Apr-90	Add DSKINT/[NO]QUERY
+;  022  REG  03-Apr-90	Add /QUERY=ASSIST
+;  023  REG  03-Apr-90	Add GF.HAL to GENFLG
+;  024  REG  26-Apr-90	Add Y/N/ALL for /QUERY
+;  025  REG  21-JUN-90	Add new flag for HOOK
+;  026	REG  28-JUN-90	Add PC to ?Unexpected error... parameters
+;  027  REG  10-Sep-90	Add flag for recovery operations
+;
+;			[RSTS V10.1]
+;  028  REG  29-Jan-91	Free up one APR
+;  029	REG  29-Jan-91	Add flag for PK communications
+;  030  REG  06-May-91	Add flag for restore file name change
+;  031	REG  22-May-91	Add flag for reallocating disk before HOOK
+;-
+
+.SBTTL	Call external libraries and files
+
+.LIBRARY /CUI:CUIMLB/						
+
+.SBTTL	Set up listing options
+
+.NLIST	TTM
+.LIST	TOC,MEB,BEX
+
+.SBTTL	Define macros
+
+.MCALL	SAVREG			; Register save/restore
+
+;+
+; BITINI - Initialize bit definition macros
+;
+;	BITINI
+;
+; The BITINI macro is used at the beginning of bit definitions.
+;
+; These macros use the symbols $$$$$A and $$$$$B as context. They
+; are used by the BITDEF macro.
+;-
+
+.MACRO	BITINI
+$$$$$A	=	0
+$$$$$B	=	1
+.ENDM	BITINI
+
+;+
+; BITDEF - Define a bit
+;
+;	BITDEF	BIT
+;
+; This macro is used to define a bit. The bit name must be unique to
+; the first five characters. The symbols O'BIT and B'BIT are defined
+; as the offsets and bit values, respectively.
+;
+; The symbols $$$$$A and $$$$$B are used as context.
+;-
+
+.MACRO	BITDEF	BIT
+O'BIT	=	$$$$$A
+B'BIT	=	$$$$$B
+$$$$$B	=	$$$$$B*2
+.IIF	EQ	$$$$$B,	$$$$$A	=	$$$$$A+1
+.ENDM	BITDEF
+
+;+
+; BITBLD - Build bit values
+;
+;
+;	BITBLD	BITS
+;
+; BITS = List of bit names to parse
+;
+; This MACRO defines the symbols $$$$$0 through $$$$$9 as the values
+; of the bits specified in BITS.
+;
+; The symbol $$$$$A is set to the number of different words that the
+; passed switch bits effect.
+;
+; Note: This macro sets the Radix to 8 on completion.
+;-
+
+.MACRO	BITBLD	BITS
+.RADIX	10
+.IRPC	COUNT, <0123456789A>
+$$$$$'COUNT	=	0
+.ENDM
+.IRP	BIT,	<BITS>
+.IRP	OFFSET,	<\O'BIT'>
+.IIF	EQ	$$$$$'OFFSET, $$$$$A = $$$$$A + 1
+$$$$$'OFFSET	=	$$$$$'OFFSET ! B'BIT
+.ENDM
+.ENDM
+.RADIX	8
+.ENDM	BITBLD
+
+;+
+; BITSET - Set a group of bits in a group of words
+;
+; BITS = List of bits to set
+; WHERE = Where to set bits (must be a symbolic location)
+;
+; This macro sets bits in a multi-word bit field. The macro BITBLD
+; is used to create the masks to set.
+;
+; On completion, the radix is set to 8.
+;-
+
+.MACRO	BITSET	BITS,WHERE
+BITBLD	<BITS>
+.IRPC	WORD,	<0123456789>
+.IIF	NE	$$$$$'WORD',	BIS	#$$$$$'WORD','WHERE'+<'WORD'*2>
+.ENDM
+.ENDM	BITSET
+
+;+
+; BITCLR - Clear a group of bits in a group of words
+;
+; BITS = List of bits to set
+; WHERE = Where to set bits (must be a symbolic location)
+;
+; This macro clears bits in a multi-word bit field. The macro BITBLD
+; is used to create the masks to set.
+;
+; On completion, the radix is set to 8.
+;-
+
+.MACRO	BITCLR	BITS,WHERE
+BITBLD	<BITS>
+.IRPC	WORD,	<0123456789>
+.IIF	NE	$$$$$'WORD',	BIC	#$$$$$'WORD','WHERE'+<'WORD'*2>
+.ENDM
+.ENDM	BITCLR
+
+;+
+; BITTST - Test a group of bits in a group of words
+;
+; BITS = List of bits to test
+; WHERE = Location to check (must be a symbolic value)
+;
+; This macro tests bits in a multi-word bit field. The data is tested
+; starting at the location WHERE.
+;-
+
+.MACRO	BITTST	BITS,WHERE
+BITBLD	<BITS>
+$$$$$	=	<.-2>+<10*$$$$$A>
+.IRPC	WORD,	<0123456789>
+.IF	NE	$$$$$'WORD
+	BIT	#$$$$$'WORD',WHERE+<'WORD'*2>
+.IIF	NE	<.-$$$$$>,	BNE	$$$$$
+.ENDC
+$$$$$$	=	$$$$$$+1
+.ENDM
+.ENDM	BITTST
+
+;+
+; THREAD - Access a thread
+;
+; The THREAD macro is used to access a threaded routine. It does a .EVEN
+; to be sure the thread address is on an even boundry, then does a .WORD
+; of the routine entry point, and then declares the routine external.
+;-
+
+
+.MACRO	THREAD	NAME
+.EVEN
+	.WORD	NAME
+.GLOBL	NAME
+.ENDM	THREAD
+
+;+
+; .QUAD - Delcare a QUAD word
+;
+; The .QUAD macro is used to declare quad words. The number passed
+; is interpreted in decimal radix, regardless of the setting of
+; the .RADIX flag. This macro expands to .BYTE directives, this will
+; allow the placement of quad words on byte boundries.
+;-
+
+.MACRO	.QUAD	WORD
+$$$B1	=	0
+$$$B2	=	0
+$$$B3	=	0
+$$$B4	=	0
+$$$B5	=	0
+$$$B6	=	0
+$$$B7	=	0
+$$$B8	=	0
+.IRPC	D,WORD
+$$$B1	=	$$$B1*10.+D'.
+$$$C	=	$$$B1/256.
+$$$B1	=	$$$B1&255.
+$$$B2	=	$$$B2*10.+$$$C
+$$$C	=	$$$B2/256.
+$$$B2	=	$$$B2&255.
+$$$B3	=	$$$B3*10.+$$$C
+$$$C	=	$$$B3/256.
+$$$B3	=	$$$B3&255.
+$$$B4	=	$$$B4*10.+$$$C
+$$$C	=	$$$B4/256.
+$$$B4	=	$$$B4&255.
+$$$B5	=	$$$B5*10.+$$$C
+$$$C	=	$$$B5/256.
+$$$B5	=	$$$B5&255.
+$$$B6	=	$$$B6*10.+$$$C
+$$$C	=	$$$B6/256.
+$$$B6	=	$$$B6&255.
+$$$B7	=	$$$B7*10.+$$$C
+$$$C	=	$$$B7/256.
+$$$B7	=	$$$B7&255.
+$$$B8	=	$$$B8*10.+$$$C
+$$$B8	=	$$$B8&255.
+.ENDM
+	.BYTE	$$$B1,$$$B2,$$$B3,$$$B4,$$$B5,$$$B6,$$$B7,$$$B8
+.ENDM	.QUAD
+
+;+
+; CRASH - Crash if there is an error
+;
+; CHECK = Location to check for errors (default is @#402)
+; WHY = Address of CUI message to explain error (default is #UNXERR)
+; PARAMS = Paramaters to pass message (default is @#402 and an .ASCIC
+;	string located at #MODNAM [usually module name])
+;-
+
+.MACRO	CRASH	CHECK=@#402,WHY=#UNXERR,PARAMS=<@#402,#MODNAM,PC>,?A	;026
+.MCALL	CALBX
+	TST	CHECK
+	BEQ	A
+.ENABL	GBL
+.IF	B	<PARAMS>
+	CALBX	CRASH,<WHY>
+.IFF	;B	<PARAMS>
+	CALBX	CRASH,<WHY,PARAMS>
+.ENDC	;B	<PARAMS>
+.DSABL	GBL
+A:
+.ENDM	CRASH
+
+;+
+; ZEROST - Declare the start of a ZERO area
+; ZEROEN - Declare the end of a ZERO area
+;-
+
+.MACRO	ZEROST
+$$$$$$	=	.
+.SAVE
+	.PSECT	ZROTBL,RO,D,GBL,REL,CON
+	.WORD	$$$$$$
+.RESTORE
+.ENDM	ZEROST
+
+.MACRO	ZEROEN
+ZEROST
+.ENDM	ZEROEN
+
+;+
+; ATRENT - Declare attribute value entry point
+;
+;	ATRENT	TYPE,ATTR,USER,MIN,MAX,WHERE
+;
+;	TYPE = Record type this attribute belongs in
+;	ATTR = Attribute code
+;	USER = User-supplied parameter
+;	MIN = Minimum legal length of attribute data (optional, default = 1)
+;	MAX = Maximum legal length of attribute data (optional, default = -1)
+;	WHERE = PC to transfer control to (default is in-line)
+;
+; This MACRO writes these values into the P-sect ATRTBL.
+; Each attribute code has five words allocated, in the following
+; order:
+;
+;	.WORD	TYPE
+;	.WORD	USER
+;	.WORD	MIN
+;	.WORD	MAX
+;	.WORD	PC to transfer control to
+;
+; Note that attribute code 1 is the first entry in the table.
+;-
+
+.MACRO	ATRENT	TYPE,ATTR,USER=0,MIN=1,MAX=-1,WHERE
+$$$$$$	=	.
+.SAVE
+	.PSECT	ATRTBL,RO,D,GBL,REL,OVR,SAV				;010
+.IF	NDF	ATRTBL
+ATRTBL:
+.ENDC	;NDF	ATRTBL
+.	=	ATRTBL+<<ATTR-1>*12>
+	.WORD	TYPE
+	.WORD	USER
+	.WORD	MIN
+	.WORD	MAX
+.IF	NB	WHERE
+	.WORD	WHERE
+.IFF	;NB	WHERE
+	.WORD	$$$$$$
+.ENDC	;NB	WHERE
+.RESTORE
+.ENDM	ATRENT
+
+;+
+; RECENT - Declare record handler entry point
+;
+;	RECENT	TYPE,WHERE
+;
+;	TYPE = Record type to handle
+;	WHERE = Where to transfer control to (default is .)
+;
+; This MACRO writes into the P-sect RECTBL. There is an entry in RECTBL
+; for each record type. RECTBL contains the entry point of the handler
+; routine, and nothing else.
+;-
+
+.MACRO	RECENT	TYPE,WHERE=$$$$$$
+$$$$$$	=	.
+.SAVE
+.PSECT	RECTBL,RO,D,GBL,REL,OVR,SAV					;010
+.IF	NDF	RECTBL
+RECTBL:
+.ENDC	;NDF	RECTBL
+.	=	RECTBL+<TYPE*2>
+	.WORD	WHERE
+.RESTORE
+.ENDM	RECENT
+
+;+
+; EOFENT - Declare End-of-saveset exception handler
+;
+;	EOFENT	BITS
+;
+; Where BITS are bits in RSTFLG to check before calling exception handler.
+;
+; This MACRO is used to declare an end-of-saveset exception handler. When
+; the end of a saveset is detected, a routine may need to perform cleanup.
+;
+; The exception caller checks to see if any of the bits specified in BITS
+; are set in RSTFLG. If any of the bits are set, or BITS is zero, the
+; exception handler will be called. The exception handler is free to
+; modify any register and will exit with a RETURN instruction.
+;
+; This MACRO writes into the P-sect EOFTBL. The data is written in the
+; following format:
+;
+;	.WORD	BITS		(Bits to check)
+;	.WORD	XFRADR		(Address to transfer control to)
+;-
+
+.MACRO	EOFENT	BITS=0
+$$$$$$	=	.
+.SAVE
+	.PSECT	EOFTBL,RO,D,GBL,REL,CON,SAV				;010
+	.WORD	BITS
+	.WORD	$$$$$$
+.RESTORE
+.ENDM	EOFENT
+
+;+
+; UNQTXT - Generate text for uniqueness matching
+;
+;	UNQTXT	TEXT
+;
+; This macro is used for creating text in the format used by GETUNQ.
+;
+; The abbreviation point is specified by including a '-' in the text.
+;-
+
+.MACRO	UNQTXT	TEXT
+$$$$$0	=	0
+.IRPC	CHAR,	<TEXT>
+.IF	IDN	CHAR,<->
+$$$$$0	=	200
+.IFF	;IDN	CHAR,<->
+	.BYTE	''CHAR'+$$$$$0
+.ENDC
+.ENDM
+	.BYTE	377
+.ENDM	UNQTXT
+
+.SBTTL	Set up table sizes
+
+TTYLEN	=:	512.		;Terminal I/O buffer is 80 bytes long	;020
+
+.SBTTL	Define bit and offset values
+
+.DSECT				;Define Date and time comparison offsets
+
+D$EMDA:	.BLKW			;Earliest modification date
+D$LMDA:	.BLKW			;Latest modification date
+D$LMTI:	.BLKW			; Latest Modification time		
+D$EMTI:	.BLKW			; Earliest Modification time		
+D$ECDA:	.BLKW			;Earliest creation date
+D$LCDA:	.BLKW			;Latest creation date
+D$LCTI:	.BLKW			;Latest creation time
+D$ECTI:	.BLKW			;Earliest creation time
+D$SIZE:				;Size of entry in bytes
+
+.DSECT				;Define SELECT/EXCLUDE/INCLUDE offsets
+
+S$NEXT:	.BLKW			;Link to next
+S$PPN:	.BLKW			;PPN of file in list
+S$NAME:	.BLKB	10.		;NAME.TYP of file in ASCII
+S$SIZE:				;Size of entry in bytes
+
+.DSECT				;Define current file cells
+
+C$PPN:	.BLKW			;PPN of current file
+C$NAME:	.BLKB	10.		;NAME.TYP of file in ASCII
+C$MDAT:	.BLKW			;Modification date of file in RSTS format
+C$MTIM:	.BLKW			;Modification time of file in RSTS firnat
+C$CDAT:	.BLKW			;Creation date of file in RSTS format
+C$CTIM:	.BLKW			;Creation time of file in RSTS format
+C$ATTR:	.BLKW	16.		;File's RMS attributes
+C$SIZ:	.BLKW			;File's Size, Low order word
+	.BLKW			;File's Size, High order word
+
+; Note: The definitions below must match the definitions of RSTS specific
+; attributes (BFA$RS).
+
+C$POS:	.BLKW			;File's start DCN
+C$RTS:	.BLKW	2		;File's Run-Time System
+C$CLUS:	.BLKW			;File's Clustersize
+C$PCOD:	.BLKB			;File's protection code
+C$STAT:	.BLKB			;File's flags
+
+; End of grouped area.
+
+C$SIZE:				;Size of entry in bytes
+
+; Verify ordering of RSTS specific attributes
+
+.DSECT	2,NOCREF
+
+BRS$DC:	.BLKW			;Start DCN of file
+BRS$RT:	.BLKW	2		;RTS of file in RAD-50
+BRS$CS:	.BLKW			;Clustersize of file
+BRS$RP:	.BLKB			;Protection code in RSTS format
+BRS$FF:	.BLKB			;File flags
+
+.SBTTL	Bit definitions for BACKUP command flag words (C$FLAG and C$FLG2)
+
+.BSECT	,NOCREF			; In C$FLAG
+					
+	.BLKB	.		;Reserved				;017
+DO.INS:	.BLKB	.		;An installation			;005
+DO.REW:	.BLKB	.		;Rewind BEFORE processing		
+NO.VOL:	.BLKB	.		;Don't report volume number		;005
+DO.IMA:	.BLKB	.		;Image mode				;010
+REP.S:	.BLKB	.		;If clear, query for replacement	;002
+				;If set, see DO.REP for action		;002
+DO.REP:	.BLKB	.		;Supersede existing files (if REP.S)	;002
+DO.LIS:	.BLKB	.		;Keep a listing_file of activity	
+DO.VER:	.BLKB	.		;Verify data transfered		
+DO.RES:	.BLKB	.		;RESTORE command given			
+DIR.FU:	.BLKB	.		;Full Directory				;006
+DO.INI:	.BLKB	.		;Initialize Output device before using
+DO.LOG:	.BLKB	.		;Logfile				;006
+DO.FIL:	.BLKB	.		;Include files and data on operation	
+DO.ACC:	.BLKB	.		;Include UFD accounting information	
+DO.QRY:	.BLKB	.		;Set: Query each file before operation	;024
+				;Clear: Refer to C2$QER for action	;024
+
+.BSECT	,NOCREF			; In C$FLG2
+
+C2$DIR:	.BLKB	.		;Pre-extend directories			;002
+C2$CLU:	.BLKB	.		;Optimize clustersize
+C2$PRO:	.BLKB	.		;Don't ask proceed for volume 1
+C2$COP:	.BLKB	.		;/COPY					;017
+C2$EDM:	.BLKB	.		;At end of BACKUP, dismount save set	;002
+C2$HOK:	.BLKB	.		;[0,1]INIT.SYS xferred, OK to hook	;016
+C2$HEA:	.BLKB	.		;Set if /NOHEADER specified		;007
+C2$INT:	.BLKB	.		;This output disk needs to be INIT'ed	;015
+C2$ERA:	.BLKB	.		;/INITIALIZE=ERASE specified		;012
+C2$NER:	.BLKB	.		;/INITIALIZE=NOERASE specified		;012
+C2$EXE:	.BLKB	.		;/INITIALIZE=[NO]EXERCISE[=n] specified	;012
+C2$ONL:	.BLKB	.		;/VERIFY=ONLY				;014
+C2$AST:	.BLKB	.		;/ASSIST mode				;017
+C2$QRY:	.BLKB	.		;DSKINT/[NO]QUERY switch		;021
+C2$QER:	.BLKB	.		;Clear: Don't skip this file		;024
+				;Set: Skip this file			;024
+C2$ERW:	.BLKB	.		;At end of BACKUP, rewind save set	;002
+
+.SBTTL	Flag bits in RSTFLG
+
+.BSECT	,NOCREF
+
+RS.NOS:	.BLKB	.		;This block was not read sequentially
+RS.FIL:	.BLKB	.		;We expect to see file data records
+RS.OPN:	.BLKB	.		;We have a file open and are restoring it
+RS.XRT:	.BLKB	.		;XOR recovery has been tried for this group
+RS.IBH:	.BLKB	.		;Block header for this block is invalid
+RS.FRS:	.BLKB	.		;Set for the first record of each volume
+RS.NBX:	.BLKB	.		;Next block is supposed to be an XOR block
+RS.EOF:	.BLKB	.		;EOF pending in read chain
+RS.EOV:	.BLKB	.		;EOV pending in read chain
+RS.OVS:	.BLKB	.		;Set if output volume already set up
+RS.NBI:	.BLKB	.		;Used by cancel to turn off backspace inc's ;027
+RS.NAM:	.BLKB	.		;Output file [PPN]name is being changed	;030
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+
+.SBTTL	Flag bits in GENFLG
+
+.BSECT	,NOCREF
+
+GF.OWN:	.BLKB	.		;Set if we didn't own device before backup
+GF.DIR:	.BLKB	.		;/Directory				;006
+GF.BHD:	.BLKB	.		;Set if /BRIEF file header line printed ;008
+GF.DYN:	.BLKB	.		;Set if the dynamic region is ready	;009
+GF.BAT:	.BLKB	.		;We are running under BATCH		;018
+GF.QOP:	.BLKB	.		;Set if /REPLACE=ASSIST was specified	;018
+GF.QOQ:	.BLKB	.		;Set if /QUERY=ASSIST was specified	;022
+	.BLKB	.		;Reserved
+GF.YNF:	.BLKB	.		;/ASSIST for file replacement prompt	;019
+GF.HLD:	.BLKB	.		;HOLD mode for OMS messages		;020
+GF.HAL:	.BLKB	.		;HOOK allowed (set if they have both	;023
+				; RDNFS and INSTAL privs		;023
+GF.HOK:	.BLKB	.		;Last file opened was [0,1]INIT.SYS	;025
+GF.NHL:	.BLKB	.		;Don't hold data any more		;029
+GF.ASS:	.BLKB	.		;Reallocate disk before doing HOOK	;031
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+
+.SBTTL	Flag bits in RESSUB						;006
+
+.BSECT	,NOCREF
+
+RS$RES:	.BLKB	.		;Restore subfunction			;006
+RS$VFY:	.BLKB	.		;Verify subfunction			;006
+RS$DIR:	.BLKB	.		;Directory subfunction			;006
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+
+.SBTTL	Flag bits in IMGSUB						;017+
+
+.BSECT	,NOCREF
+
+IM$COP:	.BLKB	.		;/COPY mode
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved				;017-
+
+.SBTTL	File flag bit definitions					;006
+
+.BSECT			; BIT RETURNED FROM USTAT BY DIR LOOKUP		;006
+
+US.OUT:	.BLKB	.	; FILE IS PHYSICALLY ON ANOTHER DISK		;006
+US.PLC:	.BLKB	.	; FILE HAS BEEN PLACED				;006
+US.WRT:	.BLKB	.	; FILE IS OPEN FOR WRITE ACCESS			;006
+US.UPD:	.BLKB	.	; FILE IS OPEN FOR UPDATE			;006
+US.NOX:	.BLKB	.	; FILE IS CONTIGUOUS				;006
+US.NOK:	.BLKB	.	; FILE CANNOT BE KILLED DURING TIMESHARING	;006
+US.UFD:	.BLKB	.	; NAME ENTRY IS A UFD				;006
+US.DEL:	.BLKB	.	; FILE IS MARKED FOR DELETION			;006
+
+.SBTTL	Definitions for CUI interface to BCKCUI.MAC			
+
+;+									
+;	These are the dummy tag definitions for the CUI			
+;	interface to BCKCUI. They need to be odd values so		
+;	the initial ".BLKB" is not a mistake. These define the		
+;	two parameters allowed in a BACKUP command.			
+;-
+
+
+.DSECT	
+
+	.BLKB
+IN.T:	.BLKB	2		; Dummy Input Device Tag for CUI 	
+OUT.T:	.BLKB	2		; Dummy Output Device Tag for CUI	
+
+
+
+.SBTTL	Define channel numbers
+
+.DSECT				; Channel numbers			
+
+	.BLKW			;Channel #0 is job's console		
+LISFIL:	.BLKW			;Channel #1 is log file			
+SAVFIL:	.BLKW			;Channel #2 is save set file/device	
+DSKFIL:	.BLKW			;Channel #3 is RSTS format file		
+	.BLKW			;Channel #4				
+	.BLKW			;Channel #5				
+	.BLKW			;Channel #6				
+	.BLKW			;Channel #7				
+	.BLKW			;Channel #8				
+	.BLKW			;Channel #9				
+	.BLKW			;Channel #10 Reserved for CUI		
+	.BLKW			;Channel #11 Reserved for CUI		
+	.BLKW			;Channel #12 Reserved for CUI		
+INIFIL:	.BLKW			;Channel #13 is for DSKINT usage
+	.BLKW			;Channel #14				
+	.BLKW			;Channel #15 Reserved for task image	
+
+
+.SBTTL	FSS Flag word 2 bit definitions					
+
+
+	.BSECT								
+
+F2NAM:	.BLKB	.		;There is a filename.			
+F2NAMS:	.BLKB	.		;The filename is a star ("*").		
+F2NAMQ:	.BLKB	.		;The filename contains at least one "?".
+F2EXT:	.BLKB	.		;There is a filetype.			
+F2EXT1:	.BLKB	.		;There is a non-null filetype.		
+F2EXTS:	.BLKB	.		;The filetype is a star ("*").		
+F2EXTQ:	.BLKB	.		;The filetype contains at least one "?".
+F2PPN:	.BLKB	.		;There is a PPN.			
+F2PRJW:	.BLKB	.		;The project number is wild (*).	
+F2PRGW:	.BLKB	.		;The programmer number is wild (*).	
+F2PRT:	.BLKB	.		;There is a protection code in <>.	
+F2UPRT:	.BLKB	.		;There is no protection code in the filespec,
+				;the user assignable protection code was used.
+F2DEV:	.BLKB	.		;There is a device name.		
+F2DEV1:	.BLKB	.		;There is a non-null device name.	
+F2DEVL:	.BLKB	.		;The device name is a logical name.	
+F2DEVI:	.BLKB	.		;The device name is currently invalid.	
+
+
+.SBTTL	Define useful constants
+
+LF	=:	12		;Linefeed				
+
+.SBTTL	Define BACKUP set format
+
+.DSECT				;Define block header			
+
+BBH$SZ:	.BLKW			;Size of block header			
+BBH$OS:	.BLKW			;Operating system ID			
+BBH$SS:	.BLKW			;Subsystem ID				
+BBH$AP:	.BLKW			;Application ID				
+BBH$NO:	.BLKW	2		;Block sequence number			
+	.BLKB	20.		;Reserved				
+BBH$SL:	.BLKW			;Structure level			
+BBH$VL:	.BLKW			;Volume number				
+BBH$CR:	.BLKW	2		;Block CRC				
+BBH$BS:	.BLKW	2		;Block size				
+BBH$FL:	.BLKW	2		;Block flags				
+BBH$SN:	.BLKB	32.		;Save set name				
+BBH$FI:	.BLKB	6		;File ID (unused)			
+BBH$DI:	.BLKB	6		;Directory ID (unused)			
+BBH$FN:	.BLKB			;Size of file name in bytes		
+	.BLKB	127.		;File name				
+BBH$RT:	.BLKB			;Record type				
+BBH$AT:	.BLKB			;Record attributes			
+BBH$RS:	.BLKW			;Record size				
+BBH$KS:	.BLKB			;Bucket size				
+BBH$VS:	.BLKB			;VFC area length			
+BBH$MS:	.BLKW			;Maximum record size			
+BBH$FS:	.BLKW	2		;Allocated file size			
+	.BLKB	22.		;Reserved for future use		
+BBH$CS:	.BLKW			;Block header checksum			
+BBHSIZ:				;Size of block header			
+
+.ASSUME	.	EQ	256.	;Be sure block header is correct size	
+
+.BSECT	,NOCREF			;Block header flag bits [in BBH$FL]	
+
+BH$NOC:	.BLKB	.		;CRC is not used in block		
+
+.DSECT	,NOCREF			;Define record header			
+
+BRH$RS:	.BLKW			;Record size				
+BRH$RT:	.BLKW			;Record type				
+BRH$FL:	.BLKW	2		;Record flags				
+BRH$VB:	.BLKW	2		;File data VBN				
+	.BLKW	2		;Reserved words				
+BRHSIZ:				;Size of a record header		
+
+.ASSUME	.	EQ	16.	;Verify record header is correct size	
+
+.DSECT				;Define record type values		
+
+BRT$NL:	.BLKB			;Null record				
+BRT$SU:	.BLKB			;BACKUP summary record			
+BRT$VL:	.BLKB			;Volume summary record			
+BRT$FL:	.BLKB			;File attribute record			
+BRT$VB:	.BLKB			;File data record			
+BRT$05:	.BLKB			;Physical volume attribute record	
+BRT$LB:	.BLKB			;Physical volume logical block record	
+BRT$07:	.BLKB			;File ID record				
+BRT$08:	.BLKB			;file attribute extension record	
+BRT$09:	.BLKB			;576 byte LBN record			
+BRT$DA:	.BLKB			;Directory attribute record		
+
+BRTMAX	=:	.-1		;Maximum record type			
+
+.BSECT				;Define record flags [BRH$FL]		
+
+BR$BDT:	.BLKB	.		;Data error occured while reading file	
+	.BLKB	.		;Record describes an ODS directory	
+	.BLKB	.		;Data record is not in LBN/VBN sequence	
+
+.DSECT	1			;Define attribute codes			
+
+; BACKUP summary record attributes					
+
+BSA$SN:	.BLKB			;Save set name				
+BSA$CM:	.BLKB			;Command line				
+BSA$03:	.BLKB			;User comment about BACKUP		
+BSA$UN:	.BLKB			;User name of user doing BACKUP		
+BSA$AC:	.BLKB			;PPN (UIC) of user doing BACKUP		
+BSA$DT:	.BLKB			;BACKUP date				
+BSA$OS:	.BLKB			;Operating system			
+BSA$SV:	.BLKB			;Operating system version		
+BSA$NN:	.BLKB			;Node name				
+BSA$10:	.BLKB			;System ID of system doing BACKUP	
+BSA$DI:	.BLKB			;Name of drive doing BACKUP		
+BSA$BV:	.BLKB			;BACKUP version				
+BSA$BS:	.BLKB			;Block size of save set			
+BSA$GS:	.BLKB			;size of each XOR group			
+BSA$15:	.BLKB			;Number of buffers			
+BSA$16:	.BLKB			;Volume set name			
+BSA$17:	.BLKB			;Number of volumes in set		
+BSA$18:	.BLKB			;Total file space in save set		
+BSA$19:	.BLKB			;Total number of files in save set	
+
+; Volume summary record attributes					
+
+.ASSUME	.	EQ	20.
+
+BVA$20:	.BLKB			;VMS flavor pack structure level	
+BVA$ID:	.BLKB			;Volume label				
+BVA$22:	.BLKB			;Volume owner				
+BVA$23:	.BLKB			;Volume file format name		
+BVA$24:	.BLKB			;Relative volume number			
+BVA$25:	.BLKB			;Volume owner UIC			
+BVA$26:	.BLKB			;Volume protection mask			
+BVA$27:	.BLKB			;Volume default file protection		
+BVA$28:	.BLKB			;Volume default record protection	
+BVA$29:	.BLKB			;VMS flavor pack flags			
+BVA$30:	.BLKB			;Volume creation date			
+BVA$31:	.BLKB			;Default file window size		
+BVA$32:	.BLKB			;Default directory LRU limit		
+BVA$33:	.BLKB			;Default file extend size		
+BVA$CS:	.BLKB			;Pack cluster size			
+BVA$35:	.BLKB			;Number of reserved files		
+BVA$PS:	.BLKB			;Pack size in blocks			
+BVA$37:	.BLKB			;Total file space in volume set		
+BVA$38:	.BLKB			;Total number of files in volume	
+BVA$39:	.BLKB			;Maximum number of files allowed	
+BVA$40:	.BLKB			;Highest file number			
+BVA$41:	.BLKB			;Volume serial number			
+
+; File attribute records						
+
+.ASSUME	.	EQ	42.						
+
+BFA$FN:	.BLKB			;File name				
+BFA$SL:	.BLKB			;Structure level of file		
+BFA$44:	.BLKB			;File ID				
+BFA$45:	.BLKB			;Directory ID back link			
+BFA$FS:	.BLKB			;Allocated file size in blocks		
+BFA$AC:	.BLKB			;File account				
+BFA$FP:	.BLKB			;File protection mask in VMS format	
+BFA$49:	.BLKB			;record protection mask			
+BFA$50:	.BLKB			;access level				
+BFA$51:	.BLKB			;file characteristics			
+BFA$FA:	.BLKB			;record attributes area			
+BFA$53:	.BLKB			;revision number of file		
+BFA$CD:	.BLKB			;creation date				
+BFA$RD:	.BLKB			;revision date				
+BFA$56:	.BLKB			;expiration date			
+BFA$57:	.BLKB			;backup date				
+
+; Physical volume attributes						
+
+.ASSUME	.	EQ	58.
+
+BPA$58:	.BLKB			;sectors per track			
+BPA$59:	.BLKB			;tracks per cylinder			
+BPA$60:	.BLKB			;cylinders per volume			
+BPA$61:	.BLKB			;Device cluster size			
+BPA$62:	.BLKB			;device type				
+BPA$SN:	.BLKB			;serial number				
+BPA$DN:	.BLKB			;Device name				
+BPA$65:	.BLKB			;label					
+BPA$66:	.BLKB			;bad block descriptor			
+
+; The following fields are recent VMS additions				
+
+.ASSUME	.	EQ	67.						
+
+BVA$MF:	.BLKB			;(VS) First LBN of MFD			
+BVA$68:	.BLKB			;(VS) Boot block image			
+BFA$69:	.BLKB			;(FA) VBN within file for boot block	
+BFA$70:	.BLKB			;(FA) Placement data			
+BFA$71:	.BLKB			;(FA) UIC of directory			
+BFA$72:	.BLKB			;(FA) Protection of directory		
+BFA$73:	.BLKB			;(FA) Status of directory		
+BFA$74:	.BLKB			;(FA) Version limit of directory	
+BFA$75:	.BLKB			;(FA) File version limit		
+BVA$76:	.BLKB			;(VS) Minimum file retention period	
+BVA$77:	.BLKB			;(VS) Maximum file retention period	
+BFA$78:	.BLKB			;(FA) ACL segment for the file		
+BFA$79:	.BLKB			;(FA) Highwater mark			
+BFA$80:	.BLKB			;(FA) Journal control flags		
+BSA$81:	.BLKB			;(BS) File encryption attribute		
+BPA$82:	.BLKB			;(PS) Disk block size in bytes		
+
+.ASSUME	.	EQ	83.
+
+; Directory attribute codes (RSTS specific):
+
+BDA$CR:	.BLKB			;Directory creation attribute		
+BDA$AT:	.BLKB			;Directory attribute attribute		
+
+; File attribute codes (RSTS specific):
+
+BFA$RS:	.BLKB			;RSTS specific file characteristics	
+
+; Volume attribute codes (RSTS specific):
+
+BVA$RS:	.BLKB			;RSTS specific pack characteristics	
+
+ATRMAX	=:	.-1		;Highest attribute type			
+
+.SBTTL	Define layout of attribute entires
+
+.DSECT	;Layout of BDA$CR
+
+; Note: Old savesets may not include BCR$PW. Therefore, legal recordsizes
+;	are BCR$PW or BCRSIZ.
+
+BCR$SI:	.BLKB			;Number of clusters to extend
+BCR$CS:	.BLKB			;UFD clustersize
+BCR$QU:	.BLKW			;"Old-style" disk quota to restore
+BCR$PW:	.BLKW	2		;"Old-style" password to restore	;002
+BCRSIZ:				;Size of BDA$CR attribute
+
+.DSECT	;Layout of BFA$RS
+
+BRS$SL:	.BLKW			;Structure level of RSTS attributes
+BRS$DC:	.BLKW			;Start DCN of file
+BRS$RT:	.BLKW	2		;RTS of file in RAD-50
+BRS$CS:	.BLKW			;Clustersize of file
+BRS$RP:	.BLKB			;Protection code in RSTS format
+BRS$FF:	.BLKB			;File flags (see below)
+BRSSIZ:				;Size of BFA$RS attribute
+
+.BSECT	;Layout of BRS$FF
+
+; Note: These bit definitions match the data returned by UU.FIL
+
+	.BLKB	.		;Reserved
+BFF$PL:	.BLKB	.		;File is placed
+BFF$CS:	.BLKB	.		;File caching is sequential
+BFF$NB:	.BLKB	.		;[NO]BACKUP bit				;011
+BFF$CO:	.BLKB	.		;File is contiguous
+BFF$ND:	.BLKB	.		;File may not be deleted or renamed
+BFF$IG:	.BLKB	.		;[NO]IGNORE bit				;011
+BFF$CA:	.BLKB	.		;File is to be cached
+
+.DSECT	;Layout of BVA$RS
+
+BVR$SL:	.BLKW			;Structure level of pack
+BVR$FL:	.BLKW			;Pack flags
+
+.BSECT	;Layout of BVR$FL
+
+; Note: These definitions match those returned by UU.ATR subfunction -4
+
+BRF$IB:	.BLKB	.	; Place index at beginning (internal flag only)	;002
+	.BLKB	.	; Reserved
+	.BLKB	.	; Reserved
+	.BLKB	.	; Reserved
+	.BLKB	.	; Reserved
+	.BLKB	.	; Reserved
+	.BLKB	.	; Reserved
+	.BLKB	.	; Reserved
+	.BLKB	.	; Reserved
+BRF$TP:	.BLKB	.	; New files first
+	.BLKB	.	; Reserved
+BRF$DW:	.BLKB	.	; Maintain date of last write
+BRF$RO:	.BLKB	.	; Read-only pack
+BRF$NW:	.BLKB	.	; "New" pack
+BRF$PR:	.BLKB	.	; Pack is private/system
+BRF$MN:	.BLKB	.	; Pack is mounted
+
+.SBTTL	Define constants relating to save sets
+
+STRLVL	=:	401		;Structure level that we write
+
+.SBTTL	Block Buffer header definitions 				
+
+
+;+
+;	
+;	Block Buffer Header definitions for BACKUP Operations 		
+;
+;-
+
+.DSECT	,NOCREF
+
+HB$FLG:	.BLKW			; Header Flag word
+HB$NXT:	.BLKW			; Link to next buffer header
+HB$VBN:	.BLKW			; (Disk-Backup) Virtual Block # to Write
+	.BLKB			; (Disk-Backup) MSB of virtual block # to write
+HB$PRC:	.BLKB			; Count of pending requests for block
+HB$EBA:	.BLKW			; Link to first end-of-block action routine
+HB$EBT:	.BLKW			; Link to last end-of-block action routine
+HB$XOR:	.BLKW			; Block ID of XOR block for this group
+HB$ERR:	.BLKB			; Returned error code
+	.BLKB	61		; Reserved
+
+HBSIZE:
+
+.ASSUME . EQ 64.		; Buffer header must be one sliver long	
+
+.BSECT	,NOCREF			; Bit definitions for HB$FLG		
+
+HBF$TC:	.BLKB	.		; Block has been included in pending tape count
+HBF$CR:	.BLKB	.		; CRC-32 calculation has been done for block ;004
+	.BLKB	.		; Reserved				
+	.BLKB	.		; Reserved				
+	.BLKB	.		; Reserved				
+	.BLKB	.		; Reserved				
+	.BLKB	.		; Reserved				
+HBF$RB:	.BLKB	.		; Queue (Backup) or return (Restore) buffer
+				; when I/O is complete
+	.BLKB	.		; Reserved				
+	.BLKB	.		; Reserved				
+	.BLKB	.		; Reserved				
+	.BLKB	.		; Reserved				
+	.BLKB	.		; Reserved				
+	.BLKB	.		; Reserved				
+	.BLKB	.		; Reserved				
+HBF$IO:	.BLKB	.		; Set when block I/O has completed
+
+.SBTTL	Memory handling definitions
+
+.DSECT	,NOCREF			;APR usage				
+
+	.BLKB			;APR0 is for task image			
+	.BLKB			;APR1 is for task image			
+	.BLKB			;APR2 is for task image			
+	.BLKB			;APR3 is for task image			
+	.BLKB			;APR4 is for task image			
+	.BLKB			;APR5 is for task image
+BASAPR:				;Base APR for window creation
+DTAAPR:	.BLKB			;APR6 is for data maps			;028
+XORAPR:	.BLKB			;APR7 is for XOR maps			;028
+ENDAPR:				;End APR for window creation + 1
+				; NOTE: Either APR may be used for	;028
+				;	scratch mapping.		;028
+
+.SBTTL	Temporary definitions for no asynchronous I/O
+
+.REM	*
+
+.MACRO	.READA
+	.READ
+	CALL	@FIRQB+FQFIL
+.ENDM	.READA
+
+.MACRO	.WRITA
+	.WRITE
+	CALL	@FIRQB+FQFIL
+.ENDM	.WRITA
+
+.MACRO	.ASTX
+	CLRB	@#FIRQB		;Ensure no directive error
+	RETURN			;And we're done
+.ENDM	.ASTX
+
+*
+
+; Keep the stuff below at the bottom of the file, it controls listing
+; options!
+
+.IIF	NDF	L$$IST,	.ENABL	CRF
+.IIF	NDF	L$$IST,	.LIST

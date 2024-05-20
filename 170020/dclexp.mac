@@ -1,0 +1,1948 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.LIBRARY	/DCL:DCLMAC.MLB/
+.NLIST
+.INCLUDE	/DCL:DCLPFX.MAC/
+.LIST
+TITLE	DCLEXP,<DCL Expression Evaluator>,0B,21-JUN-91,JFM/GMB/SDL/BTB/DLS
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DCLEXP
+;+
+;
+;  001	JFM  25-Oct-83	Created
+;  002	JFM  29-Dec-83	Removed some symbol name checks from EXPEVL
+;  003	JFM  11-Jan-84	Made NM2STR, STR2NM, $EXPR, VALUE, GOTST, $TYPE global
+;  004	JFM  05-Mar-84	Added new entry points DOEXPI and DOEXPR
+;  005	JFM  05-Mar-84	CNVSTR checks ATCMD bit to see if it should stop at
+;			first non-quoted space for @ command.
+;  006	JFM  05-Mar-84	Cleaned up use of stack
+;  007	JFM  11-Apr-84	Cleaned up use of stack in CEXPR
+;  008	JFM  08-May-84	Use + for string concatenation
+;  009	GMB  25-Jun-84	Fixed $GTCHR, CNVSTR, multiplication and division.
+;  010	SDL  06-Aug-84	Fixed STR2NM routine so it assumes a signed integer
+;  011	JFM  16-Aug-84	Call to STR2NM on 2nd operand if subtraction or .AND.
+;  012	JFM  16-Dec-84	Fixed string concatenation in AEXPR
+;
+;			[RSTS/E V9.6]
+;  013	BTK  20-Jan-88	Check for comment delimiter
+;
+;			[RSTS/E V9.7]
+;  014	JFM  24-Aug-88	Add new entry point for string expressions
+;  015	JFM  20-Sep-88	Unglobalized variables
+;
+;			[RSTS/E V10.0]
+;  016	BTB  23-Feb-90	Added F$ENVIRONMENT
+;
+;			[RSTS/E V10.1]
+;  017	DLS  17-Apr-91	Moved F$TBL to DCLFUN and globalized it here.
+;			Built the table in DCLFUN also.  Makes sense doesn't it?
+;-
+
+	.MCALL	$CUI
+	.PSECT	DCLEXP,RO,REL,CON	
+	DEFORG	DCLEXP
+
+
+
+	TMPORG	IMPURE
+VALUE::	.BLKW	2		;Value of expression  (for 32-bit result)
+OPENQ:				;Address of opening quote, (shared location)
+OPRADR:	.BLKW			;Address of conditional word to check
+STRBUF::.BLKW			;Address of available string storage
+FUNPOS::.BLKW			;Address of DCL function in expression
+LEVEL:	.BLKB			;Level of expression recursion.  Guard 
+				; against overflow.
+GOTST::	.BLKB			;0 -> we keep going, -1 -> at end of string
+$TYPE::	.BLKB			;0  -> string, 1 -> integer
+EXPFLG:	.BLKB			;Byte containing many expression flags	;015
+	.EVEN
+	UNORG
+	
+; The following bit definitions are used in the main expression parser	;014
+; and set differently depending on the entry point.			;014
+
+	.SAVE								;014
+	.BSECT	,NOCREF							;014
+E.INT:	.BLKB	.	;0=leave result alone	1=make result an INTEGER;014
+E.STR:	.BLKB	.	;0=leave result alone	1=make result a STRING	;014
+E.FCTR:	.BLKB	.	;0=<nothing special>	1=process a factor only	;014
+E.COMM:	.BLKB	.	;0=<nothing special>	1=process a command-type;014
+	.BLKB	.	;reserved (add entries for @ parm or :=)	;014
+	.RESTORE							;014
+
+.NLIST	MEB			;No need to waste paper on binary expansions
+
+; Arithmetic operators
+
+	TMPORG	TEXT		
+
+AND:	.ASCIC	"AND"
+OR:	.ASCIC	"OR"
+NOT:	.ASCIC	"NOT"
+EQ:	.ASCIC	"EQ"
+NE:	.ASCIC	"NE"
+GE:	.ASCIC	"GE"
+GT:	.ASCIC	"GT"
+LE:	.ASCIC	"LE"
+LT:	.ASCIC	"LT"
+EQS:	.ASCIC	"EQS"
+NES:	.ASCIC	"NES"
+GES:	.ASCIC	"GES"
+GTS:	.ASCIC	"GTS"
+LES:	.ASCIC	"LES"
+LTS:	.ASCIC	"LTS"
+
+	.EVEN
+	UNORG
+.LIST	MEB			
+
+COND:	.WORD	EQ,0		; NOTE: This table is definitely ordered.
+	.WORD	NE,4		;       DO NOT change the order of the 
+	.WORD	GE,10		;	conditions nor the values, which are 
+	.WORD	GT,14		;	offsets into a jump table.
+	.WORD	LE,20		;
+	.WORD	LT,24		; 	These conditions and offsets correspond
+	.WORD	EQS,0!100	;	to those found in CEXPR under JMPTBL:
+	.WORD	NES,4!100	;
+	.WORD	GES,10!100	;
+	.WORD	GTS,14!100	;
+	.WORD	LES,20!100	;
+	.WORD	LTS,24!100	;
+	.WORD	0		; End of the table
+
+
+.SBTTL	EXPEVL 	- Expression Evaluator 
+;+
+;
+; Evaluate the right-hand side of an assignment statement.
+;
+; ENTRY:
+;	$EXPEVL			threaded call
+;	CALBX	EXPEVL		MACRO call
+;
+; INPUTS:
+;	NAMADR ->  Symbol name
+;	NAMLNG =   Symbol name length
+;	LX.POS =   Scan position.  	
+;	EVLTYP =   Evaluation type
+;			0 =  Normal expression
+;			- =  @ parameter
+;			+ =  := string assignment
+;
+; OUTPUTS:
+;	C = 0 if success  (the assignment statement is syntactically valid)
+;		R0	= 0 
+;		TYPE    = indicates if symbol assignment (0=string, 1=numeric)
+;		NAMADR  = unchanged
+;		NAMLNG  = unchanged
+;		VALADR  = address of the string or integer value
+;		VALLNG	= length of the string or #2 if result is integer 
+;		LX.POS	= New scan position, first non-blank not in expression
+;		LX.ERP	= 0   (no error)
+;
+;	C = 1 if failure
+;		R0	= error code 
+;			IEXP.E  = "?Invalid expression"
+;			IOP.E  	= "?Invalid operator"
+;			U.BIGN  = "?Number too big"
+;			NOCP.E	= "?Unbalanced parentheses"
+;			DIV.E	= "?Division by zero"
+;			U.NOCQ	= "?Missing closing quote"
+;			U.UCHR	= "?Unexpected character"
+;			LGSY.E	= "?Symbol name too long"
+;		LX.ERP	= error position
+;
+; Destroys:  R0-R5  
+;-
+
+;+
+; I N T E R N A L   V A R I A B L E S 
+;
+;	R0	=	Error Status (0 if no error, else error code)
+;	R1	=	Low order value
+;	R2	=	High order value
+;	R3	->	scratch 
+;	R4	=	scratch
+;	R5	->	Character in string to parse
+;-
+
+.MACRO	$EXPEVL
+	.WORD	EXPEVL
+	.GLOBL	EXPEVL
+	.ENDM	$EXPEVL	
+
+.ENABL	LSB
+
+EXPEVL::MOV	R3,-(SP)	;Importante! Save register (threaded pointer)
+	MOV	NAMADR,R1	;Get pointer to symbol name
+	CLR	R4		;Ensure high byte is clear
+	BISB	NAMLNG,R4	;Store length of symbol name.
+	CMP	R4,#255.	;Is symbol name too long? //How could it be?//
+	BLE	10$		;No. It's fine
+	MOV	#LGSY.E,R0	;?Symbol name too long
+	SUB	R5,R1		;Calculate position of symbol name
+	MOV	R1,LX.ERP	;Position of symbol is error position
+	SEC			;Indicate error
+	BR	50$		;Quit
+
+10$:	MOV	R1,-(SP)	;Save address of symbol name
+	MOVB	R4,-(SP)	;Save length of symbol name
+	CALL	DOEXPR		;Parse an expression
+	MOVB	(SP)+,NAMLNG	;Restore name length  (C-bit unaffected)
+	MOV	(SP)+,NAMADR	;Restore address of symbol name
+	BCS	50$		;An error occurred in expression
+				.ASSUME STRTYP EQ 2
+				.ASSUME NUMTYP EQ 4
+	MOVB	$TYPE,TYPE	;Get type (0=string, 1=numeric)
+	INCB	TYPE		;Now 1 or 2
+	ASLB	TYPE		;Now 2 or 4
+	TSTB	$TYPE		;Is result string or integer?
+	BGT	30$		;If number, go process that
+	MOV	#SUBBUF,R3	;Put string into SUBBUF (255. chars max)
+	MOV	R3,VALADR	;Store address
+	MOVB	R2,VALLNG	;Store length
+	BEQ	40$		;If nothing to store then done
+20$:	MOVB	(R1)+,(R3)+	;Move a character at a time	
+	SOB	R2,20$		; until all characters are moved
+	BR	40$		;Everything is kool
+
+30$:	MOV	#VALUE+2,R3	;Value storage location
+	MOV	R2,(R3) 	;Store high order bits
+	MOV	R1,-(R3)	;Store low order bits
+	MOV	R3,VALADR	;Store address
+	MOVB	#4.,VALLNG	;Store length of result
+40$:	CLR	R0		;Success, clear C-bit
+50$:	MOV	(SP)+,R3	;Restore register
+	RETURN			;Return with status
+
+.DSABL	LSB
+
+GLOBAL	<CMDBUF,SUBBUF>
+GLOBAL	<LX.POS,LX.ERP>
+GLOBAL	<VALADR,VALLNG,TYPE,NAMADR,NAMLNG>
+GLOBAL	<IEXP.E,LGSY.E>
+
+.SBTTL	DOEXPR 	- Do an expression
+;+
+; FORMAT:
+;	CALL	DOEXPR 	(result desired is what we get)
+;	CALLX	DOEXPI 	(if result desired is explicitly an integer) 
+;	CALLX	DOEXPS 	(if result desired is explicitly an string) 
+;	CALLX	DOEXPC 	(if result desired is for command substitution)
+;	CALLX	DOEXPF 	(if we only want to parse a factor, i.e. an integer
+;			constant, a string constant, or a symbol.  This is
+;			used for things like "WRITE channel" where channel
+;			is a factor.)
+;
+; INPUTS:
+;	LX.POS	= Scan position
+;
+; OUTPUTS:
+;	C=0 if success
+;		LX.POS = New scan position.  First non-blank character not 
+;			 recognized as part of expression. (Position of "T"
+;			 in 'A .EQ. 5 + 4 THEN FOO')
+;
+;		$TYPE  = 0 (integer)  ALWAYS OUTPUT WITH DOEXPI and DOEXPF
+;			 R1 = low order word of 32-bit result
+;			 R2 = high order word of 32-bit result
+;		$TYPE  = 1 (string)
+;			 R1 = address of string
+;			 R2 = number of characters in string
+;	C=1 if error
+;		LX.ERP = position of error in command string
+;		R0     = error code (from $EXPR)
+;
+;-
+.ENABL	LSB
+
+DOEXPS::MOV	#E.STR,-(SP)	;Indicate a string command result
+	BR	5$		;Join common code
+
+DOEXPC::MOV	#E.COMM,-(SP)	;Indicate a command substitution result.  
+	BR	5$		;Join common code
+
+DOEXPF::MOV	#E.INT!E.FCTR,-(SP)
+	BR	5$		;Indicate an integer factor result
+
+DOEXPI::MOV	#E.INT,-(SP)	;Indicate an integer result
+5$:	CLRB	EVLTYP		;Normal expression (not @ param or := string)
+	BR	8$		;
+
+DOEXPR::CLR	-(SP)		;What we get is what we get
+8$:	MOV	#CMDBUF-1,R5	;Get pointer to input string
+	ADD	LX.POS,R5	;Get current scan position
+	TSTB	EVLTYP		;@ param or := string value?
+	BEQ	30$		;No.
+
+; Specifically do a STRING type parse (@ param or := string)
+
+       ;TSTB	EVLTYP		;Is this assignment for the "@" command?
+	IFMI			;If so then
+	CALL	CNVSPA		;  Convert string until space encountered
+	ELSE			;Else (:=)
+	CALL	CNVSTR		;  How boring.  Convert string
+	ENDIF			;Endif
+	BCS	60$		;If error, display "Missing closing quote";014
+	BR	40$		;Return with success
+
+; Do expression, factor, or command type parsing			;014
+
+30$:	CLRB	GOTST		;We can go now
+	CLRB	LEVEL		;Start at level 0
+	BIT	#E.FCTR!E.COMM,(SP) ;Parsing a factor or command type?	;014
+	BEQ	35$		;No, a full expression			;014
+	BIT	#E.FCTR,(SP)	;Are we only parsing a FACTOR?		;014
+	BEQ	33$		;No, something else			;014
+	CALL	FACTOR		;Parse a factor				;014
+	BCS	60$		;An error occured			;014
+	BR	40$		;Finish up				;014
+
+33$:	;BIT	#E.COMM,(SP)	;Are we only parsing a COMMAND type?	;014
+	;BEQ	xx$		;No, something else			;014
+	MOVB	#1,SRHABB	;Matching on abbreviation point is okay	;014
+	CALL	$GTCOM		;Parse a command type			;014
+	BCS	60$		;An error occured			;014
+	TSTB	$TYPE		;What type did we have?			;014
+	BEQ	40$		;String is okay				;014
+	SEC			;Indicate failure (because command 	;014
+				; substitution resulting in an integer 	;014
+				; is ignored)				;014
+	BR	60$		;Finish up				;014
+
+35$:	CALL	$EXPR		;Parse an expression			;014
+	BCS	60$		;An error occurred 			;014
+
+; Set scan position back
+
+40$:	SUB	#CMDBUF-1,R5	;Need to update scan position
+	MOV	R5,LX.POS	;Update scan position
+
+	BIT	#E.INT!E.STR,(SP) ;Convert to string or integer?	;014
+	BEQ	50$		;No, just return			;014
+	BIT	#E.INT,(SP)	;Convert to integer?			;014
+	BEQ	45$		;No, must be string			;014
+	CALL	STR2NM		;Convert to integer (could return error);014
+	BCS	60$		;Return if error 			;014
+	BR	50$		;Finish up				;014
+
+45$:	CALL	NM2STR		;Convert to string (no error possible)	;014
+	.BR	50$		;Finish up				;014
+
+; Finish up.  50$=success entry, 60$=failure 				;014
+
+				;Success - Ignore comments		;013
+50$:	CMPB	CMDBUF-1(R5),#'!;Are we pointing at a comment?		;013
+	CLC			;Don't allow carry to be set		;013
+	BNE	60$		;No comment, exit without error		;013
+	MOV	@LX.LEN,LX.POS  ;Update scan position			;013
+	INC	LX.POS		;And point past the last character	;013
+
+60$:	MOV	(SP)+,R3	;Give back stack space
+	MOVB	#0,EVLTYP	;Clear evaluation type one-shot (no touch carry)
+	RETURN			;Return with status
+
+.DSABL	LSB
+
+GLOBAL	<EVLTYP,LX.LEN,LX.POS>
+
+
+.SBTTL	$EXPR	- Evaluate an expression
+;+
+; OPERATOR PROCESSED:
+;	.OR.		Logical OR
+;
+; OPERATOR PRIORITY:    *****  6  *****
+;
+; INPUTS:
+;	R5 ->	Character in string
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R1 =	Low order value
+;		R2 =	High order value
+;		R5 ->	First character not recognized as part of expression 
+;
+;	C = 1 if failure
+;		R0 = 	?Invalid expression (hit end of string after .OR.)
+;		   =	Error message from calls to higher priority routines
+;		R5 =	Position of error
+;
+;-
+.ENABL	LSB
+
+$EXPR::	INCB	LEVEL		;We are going deeper into recursion
+	CMPB	LEVEL,#20.	;Are we at maximum recursion level?
+	BLE	10$		;No.  Then process command
+	MOV	#OUTOAS,R0	;?Expression too complicated
+	SEC			;Indicate error
+	BR	70$		;Quit with error
+
+10$:	CALL	ANDEXP		;Process an .AND. expression
+	BCS	70$		;An error occurred
+20$:	TSTB	GOTST		;Can we go on?
+	BNE	30$		;No.  But we ended successfully
+	CMPB	(R5),#'.	;Checking for .OR.
+	BEQ	40$		;Could be, check it out.
+30$:	DECB	LEVEL		;We came out of this recursion
+	CLR	R0		;No error.  clear C-bit
+	BR	70$		;Return without error
+
+40$:	MOV	R5,-(SP)	;Save this location
+	CALL	$GTCHR		;Get next character
+	MOV	#IEXP.E,R0	;Guess we are at end of string
+	BCS	50$		;If we were then error
+	MOV	#OR,OPRADR	;Set up .OR. conditional address
+	CALL	$ISIT 		;Is it .OR. operator?
+	MOV	#IOP.E,R0	;Guess it isn't .OR.
+	BCS	50$		;If it wasn't then ?Invalid operator
+	CMPB	(R5),#'.	;Hit ending period?
+	BNE	50$		;?Invalid operator
+	TST	(SP)+		;We don't need space any more
+	CALL	STR2NM		;If result was a string, convert to integer
+	BCS	70$		;An error occurred
+	CALL	$GTCHR		;Get character after period
+	MOV	#IEXP.E,R0	;?Invalid expression 
+	BCS	60$		;Wasn't one.  ?Invalid expression
+	MOV	R2,-(SP)	;Save partial expression
+	MOV	R1,-(SP)	; and low order half
+	CALL	ANDEXP		;Scan another conditional expression
+	MOV	(SP)+,R3	;Restore low order half
+	MOV	(SP)+,R4	;Restore high order half
+	BCS	70$		;An error occurred in ANDEXP
+	CALL	STR2NM		;If result was a string, convert to integer
+	BCS	70$		;An error occurred
+	BIS	R3,R1		;No. "OR" low word
+	BIS	R4,R2		; and high order word
+	BR	20$		;And try to do this again
+
+50$:	MOV	(SP)+,R5	;Point at period
+60$:	CALL	SETERR		;Set up error position
+70$:	RETURN			;Return error
+
+.DSABL	LSB
+
+GLOBAL	<IEXP.E,OUTOAS,IOP.E>
+
+.SBTTL	ANDEXP	- Evaluate an .AND. expression
+;+
+; OPERATOR PROCESSED:
+;	.AND.		Logical AND
+;
+; OPERATOR PRIORITY:	*****  5  *****
+;
+; INPUTS:
+;	R5 ->	Character in string
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R1 =	Low order value
+;		R2 =	High order value
+;		R5 ->	First character not recognized as part of an .AND.
+;			expression.
+;
+;	C = 1 if failure
+;		R0 = 	?Invalid expression (hit end of string after .AND.)
+;		   =	Error message from calls to higher priority routines
+;		R5 =	Position of error
+;
+;-
+.ENABL	LSB
+
+ANDEXP:	CALL	CEXPR		;Parse a conditional expression
+	BCS	70$		;An error occurred
+10$:	TSTB	GOTST		;Can we go on?
+	BNE	30$		;No.  But we ended successfully
+	MOV	#AND,OPRADR	;Set up .AND. conditional address
+	CMPB	(R5),#'.	;Do we have a period?
+	BNE	30$		;No error
+	MOV	R5,-(SP)	;Save position of period
+	CALL	$GTCHR		;Get next character
+	BCS	40$		;Wasn't one.  ?Invalid operator
+	CALL	$ISIT 		;Is it .AND. operator?
+	BCS	20$		;No.  Completed ANDEXP
+	CMPB	(R5),#'.	;Do we have another period?
+	BNE	40$		;No.  ?Invalid operator
+	TST	(SP)+		;Give back stack space
+	CALL	STR2NM		;If result was a string, convert to a number
+	BCS	70$		;An error occurred
+	MOV	R2,-(SP)	;Save partial expression
+	MOV	R1,-(SP)	; and low order half
+	CALL	$GTCHR		;Get character after period
+	BCS	50$		;Wasn't one.  ?Invalid expression
+	CALL	CEXPR		;Scan another conditional expression
+	BCS	60$		;Syntax error, clean up stack and leave
+	CALL	STR2NM		;If result was a string, convert to a number
+	COM	(SP)		;
+	BIC	(SP)+,R1	;"AND" low order word
+	COM	(SP)		;
+	BIC	(SP)+,R2	; and high order word
+	BR	10$		; and continue
+
+20$:	MOV	(SP)+,R5	;Point back to period
+30$:	CLR	R0		;No error.  Clear C-bit
+	RETURN			;Return without error
+
+40$:	MOV	#IOP.E,R0	;?Invalid operator
+	MOV	(SP)+,R5	;Point to period
+	CALL	SETERR		;Set up error
+	BR	70$		; and quit
+	
+50$:	MOV	#IEXP.E,R0	;?Invalid expression 
+	CALL	SETERR		;Set up error position
+60$:	MOV	(SP)+,(SP)+	;Error.  Reset stack, C-bit is unaffected
+70$:	RETURN			;Return error
+
+.DSABL	LSB
+
+GLOBAL	<IEXP.E,IOP.E>
+
+.SBTTL	CEXPR	- Evaluate a condition expression
+;+
+; OPERATORS PROCESSED:
+;	.EQ.		Arithmetic equal to
+;	.NE.		Arithmetic not equal to
+;	.GE.		Arithmetic greater than or equal to
+;	.GT.		Arithmetic greater than 
+;	.LE.		Arithmetic less than or equal to
+;	.LT.		Arithmetic less than
+;	.EQS.		String equal to
+;	.NES.		String not equal to
+;	.GES.		String greater than or equal to
+;	.GTS.		String greater than 
+;	.LES.		String less than or equal to
+;	.LTS.		String less than
+;
+; OPERATOR PRIORITY:	*****  4  *****
+;
+; INPUTS:
+;	R5 ->	Character in string
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R1 =	Low order value
+;		R2 =	High order value
+;		R5 ->	First character not recognized as part of a conditional
+;			expression.
+;
+;	C = 1 if failure
+;		R0 = 	?Invalid expression (hit EOS after conditional)
+;		   =	Error message from calls to higher priority routines
+;		R5 =	Position of error
+;
+;-
+.ENABL	LSB
+
+CEXPR:	CALL	AEXPR		;Parse an arithmetic expression
+	BCS	150$		;An error occurred
+10$:	TSTB	GOTST		;Can we go on?
+	BNE	30$		;No.  But we ended successfully
+	CMPB	(R5),#'.	;Do we have a period?
+	BNE	30$		;No.  No error	
+	CALL	$GTCHR		;Get next character
+	BCS	50$		;Wasn't one.  ?Invalid operator
+	MOV	#COND,R4	;Get address of conditional table
+20$:	MOV	(R4)+,OPRADR	;Move in condition to test 
+	CALL	$ISIT		;Is it this condition?
+	BCC	40$		;Yes.  (R4) now contains offset
+	TST	(R4)+		;Bump past offset
+	TST	(R4)		;Are we at the end of the table?
+	BNE	20$		;No.  Try the next operator
+	DEC	R5		;Point to the period
+30$:	CLR	R0		;No error, clear C-bit
+	BR	150$		;Return no error.  We are done
+	
+	;We found a period and our operator (like ".EQ") so far
+	;If there are no more characters on the line then the ISIT will
+	;not succeed ...
+
+40$:	CMPB	(R5),#'.	;Do we have a trailing period?
+	BEQ	60$		;Yes.  Process operator
+	MOVB	@-2(R4),R4	;Get length of operator
+	SUB	R4,R5		;Subtract it from scan position
+50$:	MOV	#IOP.E,R0	;?Invalid operator	
+	DEC	R5		;Point to period
+	BR	140$		;Return with error
+
+60$:	BIT	#100,(R4)	;Do we have a string compare?
+	BEQ	70$		;No.  Work with integers
+	CALL	NM2STR		;If integer, convert to a string
+	BR	80$		;Yoop!
+
+70$:	CALL	STR2NM		;If string, convert to an integer
+	BCS	150$		;An error occurred
+80$:	CALL	$GTCHR		;Get character after period
+	BCS	130$		;Wasn't one.  ?Invalid expression
+	MOV	(R4),-(SP)	;Save offset
+	MOV	R2,-(SP)	;Save high order value
+	MOV	R1,-(SP)	;Save low order value
+	CALL	AEXPR		;Evaluate an arithmetic expression
+	MOV	(SP)+,R3	;Restore low order value
+	MOV	(SP)+,R4	;Restore high order value
+	BCC	90$		;Everything is okay
+	MOV	(SP),(SP)+	;An error occured. Give back stack space
+	BR	150$		;Quit
+
+90$:	MOV	(SP)+,R0	;Save offset
+
+;R0 = offset into JMPTBL 
+;R1 = low order word - second operand
+;R2 = high order word - second operand
+;R3 = low order word - first operand
+;R4 = High order word - first operand
+;R5 = (SP) = scan position - character after second operand
+
+	BIT	#100,R0		;Do we have a string conditional?
+	BEQ	100$		;No.  Go do integer compare
+	BIC	#100,R0		;Get rid of string bit mask
+	CALL	NM2STR		;If result was an integer, convert to a string
+	MOV	R5,-(SP)	;Save scan position
+	CALL	CMPSTR		;Compare the two strings
+	BR	110$		;Test condition
+
+100$:	CALL	STR2NM		;If result was string, convert to an integer
+	BCS	150$		;An error occurred
+	MOV	R5,-(SP)	;Save scan position
+	CALL	CMPINT		;Compare the two integers
+110$:	JMP	JMPTBL(R0)	;Jump to appropriate branch instruction
+JMPTBL:	BEQ	TRUE		;0(8) 	offset to JMPTBL   --- EQ
+	BR	FALSE		;
+	BNE	TRUE		;4(8)	offset to JMPTBL   --- NE
+	BR	FALSE		;
+	BGE	TRUE		;10(8)	offset to JMPTBL   --- GE
+	BR	FALSE		;
+	BGT	TRUE		;14(8)	offset to JMPTBL   --- GT
+	BR	FALSE		;
+	BLE	TRUE		;20(8)	offset to JMPTBL   --- LE
+	BR	FALSE		;
+	BLT	TRUE		;24(8)	offset to JMPTBL   --- LT
+	BR	FALSE		;
+
+TRUE:	MOV	#1,R1		;R1 = 1 if true
+	BR	120$		;Join common routine
+
+FALSE:	CLR	R1		;R1 = 0 if false
+120$:	CLR	R2		;Even in 32 bits, high order is clear
+	CLR	R0		;No error
+	MOV	(SP)+,R5	;Restore scan position
+	MOVB	#1,$TYPE	;Resulting type is integer
+	BR	10$		;Try another conditional
+
+130$:	MOV	#IEXP.E,R0	;?Invalid expression 
+140$:	CALL	SETERR		;Set up error position
+150$:	RETURN			; ... And return with error
+	
+.DSABL	LSB
+
+GLOBAL	<IEXP.E,IOP.E>
+
+.SBTTL	AEXPR	- Evaluate an Arithmetic expression
+;+
+; OPERATORS PROCESSED:
+;	+		Arithmetic sum
+;	-		Arithmetic difference
+;	+		String concatenation ("A" + "B" = "AB")
+;
+; OPERATOR PRIORITY: 	*****  3  *****
+;
+; INPUTS:
+;	R5 ->	Character in string
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R1 =	Low order value
+;		R2 =	High order value
+;		R5 ->	First character not recognized as part of a string
+;			expression.
+;
+;	C = 1 if failure
+;		R0 = 	?Invalid expression (hit end of string after + or -)
+;		   =	Error message from calls to higher priority routines
+;		R5 =	Position of error
+;
+;-
+.ENABL	LSB
+
+AEXPR:	MOVB	EXPFLG,-(SP)		;Save expression flag throughout routine
+	MOV	STRBUF,-(SP)		;Save positon of string buffer
+	CALL	TERM			;Parse a term
+	BCS	37$			;Quit if error occured
+
+10$:	TSTB	GOTST			;Can we continue?
+	BNE	12$			;No, we can't
+	CLRB	EXPFLG			;Start with new set of flags 
+					; #EXPOPR = 0 indicates SUBTRACTION
+	CMPB	(R5),#'+		;Addition or string concatenation?
+	BEQ	15$			;Yes
+	CMPB	(R5),#'-		;Subtraction?
+	BEQ	20$			;Yes
+12$:	CLR	R0			;Set no error, clear C-bit
+	BR	37$			;Return without failure
+
+15$:	BISB	#EXPOPR,EXPFLG		;Operation is ADDITION
+20$:	CALL	$GTCHR			;Get another character
+	BCC	30$			;Got one
+	MOV	#IEXP.E,R0		;?Invalid expression
+	CALL	SETERR			;Set an error
+	BR	37$			;Quit with error
+
+30$:	TSTB	$TYPE			;What type have we got here?
+	IFEQ				;If it's a string
+	BISB	#EXP1ST,EXPFLG		;  Indicate that first arg is string
+	CMP	R1,(SP)			;  Is string located at STRBUF?
+	IFNE				;  If not then
+	MOV	(SP),R3			;    Get pointer into SUBBUF
+	CMP	R2,#SUB.BSIZ		;    Is length too big? (Shouldn't be)
+	BGT	990$			;    Error if so
+	MOV	R2,R4			;    Make a copy of its length
+	IFNE				;    If there is something to copy then
+35$:	MOVB	(R1)+,(R3)+		;      Make a copy of it ...
+	SOB	R4,35$			;      until all characters are moved
+	ENDIF				;    Endif	
+	MOV	(SP),R1			;    String begins at STRBUF
+	ENDIF				;  Endif
+	MOV	R1,STRBUF		;  Get start of string 
+	ADD	R2,STRBUF		;  Ensure STRBUF --> next available byte
+
+					;  R1 --> string (original STRBUF)
+					;  R2 =   string length
+					;  EXPFLG = EXPFLG!EXPOPR (string)
+					;  STRBUF --> Next available byte 
+					;             in string buffer (SUBBUF)
+	ENDIF				;Endif	
+
+	MOV	R5,-(SP)		;Save position of char after operator
+	MOV	R2,-(SP)		;Save value (high order first)
+	MOV	R1,-(SP)		;Save value (low order)
+	PUSH	<STRBUF>		;Save string buffer position
+	CALL	TERM			;Process next term
+	POP	<STRBUF>		;Restore string buffer position
+	MOV	(SP)+,R3		;Restore low order
+	MOV	(SP)+,R4		;Restore high order
+	BCC	40$			;No error occured
+	MOV	(SP),(SP)+		;Give back stack position 
+37$:	BR	999$			;Quit with error (with C-bit set)
+
+40$:	; (SP) --> position after operator
+
+	TSTB	$TYPE			;What was second result?
+	IFEQ				;If it was a string then
+	BISB	#EXP2ST,EXPFLG		;  Indicate it was a string
+	ENDIF				;Endif
+
+	MOV	#EXPOPR!EXP1ST!EXP2ST,R0;Is operator + and are ...
+	BICB	EXPFLG,R0		; both arguments string?
+	BNE	60$			;No, do integer arithmatic
+	
+; String concatenation. R3,R4 = first result (in STRBUF)
+; R1,R2 = second result
+
+	TST	R2			;Was second result null string?
+	IFNE				;If not then
+	MOV	STRBUF,R0		;  Point to next available slot
+	ADD	R2,R0			;  Find where end is going to be
+	CMP	R0,#SUBEND		;  Will this overflow the buffer?
+	IFGE				;  If so then
+	MOV	(SP)+,R5		;    Point at char after operator
+	BR	990$			;    Say ?String too long
+	ENDIF				;  Endif
+
+	SUB	R2,R0			;  Get back pointer
+	ADD	R2,R4			;  Add the lengths
+50$:	MOVB	(R1)+,(R0)+		;  Move the string
+	SOB	R2,50$			;  until all characters moved
+	MOV	R0,STRBUF		;  Update STRBUF pointer
+	ENDIF				;Endif
+
+	MOV	R3,R1			;R1 --> string now
+	MOV	R4,R2			;R2 = length
+	TST	(SP)+			;Give back stack space
+	BR	10$			;All finished
+
+; This is NOT string concatenation.  That means that both arguments must
+; be converted to integers before processing the command
+
+; (SP) --> position after operator
+
+60$:	BITB	#EXP1ST,EXPFLG		;Was first argument a string?
+	BEQ	70$			;No, it was an integer
+	PUSH	<R1,R2>			;Save second terms value
+	MOV	R3,R1			;Get first term back in R1,R2
+	MOV	R4,R2			;
+	CLRB	$TYPE			;Type is a string
+	CALL	STR2NM			;Ensure first argument is integer
+	MOV	R1,R3			;Put first term back into R3,R4
+	MOV	R2,R4			;
+	POP	<R2,R1>			;Restore second terms value
+	IFCS				;If an error occurred in conversion
+	MOV	(SP),(SP)+		;  Give back stack space
+	BR	999$			;  Quit
+	ENDIF				;Endif
+
+; (SP) --> position after operator
+
+70$:	BITB	#EXP2ST,EXPFLG		;Was second argument a string?
+	IFNZ				;If so then
+	CLRB	$TYPE			;  Mark it as a string
+	CALL	STR2NM			;  Make second argument an integer
+	IFCS				;  If an error occurred in conversion
+	MOV	(SP),(SP)+		;    Give back stack space
+	BR	999$			;    Quit
+	ENDIF				;  Endif
+	ENDIF				;Endif
+
+; (SP) --> position after operator
+
+80$:	BITB	#EXPOPR,EXPFLG		;Was operation addition?
+	BNE	90$			;Yes, do addition
+	NEG	R1			;No, first do double 
+	ADC	R2			;  ... precision 
+	NEG	R2			;  ... negate
+90$:	ADD	R3,R1			;Double 
+	ADC	R2			; precision 
+	ADD	R4,R2			; add/subtract
+	BVS	100$			;Overflow  ?Number too big
+	MOVB	#1,$TYPE		;Type is integer
+	TST	(SP)+			;Give back stack space 
+	JMP	10$			;And see if there is more
+
+; (SP) --> position after operator
+
+100$:	MOV	(SP)+,R5		;Point to position after operator
+	MOV	#U.BIGN,R0		;?Number too big
+	BR	995$			;Quit with error	
+	
+
+; String too long - string concatenation caused this string to overflow our
+; string buffer
+
+990$:	MOV	#BSTR.E,R0		;?String too long
+995$:	DEC	R5			;Point at operator which caused this
+	CALL	SETERR			;Set an error
+
+; End of routine - will cuase expression handler stop if C-bit is SET or if
+; $GOTST is set.  
+;
+; NOTE: This routine CANNOT change the C-BIT since it reflects the
+; 	outcome of this procedure!!!
+
+999$:	MOVB	$TYPE,$TYPE		;What type do we have? 
+	IFEQ				;If string then
+	MOV	(SP),(SP)+		;  Give back stack space
+	ELSE				;Else
+	MOV	(SP)+,STRBUF		;  Restore string buffer pointer
+	ENDIF				;Endif
+	MOVB	(SP)+,EXPFLG		;Restore expression flag
+	RETURN				;Return with C=0 for success else C=1
+
+GLOBAL	<SUBEND,BSTR.E,SUB.BSIZ>
+
+.SBTTL	TERM	- Evaluate a term
+;+
+; OPERATORS PROCESSED:
+;	*		Arithmetic product
+;	/		Arithmetic division
+;
+; OPERATOR PRIORITY:	*****  2  *****
+;
+; INPUTS:
+;	R5 ->	Character in string
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R1 =	Low order value
+;		R2 =	High order value
+;		R5 ->	First character not recognized as part of a string
+;			expression.
+;
+;	C = 1 if failure
+;		R0 = 	?Invalid expression (hit end of string after * or /)
+;			?Division by zero
+;		   =	Error message from calls to higher priority routines
+;		R5 =	Position of error
+;
+;-
+.ENABL	LSB
+
+TERM:	CALL	FACTOR		;Get a factor
+	BCS	20$		;Syntax error
+10$:	TSTB	GOTST		;Can we go on?
+	BNE	20$		;No.  But we ended ok
+	CMPB	(R5),#'*	;Multiply?
+	BEQ	30$		;Yes
+	CMPB	(R5),#'/	;Divide?
+	BEQ	30$		;Yes
+	CLR	R0		;Indicate success (clear C-bit)
+20$:	RETURN			;Return with success
+
+30$:	CALL	STR2NM		;If string, convert to an integer
+	BCS	200$		;Error occurred
+	CALL	$GTCHR		;Get next character
+	BCS	180$		;If we are at end of sting here, that's bad
+	MOV	R5,-(SP)	;Save location of character after operator 
+	DEC	(SP)		;Now it's position of operator
+	MOV	R2,-(SP)	;Save current value (high order first)
+	MOV	R1,-(SP)	;Save current value 
+	CALL	FACTOR		;Get the next factor
+	MOV	(SP)+,R3	;Restore first factor (low order)
+	MOV	(SP)+,R4	;(high order)
+	BCC	35$		;No error
+	MOV	(SP),(SP)+	;Get rid of stack space, don't affect C-bit
+	BR	200$		;An error occurred in FACTOR
+
+35$:	MOV	(SP)+,R0	;Get position of operator
+	CALL	STR2NM		;If string, convert to an integer
+	BCS	200$		;An error occurred
+	MOV	R0,-(SP)	;Save position of operator
+
+; If either operand is negative, negate it.  If neither or both get negated, 
+; R0 = 0, which implies product is positive.
+
+	CLR	R0		;R0 =  0 -> do not negate
+	TST	R2		;Is second operand negative?
+	BGE	40$		;No
+	COM	R0		;Negate flag
+	NEG	R1		;Negate second operand
+	ADC	R2		;
+	NEG	R2		;
+40$:	TST	R4		;Is first operand negative?
+	BGE	50$		;No
+	COM	R0		;Negate flag
+	NEG	R3		;Negate first operand
+	ADC	R4		;
+	NEG	R4		;
+50$:	CMPB	@(SP),#'*	;Multiply?
+	BNE	100$		;No - must be divide
+
+;Multiply R3,R4 * R1,R2 
+
+	MOV	R0,-(SP)	;Save R0
+	MOV	R5,-(SP)	;Save R5, may need it sometime
+	MOV	#32.,R0		;Set up iteration count
+	MOV	R1,-(SP)	;Save the multiplier
+	MOV	R2,-(SP)	;
+	CLR	R1		;Zero the product
+	CLR	R2		;
+	TST	(PC)+		;Bump past next instruction
+60$:	TST	(SP)+		;Move to next lower word of multiplier
+	CLR	R5		;Initialize mask
+	SEC
+70$:	ROR	R5		;Shift to next lower bit
+	BCS	60$		;Move to next word if necessary
+	ROL	R1		;Shift it to the left one place
+	ROL	R2		;
+	BCS	90$		;Overflow?
+	BIT	R5,(SP)		;See if bit of multiplier is on
+	BEQ	80$		;Branch if not - no add
+	ADD	R3,R1		;Add multiplicand into product
+	ADC	R2		;
+	ADD	R4,R2		;
+	BCS	90$		;Overflow
+80$:	;CLC			;Clear carry for above rotate (C clear already)
+	DEC	R0		;Bump step count
+	BNE	70$		;And loop
+	BIT	#100000,R2	;Branch if int "signed".  This is an unsigned 
+	BNE	90$		; routine working on signed positive integers
+	TST	(SP)+		;Clean the stack
+	BR	160$		;Restore R5 R0, see if number should be negated
+
+90$:	ADD	#6,SP		;Give back stack space
+	CMP	R0,#16.		;Were we on second word?
+	BLOS	91$		;Yes.
+	TST	(SP)+		;Pop first word off stack
+91$:	MOV	#U.BIGN,R0	;?Number too big
+	BR	110$		;Quit with error
+	
+; Divide R3,R4 / R1,R2
+
+100$:	TST	R1		;Check for division by zero
+	BNE	120$		;No problem
+	TST	R2		;Division by zero?
+	BNE	120$		;No problem
+	MOV	#DIV.E,R0	;?Division by zero 
+110$:	MOV	(SP)+,R5	;Get back position of operator
+	BR	190$		;Quit with error
+
+120$:	MOV	R0,-(SP)	;Save R0 R5
+	MOV	R5,-(SP)	;
+	MOV	#33.,-(SP)	;Set up iteration count
+	CLR	R0		;Quotient ends up in R4:R3
+	CLR	R5		;
+130$:	ROL	R5		;Expose new bit of numerator
+	ROL	R0		;
+	CMP	R2,R0		;Does denominator fit?
+	BHI	150$		;No
+	BNE	140$		;Yes
+	CMP	R1,R5		;High parts are the same, check low
+	BHI	150$		;No
+140$:	SUB	R1,R5		;Subtract denominator from remainder
+	SBC	R0		;
+	SUB	R2,R0		;
+	SEC			;Indicate new quotient bit
+150$:	ROL	R3		;Shift in new bit of quotient
+	ROL	R4		;
+	DECB	(SP)		;Check loop count
+	BGT	130$		;Loop
+	TST	(SP)+		;Give back stack space
+	MOV	R4,R2		;Move result to R2:R1
+	MOV	R3,R1		;
+160$:	MOV	(SP)+,R5	;Restore R5 R0
+	MOV	(SP)+,R0	;
+	BEQ	170$		;If R0 = 0 then no need to negate result
+	NEG	R1		;Negate result
+	ADC	R2		;
+	NEG	R2		;
+170$:	TST	(SP)+		;Give back stack space
+	JMP	10$		;And loop around
+
+180$:	MOV	#IEXP.E,R0	;?Invalid expression
+190$:	CALL	SETERR		;Set up error position
+200$:	RETURN			;Return with status
+
+.DSABL	LSB
+
+GLOBAL	<IEXP.E,DIV.E,BDNERR>
+
+.SBTTL	FACTOR	- Evaluate a factor
+;+
+; OPERATORS PROCESSED:
+;	+		Arithmetic unary plus
+;	-		Arithmetic unary minus
+;	.NOT.		Logical compliment
+;	( expr ) 	Expression in parentheses
+;
+; OPERATOR PRIORITY: 	*****  1  *****
+;
+; INPUTS:
+;	R5 ->	Character in string
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R1 =	Low order value
+;		R2 =	High order value
+;		R5 ->	First character not recognized as part of a string
+;			expression.
+;
+;	C = 1 if failure
+;		R0 = 	?Invalid expression (hit EOS after + or - or .NOT.)
+;			?Invalid symbol name
+;			?Number too big
+;			?Undefined symbol
+;		   =	Error message from calls to higher priority routines
+;		R5 =	Position of error
+;
+;-
+.ENABL	LSB
+
+FACTOR:	CALL	$GNBLK		;Get first non-blank character
+	BCS	110$		;If so then ?Invalid expression
+	CMPB	(R5),#'+	;Plus sign?
+	BNE	10$		;No
+	CALL	$GTCHR		;Get next character
+	BCS	110$		;Fail if at end of line
+	CALL	FACTOR		;And check again
+	BCS	140$		;Fail if error occurred
+	CALL	STR2NM		;If string, convert to an integer
+	BCS	140$		;Error occurred
+	BR	90$		;Return success
+
+10$:	CMPB	(R5),#'-	;Minus sign?
+	BNE	20$		;No
+	CALL	$GTCHR		;Get next character
+	BCS	110$		;Fail if at end of line
+	CALL	FACTOR		;Yes.  parse a factor
+	BCS	140$		;Die if error
+	CALL	STR2NM		;If string, convert to an integer
+	BCS	140$		;Error occurred
+	NEG	R1		;Negate lower half
+	ADC	R2		;Propaganda carry
+	NEG	R2		;And upper half
+	BR	90$		;And exit successfully
+
+20$:	CMPB	(R5),#'.	;Do we have a period?	
+	BNE	30$		;No
+	MOV	R5,R3		;Save position of period
+	CALL	$GTCHR		;Get the next character
+	BCS	100$		;Wasn't one.  ?Invalid expression
+	MOV	#NOT,OPRADR	;Do we have a .NOT.?
+	CALL	$ISIT		;Do we?
+	BCS	100$		;No.  ?Invalid expression
+	CMPB	(R5),#'.	;Do we have a period?	
+	BNE	100$		;No.  ?Invalid expression
+	CALL	$GTCHR		;Get next character
+	BCS	110$		;Wasn't one.  That's bad		
+	CALL	FACTOR		;Yes.  parse a factor
+	BCS	140$		;Error occurred
+	CALL	STR2NM		;If string, convert to an integer
+	BCS	140$		;Error occurred
+	COM	R1		;Take compliment
+	COM	R2		;Compliment upper half too
+	BR	90$		;And exit successfully
+
+30$:	CMPB	(R5),#'(	;Open parenthesis?
+	BNE	50$		;No
+	MOV	R5,-(SP)	;Save position of parenthesis
+	CALL	$GTCHR		;Get next character
+	BCS	40$		;None to get? Error
+	CALL	$GNBLK		;Get next non-blank
+	BCS	40$		;Die if at end of string
+	CALL	$EXPR		;Evaluate the expression
+	BCS	130$		;Error in expression
+	CMPB	(R5),#')	;Must have close parenthesis
+	BNE	40$		;No, we don't.  Fail
+	TST	(SP)+		;Give back stack space
+	CALL	$GTCHR		;Success.  Get next character
+	BR	80$		;And succeed
+
+40$:	MOV	#NOCP.E,R0	;?Matching parenthesis missing
+	MOV	(SP)+,R5	;Position of "(" is error position
+	CALL	SETERR		;Set up error position
+	BR	140$		;Indicate failure
+
+50$:	CMPB	(R5),#'"	;Quote?
+	BNE	60$		;Nope
+	CALL	$GTSTR		;Yep. process a string
+	BCS	140$		;Error occurred.  quit
+	BR	80$		;And exit
+
+60$:	CALL	$GTNUM		;Scan a number
+	BCC	80$		;And exit if found one
+	TST	R0		;Was there an error?
+	BNE	140$		;Yes.  That means trouble
+70$:	CALL	$GTSYM		;No.  Just wasn't a number. Try a variable 
+	BCS	140$		;Error
+80$:	CALL	$GNBLK		;Success.  Scan to next non-blank
+90$:	CLR	R0		;No error.  Clear C-bit
+	RETURN			;Finished
+
+100$:	MOV	R3,R5		;Point to period
+110$:	MOV	#IEXP.E,R0	;?Invalid expression 
+120$:	CALL	SETERR		;Set up error position
+	BR	140$		;Give back stack space
+
+130$:	COM	(SP)+		;Give back stack space
+140$:	SEC			;Indicate error
+	RETURN			;Return with error status
+
+.DSABL	LSB
+
+GLOBAL	<IEXP.E,NOCP.E>
+
+.SBTTL	$GTNUM	- Convert a number to binary
+;+
+; INPUTS:
+;	R5 ->	Integer
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R1 =	Low order value
+;		R2 =	High order value
+;		R5 ->	First character which is not an integer
+;		$TYPE = 1 (integer)
+;
+;	C = 1 if failure
+;		R0 =    0 -> Number was not found.
+;		R0 = 	?Number too big
+;		R5 =	Position of error
+;
+;-
+.ENABL	LSB
+
+
+$GTNUM:	MOV	R5,-(SP)	;Remember position of number
+	CLR	R2		;Number of digits in number
+10$:	MOVB	(R5),R1		;Get current char
+	CMPB	R1,#'0		;Is it a digit?
+	BLT	20$		;No
+	CMPB	R1,#'9		;Maybe
+	BGT	20$		;No
+	INC	R2		;Another digit discovered
+	CALL	$GTCHR		;Get next character
+	BCC	10$		;Loop	
+20$:	TST	R2		;Were there any found?
+	BEQ	40$		;Nope
+	BIS	#100000,R2	;Signed integer is assumed
+	MOV	(SP),R0		;Input pointer
+	MOV	#VALUE,R1	;Place to put number
+	;MOV	R2,R2		;Number of characters in number
+	CALLX	$XDT2B		;Convert number
+	BCS	30$		;Error in number  //Like what?//
+	TST	R2		;Were all characters looked at?
+	BGE	30$		;Nope
+	MOV	(R1),R2		;High order
+	MOV	2(R1),R1	;Low order
+	MOVB	#1,$TYPE	;Type is integer
+	TST	(SP)+		;Give back stack space
+	CLR	R0		;No error.  Clear C-bit
+	RETURN
+
+30$:	MOV	(SP)+,R5	;Point back to number
+	MOV	#U.BIGN,R0	;?Number too big
+	CALL	SETERR		;Set up position of this monster number
+	BR	50$		;Quit with error
+
+40$:	CLR	R0		;# not found.  We are not staring at digit
+	COM	(SP)+		;Indicate error
+50$:	RETURN			;Quit with failure
+
+.DSABL	LSB
+
+GLOBAL	<U.BIGN>
+
+.SBTTL	$GTSTR	- Process a string
+;+
+; INPUTS:
+;	R5 	->	first quote (").
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R5	->	character after next quote (")
+;		R1	->	string 
+;		R2	=	length of string 
+;		$TYPE	=	0 (string)
+;	C = 1 if failure
+;		R5	->	unchanged
+;		R0	=	?Missing closing quote
+;-
+.ENABL	LSB
+
+$GTSTR:	MOV	R3,-(SP)	;Save register
+	MOV	R5,-(SP)	;Save scan position
+	CALL	$GTCHR		;Get next character
+	BCS	50$		;If none available, ?Missing closing quote
+	CLR	R2		;Zero string length
+	MOV	STRBUF,R3	;Address of quote
+	MOV	R3,R1		;Save address
+
+10$:	CMPB	(R5),#'"	;Is character a quote?
+	BEQ	30$		;Yes
+20$:	INC	R2		;Increase character length	
+	MOVB	(R5),(R3)+	;Move character to buffer
+	CALL	$GTCHR		;Get next character
+	BCS	50$		;Hit eos -> ?Missing closing quote
+	BR	10$		;Check next character
+
+30$:	CALL	$GTCHR		;Get another character
+	BCS	40$		;Weren't any more.  Finish up
+	CMPB	(R5),#'"	;Another quote?
+	BEQ	20$		;Yes.  This one counts	
+40$:	TST	(SP)+		;Throw away original scan position
+	MOV	(SP)+,R3	;Restore register
+	ADD	R2,STRBUF	;Update buffer space
+	CLRB	$TYPE		;Type is string
+	RETURN			;Finished here (C-Bit is clear)
+
+50$:	MOV	#U.NOCQ,R0	;?Missing closing quote
+	MOV	(SP)+,R5	;Point to opening quote
+	CALL	SETERR		;Set up error position
+	MOV	(SP)+,R3	;Restore register
+	RETURN			;Quit with error (C-Bit is set)
+
+.DSABL	LSB
+
+GLOBAL	<U.NOCQ>
+
+.SBTTL	$GNBLK	- Get first non-blank character
+; INPUTS:
+;	R5 	->	Character in string
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R5	->	next non-blank, non-tab character 
+;	C = 1 if failure
+;		R5	->	EOS
+;		GOTST	=	-1  (We hit EOS)
+;-
+.ENABL	LSB
+
+$GNBLK::CALL	EOS		;Are we already at end of string?
+	BCS	20$		;Yes
+	CMPB	(R5),#TAB	;Is character a tab?
+	BEQ	10$		;If so then advance
+	CMPB	(R5),#SPACE	;Is character a space?
+	BEQ	10$		;If so then advance
+	CLC			;We are okay, no space found
+	RETURN			;Return (C-bit is clear)
+
+10$:	CALL	$GTCHR		;Yes. look at next character
+	BCC	$GNBLK		;Continue looking for spaces
+20$:	RETURN			;Return (C-bit is set) we hit EOS
+
+.DSABL	LSB
+
+.SBTTL	$GTCHR	- Get next character
+.SBTTL	EOS - test for end of string
+;+
+; INPUTS:
+;	R5 	->	Character in string
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R5	->	Next character in string for CALL $GTCHR
+;		R5	->	unchanged for CALL EOS
+;	C = 1 if failure
+;		R5	->	EOS
+;		GOTST	=	-1
+;-
+.ENABL	LSB
+
+$GTCHR::INC	R5		;Increase R5, guess we will be okay
+	CLRB	GOTST		;Guess that we are not at end of line	
+EOS:	MOV	R2,-(SP)	;Save a register
+	MOV	#CMDBUF-1,R2	;Compute end of
+	ADD	@LX.LEN,R2	; string
+	CMP	R5,R2		;Did we just fall off end of string?
+	BHI	10$		;Yes
+	MOV	(SP)+,R2	;No.  restore register
+	CLC			;Indicate no error
+	RETURN			;Return success
+
+10$:	MOV	(SP)+,R2	;Restore register
+	MOVB	#-1,GOTST	;We can't go any further
+	SEC			;Indicate we are at the end of string
+	RETURN			;Return
+
+.DSABL	LSB
+
+GLOBAL	<CMDBUF,LX.LEN>
+
+.SBTTL	$GTSYM	- Get a symbol or evaluate function
+;+
+; INPUTS:
+;	R5 	->	Non-digit
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R5	->	Character not in symbol name
+;		R1	->	String in symbol table if symbol is string
+;			=	Low order value of symbol if symbol is integer
+;		R2	=	length of string if symbol is string
+;			=	High order value of symbol if symbol is integer
+;		$TYPE	=	0 if symbol is string, 1 if symbol is integer
+;	C = 1 if failure
+;		R5	= 	Position of error
+;		R0	=	?Invalid symbol name
+;				?Undefined symbol
+;-
+.ENABL	LSB
+
+$GTSYM:	MOV	R4,-(SP)	;Save register 4 
+	MOV	R5,-(SP)	;Save register 5
+	CMPB	(R5),#'F	;Checking for special prefix name:
+	BEQ	10$		;   F$
+	CMPB	(R5),#'f	;Symbol names cannot begin with "F$".
+	BNE	60$		;It wasn't "F$"
+10$:	CALL	$GTCHR		;Maybe it is, we have an "F" so far.
+	BCS	60$		;Definitely is not.
+	CMPB	(R5),#'$	;Have "F$"?
+	BNE	60$		;Nope
+	CALL	$GTCHR		;Point to next character
+	BCS	30$		;Wasn't one. 
+
+; Have a symbol beginning w/"F$", it's really a function.  Evaluate it.
+
+	MOV	#F$TBL,R4	;Go through list of legal DCL functions
+20$:	TST	(R4)		;Have we gone through entire list?
+	BNE	40$		;No.  Try the next function
+30$:	MOV	#IFUN.E,R0	;Yes. Then we hit an invalid function name (F$)
+	MOV	(SP),R5		;Get R5 (position of bad symbol)
+	CALL	SETERR		;Set up error position, failure (set C-bit)
+	BR	70$		;Join cleanup code, quit with error	;014
+
+40$:	MOV	(R4)+,OPRADR	;Move in function to test
+	CALL	$ISIT		;Is it this function?
+	BCC	50$		;Yes.  Do it
+	TST	(R4)+		;Bump past routine name
+	BR	20$		;Continue looking through the functions
+
+50$:	MOV	(SP),FUNPOS	;At top of stack is position of function
+	PUSH	<ARGPOS>	;Push position of argument in case	;014
+				;  functions call other functions	;014
+	CALL	@(R4)		;Go to appropriate routine
+	POP	<ARGPOS>	;Pop argument position			;014
+	MOV	(SP),FUNPOS	;Restore position of function		;014
+	BR	70$		;Join cleanup code, return with status	;014
+
+; Was not a function.  We have a symbol name or garbage.
+	
+60$:	MOV	(SP),R5		;Point at first character again.
+	CLRB	SRHABB		;Don't match on abbreviation point
+	CALL	$GTCOM		;Attempt to match a symbol only		;014
+	;BCS	70$		;Branch if error			;014
+
+; Cleanup code
+
+70$:	INC	(SP)+		;Clean up stack, don't touch C-bit	;014
+	MOV	(SP)+,R4	;Restore R4 don't touch C-bit		;014
+	RETURN			;Return with status
+
+.DSABL	LSB
+
+GLOBAL	<NAMADR,IFUN.E,SRHABB,ARGPOS,F$TBL>
+
+.SBTTL	$GTCOM	- Get a DCL command.  Used by command substitution only!
+;+
+;
+; $GTCOM - Get a DCL command.  Used by command substitution only!
+;
+; INPUTS:
+;	R5 	->	Next character in buffer
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R5	->	Character not in symbol name
+;		R1	->	String in symbol table if symbol is string
+;			=	Low order value of symbol if symbol is integer
+;		R2	=	length of string if symbol is string
+;			=	High order value of symbol if symbol is integer
+;		$TYPE	=	0, result is always a string
+;	C = 1 if failure
+;		R5	= 	Position of error
+;		R0	=	?Invalid symbol name (returned by NUMCHR)
+;				?Undefined symbol (returned by LOKSYM)
+;-
+.ENABL	LSB
+
+$GTCOM:	MOV	R5,NAMADR	;Set up pointer to name			;014
+	CALL	NUMCHR		;Get number of chars in symbol name	;014
+	BCS	10$		;Error if none				;014
+	CALL	LOKSYM		;Look up symbol				;014
+10$:	RETURN			;Return with status			;014
+
+.DSABL	LSB								;014
+
+GLOBAL	<NAMADR,SRHABB>							;014
+
+.SBTTL	NUMCHR	- Get number of characters in symbol name
+;+
+; NUMCHR - Get number of characters in symbol name
+;
+; INPUTS:
+;	R5 	->	Next character in buffer
+;
+; FORMAT:
+;	CALL NUMCHR
+;
+; OUTPUTS:
+;	C=0 if success and:
+;		R5	->	Character not in symbol name
+;		R1	=	Number of characters in symbol name
+;
+;	C=1 if failure and:
+;		R0 	= 	?Unexpected error
+;		LX.ERP  ->	Error position (first character in this case)
+;-	
+.ENABL	LSB
+
+NUMCHR:	CLR	R1		;R1 = #chars in symbol name		;014
+	BR	20$		;First char can't be a digit or an _	;014
+
+10$:	CMPB	(R5),#'0	;Is it a digit?				;014
+	BLO	20$		;No, it's not even a letter		;014
+	CMPB	(R5),#'9	;Maybe					;014
+	BLOS	40$		;Definitely a digit			;014
+	CMPB	(R5),#'_	;Is it an underscore?			;014
+	BEQ	40$		;Yes					;014
+20$:	CMPB	(R5),#'$	;Is it a dollar sign?			;014
+	BEQ	40$		;Yes					;014
+30$:	CMPB	(R5),#'A	;Is it a capital letter?		;014
+	BLO	50$		;No. it's not a letter at all		;014
+	CMPB	(R5),#'Z	;Maybe					;014
+	BLOS	40$		;Definitely a capital letter		;014
+	CMPB	(R5),#'a	;Is it a lowercase letter?		;014
+	BLO	50$		;No. not a letter			;014
+	CMPB	(R5),#'z	;Maybe					;014
+	BGT	50$		;No					;014
+40$:	INC	R1		;Found a legal symbol name character	;014
+	CALL	$GTCHR		;Get next character			;014
+	BCC	10$		;Check next character			;014
+
+50$:	TST	R1		;Were there any characters in the name?	;014
+	BNE	60$		;Branch if not (with C-bit clear)	;014
+	MOV	#U.UCHR,R0	;?Unexpected character (not a number)	;014
+	CALL	SETERR		;Set error position			;014
+60$:	RETURN			;Return with status			;014
+
+.DSABL	LSB								;014
+
+GLOBAL	<U.UCHR>							;014
+
+.SBTTL	LOKSYM	- Look up symbol in symbol table
+;+
+; LOKSYM - Look up symbol in symbol table
+;
+; INPUTS:
+;	R1 	= number of characters in symbol name
+;	NAMADR 	= position of start of symbol 
+;	SRHABB 	= 0 if we are not to look up using abbriviation points,
+;		 1 otherwise
+;
+; FORMAT:
+;	CALL LOKSYM
+;
+; OUTPUTS:
+;	C=0 if success and:
+;		$TYPE=0 if string with
+;			R1 -> string
+;			R2 =  length
+;		$TYPE=1 if integer with
+;			R1 = Low order value
+;			R2 = High order value
+;	C=1 if failure and:
+;		R0 	= ?Undefined symbol (returned by GETVAL)
+;		LX.ERP 	->  symbol name
+;-
+.ENABL	LSB
+
+LOKSYM:	MOVB	R1,NAMLNG	;Set up length for search routine	;014
+	CLR	SCOPE		;Look in both tables			;014
+	MOVB	#STRTYP,TYPE	;Look for string or numeric symbols	;014
+	PUSH	<NAMADR>	;Save address of symbol name		;014
+	CALLX	GETVAL		;Search for this symbol			;014
+		; R0 -> string or numeric value if carry clear OR	;014
+		; R0 =  error code					;014
+		; TYPE = STRTYP or NUMTYP depending on symbol found	;014
+	POP	<NAMADR>	;Restore address of symbol name		;014
+	BCS	10$		;Symbol was not found			;014
+				.ASSUME STRTYP EQ 2			;014
+				.ASSUME NUMTYP EQ 4			;014
+	MOVB	TYPE,$TYPE	;Get type field (4=numeric, 2=string)	;014
+	ASRB	$TYPE		;Now 2 or 1				;014
+	ASRB	$TYPE		;Now 1=numeric, 0=string		;014
+	MOV	R0,R1		;Get address of value			;014
+	CLR	R0		;Clear error code for exit without error;014
+	TSTB	$TYPE		;Is this a numeric symbol?		;014
+	IFGT			;If so then				;014
+	MOV	(R1)+,VALUE	;  Get low word into VALUE		;014
+	MOV	(R1),R2		;  Get high word into R2		;014
+	MOV	R2,VALUE+2	;  Get high word into VALUE+2		;014
+	MOV	-(R1),R1	;  Get low word into R1			;014
+	ELSE			;Else it is a string symbol		;014
+	CLR	R2		;  Ensure high byte is clear		;014
+	BISB	(R1)+,R2	;  Save value length, point to value	;014
+	ENDIF			;Endif					;014
+	;CLC			;Indicate no error			;014
+	BR	20$		;Return					;014
+
+10$:	MOV	NAMADR,R5	;Get position of symbol name		;014
+	;MOV	#USYM.E,R0	;?Undefined symbol			;014
+	CALL	SETERR		;Set error position, indicate failure	;014
+20$:	RETURN			;Return with status			;014
+
+.DSABL	LSB
+
+GLOBAL	<NAMADR,NAMLNG,SCOPE,TYPE>
+
+.SBTTL	$ISIT	- Check for an ASCIC string
+;+
+; FORMAT: 	CALL	$ISIT 
+;
+; INPUTS:	OPRADR  =       address of an ASCIC target string
+;		R5	->	input string
+;
+; OUTPUTS:
+;	GOTST = 0	-> 	We did not end up at end of string
+;	GOTST = -1	->	We ended up at end of line
+;
+;	C=0 if success
+;		R5	->	Character after string if SUCCESS
+;	C=1 if failure
+;		R5	->	Unchanged if FAILURE
+;-
+
+.ENABL	LSB
+
+$ISIT:	MOV	R1,-(SP)	;Save registers 
+	MOV	R4,-(SP)	;
+	MOV	R3,-(SP)	;
+	MOV	R2,-(SP)	;
+	MOV	R5,-(SP)	;
+	CLR	R1		;We haven't yet reached minumum abbreviation
+	MOV	OPRADR,R4	;Get pointer to .ASCIC string
+	MOVB	(R4)+,R3	;Get count
+10$:	TSTB	GOTST		;Have we hit end of string?
+	BEQ	20$		;No.  Keep checking for a match
+	TST	R1		;Did we reach minumum abbreviation?
+	BNE	70$		;Yes.  Success
+	BR	80$		;No. Failure.
+
+20$:	MOVB	(R5),R2		;Save character
+	CMPB	R2,#'a		;Is it lower case?
+	BLO	30$		;No
+	CMPB	R2,#'z		;Maybe
+	BHI	30$		;Definitely not
+	BICB	#40,R2		;Convert to upper case
+30$:	CMPB	(R4)+,R2	;Is this right so far?
+	BEQ	40$		;Yes.  Keep going.
+	TST	R1		;Did we reach minumum abbreviation?
+	BNE	60$		;Yes.  Success
+	BR	80$		;No.  Indicate failure
+
+40$:	CMPB	(R4),#'-	;Have we reached minumum abbreviation?
+	BNE	50$		;No.
+	COM	R1		;Yes.  Indicate we reached it
+	DEC	R3		;This character doesn't count
+	TSTB	(R4)+		;Point to next character
+50$:	CALL	$GTCHR		;Get next character
+	SOB	R3,10$		;Try again  (C unaffected)
+	BCS	70$		;If no more characters then success
+	MOVB	(R5),R2		;Else copy character
+	CMPB	R2,#'a		;Is it lower case?
+	BLO	60$		;No
+	CMPB	R2,#'z		;Maybe
+	BHI	60$		;Definitely not
+	BICB	#40,R2		;Convert to upper case
+60$:	CMPB	R2,#'0		;Is next character a digit?
+	BLT	70$		;Nope
+	CMPB	R2,#'9		;Maybe
+	BLE	80$		;Yes.  That means he misspelled the keyword
+	CMPB	R2,#'A		;Is next character a letter?
+	BLT	70$		;No
+	CMPB	R2,#'Z		;Maybe
+	BLE	80$		;Yes.  That means he misspelled the keyword
+70$:	TST	(SP)+		;We don't want original scan position (Clear C)
+	BR	90$		;GOTST is set (by $GTCHR) to indicate EOS
+
+80$:	MOV	(SP)+,R5	;Restore scan position
+	SEC			;Indicate failure
+90$:	MOV	(SP)+,R2	;Restore register 2  (C-BIT unaffected)
+	MOV	(SP)+,R3	;Restore register 3  (C-BIT unaffected)
+	MOV	(SP)+,R4	;Restore register 4  (C-BIT unaffected)
+	MOV	(SP)+,R1	;Restore register 1  (C-BIT unaffected)
+	RETURN	
+
+.DSABL	LSB
+
+.SBTTL	CMPINT	- Compare two 32-bit integers
+;+
+;CALL	CMPINT
+;
+; INPUTS:
+;	R1	=	Low order of 2nd 32 bit number
+;	R2	=	High order of 2nd 32 bit number
+;	R3	=	Low order of 1st 32 bit number
+;	R4	=	High order of 1st 32 bit number
+;-
+.ENABL	LSB
+
+CMPINT:	CMP	R4,R2		;Compare high order of 1st to high order of 2nd
+	BNE	40$		;If not the same then condtion code is correct
+	TST	R3		;Check signs of low order of 1st 
+	BMI	20$		;
+	TST	R1		;... and 2nd number.
+	BMI	30$
+10$:	CMP	R3,R1		;Arrive here if both are postive (or zero)
+	BR	40$		;Compare will get correct condition codes
+20$:	TST	R1
+	BMI	10$
+30$:	CMP	R1,R3		;Arrive here if one is negative, other positive
+				;Compare must be reversed to get correct codes.
+40$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	CMPSTR	- Compare two strings
+;+
+; INPUTS:
+;	R3	->	First string
+;	R4	=	Length of first string
+;	R1	->	Second string
+;	R2	=	Length of second string
+;
+; CAUTION:
+;
+;       R5 is munged, and registers are VERY scarce.  Since we can't even do
+;       a MOV without destroying the condition codes, R5 MUST be saved/restored
+;       by the caller.
+;
+;-
+.ENABL	LSB
+
+CMPSTR::
+	MOV	R4,R5		;Guess that R4 has the shorter string length
+	CMP	R2,R4		;Did it?
+	BGE	10$		;Yup.  (It's okay if they are same length)
+	MOV	R2,R5		;Guessed wrong.  Now R0=length of short string
+10$:	TST	R5		;They both have length?
+	BEQ	50$		;Nope.  Okay, then let their lengths decide.
+
+20$:	CMPB	(R3)+,(R1)+	;Compare characters. (They have at least one)
+	BNE	60$		;If not the same then we are done
+	SOB	R5,20$		;Else continue to try rest of the characters
+
+50$:	CMP	R4,R2		;They are equal up to the shortest string
+60$:	RETURN			;let the lengths decide
+
+.DSABL	LSB
+
+.SBTTL	STR2NM	- Convert string to a number
+;+
+; INPUTS:
+;	R1	->	string
+;	R2	=	length
+;
+; OUTPUTS:
+;	C = 0 if success
+;		R1	=	low order value
+;		R2	=	high order value (16-bit for now)
+;		R0 	=	unchanged
+;		$TYPE	=	1 (integer)
+;	C = 1 if error
+;		R0	=	U.BIGN (?Number too big)
+;-
+
+.ENABL	LSB
+
+STR2NM::MOV	R0,-(SP)	;Store register
+	MOV	R3,-(SP)	;Store register
+	TSTB	$TYPE		;What type do we have?
+	BGT	80$		;Integer already
+	TST	R2		;Is this a zero length string?
+	BEQ	70$		;Return 0 if so
+	MOVB	(R1),R3		;Store character
+	BICB	#40,R3		;Convert to upper if lower
+	CMPB	R3,#'Y		;Is first input character a "Y" or "y"?
+	BEQ	10$		;Yes.
+	CMPB	R3,#'T		;How about "T" or "t"?
+	BNE	20$		;No
+10$:	MOV	#1,R1		;Result of this string is #1.
+	CLR	R2		;High order is zero
+	BR	80$		;Finished
+
+20$:	CMPB	(R1),#SPACE	;Are we staring at a space?
+	BEQ	25$		;Yes
+	CMPB	(R1),#TAB	;Are we staring at a tab?
+	BNE	27$		;No
+25$:	INC	R1		;Yes, point to next character
+	SOB	R2,20$		;Decrease character count
+	BR	70$		;No more characters --> result is zero
+
+27$:	CLR	R3		;Negate flag (0 -> do not negate)
+30$:	CMPB	(R1),#'+	;Is character a plus sign?
+	BEQ	40$		;Yes
+	CMPB	(R1),#'-	;Is character a minus sign?
+	BNE	50$		;No
+	COM	R3		;Toggle negate flag
+40$:	TSTB	(R1)+		;Point to next character	
+	SOB	R2,30$		;Check next character
+	BR	70$		;All characters looked at, result is 0
+
+50$:	CMPB	(R1),#'0	;Are we looking at a digit?
+	BLT	70$		;No
+	CMPB	(R1),#'9	;Maybe
+	BGT	70$		;No, don't bother doing conversion
+	
+	MOV	R1,VALUE	;Get address of string
+	ADD	R2,VALUE	;Add number of characters in string
+53$:	DEC	VALUE		;Point to last character in string
+	CMPB	@VALUE,#SPACE	;Is last character a space?
+	BEQ	55$		;Yes
+	CMPB	@VALUE,#TAB	;Is last character a tab?
+	BNE	57$		;No
+55$:	SOB	R2,53$		;Yes, decrease character count
+
+57$:	MOV	R1,R0		;Input pointer
+	MOV	#VALUE,R1	;Output buffer pointer
+	BIS	#100000,R2	;Signed integer is assumed
+	;MOV	R2,R2		;Length of input
+	CALLX	$XDT2B		;Call conversion routine
+	BCS	90$		;An error occurred  //Like what?//
+	TST	R2		;Were all characters looked at?
+	BGE	70$		;No.  Result is zero
+60$:	MOV	(R1),R2		;Move in high order word
+	MOV	2(R1),R1	;Move in low order word
+	TST	R3		;Do we need to negate?
+	BGE	80$		;No
+	NEG	R1		;Yes, negate lower half
+	ADC	R2		;Propoganda carry
+	NEG	R2		;And upper half
+	BR	80$		;Finish up
+
+70$:	CLR	R1		;No.  Then result is zero
+	CLR	R2		;High order word is zero
+80$:	MOVB	#1,$TYPE	;Type is integer
+	MOV	(SP)+,R3	;Restore register
+	MOV	(SP)+,R0	;Restore register
+	CLC			;Indicate no error
+	RETURN
+			
+90$:	MOV	(SP)+,(SP)+	;Give back stack space (C bit is set)
+	MOV	#U.BIGN,R0	;?Number too big
+	;SEC			;Indicate failure (but we don't know where 
+	RETURN			; error was since string could have been result
+				; of for example, a concatenation of symbols.)
+
+.DSABL	LSB
+
+GLOBAL	<U.BIGN>
+
+.SBTTL	NM2STR	- Convert an integer to a string
+;+
+; INPUTS:
+;	R1	=	integer
+;
+; OUTPUTS:
+;	R1	=	address of string
+;	R2	=	number of characters in string
+;	R0	=	unchanged, NO ERROR CAN OCCUR
+;	$TYPE	=	0 (string)
+;
+; No errors are possible
+;-
+.ENABL	LSB
+
+NM2STR::TSTB	$TYPE		;What type do we have?
+	BEQ	10$		;If string already then quit
+	MOV	R0,-(SP)	;Save register
+	MOV	R3,-(SP)	;Save register
+	MOV	STRBUF,R0	;Output buffer location
+	MOV	#VALUE,R3	;Point at location of value
+	MOV	R2,(R3)		;Move in high order bits
+	MOV	R1,2(R3)	;Move in low order bits
+	MOV	R3,R1		;Point at location of value
+	CLR	R2		;Want to suppress leading zeros and spaces
+	CALLX	$CDBLS		;Convert to ascii
+	MOV	R0,R2		;Next free slot
+	MOV	STRBUF,R1	;Address of string
+	SUB	R1,R2		;Compute length of string
+	MOV	R0,STRBUF	;Store next free slot
+	CLR	R0		;No error
+	MOV	(SP)+,R3	;Restore register
+	MOV	(SP)+,R0	;Restore register
+	CLRB	$TYPE		;Type is string, (C-BIT is clear)
+10$:	RETURN			;(No error possible)
+
+.DSABL	LSB
+
+.SBTTL 	CNVSTR - Convert the character string 
+;+
+;CNVSTR - convert the character string on the assignment statement
+;
+;DESCRIPTION:
+;	CNVSTR is invoked when a string assignment statement of the form
+;			ABC:= or ABC :== 
+;	is encountered.  If the character string that follows is not enclosed 
+;	in quotation marks, then the following rules are applied to convert the
+;	string before adding it to the symbol table:
+;
+;		1. Lower case letters are converted to uppercase.
+;		2. leading and trailing spaces and tabs are removed.
+;		3. Multiple spaces and tabs are compressed to a single space.
+;
+; FORMAT:
+;	CALL CNVSTR
+;
+; INPUTS:
+;	R5 	->	1st character in the string to examine
+;	R4 	=	LX.POS
+;
+; OUTPUTS:	
+;	C = 0 if success
+;		R1	=	address of resulting string
+;		R2	=	length
+;	C = 1 if failure
+;		R0	=	?Missing closing quote
+;		R5	=	position of error
+;
+;-
+.ENABL	LSB
+
+CNVSPA:	MOV	#-1,-(SP)	;Indicate "stop at first unquoted space"
+	BR	10$		;Fire away
+
+CNVSTR:	CLR	-(SP)		;Indicate "go to the end!"
+10$:	MOV	STRBUF,R1	;Address of buffer to hold converted chars
+	CLR	OPENQ		;Assume that there is no opening quote
+	CLR	R2		;Initialized character count
+	CALL	$GNBLK		;Get the first non-blank character
+	BCS	130$		;EOS we are done.
+20$:	CMPB	(R5),#'"	;Is the opening character a quote?
+	BNE	40$		;No. Continue on
+	MOV	R5,OPENQ	;Note position of opening quote
+	CALL	$GTCHR		;Get the next character
+	BCS	120$		;Error, No closing quote
+30$:	CMPB	(R5),#'"	;Another quote? (we are already inside quotes)
+	BNE	80$		;No.  Move character without munging it
+	CALL	$GTCHR		;Get the next character
+	BCS	130$		;No more.  That means success
+	CMPB	(R5),#'"	;Yet another quote?
+	BEQ	80$		;Yes.  Move a single quote
+	CLR	OPENQ		;No.  Then we are no longer inside quotes
+40$:	CMPB	(R5),#SPACE	;Is it a 'space'?
+	BEQ	50$		;Yes
+	CMPB	(R5),#TAB	;Is it a 'tab'?
+	BNE	70$		;No
+50$:	TST	OPENQ		;Are we inside quotes?
+	BNE	60$		;Yes
+	TST	(SP)		;No,  are we supposed to stop now?
+	BNE	130$		;Yes, we are now done
+60$:	CALL	$GNBLK		;Get next non-blank character
+	BCS	130$		;EOS we are done.
+	MOVB	#SPACE,(R1)+	;Move a space into our buffer
+	INC	R2		;Account for the character
+	DEC	R5		;Go to character right before the non-blank
+	BR	100$		;We just moved a character
+
+70$:	CMPB	(R5),#'a	;Is this character lower case?
+	BLT	80$		;Nope
+	CMPB	(R5),#'z	;Maybe
+	BGT	80$		;Definitely not
+	MOVB	(R5),(R1)	;Move in the character
+	BICB	#40,(R1)+	;Convert character to lower case
+	BR	90$		;Count the character	
+
+80$:	MOVB	(R5),(R1)+	;Move the character
+90$:	INC	R2		;We moved another character
+100$:	TST	OPENQ		;Are we in quotes?
+	BNE	110$		;Yes
+	CALL	$GTCHR		;No. Get next character
+	BCS	130$		;No more characters. Success
+	BR	20$		;Continue from begining
+
+110$:	CALL	$GTCHR		;No. Get next character
+	BCC	30$		;Found one.  Continue from inside quotes
+120$:	MOV	OPENQ,R5	;Position of opening quote is position of error
+	CALL	SETERR		;Set up error position
+	MOV	#U.NOCQ,R0	;?Missing closing quote
+	MOV	(SP),(SP)+	;Give back stack space
+	RETURN			;Return with error
+
+130$:	MOV	STRBUF,R1	;R1 -> (possibly translated) string
+	CLRB	$TYPE		;Indicate string
+	TST	(SP)+		;Give back stack space, success (C-bit cleared)
+	RETURN			;Return
+
+.DSABL	LSB
+
+GLOBAL	<U.NOCQ>
+
+.SBTTL	SETERR	- Set up error position
+.ENABL	LSB
+SETERR::SUB	#CMDBUF-1,R5	;R5 -> invalid position, translate that into
+	MOV	R5,LX.ERP	;Error position
+	SEC			;There is an error
+	RETURN
+.DSABL	LSB
+
+GLOBAL	<CMDBUF,LX.ERP>
+
+	.END	

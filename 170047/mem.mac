@@ -1,0 +1,630 @@
+.INCLUDE /CMN:COMMON.MAC/
+.INCLUDE /CMN:KERNEL.MAC/
+.INCLUDE /CMN:HDRDEF.MAC/
+TITLE	MEM,<MEMORY MANAGER>,0K,04-JUN-92,MHB/ABC/MJG/SJM/GPK/KPH/MNB/FRL/JFM/WRM
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR MEM
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	TG   27-Jun-80	Added GEN phase stuff
+;  002	SJM  08-JuL-81	Added I&D space support
+;
+;				[RSTS V9.0]
+;  003	GPK  04-Mar-83	Job headers
+;  004	GPK  14-Apr-83	Multiple privileges
+;  005	GPK  17-May-83	Change J2HDRS to a byte
+;  006	GPK  21-Sep-83	Remove privileges from job header
+;  007  KPH  11-Dec-83	Dynamic regions
+;  008  MNB  22-Jan-84  Asynch changes in M.CTRL byte
+;  009  KPH  11-Mar-85	Bugfixes for SLA libraries
+;
+;				[RSTS V9.2]
+;  010  KPH  12-Aug-85	Job control region
+;
+;				[RSTS V9.3]
+;  011  FRL  24-Mar-86	Large library support
+;
+;				[RSTS V10.0]
+;  012  JFM  15-Sep-89	Add job header initialize code, add .INCLUDEs.
+;  013  WRM  12-Oct-89	Add set up for extended user logicals in INIHDR
+;  014  JFM  11-Dec-89	Moved job header initialization of recall buffer
+;			to TERREC.MAC
+;
+;				[RSTS V10.1]
+;  015	FEK  21-May-92	Get right size when LARGE library is kicked out
+;-
+
+
+	DEFORG	MEM
+
+.SBTTL	THE MEMORY MANAGER
+
+.ENABL	LSB
+
+10$:	MOV	R2,R1		;COPY JDB POINTER @ JDMCTL
+	TST	-2(R1)		;IS JOB'S RESIDENCY QUANTUM USED UP??
+.ASSUME	JDRESQ	EQ	JDMCTL-2
+	BEQ	50$		;YEP, A CANDIDATE FOR SWAPPING OUT
+	BIC	#40-1,R2	;POINT TO TOP OF JOB DATA BLOCK
+	MOV	R0,-(SP)	;SAVE WORKING REGISTER
+	CALLX	RTSSUB,R5	;RETURN WITH RTS AND MAPPED LIBRARIES
+	  BR	20$		;FOUND ONE
+	MOV	(SP)+,R0	;RESTORE WORKING REGISTERS
+	MOV	R1,R2		;RESTORE JDB POINTER @ JDMCTL
+	BR	40$		;NOT A SWAP CANDIDATE
+
+20$:	BITB	#SWP!OUT,R.MCTL+M.CTRL(R2) ;IS JOB'S RTS/LIB OUT OF MEMORY??
+	BNE	30$		;OUT, SO SWAP OUT THE JOB
+	RETURN			;BACK TO CO-ROUTINE
+
+30$:	ADD	#2,(SP)		;Signal special co-routine exit		;010
+	CALL	@(SP)+		;And invoke it				;010
+	MOV	(SP)+,R0	;RESTORE WORKING REGISTERS
+	MOV	R1,R2		;RESTORE JDB POINTER @ JDMCTL
+	BR	50$		;OUT, SO SWAP OUT THE JOB
+
+40$:	MOV	R0,R3		;Copy JDB pointer			;010
+	MOVB	JDJBNO(R0),R0	;Pick up the job number of this job	;010
+	CALLX	MAPJCR		;Map the JCR entry for it		;010
+	MOVB	JCPRI(R1),R1	;Get the job's priority			;010
+	SUB	#128.,R1	;MAKE THE RANGE 0 THROUGH -256.
+	NEG	R1		;NOW IT IS 0 THROUGH +256.
+	SUB	R1,JDRESQ(R3)	;PUNISH RESIDENCY QUANTUM BASED ON PRIORITY ;010
+	BHI	60$		;RESIDENCY QUANTUM STILL EXISTS, WAIT...
+	CLR	JDRESQ(R3)	;ELSE QUANTUM IS NOW ZERO, SO SWAP JOB	;010
+50$:	TSTB	M.CTRL(R2)	;CAN WE SWAP THIS JOB OUT NOW?
+	BEQ	130$		;YEP, SO OUT GOES THE JOB IMAGE
+	CMPB	R0,JOB		;NOPE, BECAUSE IT IS "JOB"?		;010
+	BNE	60$		;NOT "JOB", MUST PUNT
+FORCEO:	L3QSET	QFORCE		;FORCE "JOB" NOT TO BE "JOB" AFTER "QSCHED"
+60$:	JMPX	CHKSWP		;NOW EXIT CHECKING FOR SWAPS TO DO
+
+; PROCESS SPECIFIC LOAD ADDRESS RESIDENCY REQUESTS
+;
+;	R0 -> MEMLST
+;	R3 =  MMU ADDRESS OF START OF RESIDENT RTS/LIB
+;	R4 -> "SLA" RTS/LIB TO MAKE RESIDENT
+;	R5 =  RTS/LIB'S SIZE IN K-WORDS
+
+DOSLA:	MOV	R0,R2		;RETAIN POINTER TO PREVIOUS ENTRY
+	MOV	M.PNXT(R2),R0	;NOW GET POINTER TO NEXT IN LIST
+	CMP	R3,M.PHYA(R0)	;DOES RTS/LIB START AT OR ABOVE THIS?
+	BHIS	DOSLA		;YES, LOOK FURTHER IN LIST
+	MOV	R5,R1		;COPY THE RTS/LIB'S K SIZE
+	ASH	#11.-6,R1	; AND COMPUTE THE MMU ADDRESS
+	ADD	R3,R1		;  JUST BEYOND THE RTS/LIB
+	CMP	R1,M.PHYA(R0)	;DOES RTS/LIB END ABOVE THIS ENTRY?
+	BHI	70$		;YES, GOTTA KICK THIS ENTRY OUT
+	MOV	R2,R0		;NO, ENDS BELOW, POINT TO PREVIOUS
+	CLR	R1		;Compute just beyond top		;011
+	BISB	M.SIZE(R0),R1	; ...					;011
+	ASH	#11.-6,R1	; OF PREVIOUS ENTRY
+	ADD	M.PHYA(R0),R1	;  (I.E. START MMU ADDRESS OF HOLE)
+	CMP	R3,R1		;RTS/LIB START WITHIN THE HOLE?
+	BHIS	140$		;YEP, ALL SET, DO THE ALLOCATION
+70$:	MOV	R0,R2		;COPY ENTRY TO KICK OUT
+	BIC	#40-1,R0	;ROUND DOWN POINTER
+	BIT	R2,#20		;KICK OUT A JOB?
+	BNE	10$		;YES
+.ASSUME	JDMCTL	EQ	20
+	BIT	R2,#10		;KICK OUT A RTS/LIB?
+	BNE	90$		;YES
+.ASSUME	R.MCTL	EQ	10
+80$:	CRASH			;NEITHER, CRASH!!!
+
+90$:	BIT	#PF.RW,R.FLAG(R0) ;A READ/WRITE RTS/LIB?
+	BNE	80$		;YES, CRASH!!!
+	BITB	#^C<LCK>,M.CTRL(R2) ;SIMPLY IN MEMORY??			;008
+	BNE	60$		;NOPE, JUST PUNT A WHILE...
+	CMP	R0,JOBRTS	;BEING USED BY "JOB"?
+	BEQ	FORCEO		;YES, FORCE OUT THE JOB THEN
+	TST	JOBWDB		;DOES "JOB" HAVE A WINDOW DESCRIPTOR BLOCK
+	BEQ	120$		;NO
+	MOV	R0,R1		;SAVE POINTER TO BLOCK
+	MOVB	JOB,R0		;Get job # * 2				;010
+	MOV	R2,-(SP)	;SAVE WORKING REGISTER
+	CALLX	LIBSUB,R5	;RETURNS WITH ALL MAPPED LIBRARIES
+	  BR	100$		;CHECK AGAINST "JOB"
+	MOV	(SP)+,R2	;RESTORE WORKING REGISTERS
+	MOV	R1,R0		;RESTORE POINTER TO BLOCK
+	BR	120$		;OUT GOES RTS/LIB
+
+100$:	CMP	R1,R2		;BEING USED BY "JOB"?
+	BEQ	110$		;YES, FORCE OUT THE JOB THEN
+	RETURN			;BACK TO CO-ROUTINE
+
+110$:	ADD	#2,(SP)		;Signal special co-routine exit		;010
+	CALL	@(SP)+		;And do it				;010
+	MOV	(SP)+,R2	;RESTORE WORKING REGISTER
+	MOV	R1,R0		;RESTORE POINTER TO BLOCK
+	BR	FORCEO		;OUT GOES JOB
+
+120$:	CALL	OUTRTS		;ELSE KICK THE RTS/LIB OUT OF MEMORY
+	BR	TRYTRY		; AND TRY, TRY AGAIN
+
+130$:	JMP	OUTJOB		;GO SWAP OUT A JOB
+
+140$:	CMP	(R0)+,(R0)+	;INDEX TO M.TSIZ IN ENTRY
+	NEG	R5		; AND MAKE A -(SIZE)
+	.BR	ALLSET		;  THEN ALLOCATE SOME MEMORY
+
+.DSABL	LSB
+
+; ALL SET TO ENTER THE ITEM INTO THE MEMORY LIST
+;
+;	R0 -> PREVIOUS ENTRY @ M.TSIZ
+;	R4 -> NEW ENTRY
+;	R5 =  -(NEW ENTRY'S SIZE IN K)
+
+ALLSET:	MOV	(R4),RESLST	;DE-QUEUE THIS ITEM FROM RESIDENCY LIST
+	MOV	M.PHYA(R4),R3	;GET THE MMU LOAD ADDRESS
+	BNE	10$		;SPECIFIC LOAD ADDRESS HAS BEEN SET
+	CLR	R3		;No specific, get			;011
+	BISB	M.SIZE-M.TSIZ(R0),R3 ; in use size of previous 		;011
+	ASH	#11.-6.,R3	; AND FIND AS A MMU SIZE (32WD)
+	ADD	M.PHYA-M.TSIZ(R0),R3 ;  TO GET JUST ABOVE IN USE IN PREVIOUS
+10$:	TST	-(R0)		;INDEX TO +M.PNXT IN PREVIOUS
+.ASSUME	M.PNXT	EQ	2
+	CALLX	ADDMEM		;NOW ADD NEW ENTRY TO THE MEMORY LIST
+	NEG	R5		;FIND NEW SIZE AS A POSITIVE NUMBER
+	BIT	R4,#20		;IS THIS A JOB?
+	BEQ	55$		;NO, A RUN-TIME SYSTEM			;007
+.ASSUME	JDMCTL	EQ	20
+	CLR	R3		;Get job's old K size			;011
+	BISB	M.SIZE(R4),R3	; ...					;011
+	CMP	R5,R3		;IS THE JOB GROWING IN SIZE?
+	BLOS	20$		;NO (NEW <= OLD)
+	MOV	R4,R1		;YES (NEW > OLD)
+	ADD	#JDFLG-JDMCTL,R1 ;GET A JOB DATA BLOCK +JDFLG POINTER
+	CALL	ZERMEM		;GO ZERO THE NEW MEMORY
+	BIT	#J2IHDR,JDFLG3-JDFLG(R1) ;Does header need initialization? ;010
+	BEQ	20$		;No					;003
+	TST	-(R1)		;Yes, point to start of JDB		;010
+.ASSUME	JDFLG	EQ	2
+	CALL	INIHDR		;And go do it				;003
+20$:	MOVB	R5,M.SIZE(R4)	;SET THE NEW K SIZE
+	MOV	R5,R1		; AND SAVE THE NEW SIZE
+	CMP	R3,R5		;WHICH SIZE IS THE SMALLER?
+	BHIS	30$		;NEW SIZE IS SMALLER, SWAP AT NEW SIZE
+	MOV	R3,R5		;OLD SIZE IS SMALLER, SWAP AT OLD SIZE
+30$:	MOV	R4,R3		;Copy pointer to JDB @ JDMCTL		;010
+	MUL	#500.,R1	;MULTIPLY FOR RESIDENCY QUANTUM
+..QMUL	==	.-2	;**PATCH** MULTIPLY FACTOR PATCHED HERE
+	ADD	#250.,R1	;ADD FOR RESIDENCY QUANTUM
+..QADD	==	.-2	;**PATCH** ADDITION FACTOR PATCHED HERE
+	MOV	R1,-(R3)	;Set the new residency quantum		;010
+.ASSUME	JDRESQ	EQ	JDMCTL-2
+	MOVB	JDJBNO-JDRESQ(R3),R0 ;Pick up job # * 2			;010
+	CALLX	MAPJCR		;And map the JCR entry			;010
+	CMPB	JCPRI(R1),#-121. ;Is the job suspended?			;010
+	BGT	40$		;NO
+	CLR	(R3)		;Yes, forget the residency quantum	;010
+
+GLOBAL	<RESLST>
+
+40$:	MOV	-(R3),R3	;GET JOB'S RTS POINTER			;010
+.ASSUME	JDRTS	EQ	JDRESQ-2
+	INCB	R.CNT+1(R3)	; AND COUNT AS ANOTHER RESIDENT IMAGE
+	CALLX	LIBSUB,R5	;RETURNS WITH ALL MAPPED LIBRARIES
+	  BR	50$		;INCREMENT FOR MAPPED LIBRARY
+	BR	60$		;CONTINUE WITH SETUP
+
+50$:	INCB	R.CNT+1(R2)	;MARK AS ONE MORE MAPPED
+	RETURN			;BACK TO CO-ROUTINE
+
+55$:	MOVB	#LS.LIB!LS.DYN,R1 ;R1 = flag bits for dynamic region	;007
+	BICB	L.STAT-R.MCTL(R4),R1 ;Is this a dynamic region?		;007
+	BNE	60$		;No, not this time			;007
+	MOVB	#MC.LCK,M.CTRL(R4) ;Yes, lock it			;008
+	MOV	R5,R0		;Get size of region in K		;011
+	MOV	M.PHYA(R4),R2	;And get MMU address of region		;007
+	CALL	ZERANY		;Zero out this new region		;007
+	BR	TRYTRY		;And go process the rest of the list	;007
+
+60$:	CLRB	M.CTRL(R4)	;GUESS AT EVERYTHING ALL SET UP
+	MOV	R5,R0		;COPY THE SWAP SIZE IN K
+	BEQ	70$		;JUST CONTINUE IF NOTHING TO SWAP
+	MOV	R4,R1		;ELSE COPY THE MEMORY CONTROL POINTER
+	MOVB	#SWP!IN!MC.LCK,M.CTRL(R1) ; AND SET SWAP IN DESIRED	;008
+	CALLX	DOSWAP		;START THE SWAP NOW IF POSSIBLE
+70$:	.BR	TRYTRY		;TRY FOR THE NEXT IN THE LIST
+
+
+.ENABL	LSB
+
+	L3QENT	QBRING,,GENAP5	;RESIDENCY REQUESTS COME HERE
+
+TRYTRY:	MOV	RESLST,R4	;GET TOP OF RESIDENCY LIST
+	BNE	10$		;MORE TO DO
+	JMP	160$		;NO MORE, EXIT CHECKING SWAPS
+
+10$:	BIT	R4,#20		;IS THIS REALLY A JOB?
+	BNE	15$		;YES					;010
+.ASSUME	JDMCTL	EQ	20
+	CLR	R5		;No, get rts/lib's residency size	;011
+	BISB	M.SIZE(R4),R5	; ...					;011
+	MOV	M.PHYA(R4),R3	;SPECIFIC LOAD ADDRESS FOR RTS/LIB?
+	BEQ	20$		;NO
+	MOV	#MEMLST,R0	;Yes, get pointer to memory list	;010
+	JMP	DOSLA		;And process it				;010
+
+15$:	MOVB	JDJBNO-JDMCTL(R4),R0 ;Pick up job # * 2			;010
+	CALLX	MAPJCR		;Map the JCR entry			;010
+	MOVB	JCSIZN(R1),R5	;And pick up the desired size		;010
+
+; The first thing that we do is look through MEMLST for a hole of
+; sufficient size.
+
+20$:	MOV	#MEMLST,R0	;Get pointer to MEMLST			;010
+	NEG	R5		;MAKE SIZE A NEGATIVE NUMBER
+	MOV	#-077777,R3	;SET AN IMPOSSIBLY BIG HOLE SIZE
+	CLR	R1		; BUT NO REAL HOLE FOUND YET
+30$:	CMP	M.PHYA(R0),MEMADR ;IS THIS AREA HIGHER THAN LAST USED?
+	BHI	40$		;YEP
+	MOV	R0,SWTBLK	;NOPE, SO REMEMBER IT FOR LATER
+40$:	ADD	#M.SIZE,R0	;INDEX TO IN-USE SIZE OF ENTRY
+	CLR	R2		;Get size in use			;011
+	BISB	(R0),R2		; and find				;011
+	SUB	-(R0),R2	; THE -(FREE SIZE)
+.ASSUME	M.TSIZ	EQ	M.SIZE-2
+	CMP	R2,R5		;IS THE HOLE BIG ENOUGH?
+	BGT	50$		;NO, TOO SMALL
+	BR	55$		;Yes, so use it 			;006
+..BFIT	==	.-2	;**PATCH** 'BEQ 55$' for best fit method	;006
+	CMP	R2,R3		;YES, IS HOLE SMALLER THAN THE SMALLEST YET?
+	BLE	50$		;THIS HOLE IS BIGGER, SKIP IT
+	MOV	R2,R3		;SMALLER, SO REMEMBER ITS SIZE
+	MOV	R0,R1		; AND ITS POINTER
+50$:	MOV	-(R0),R0	;GET NEXT IN THE LIST
+.ASSUME	M.PNXT	EQ	M.TSIZ-2
+	BNE	30$		;LOOP IF MORE IN LIST
+	MOV	R1,R0		;ELSE SET POINTER TO FOUND HOLE
+	BEQ	60$		;NO HOLE REALLY FOUND...
+	CMP	R3,R5		;DID WE FIND A HOLE BIG ENOUGH?
+	BGT	60$		;No, we didn't				;007
+55$:	JMP	ALLSET		;YES, SO DO IT				;007
+
+GLOBAL	<GENAP5,RESLST,MEMLST,MEMADR,SWTBLK>
+
+; A hole could not be found, look for a RTS or LIB to kick out.
+; If the item to make resident is a job, we'll kick out any
+; RTS or LIB that isn't being used by the job. If the item
+; is a RTS or LIB, any library is eligable.
+;
+; The reason that we can unload any RTS or LIB when doing a RTS
+; or LIB load is because a job can only have one floating entry,
+; and floating RTS/LIB are done before fixed RTS/LIB. If we kick
+; out a fixed RTS/LIB that will later be needed, it will be reloaded
+; at the correct fixed address, and the floating library will be
+; tried again. In this case, the floating library will be done last
+; (after the job image), and there will now be a resident user
+; which will keep us from kicking out the fixed library again.
+;
+; If we are loading a job, and their is a floating RTS/LIB that
+; we might be able to kick out to make a hole, but we are using
+; it, we will save the pointer to it so that we can kick it out
+; last.
+
+60$:	TST	SWOCNT		;OUTGOING SWAPS PENDING?
+	BNE	160$		;YES, WAIT UNTIL LATER
+	CLR	R3		;SAY RTS OF LOADING JOB NOT ELIGIBLE
+	MOV	MEMLST+M.PNXT,R2 ;GET SECOND ITEM IN MEMORY LIST
+70$:	MOV	#10,R1		;PRESET A HANDY CONSTANT VALUE
+	BIT	R2,R1		;IS THIS A RTS/LIB?
+	BEQ	120$		;NO, SKIP IT
+.ASSUME	R.MCTL	EQ	10
+	TSTB	R.CNT+1-R.MCTL(R2) ;ANY RESIDENT USERS NOW??
+	BNE	120$		;SOMEONE RESIDENT, SKIP ALSO
+	BIT	#PF.RW,R.FLAG-R.MCTL(R2) ;IS IT READ/WRITE?
+	BNE	120$		;R/W, RELOAD WOULDN'T BE CORRECT...
+	CMPB	#MC.LCK,M.CTRL(R2) ;I/O activity (LCK>1?)		;008
+	BNE	120$		;ACTIVITY, WE MUST SKIP IT
+	BIT	R4,R1		;ARE WE TRYING TO MAKE A JOB RESIDENT?
+	BNE	100$		;NOPE, RTS, REMOVE OTHER RTS
+.ASSUME	JDMCTL	EQ	20
+	MOV	R2,R1		;SAVE WORKING REGISTER
+	MOV	R4,R2		;GET POINTER TO JOB'S DATA BLOCK @JDMCTL
+	BIC	#40-1,R2	; POINTING AT THE TOP OF BLOCK
+	CALLX	RTSSUB,R5	;RETURNS WITH RTS AND ALL MAPPED LIBRARIES
+	  BR	80$		;FOUND A MAPPED LIBRARY
+	MOV	R1,R2		;RESTORE POINTER TO RTS/LIB BLOCK @ R.MCTL
+	BR	100$		;GO REMOVE FROM MEMORY LIST
+
+80$:	ADD	#R.MCTL,R2	;POINT TO RTS/LIB BLOCK @ R.MCTL
+	CMP	R1,R2		;RTS/LIB OF JOB WE ARE TRYING TO LOAD??
+	BEQ	90$		;YES, REMEMBER IT
+	RETURN			;BACK TO CO-ROUTINE
+
+90$:	ADD	#2,(SP)		;Signal special co-routine exit		;010
+	CALL	@(SP)+		;And invoke it				;010
+	;MOV	R1,R2		;RESTORE POINTER TO RTS/LIB BLOCK @ R.MCTL
+	BIT	#PF.SLA,R.FLAG-R.MCTL(R2) ;Does this have a fixed address? ;009
+	BNE	120$		;Yes, don't ever try to remove it	;009
+	MOV	R2,R3		;No, save the pointer to it
+	BR	120$		;And save it for final despiration
+
+100$:	CALL	OUTRTS		;REMOVE RTS FROM MEMLST
+	CMP	R0,R5		;ENOUGH FREE SPACE NOW?
+110$:	BLE	TRYTRY		;YES, TAKE IT FROM THE TOP...
+120$:	MOV	M.PNXT(R2),R2	;GET NEXT IN THE LIST
+	BNE	70$		;MORE, LOOP
+
+GLOBAL	<SWOCNT,MEMLST>
+
+; Kicking out all the RTS/LIB that were eligable didn't get us a large
+; enough hole, so we'll try to kick out other jobs. We'll kick
+; out any job unless it has a non-zero residency quantum or it
+; is explicitly locked in memory or it has outstanding I/O.
+;
+;	R3 -> Last ditch RTS/LIB to try to kick out (if any)
+
+	CALL	190$		;GET A MEMORY TABLE POINTER
+	ASL	R1		; AND ANOTHER HANDY CONSTANT
+.ASSUME	20	EQ	10*2
+130$:	MOV	M.PNXT(R2),R2	;GET NEXT IN THE MEMORY LIST
+	BEQ	140$		;NO MORE
+	BIT	R2,R1		;IS THIS A JOB?
+	BEQ	130$		;NO, RTS/LIB, SKIP IT
+.ASSUME	JDMCTL	EQ	20
+	TST	JDRESQ-JDMCTL(R2) ;YES, EXPIRED RESIDENCY QUANTUM??
+	BNE	130$		;NOT YET, CONTINUE
+	BIT	#JFLOCK,JDFLG-JDMCTL(R2) ;YES, BUT LOCKED INTO MEMORY?
+	BNE	130$		;IF SO SKIP ALSO
+	TSTB	M.CTRL(R2)	;CAN WE SWAP THE JOB OUT NOW?
+	BEQ	OUTJOB		;YES
+	CMP	JDJDB2-JDMCTL(R2),JOBJD2 ;NO, BECAUSE IT IS "JOB"?
+	BNE	130$		;OTHER REASONS...
+	JMP	FORCEO		;YES, FORCE IT NOT TO BE "JOB"
+
+; We couldn't find any eligable jobs to kick out, so we'll look
+; for jobs for which we have kicked out an associated RTS or LIB.
+; This can happen if a specific load address load (which doesn't
+; check resident users) kicked it out. Since the job isn't
+; runnable anyway, the residency quantum or locked flags aren't
+; meaningful. The only things which can be kicked out are RTS
+; (fixed or floating) and floating libraries. Fixed libraries
+; are not an issue since they can never be kicked out by a
+; specific address load (since a fixed address used by a library
+; can not be used by anything else).
+;
+;	R3 -> Last ditch RTS/LIB to try to kick out (if any)
+
+140$:	CALL	180$		;GET MEMLST POINTER AGAIN
+				;If the code at 130$ has only been executed
+				;once, this will go back there.
+150$:	MOV	M.PNXT(R2),R2	;GET NEXT IN THE LIST
+	BEQ	170$		;NO MORE
+	BIT	R2,R1		;IS THIS A JOB?
+	BEQ	150$		;NO, RTS/LIB, SKIP IT
+.ASSUME	JDMCTL	EQ	20
+	TSTB	M.CTRL(R2)	;Can we swap this job now?		;009
+	BNE	150$		;No, try the next one			;009
+	MOV	JDFLG4-JDMCTL(R2),R0 ;Yes, get job flags #4		;010
+	BIC	#^C<J2SLAP>,R0	;And save only floating library		;009
+	BNE	155$		;Job has one, check it out		;009
+	MOV	JDRTS-JDMCTL(R2),R0 ;No floating library, check RTS	;009
+155$:	BITB	#SWP!OUT,R.MCTL+M.CTRL(R0) ;Is RTS or LIB in MEMLST?	;009
+	BEQ	150$		;Yes, don't try to touch the job	;009
+OUTJOB:	MOVB	#SWP!OUT!MC.LCK,M.CTRL(R2) ;MARK A JOB FOR SWAP OUT	;008
+	INC	SWOCNT		; AND COUNT AS A PENDING SWAP OUT
+	MOV	M.PHYA(R2),MEMADR ;REMEMBER THAT MEMORY ADDRESS
+160$:	JMPX	CHKSWP		;NOW EXIT CHECKING FOR SWAP(S) TO START
+
+GLOBAL	<SWOCNT,MEMADR>
+
+; We are totally desperate now. If we are loading a job image, we'll
+; try to kick out the floating entry used by the job so that we can
+; make the job resident. After the job becomes resident, we will try
+; the floating entry again.
+
+170$:	MOV	R3,R2		;LAST DESPERATE ATTEMPT IS JOB'S RTS
+	BEQ	160$		;OH WELL... WE WILL TRY TOMORROW...
+	CALL	OUTRTS		;Go and kick it out
+	MOV	(R4),(R2)	;NOW LINK THE (NEWLY OUT OF MEMLST)
+	MOV	R2,(R4)		; RTS INTO THE RESIDENCY LIST
+	MOVB	#SWP!IN!MC.LCK,M.CTRL(R2) ;  WITH CORRECT CONTROL BYTE	;008
+	CMP	R0,R5		;BIG ENOUGH HOLE IN MEMORY NOW?
+	BLE	110$		;YEP, FROM THE TOP CHARLIE
+	BR	160$		;NOPE, PUNT...
+
+; SWTBLK contains the address of the memory control block which
+; controls the highest memory address before the address which
+; should be picked next for our round-robin job-kick-out algorithm.
+;
+; The first pass of selecting jobs to kick out comes to 190$.
+; If no job is found, the second pass code calls 180$. If this
+; is the first call to 180$, we will set up to go back to 130$
+; and start at the beginning of the memory table.
+
+180$:	TST	(R0)		;TRY FROM THAT START OF MEMLST?
+	BEQ	200$		;YES, THIS MUST BE THE SECOND TIME...
+	MOV	#130$,(SP)	;NO, CHANGE RETURN TO LOOP AGAIN
+	CLR	(R0)		; BUT INDICATE FULL SCAN NEXT TIME
+190$:	MOV	#SWTBLK,R0	;GET POINTER TO SAVED AREA POINTER
+	MOV	(R0),R2		;NOW GET THAT POINTER
+	BNE	210$		;A REAL POINTER, START FROM THERE
+200$:	MOV	#MEMLST,R2	;OTHERWISE, USE FULL MEMORY LIST
+210$:	RETURN			;EXIT
+
+.DSABL	LSB
+
+OUTRTS:	CALLX	BYERTS		;REMOVE THIS RTS/LIB FROM MEMORY LIST
+	TST	(R0)+		;GO TO M.TSIZ IN PREVIOUS ENTRY
+.ASSUME	M.TSIZ	EQ	M.PNXT+2
+	MOV	(R0)+,-(SP)	;COMPUTE -(FREE SPACE) AS TOTAL
+	MOVB	(R0),R0		; SIZE LESS INUSE SIZE
+.ASSUME	M.SIZE	EQ	M.TSIZ+2
+	BIC	#177400,R0	;  (but don't sign extend)		;015
+	SUB	(SP)+,R0	;  BACKWARDS OFF THE STACK
+	RETURN			;RETURN
+
+GLOBAL	<SWTBLK,MEMLST>
+
+.SBTTL	ZERO NEWLY ADDED JOB IMAGE MEMORY
+
+;+
+; ZERMEM - ZERO NEWLY ADDED JOB IMAGE MEMORY.
+;
+;	R1 -> JDB @ JDFLG
+;		JDJBNO-JDFLG = Job # * 2
+;		JDSIZE-JDFLG = OLD SIZE IN K (OLD MUST BE < NEW)
+;		JDMCTL+M.PHYA-JDFLG = BASE ADDRESS /100
+;		In JCR, JCSIZN = NEW SIZE IN K
+;
+;	CALLMI	ZERMEM,GENAP5
+;
+;	DPAR6 IS CLOBBERED
+;-
+
+	TMPORG	GENDSP,0
+	.WORD	ZERMEM
+	UNORG
+
+ZERMEM:	REGSCR			;SAVE ALL REGISTERS
+	MOVB	JDSIZE-JDFLG(R1),R2 ;GET OLD K SIZE
+	MOVB	JDJBNO-JDFLG(R1),R0 ;Get job # * 2			;010
+	CALLX	MAPJCR		;Map the JCR entry			;010	
+	MOVB	JCSIZN(R1),R0	;Get the new K size			;010
+	SUB	R2,R0		;FIND THE K SIZE OF NEW MEMORY
+	ASH	#11.-6.,R2	;FIND OLD SIZE AS BYTES/100
+	MOV	TOS.R1(SP),R1	;Restore JDB @ JDFLG pointer		;010
+	.BR	ZERSOM		;Go zero it				;003
+									;003
+;+									;003
+; ZERSOM -- Zero some part of a job					;003
+;									;003
+;	R0 =	Number of K words to zero				;003
+;	R1 ->	JDB @ JDFLG						;003
+;	R2 =	Starting offset in slivers				;003
+;									;003
+;	CALL	ZERSOM							;003
+;									;003
+;	R0,1,3,4 Random							;003
+;	DPAR6	Random							;003
+;-									;003
+
+ZERSOM::ADD	JDMCTL+M.PHYA-JDFLG(R1),R2 ;ADDRESS/100 OF NEW MEMORY	;003
+	.BR	ZERANY		;And zero out this piece of job		;007
+
+;+
+; ZERANY - Zero any piece of memory					;007
+;									;007
+;	R0 = Number of K-words to zero					;007
+;	R2 -> MMU address of memory to zero				;007
+;									;007
+;	CALL	ZERANY							;007
+;									;007
+;	R0, R1, R2, R3, R4 = Random					;007
+;	DPAR6 = Random							;007
+;-									;007
+
+ZERANY:	CLR	R1		;A WORD OF ZERO TO WRITE OUT		;007
+10$:	MAP	R2,APR=6,DATA	;MAP TO NEW MEMORY
+	MOV	#1024./8.,R3	;COUNT FOR ZEROING 1K WORDS OF MEMORY BY 8'S
+	MOV	#140000,R4	;VIRTUAL POINTER TO THE MEMORY
+20$:	MOV	R1,(R4)+	;CLEAR
+	MOV	R1,(R4)+	; 8.
+	MOV	R1,(R4)+	;  WORDS
+	MOV	R1,(R4)+	;   OF
+	MOV	R1,(R4)+	;    MEMORY
+	MOV	R1,(R4)+	;     EACH
+	MOV	R1,(R4)+	;      LOOP
+	MOV	R1,(R4)+	;       ITERATION
+	SOB	R3,20$		;LOOP FOR 1K WORDS
+	ADD	#1024.*2/100,R2	;ADDRESS/100 OF NEXT K
+	SOB	R0,10$		;LOOP FOR ALL NEW MEMORY
+	RETURN			;NOW RETURN
+
+.SBTTL	INIHDR	- Initialize job header
+
+.ENABL	LSB
+
+;+									;003
+; Initialize job header for a new job or after a fatal error		;003
+;									;003
+;	R1 ->	JDB							;003
+;	R4 ->	JDB @ JDMCTL						;003
+;									;003
+;	CALL	INIHDR							;003
+;									;003
+;	DPAR6 is left pointing at the job header			;003
+;-									;003
+	.ENABL	LSB
+
+INIHDR::REGSCR			;Save all registers			;003
+	BIC	#J2IHDR,JDFLG3(R1) ;Clear "initialization required" flag ;010
+	MOVB	JDJBNO(R1),R0	;Get job # * 2				;010
+	MOV	R0,R2		;copy the job # for future reference	;013
+	CALLX	MAPJCR		;Map the JCR entry			;010
+	MOVB	JCHDRS(R1),R0	;Get job header size in K		;005
+	BEQ	10$		;Branch if there isn't one right now	;003
+	MOV	R0,-(SP)	;save it				;013
+	MOV	R2,-(SP)	;preserve job #				;013
+	MOV	R0,R5		;Copy it				;003
+	MOV	R4,R1		;Copy JDB pointer			;003
+	ADD	#JDFLG-JDMCTL,R1 ;Point to JDFLG in JDB			;003
+	CLR	R2		;Set offset in job = 0			;003
+	CALL	ZERSOM		;Zero out the job header		;003
+	;								;013
+	;	now init for user logical space 			;013
+	;								;013
+	MOV	(SP)+,R3	;retrieve JOB#*2			;013
+	CALLX	MAPHDR		;re-map base of header			;013
+	MOV	(SP)+,R0	;get hdrsiz back			;013
+3$:	ASH	#11.,R0		;Turn into bytes			;013
+	DEC	R0		;highest available byte			;013
+	BIS	#140000,R0	;set to APR6 window			;013
+	MOV	#JHSIZE,R4	;set up base pointer			;013
+	MOV	R0,(R4)+	;set maximum header address		;013
+	MOV	#JHUSL,(R4)+	;first available free list member	;013
+	CLR	(R4)		;no logical list members yet		;013
+	MOV	#JHUSL,R4	;set up top of free list to link	;013
+	MOV	#<JHUSL+JHBSIZ>,R1	;^next buffer to link		;013
+5$:	CMP	R1,R0		;next-max address, is it in space?	;013
+	BHIS	9$		;no- done				;013
+	MOV	R1,(R4)		;then link it in			;013
+	ADD	#JHBSIZ,R1	;advance to ^next			;013
+	ADD	#JHBSIZ,R4	;advance ^this				;013
+	BR	5$		;loop until end of header space		;013
+
+9$:	CLR	(R4)		;assure last link is zero		;013
+10$:	RETURN			;Done					;003
+
+
+ZAPLOG:: MOV	R3,R0		;test job # * 2				;013
+	BEQ	10$		;if system job there is no header	;013
+	MOV	R3,-(SP)	;save it for header mapping		;013
+	MOV	JOBTBL(R0),R3	;get the JDB from JOB # for this job	;013
+	CALLX	MAPJCR		;Map the JCR entry			;013
+	MOV	(SP)+,R3	;get JOB#*2 again			;013
+	MOVB	JCHDRS(R1),R0	;Get job header size in K		;013
+	BEQ	10$		;Branch if there isn't one right now	;013
+	CALLX	MAPHDR		;map the job's header			;013
+	BCC	3$		;go clear the logical list inheader	;013
+	BR	10$		;if carry was set exit (non resident)	;013
+	GLOBAL	<ZAPLOG,JOBTBL,FIJOB>					;013
+
+.DSABL	LSB
+
+.END

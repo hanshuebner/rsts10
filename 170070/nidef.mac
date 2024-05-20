@@ -1,0 +1,463 @@
+.IIF	NDF	L$$ETH,	.NLIST
+.IIF	NDF	L$$ETH,	.DSABL	CRF
+TITLE	NIDEF,<Ethernet Definitions file>,0A,10-MAY-91,JHC/KCG
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit History
+
+;+
+;
+;  000	JHC  17-Jun-85	Creation Date
+;  000	KCG  12-Aug-85	Me too, more creation
+;  001	JHC  22-Jan-87	General Cleanup to RSTS convention
+;		[RSTS/E V9.7 -- DECnet/E V4.2]
+;  002  JHC  10-Nov-88	Fix RC.FUN remote console offset
+;
+;-
+
+.SBTTL	Constants	Define Driver Constants
+
+MULMAX	=:	5	;MAXIMUM OF FIVE MULTICASTS PER PORTAL
+MOP.BF	=:	3	;NUMBER OF MOP BUFFERS TO AQUIRE.
+XTR.BF	=:	5	;<DEQNA ONLY> NUM OF EXTRA RECEIVE BUFFERS TO ALLOCATE
+
+
+.SBTTL	PDB 	Portal Data Block definitions
+
+;+
+; All EP. values are Ethernet Portal Specific PDB entries
+; All E. values are Ethernet Channel Specific Values, usually CDB entries
+; All U. values are UNA specific CDB entries
+; All Q. values are QNA specific CDB entries
+;-
+
+; Simplify queue thread handling and offsets with PDB offset
+
+PDBOFF	=: 14
+
+	.DSECT -PDBOFF
+
+EPIDX:	.BLKB		; DRIVER INDEX (DDIDX)
+EPSTS:	.BLKB		; STATUS BYTE (DDSTS)
+EPJBNO:	.BLKB		; OWNING JOB NUMBER (DDJBNO)
+EPUNT:	.BLKB		; UNIT NUMBER (DDUNT)
+EPTIME:	.BLKW		; TIME OF OWNERSHIP (DDTIME)
+EPCNT:	.BLKW		; ACCESS CONTROL (DDCNT)
+EPFLAG:	.BLKW		; FLAGS (DDFLAG)
+EP.ID:	.BLKW		; DDB IDENTIFIER (FOR DEBUGGING)
+
+.ASSUME	. EQ	0	; offset zero in PDB
+EP.LNK:	.BLKW		; THREAD TO NEXT PDB
+EP.STS:	.BLKW		; STATUS OF PORTAL
+EP.RCV:	.BLKW		; RECEIVED PACKETS (CCBs) PENDING POSTING
+EP.RCT:	.BLKW		; RECEIVE PACKET Q TAIL
+EP.CDB:	.BLKW		; POINTER TO CDB FOR PORTAL
+EP.TYP:	.BLKW		; PROTOCOL TYPE
+EP.BUF:	.BLKW		; AVAILABLE RECEIVE BUFFER COUNT FOR PORTAL
+EP.XMO:	.BLKW		; TRANSMIT OUTSTANDING COUNT (SYSJOB ONLY)
+
+	; MULTICAST ADDRESS BLOCK
+EP.MCT:	.BLKB		; NUMBER OF MULTICASTS ENABLED FOR PORTAL
+	.EVEN
+EP.CST:	.BLKB	<6*MULMAX> ; MULTICAST ADDRESS BLOCK 
+
+	; CIRCUIT COUNTERS -- Order Dependancies in XEDVR,XHDVR and V4.2
+	; of DNA Network Management Specification
+EP.BCT:			; BEGINNING OF CIRCUIT COUNTERS
+EP.DTZ:	.BLKW	2	; DATE/TIME LAST ZEROED
+EP.BYR:	.BLKW	2	; BYTES RECEIVED -- LONG WORD COUNTER
+EP.BYS:	.BLKW	2	; BYTES SENT ------ LONG WORD COUNTER
+EP.BLR:	.BLKW	2	; BLOCKS RECEIVED - LONG WORD COUNTER
+EP.BLS:	.BLKW	2	; BLOCKS SENT ----- LONG WORD COUNTER
+EP.UNA:	.BLKW		; USER BUFFER UNAVAILABLE   (ONE WORD)
+EP.ECT:			; END OF CIRCUIT COUNTERS
+EP.CNT =: <<. - EP.BCT>+4> ; length of counters (plus 4 bytes current date/time)
+
+	; END OF CIRCUIT COUNTERS
+
+PDBSIZ =: <EP.ECT+PDBOFF>
+
+.SBTTL	EP.STS	Open Modes, and Other Portal Status
+
+;+
+; EP.STS -- 
+;
+; 	Low byte of EP.STS byte is used for OPEN MODE information
+;	High byte of EP.STS contains other Portal Status bits
+;
+; First, the OPEN MODE information:
+;-
+
+
+	.BSECT
+
+	.BLKB	.	;	RESERVED
+	.BLKB	.	;	RESERVED
+	.BLKB	.	;	RESERVED
+	.BLKB	.	;	RESERVED
+	.BLKB	.	;	RESERVED
+	.BLKB	.	;	RESERVED
+	.BLKB	.	;	RESERVED
+OP$NPD:	.BLKB	.	; Disable Padding for this portal
+
+;+
+; Now, the Portal Status information:
+;-
+
+P$SND:	.BLKB	.	; last RCV reported Lost packets.  Don't report any now.
+P$LST:	.BLKB	.	; data packets lost (buffers unavailable)
+P$DNT:	.BLKB	.	; This is the DECnet Portal. Log events.
+P$CLS:	.BLKB	.	; Close in progress.  Trying to dump PDB.
+	.BLKB	.	;	Reserved
+	.BLKB	.	;	Reserved
+	.BLKB	.	;	Reserved
+	.BLKB	.	;	Reserved
+
+; END OF PDB
+
+.SBTTL	CDB	Controller Data Block and Prefix
+
+;+
+; Controller Data Block - 
+; 	Ethernet Device independant CDB contents
+; Use CDBOFF to simplify continuation queueing and service
+;-
+
+CDBOFF =: 22
+
+	.DSECT -CDBOFF
+
+	; DEVICE INDEPENDENT ETHERNET CDB
+E.LNK:	.BLKW		;CONTROLLER LINK WORD
+E.UNT:	.BLKB		;CONTROLLER UNIT NUMBER
+	.BLKB		;RESERVED
+E.PRTL:	.BLKW		;OPEN PORTAL CHAIN (PDBs FOR CHANNEL)
+E.STS:	.BLKW		;CONTROLLER STATUS
+E.STAT:	.BLKW		;CONTROLLER STATE
+E.MSGL:	.BLKW		;LENGTH OF LAST RECEIVED BUFFER
+E.STR1:	.BLKB		;STATUS ONE OF LAST RECEIVED BUFFER
+	.BLKB		;RESERVED (QNA uses this byte)
+E.STR2:	.BLKW		;STATUS TWO OF LAST RECEIVED BUFFER
+E.CNCQ:			;CCB CON$ QUEUE for UNA driver
+
+	; LEVEL 3 QUEUE POSITION DEPENDENT FIELDS 
+	; Following four entries are standard (QUEL3Q/QUEUE0)
+	; DDB format.  Used in XEDVR,XHDVR.  Do not change order.
+
+E.DSP:	.BLKW		; CON$ dispatch bits for QNA driver
+.ASSUME	. EQ 0		; this is where the link word lives
+E.QLNK:	.BLKW		; --- QUEUE LINK WORK       ***\
+	.BLKW		; --- SCRATCH WORD          *** USED BY QUEL3Q
+E.CONQ:	.BLKW		; --- POINTER TO QUEUE ROOT ***/
+
+	; Buffer Subblock order dependancies	(XHDVR,XEDVR)
+	; RECEIVE BUFFER CONTROL AREA (QUEUED BY CCBS)
+
+E.RRB:	.BLKW		;ACTIVE RECEIVE BUFFER LIST POINTER (ON RINGS)
+E.RRBT:	.BLKW		; ACTIVE RECEIVE BUFFER LIST TAIL POINTER
+E.RFRE:	.BLKW		;FREE RECEIVE BUFFER LIST (NOT ON RINGS)
+E.RFRT:	.BLKW		; FREE RECEIVE BUFFER LIST TAIL
+
+	; RECEIVE DESCRIPTOR RING POINTERS
+
+E.TOPR:	.BLKW		;(VIRTUAL) ADDRESS OF TOP OF RCV DESCRIPTOR RINGS
+E.BOTR:	.BLKW		;(VIRTUAL) ADDRESS OF BOTTOM OF RCV DESCRIPTOR RINGS
+E.EMPR:	.BLKW		;    "     POINTER TO FIRST RING ENTRY
+E.FILR:	.BLKW		;    "     POINTER TO LAST RING ENTRY
+
+	; BEGIN TRANSMIT RING/BUFFER CONTROL SUBBLOCK 
+	; TRANSMIT BUFFER CONTROL AREA (QUEUED BY CCBS)
+
+E.XRB:	.BLKW		;OUTSTANDING XMIT BUFFER LIST POINTER (ON RINGS)
+E.XRBT:	.BLKW		; OUTSTANDING XMIT BUFFER LIST END POINTER
+E.XPB:	.BLKW		;PENDING XMIT BUFFER LIST POINTER (NOT ON RING)
+E.XPBT:	.BLKW		; PENDING XMIT BUFFER LIST TAIL POINTER
+	; XMIT DESCRIPTOR RING POINTERS
+E.TOPX:	.BLKW		;(VIRTUAL) TOP OF XMIT DESCRIPTOR RINGS
+E.BOTX:	.BLKW		;(VIRTUAL) BOTTOM OF XMIT DESCRIPTOR RINGS
+E.EMPX:	.BLKW		;    "     POINTER TO FIRST RING ENTRY
+E.FILX:	.BLKW		;    "     POINTER TO LAST RING ENTRY
+	; END RCV/XMIT CONTROL SUBBLOCKS
+	; End of counter order dependant region
+
+	; INTERNAL BUFFER COUNTERS
+E.IBF:
+E.MOPB:	.BLKB		;COUNT OF MOP BUFFERS (word access for UNA)
+.ASSUME	E.MOPB&1 EQ 0	; make sure it is on a word boundary for UNA
+E.XTRB:	.BLKB		;COUNT OF 'lost' RECEIVE BUFFERS (DEQNA ONLY)
+E.XTRA:	.BLKW		;COUNT OF EXTRA BUFFERS FOR CHANNEL (from old portals)
+	; ACTIVE FAILURE COUNTER
+E.FALC:	.BLKB		; controller failure count
+	.EVEN		; line up the ducks.
+
+	; COUNTERS FOR LINE - DO NOT CHANGE ORDER
+	; Used by NCP,XEDVR,XHDVR, and analogous to order in DNA NETMAN V4.2
+
+E.CNTS:			;START OF ETHERNET LINE COUNTERS
+E.DTZR:	.BLKW	2	;DATE/TIME LAST ZEROED
+E.BYTR:	.BLKW	2	;BYTES RECEIVED 		- LONG WORD
+E.BYTS:	.BLKW	2	;BYTES SENT			- LONG WORD
+E.MBYR:	.BLKW	2	;MULTICAST BYTES RECEIVED 	- LONG WORD
+E.BLKR:	.BLKW	2	;DATA BLOCKS RECEIVED		- LONG WORD
+E.BLKS:	.BLKW	2	;DATA BLOCKS SENT	  	- LONG WORD
+E.MBLR:	.BLKW	2	;MULTICAST BLOCKS RECEIVED	- LONG WORD
+E.DEF:	.BLKW	2	;BLOCKS SENT, DEFERRED	  	- LONG WORD
+E.1COL:	.BLKW	2	;BLOCKS SENT, ONE COLLISION 	- LONG WORD
+E.MCOL:	.BLKW	2	;BLOCKS SENT, MULTI COLLISION 	- LONG WORD
+E.XMTF:	.BLKW		;TRANSMIT FAILURE
+E.XFLG:	.BLKW		;TRANSMIT FAILURE (flag bits)
+E.CDCF:	.BLKW		;COLLISION DETECT CHECK FAILURE
+E.RCVF:	.BLKW		;RECEIVE FAILURE
+E.RFLG:	.BLKW		;RECEIVE FAILURE (flag bits
+E.UDST:	.BLKW		;UNRECOGNIZED FRAME DESTINATION
+E.DTOV:	.BLKW		;DATA OVERRUN
+E.SYAV:	.BLKW		;SYSTEM BUFFER UNAVAILABLE
+E.USAV:	.BLKW		;USER BUFFER UNAVAILABLE
+E.CNTE:			;END OF ETHERNET LINE COUNTERS
+E.CNT =: <<. - E.CNTS> + 4> ; length of counters (plus 4 for current date/time)
+	;END OF COUNTER SECTION
+	; End of Counter Order Dependant region
+
+E.PHYS:	.BLKB	6	;Current Physical Address for Controller
+E.CDBE:			;END OF DEV IND CDB
+
+;+
+; CONTROLLER DATA BLOCK EXTENSION FOR UNA
+;-
+
+E.PCBB:	.BLKW		;POINTER TO PCBB IN LOWCORE (virtual/physical)
+E.PSTS:	.BLKW		;PORT STATUS WORD (Read and Clear Port Status)
+E.XTMO:	.BLKW		;WATCH FOR TRANSMIT TIMEOUTS IN HERE
+E.PTMO:	.BLKW		;WATCH FOR PORT COMMAND TIMEOUTS HERE
+UNPSIZ:			;END OF UDB CDB EXTENSION (no contents)
+
+;+
+; CONTROLLER DATA BLOCK EXTENSION FOR THE QNA
+;-
+
+	.DSECT	E.CDBE
+
+	; TARGET (MULTICAST) ADDRESS BUFFER CONTROL
+E.MULC:	.BLKW		;VIRTUAL ADDRESS (APR6) OF MULTICAST WORK BUFFER
+	; TIMER CONTROL AREA
+E.TMR:	.BLKW		;CONTROLLER TIMEOUT (TRANSMIT) TIMER OR SWINIT TIMER
+	; ADDITIONAL VARIABLES
+E.TDR:	.BLKW		;PREVIOUS ERROR TIME DOMAIN REFLECTOMETER READING
+E.QSID:	.BLKW		;QUEUE OF SYSTEM ID REQUESTS FOR CONTROLLER.
+E.QMUL:	.BLKW		;QUEUE OF MULTICAST SETUP REQUEST FOR CONTROLLER.
+E.QRID:	.BLKW		;QUEUE OF INDIVIDUAL SYSTEM IDS REQUESTS FOR CNTROLLER.
+QNPSIZ:			;END OF CDB EXTENSION FOR QNA
+
+;+
+; Calculate actual sizes using offset in CDB
+
+UNASIZ =: <UNPSIZ+CDBOFF>
+QNASIZ =: <QNPSIZ+CDBOFF>
+
+;+
+; Ring Control Subblock Definitions
+;
+; Sub-block ordering is:
+;
+;	On-ring buffers CCB queue (Head/Tail)
+;	Pending (not on ring) buffers CCB queue (Head/Tail)
+;	
+;	Top/Bottom pointers to rings structure (static)
+;	Empty Descriptor Ring pointer (Empty from here -- dynamic)
+;	Fill Descriptor Ring pointer  (Fill From here  -- dynamic)
+;
+; See CDB definitions for more detailed descriptions for each set of rings
+;
+; These exist for template overlaying buffer subblock in CDB for use
+; in Transmit/Receive Buffer general handling routines.
+;-
+
+	.DSECT
+	; CCB Queues 
+E.RNG:	.BLKW		;On Ring CCB list HEAD
+E.RNGT:	.BLKW		; On Ring CCB list TAIL
+E.PND:	.BLKW		;Pending Buffer CCB List HEAD
+E.PNDT:	.BLKW		; Pending Buffer CCB List TAIL
+	; Descriptor ring Pointers
+E.TOP:	.BLKW		;(VIRTUAL) TOP OF DESCRIPTOR RINGS
+E.BOT:	.BLKW		;(VIRTUAL) BOTTOM OF DESCRIPTOR RINGS
+E.EMP:	.BLKW		;    "     POINTER TO FIRST RING ENTRY
+E.FIL:	.BLKW		;    "     POINTER TO LAST RING ENTRY
+
+
+.SBTTL  PDU	Data Packet offset definitions
+
+;+
+; Ethernet Data Link Layer Data Packet offsets
+;-
+
+	.DSECT
+
+PK.DST:	.BLKB	6	; Destination Address (Us on RCV, them on XMIT)
+PK.SRC:	.BLKB	6	; Source Address (Them on RCV, Us on XMIT)
+PK.PRT:	.BLKB	2	; Protocol Type
+PK.NPD:			; Size of Packet Header for No Padding Protocol
+PK.LEN:	.BLKB	2	; Data Length Field for Padding Enabled Protocol
+PK.PAD:			; Size of header for Padding Enabled Protocol
+
+;+
+; LOOP Request Packets
+;  Define the Skip count word offset
+;-
+
+LP.SKP =: PK.LEN
+
+;+
+; Remote Console Packet Set up
+;  Additional Words in remote console packets.
+;-
+
+	.DSECT	PK.PAD
+
+RC.FUN:	.BLKB	1	; Function Code of Request			;002
+RC.RCP:	.BLKB	2	; Receipt number of Request		
+
+.SBTTL	Commands.
+
+;+
+; Device independant Special Functions
+;-
+
+SEREND =: 12		; set equal to FC$STA
+
+	.DSECT	SEREND	; offset past last function
+
+FC$CNT:	.BLKW		; Get Circuit Counters into DDB (SPC$)
+FC$XFR:	.BLKW		; Xfer Circuit Counters into user buffer
+FC$RBQ:	.BLKW		; Set Receive Buffer Quota (doesn't work)
+
+;+
+; Device Dependant Special Functions
+;-
+
+ETHSPC =: <5 * 2>	; Number of Ethernet Special Functions
+
+	.DSECT	-ETHSPC
+
+NI$RCT:	.BLKW		; Request Counters ethernet request
+	; Only comes over the wire.  Not callable through .SPEC entry point
+
+NI$PHY:	.BLKW		; Set New Device Physical Address
+NI$EML:	.BLKW		; Enable Multicast Addresses
+NI$XFL:	.BLKW		; Transfer Line Counters to user buffer (like DMP)
+NI$LCT:	.BLKW		; Get line counters into CDB (like DMP)
+.ASSUME	. EQ 0		; address should be zero now (zero reserved)
+
+
+.SBTTL	States	Driver State Definitions
+
+;+
+; THESE SYMBOLS DEFINE THE STATE OF THE DRIVER THAT IS STORED IN THE
+; E.STATE WORD IN THE CDB.
+;-
+
+	.DSECT
+E$RUN:	.BLKW		;"RUNNING"
+E$DIS:	.BLKW		;"DISABLED"
+E$ONE:	.BLKW		;"SW ONE-SHOT"
+E$INI:	.BLKW		;"SW INIT"
+E$RST:	.BLKW		;"SW Re-init"
+
+;+
+; Define value of the DECnet Protocol Type
+;-
+
+DECPRT	=:	^B0110000000000011	; DNA routing Protocol type (60-03)
+	
+.SBTTL	MOP Functions 
+
+RQRSP	=:	11.	; (000B) Response to Request Counters
+RQCNTR	=:	9.	; (0009) Request Counters
+RQID	=:	5.	; (0005) Request ID
+LPFRWD	=:	2.	; (0002) Loop Forward
+
+.SBTTL	HEX 	Define Ethernet Hex Conversion Macro
+
+;+
+;This macro is taken from the RT11 QNA Ethernet port driver test program
+;written by Marty Gentry.
+;-
+
+	.MACRO	HEX	TEXT
+	.DSABL	CRF
+	.TOGL. = 0
+	.IRPC ..CHR.,<TEXT>
+	 .IF DIF ..CHR.,-		
+		.HXCT. = 0
+		.FIND. = 0
+	  .IRPC ..HEX.,<0123456789ABCDEF>
+	   .IF IDN ..CHR.,..HEX.
+		.FIND. = 200!.HXCT.
+	   .ENDC ;IDN ..CHR.,..HEX.
+		.HXCT. = .HXCT. + 1
+	  .ENDR ;..HEX.
+	  .IF EQ .FIND.
+		.ERROR ;Invalid character ''..CHR.'' in hex string ''TEXT''
+		.MEXIT
+	  .ENDC ;EQ .FIND.
+	  .IF EQ .TOGL.
+		.FRST. = <.FIND.&17>*20
+	  .IFF
+		.BYTE	.FRST.!<.FIND.&17>
+	  .ENDC ;EQ .TOGL.
+		.TOGL. = <-.TOGL.> + 1
+	 .IFF
+	  .IF NE .TOGL.
+		.BYTE	.FRST./20
+		.TOGL. = 0
+	  .ENDC ;NE .TOGL.
+	 .ENDC ;DIF ..CHR.,-
+	.ENDR ;.IRPC ..CHR.
+	.IF NE .TOGL.
+		.BYTE	.FRST./20
+		.TOGL. = 0
+	.ENDC ;NE .TOGL.
+	.ENABL	CRF
+	.ENDM ;MACRO
+
+.SBTTL	BITS	Define Useful Bit Symbols
+
+	.BSECT	,CREF
+BIT0:	.BLKB	.		;BIT 0	VALUE 1      (1.)
+BIT1:	.BLKB	.		;BIT 1	VALUE 2      (2.)
+BIT2:	.BLKB	.		;BIT 2	VALUE 4      (4.)
+BIT3:	.BLKB	.		;BIT 3	VALUE 10     (8.)
+BIT4:	.BLKB	.		;BIT 4	VALUE 20     (16.)
+BIT5:	.BLKB	.		;BIT 5	VALUE 40     (32.)
+BIT6:	.BLKB	.		;BIT 6  VALUE 100    (64.)
+BIT7:	.BLKB	.		;BIT 7	VALUE 200    (128.)
+BIT8:	.BLKB	.		;BIT 8	VALUE 400    (256.)
+BIT9:	.BLKB	.		;BIT 9	VALUE 1000   (512.)
+BIT10:	.BLKB	.		;BIT 10	VALUE 2000   (1024.)
+BIT11:	.BLKB	.		;BIT 11	VALUE 4000   (2048.)
+BIT12:	.BLKB	.		;BIT 12	VALUE 10000  (4096.)
+BIT13:	.BLKB	.		;BIT 13	VALUE 20000  (8192.)
+BIT14:	.BLKB	.		;BIT 14	VALUE 40000  (16384.)
+BIT15:	.BLKB	.		;BIT 15	VALUE 100000 (32768.)
+
+.IIF	NDF	L$$ETH,	.ENABL	CRF
+.IIF	NDF	L$$ETH,	.LIST
+

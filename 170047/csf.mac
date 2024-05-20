@@ -1,0 +1,142 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+TITLE	CSF,<Common System Functions>,0A,10-MAY-91,KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for CSF.MAC
+
+;+
+;			[RSTS/E V9.3]
+;  000  KPH  04-Feb-86	Creation - or was it a dream?
+;-
+
+	DEFORG	CSF
+
+.SBTTL	CVTTIM	Convert date/time zeroed to seconds since zeroed
+
+;+
+; CVTTIM - Convert date/time zeroed to seconds since zeroed
+;
+;	R4 -> Date/time block, consisting of:
+;		.WORD	<Date zeroed (RSTS internal form)>
+;		.WORD	<Time zeroed (# of two-second intervals to midnight)>
+;
+;	Call	CVTTIM
+;
+;	R4 -> Date/time block modified:
+;		.WORD	<Seconds since last zeroed>
+;		.WORD	<Time zeroed (unchanged)>
+;-
+
+CVTTIM::REGSCR			;Save all registers
+	MOV	TIME,R3		;Get minutes until midnight
+	MUL	#30.,R3		;Compute double-seconds
+	MOVB	TIMSEC,R2	;Get seconds until minute
+	ASR	R2		;Now double seconds
+	ADD	R3,R2		;Now double seconds until midnight
+	MOV	2(R4),R3	;Get time zeroed
+	MOV	DATE,R5		;Get today
+	SUB	(R4),R5		;Compute delta-date
+	BEQ	30$		;Same day
+;
+; If it's not the same day, then the only way delta-seconds can fit in 16
+; bits is if the date difference is only one day, so check that next.
+;
+	DEC	R5		;Previous day?
+	BEQ	10$		;Yes
+;
+; Check for end-of-year wraparound.  This is the case if:
+;    Today is 1-Jan, and
+;    1. Date zeroed was day 366, or
+;    2. Date zeroed was day 365 and not a leapyear
+;
+	MOV	DATE,R0		;Get today
+	CLR	R1		;Clear high order for divide
+	DIV	#1000.,R0	;Get day within year and year-1970
+	DEC	R1		;Is it 1-Jan?
+	BNE	20$		;No
+	CMP	R5,#1001.-365.-1 ;Yes, but was start day #366 or #365?
+	BHI	20$		;No
+	BNE	10$		;Was 366 so definitely 31-Dec
+;
+; Day 365 is 31-Dec if not a leapyear.  This is the case if (today mod 4) = 1
+; or ((today-1970) mod 4) = 3 (since 1970 mod 4 = 2) so check that
+;
+	INC	R0		;Get today's year # + 1
+	BIT	#3,R0		;Are we in a leap year?
+	BNE	20$		;No, so overflow
+;
+; To compute delta-time we do start-end since both are in time-until-midnight
+; (i.e. backwards) notation
+;
+
+10$:	SUB	R2,R3		;Compute delta-double-seconds
+	BHIS	20$		;If start < end then > full day elapsed
+	ADD	#43200.,R3	;Add in a day (86400/2 = 43200 double seconds)
+	BR	40$		;Now get real seconds
+
+30$:	SUB	R2,R3		;Compute delta-double-seconds
+40$:	ASL	R3		;Compute seconds
+	BCC	50$		;Amazing! it fit...
+20$:	MOV	#65535.,R3	;Store overflow value
+50$:	MOV	R3,(R4)		;Store result
+	RETURN			;Whew
+
+.SBTTL	INIZTM	Set up initial date/time entry
+.SBTTL	UPDZTM	Set up date/time last zeroed
+
+;+
+; INIZTM - Set up initial date/time entry
+; UPDZTM - Set up date/time last zeroed
+;
+;	R4 -> Date/time block, consisting of:
+;		.WORD	<Date zeroed (RSTS internal form)>
+;		.WORD	<Time zeroed (# of two-second intervals to midnight)>
+;
+;	CALL	INIZTM
+;	CALL	UPDZTM
+;
+; These routines initialize standard date/time blocks. UPDZTM will set
+; up the entry unconditionally; INIZTM will only set up the entry if
+; it has never been set before.
+;-
+
+.ENABL	LSB
+
+INIZTM::TST	(R4)		;Was date ever set before?
+	BNE	10$		;Yes, so exit (date is never 0)
+	.BR	UPDZTM		;No, go set it
+
+
+UPDZTM::PUSH	<R2,R3>		;Needed for multiply work
+	MOV	DATE,(R4)	;Save the monitor date word
+	MOV	TIME,R3		;Grab monitor time (minutes till midnight)
+	MUL	#30.,R3		;Make into double-seconds
+	MOVB	TIMSEC,R2	;Snatch seconds until next minute
+	ASR	R2		;Make it seconds/2
+	ADD	R2,R3		;Add it to system time in double-seconds
+	MOV	R3,2(R4)	;Store <time in seconds till midnight>/2
+	POP	<R3,R2>		;Bring back old friends
+10$:	RETURN
+
+.DSABL	LSB
+
+.END

@@ -1,0 +1,359 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	BCKSUM,<BACKUP and VOLUME summary handling>,0H,23-DEC-91,KPH/BGN/DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BCKSUM
+
+;+
+;
+;  000	KPH  06-Dec-83  Creation for Version 9.0 RSTS/E
+;  001	KPH  26-Mar-85	Bugfixes
+;			Add username
+;
+;			[RSTS/E V9.4]
+;  002  KPH  11-May-87	Split backup & volume summaries
+;  003  BGN  21-Feb-89  Modify fields for V9.7, new backup version is 1.1
+;  004  BGN   3-May-89  Don't write header information if /NOHEADER was
+;			specified.
+;  005	REG  22-Jan-90	Change 9.7 to 10.0, and 1.1 to 1.2
+;
+;			[RSTS V10.1]
+;  007  REG  07-Jan-91	Fix name attribute character count
+;  008	REG  07-Feb-91	Fix dev name if null
+;  009	DRP  20-Nov-91	Remove hardcoded values for OS version number and
+;			use the SYSVEL and SYSVEE values from COMMON.MAC.
+;			Change the BACKUP version id from 1.2 to 1.3.
+;-
+
+.SBTTL	Call all needed MACROs
+
+.MCALL	SUBR,CALBX,.ASCIC
+
+.SBTTL	Define our local data
+
+	.PSECT	RWDATA,RW,D,LCL,REL,CON
+
+	.EVEN
+HDPPN:	.BLKW			;PPN to write in the header		;004
+HDLEN:	.BLKW			;Length of the command to save		;004
+HDPTR:	.BLKW			;Pointer to command text		;004
+NODNAM:	.BLKB	12		;Node name as .ASCIC, in format _NODE::
+DEVNAM:	.BLKB	10		;Save device as .ASCIC, in format _DEV::
+USRNAM:	.BLKB	14.		;User name as .ASCIC string		;001
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+MODNAM:	.ASCIC	<"BCKSUM">	;Module name
+	.EVEN
+NULTXT:	.ASCIC	<" ">		;Null text
+
+.EVEN	;Cowgirls get the blues
+
+; The following is a list of threads used to build the Backup summary
+; record.
+
+THRLST:
+
+	THREAD	SETREC		;Set record type
+	 .WORD	BRT$SU		;To be BACKUP summary
+
+; Save set name
+
+	THREAD	CPYASC		;Copy .ASCIC string
+	 .WORD	BBHDAT+BBH$SN	;From block header
+	 .WORD	BSA$SN		;With attribute type of save set name
+
+; Command line
+
+	THREAD	CPIAIL		;Copy indirect address / indirect length
+	 .WORD	HDLEN		;From saved command length		;004
+	 .WORD	BSA$CM		;With attribute type of command line
+	 .WORD	HDPTR		;And saved command line			;004
+
+; User name
+
+	THREAD	CPYASC		;Copy .ASCIC string			;001
+	 .WORD	USRNAM		;From username save area		;001
+	 .WORD	BSA$UN		;Attribute type is username		;001
+
+; UIC (PPN)
+
+	THREAD	CPYUIC		;Build the UIC field
+	 .WORD	BSA$AC		;Attribute type is account
+	 .WORD	HDPPN		;From the PPN field
+
+; Backup date and time
+
+	THREAD	CPYDAT		;Build the date field
+	 .WORD	BSA$DT		;Attribute type is date
+	 .WORD	BCKDAT		;Date address
+	 .WORD	BCKTIM		;Time address
+
+; Operating system ID
+
+	THREAD	CPYIMM		;Copy immediate
+	 .WORD	2		;Two bytes
+	 .WORD	BSA$OS		;With attribute type of operating system ID
+	 .WORD	4		;Which is the value "4" for RSTS/E
+
+; Operating system version
+
+	THREAD	CPYIMM		;Copy immediate
+	 .WORD	4		;Six bytes				;005
+	 .WORD	BSA$SV		;With attribute type of O/S version
+	 .WORD	SYSVEL		;OS version number in ASCII		;009
+	 .WORD	SYSVEE		; e.g., V10.1				;009
+
+; Node name
+
+	THREAD	CPYASC		;Copy .ASCIC
+	 .WORD	NODNAM		;From node name
+	 .WORD	BSA$NN		;With attribute type of node name
+
+; Device name
+
+	THREAD	CPYASC		;Copy .ASCIC
+	 .WORD	DEVNAM		;From device name
+	 .WORD	BSA$DI		;Attribute type is device ID
+
+; BACKUP version
+
+	THREAD	CPYIMM		;Copy immediate
+	 .WORD	4		;Four bytes
+	 .WORD	BSA$BV		;Backup version
+	 .ASCII	/1.3 /		;Is 1.3					;009
+
+; Block size
+
+	THREAD	CPYADR		;Copy from an address
+	 .WORD	4		;Four bytes
+	 .WORD	BSA$BS		;Block size
+	 .WORD	BBHDAT+BBH$BS	;From the block header
+
+; XOR group size
+
+	THREAD	CPYADR		;Copy from an address
+	 .WORD	2		;Of two bytes
+	 .WORD	BSA$GS		;XOR group size
+	 .WORD	$GRPSZ		;From the common cell
+
+; And we're done
+
+	THREAD	THREXI		;Go and exit this thread list
+
+GLOBAL	<BBHDAT,$GRPSZ,$MYPPN,BCKDAT,BCKTIM,CMDSLN,CMDSAV>
+
+.SBTTL	Thread list for volume summary
+
+VOLTHR:
+
+	THREAD	SETREC		;Set record type
+	 .WORD	BRT$VL		;To be volume summary
+
+; Volume label
+
+	THREAD	CPYIMM		;Copy immediate
+	 .WORD	12.		;Twelve bytes
+	 .WORD	BVA$ID		;Volume label
+VOLLBL:	 .BLKB	6		;Filled in here
+	 .BLKB0	6,40		;Followed by six spaces
+
+; Pack cluster size
+
+	THREAD	CPYIMM		;Copy immediate
+	 .WORD	2		;Two bytes
+	 .WORD	BVA$CS		;Pack cluster size
+VOLPCS:	 .WORD	0		;Filled in here
+
+; Pack size in blocks
+
+	THREAD	CPYIMM		;Copy immediate
+	 .WORD	4		;Four bytes
+	 .WORD	BVA$PS		;Pack size in blocks
+VOLSIZ:	 .WORD	0,0		;Filled in here
+
+; First LBN of MFD
+
+	THREAD	CPYIMM		;Copy immediate
+	 .WORD	4		;Four bytes	
+	 .WORD	BVA$MF		;First LBN of MFD
+MFDLBN:	 .WORD	0,0		;Filled in here
+
+; RSTS specific attributes
+
+	THREAD	CPYIMM		;Copy immediate
+	 .WORD	4		;Four bytes
+	 .WORD	BVA$RS		;RSTS specific attributes
+VOLSTR:	 .WORD	0		;Structure level
+VOLFLG:	 .WORD	0		;Pack flags
+	 
+; And we're done
+
+	THREAD	THREXI		;Exit from thread land
+
+
+.SBTTL	Write BACKUP summary
+
+;+
+; BCKBSM - Write BACKUP summary
+;
+;	CALL	BCKBSM
+;
+;	And it happens
+;
+;	All registers are preserved
+;-
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+BCKBSM::SAVREG			;Save all registers			;002
+	CLR	HDPPN		;Zero ppn				;004
+	MOV	#1,HDLEN	;Zero command length			;004
+	MOV	#NULTXT+1,HDPTR	;Zero command line			;004
+	MOV	NULTXT,R1	;Single character and a space		;004
+	MOV	R1,USRNAM	;Zero username				;004
+	MOV	R1,NODNAM	;Zero node name				;004
+	MOV	R1,DEVNAM	;Zero device name			;004
+	BIT	#C2$HEA,C$FLG2	;Suppress header info?			;004
+	BNE	38$		;Yes, skip next section			;004
+
+	MOV	CMDSAV,HDPTR	;Point to command text			;004
+	MOV	CMDSLN,HDLEN	;Length of command line			;004
+	MOV	$MYPPN,HDPPN	;PPN to save				;004
+	CALLX	CLRXRB		;Clear out the XRB
+	.DATE			;Get date and time information
+	MOV	@#XRB+XRLEN,BCKDAT ;Save the backup date
+	MOV	@#XRB+XRBC,BCKTIM ;And the backup time
+	CALLX	CLRFQB		;Clear out the XRB
+	MOV	#FIRQB+FQFIL,R1	;R1 -> FIRQB @ function code
+	MOV	#NODNAM,R2	;R2 -> Node name save area
+	CLRB	(R2)+		;Guess at no node name
+	MOV	(PC)+,(R1)+	;Set function code
+	.BYTE	-19.,1		; As get node parameters
+	.MESAG			;Now go for it
+	TSTB	@#FIRQB		;Error?
+	BNE	30$		;Yes, just ignore it, no node name
+	MOVB	#'_,(R2)+	;Start the node name with an underscore
+	MOV	#6,R4		;R4 = Maximum length of node name
+10$:	MOVB	(R1)+,R3	;Pick up byte of node name
+	CMPB	R3,#40		;Is this the end?
+	BEQ	20$		;Yes, it sure is
+	MOVB	R3,(R2)+	;No, so save it for the caller
+	SOB	R4,10$		;And loop for the whole thing
+20$:	MOVB	#':,(R2)	;Now end the node name
+	MOVB	(R2)+,(R2)+	;With a ::
+
+30$:	SUB	#NODNAM+1,R2	;R2 = Length of node name
+	MOVB	R2,NODNAM	;Now save the node name as .ASCIC string
+
+	MOV	#DEVNAM+1,R5	;R5 -> Device name save area
+	MOVB	#'_,(R5)+	;Start the device name with an underscore
+	MOVB	$SAVDEV,(R5)+	;Now do device name LSB
+	MOVB	$SAVDEV+1,(R5)+	;And device name MSB
+	TST	$SAVDEV		;Is there anything there?		;008
+	BNE	32$		;Yes					;008
+	MOVB	#'S,-2(R5)	;No, so make it look good		;008
+	MOVB	#'Y,-1(R5)	; with system disk name			;008
+32$:	CLR	R0		;Get ready to get unit number		;001
+	BISB	$SAVUNT,R0	;Now get unit number
+	CALLX	NUM$		;And convert it to ASCII
+	MOVB	#':,(R5)+	;Now end the name with a colon
+	SUB	#DEVNAM+1,R5	;Get the length of the string
+	MOVB	R5,DEVNAM	;And save it
+
+	MOV	#USRNAM,R2	;Point to username string		;001
+	CLRB	(R2)+		;Guess at no username			;001
+	CALLX	CLRFQB		;Clear out the FIRQB			;001
+	MOVB	#UU.ATR,@#FIRQB+FQFUN ;Function is read attribute	;001
+	MOV	#377+<5*400>,@#FIRQB+FQFIL ;Read user name		;001
+	.UUO			;What's his name?			;001
+	TSTB	@#FIRQB		;Did we get one?			;001
+	BNE	38$		;No forget it				;001
+	MOV	#FIRQB+FQNAM1+1,R1 ;Point to username			;001
+	MOV	#13.,R3		;Maximum length is 13 bytes		;001
+35$:	TSTB	(R1)		;Examine the next character		;007
+	BEQ	36$		;Null, we're done			;007
+	MOVB	(R1)+,(R2)+	;Copy a byte				;001
+	SOB	R3,35$		;More, loop for it			;001
+36$:	SUB	#USRNAM+1,R2	;Get the length of their name		;001
+	MOVB	R2,USRNAM	;And stash it away			;001
+
+38$:	MOV	#THRLST,R4	;Point to thread list			;001
+	CALLRX	THRINI		;Now execute the threads		;002
+
+GLOBAL	<BCKDAT,BCKTIM,$SAVDEV,$SAVUNT>					;002
+
+.SBTTL	Write volume summary
+
+;+
+; BCKVSM - Write volume summary
+;
+;	CALL	BCKVSM
+;
+; And it happens. All registers are preserved.
+;-
+
+BCKVSM::SAVREG			;Save all registers			;002
+	CALLX	CLRFQB		;Clear out the FIRQB
+	MOV	#FIRQB+FQFUN,R1 ;R1 -> FIRQB @ FQFUN
+	MOVB	#UU.ATR,(R1)+	;Function code is read/write attributes
+	MOVB	#-4,(R1)+	;Subfunction code is read pack attributes
+	MOV	$DSKDEV,@#FIRQB+FQDEV ;Set up input device name		;001
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;And unit number			;001
+	.UUO			;Now go for it
+	MOVB	@#FIRQB,R0	;Pick up error code
+	BNE	60$		;We got one, forget volume summary
+	MOVB	@#FIRQB+26,R1	;R1 = Device cluster size
+	CLR	R2		;Get ready to get the shift factor for pack
+40$:	ASR	R1		;Are we done yet?
+	BEQ	50$		;Yes, R2 has the shift factor
+	INC	R2		;No, say we need at least another shift
+	BR	40$		;And go for it
+
+50$:	MOV	#FIRQB+10,R0	;R0 -> FIRQB @ MFD start DCN
+	MOV	(R0)+,R5	;R5 has start DCN of MFD
+	CLR	R4		;Set up MSB for LBN conversion
+	ASHC	R2,R4		;Now <R4,R5> has LBN of MFD
+	MOV	R5,MFDLBN	;Set LSB of start of MFD
+	MOV	R4,MFDLBN+2	;And set MSB of start of MFD
+	MOV	(R0)+,VOLSTR	;Now set volume structure level
+	MOV	(R0)+,VOLPCS	;And volume pack cluster size
+	MOV	(R0)+,VOLFLG	;And volume flags
+	MOV	#VOLLBL,R5	;R5 -> Label area
+	BIT	#C2$HEA,C$FLG2	;/NOHEADER specified?
+	BEQ	55$		;No
+	CLR	(R0)		;Yes, clear packid
+	CLR	2(R0)		;And the second word
+55$:	CALLX	RAD$W2		;Convert label to ASCII
+	MOV	(R0)+,R5	;Pick up size of disk in DCNs
+	CLR	R4		;And clear MSB for LBN conversion
+	ASHC	R2,R4		;Now <R4,R5> has size of disk in blocks
+	MOV	R5,VOLSIZ	;Set volume size LSB
+	MOV	R4,VOLSIZ+2	;And volume size MSB
+
+	MOV	#VOLTHR,R4	;R4 -> Thread list
+	CALLRX	THRINI		;Go and process the threads
+
+60$:	RETURN			;Now we're done
+
+GLOBAL	<$DSKDEV,$DSKUNT,C$FLG2>					;002
+
+.END

@@ -1,0 +1,395 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+TITLE	LOD,<SYSTEM STARTUP>,0I,31-JAN-92,JTC/SRM/FEK/DRP/KPH/DBM/VAM
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR LOD
+
+;+
+;
+;  000	JTC  15-Oct-81	Creation - Brand new module
+;  001  SRM  26-oct-81	Load resident overlays at startup time.
+;  002	JTC  10-Nov-81	Fix I-APR trimming bug.
+;  003	FEK  01-SEP-82	Do the mount before the login
+;  004  AJK  14-FEB-83  Added code to initialize MSCP region
+;
+;				[RSTS V9.0]
+;  005	GPK  22-Sep-83	Add DCL, run INIT at startup
+;  006	GPK  17-Nov-83	Make DCL default KBM; improve error reporting
+;  007	DRP  05-Dec-83	Changes for Open phase
+;  008	KPH  27-Mar-84	Run START.COM or CRASH.COM instead of INIT
+;			Don't add DCL if it is the primary RTS
+;  009	KPH  16-Jul-84	Allocate XBUF space for disk statistics
+;  010	KPH  19-Jul-84	Run DCL.RTS and pass a command line
+;			Move FIPPOL setup to first overlay
+;			Move MSCP setup to first overlay
+;  011	KPH  02-Aug-84	Change system startup to invoke SYSINI with a parameter
+;  012	KPH  29-Aug-84	Changes for APR5 FIP pool
+;			Remove code to load overlays (done dynamically)
+;  013	KPH  08-Feb-85	Changes for monitor KBM
+;
+;			[RSTS V9.1]
+;  014	DBM  27-Feb-85	Changes for new [T]MSCP queue structure
+;  015	KPH  05-Apr-85	Remove primary RTS
+;
+;			[RSTS V9.2]
+;  016  KPH  25-Jul-85	Add job control region
+;
+;			[RSTS V9.3]
+;  017  JHC  11-Nov-85	Initialize any DEUNAs/DEQNAs on the system
+;  018  VAM  18-Jun-86	Change mapping in MSCP initialization.
+;
+;			[RSTS V9.6]
+;  019  KPH  19-Feb-88	Remove stats setup
+;
+;			[RSTS 10.1]
+;  020	FEK  24-Dec-91	Try to clean SY0: if started dirty
+;-
+
+.SBTTL	STAFQ  -- Final Monitor Startup
+
+FQFSRT	LOD
+
+;+
+; STAFQ - SYSTEM STARTUP
+;
+;	R0 =  Job number of the first job on the system (not logged in)
+;	R1 -> Job Data Block
+;	R2 -> 2nd Job Data Block
+;	R4 -> FIRQB (Work Block)
+;
+; Action taken:
+;
+;	- Kernel I-apr's are trimmed if I&D are seperated
+;	- The FIP Pool free list is initialized				;010
+;	- I-space code is moved out of the root, if any
+;	- The system disk is mounted
+;	- The first job is logged in
+;	- DCL is added and made default KBM				;006
+;	- A @SYSINI START or @SYSINI CRASH is placed in the job's	;011
+;	  command line buffer						;011
+;	- DCL.RTS is RUN						;010
+;	- We return to RTI3
+;-
+
+	FQFENT	STA
+
+	NOP			;Can patch to a BPT for debugging
+	REGSAV			;Save all the registers
+	BIT	#4,@#MMU22W+2	;Are we running with D-space enabled?
+	BEQ	10$		;No, we can't trim the I-APR's, then.
+	CALL	ISPGAP,R5	;Yes, I-space mapping is needed up through
+	.WORD	$$IBOT-2	; the last word before $$IBOT, and is needed
+	.WORD	$$ISPS		;  again at $$ISPS, but not in between.
+	CALL	ISPGAP,R5	;It is needed again up to the last word
+	.WORD	$$ISPE-2	; before $$ISPE and but it is not needed
+	.WORD	$$ITOP		;  again until $$ITOP.
+10$:	MOV	@#$$LODB+F.FBNL,R2 ;Pick up LSB of load block		;012
+	MOVB	@#$$LODB+F.FBNM,R3 ;Pick up MSB of load block		;012
+	CALLX	READ		;Now read the load block into FIBUF	;012
+	MOV	#FIPEND,R4	;Get virtual address of FIP Pool
+				; assuming that D-space is not enabled.
+	ADD	#40-1,R4	;Round it up to the next small buffer boundary
+	BIC	#40-1,R4	; just to make sure.
+	BIT	#4,@#MMU22W+2	;Are we running with D-space enabled?
+	BEQ	40$		;No, FIP Pool virtual address is FIPEND.
+	MOV	#121000,R4	;Yes, FIP Pool starts after overlays	;012
+	MOV	@#FIBUF+LBFPLP,@#FPLAP6 ;So set up the FIP Pool mapping
+	ADD	#<140000-121000>/100,@#FPLAP6 ;And offset for APR6	;012
+	MAP	FIPPOL		;And go map FIP				;012
+40$:	MOV	@#FIBUF+LBFPLL,R0 ;Get FIP Pool length in MMU slivers
+	BEQ	50$		;Oh, there's no FIP Pool.
+	ASH	#6,R0		;Convert FIP Pool length to bytes.
+	MOV	R0,(R4)		;Store length in the buffer to return,
+	BUFFER	RETURN		;And return it.
+
+GLOBAL	<DPAR6,FPLAP6,$$LODB>						;012
+
+.SBTTL	... Initialize MSCP region
+
+50$:	CMP	#CMT,#UMT$XX		; Ssystem genned with MSCP devices?
+	BEQ	60$			; No, NOP.
+	CMP	@#CMT+CM.CRQ,#-1	; MSCP region already initialized? ;014
+	BNE	60$			; Yes, NOP.
+	TSTB	@#CMT+CM.DCT		; Did INIT see any RU controllers? ;014
+	BEQ	60$			; No, NOP.
+
+	MOV	@#DSKMAP+<<UMT$DU-UMT$XX>/2>,R2 ; R2 = Disk driver index
+	MOV	DSKPTR(R2),R2		; R2 -> D?DINT of unit 0'S controlr.
+	MOV	PC,-(SP)		; Compute return address.
+	ADD	#60$-.,(SP)		; (SP) = return address
+	MOV	@#DPAR5,-(SP)		; (SP) = data PAR5 address
+	MOV	@(SP),(SP)		; (SP) = contents of current DPAR5
+	MOV	@#KISAR5,-(SP)		; (SP) = contents of current KISAR5
+	MOV	-(R2),-(SP)		; Put MSCP driver's QDS$DU on stack
+	MOV	@#MCPAP5,-(SP)		; Put MCP phase APR5 on stack.	;018
+	CLR	R4			; R4 = 0 means no DSQ, means
+					; .. initialize MSCP region.
+	JMP	@#CALLMX		; Initialize driver and MSCP region.
+					; .. This will establish the virtual
+					; .. circuit between host and
+					; .. controllers.  And attention
+					; .. messages will become visible
+					; .. to the driver.
+60$:	TST	@#XECORE		; check for any UNAs		;017
+	BEQ	70$			; none				;017
+	CLR	R0			; R0 = 0 means start up or re-init
+	CALLX	CALLMI,R5		; Do a CALLMI into DEA$XE for UNA
+	.WORD	$DEATBL+10,XEDAP5	; init, but don't do CALLMI .GLOBL
+70$:	TST	@#XHDATA		; Return here, and check for QNAs;017
+	BEQ	90$			; none, so continue		;017
+	CLR	R0			; R0 = 0 means start up or re-init
+	CALLX	CALLMI,R5		; Do a CALLMI into DEA$XH for QNA
+	.WORD	$DEATBL+12,XHDAP5	; init, but don't do CALLMI .GLOBL
+90$:	FJMP	MORSTA		;Now off to more startup		;009
+
+GLOBAL	<MMU22W,$$IBOT,$$ISPS,$$ISPE,$$ITOP,FIBUF,FIPEND,MMU22W,FPLAP6>	;010
+GLOBAL	<CMT,DSKMAP,DSKPTR,UMT$XX,UMT$DU,MCPAP5,CALLMX,DPAR5>		;018
+GLOBAL	<KISAR5,MAXUNT,XECORE,XHDATA,XEDAP5,XHDAP5,$DEATBL>		;017
+
+.SBTTL	ISPGAP -- Create a gap in Kernel I-space mapping
+
+ISPGAP:	MOV	(R5)+,R2	;Point to where I-space is last needed.
+	MOV	R2,R1		;Round trim area start down to
+	BIC	#20000-1,R1	; the next lower APR boundary.
+	BIC	#100-1,R2	;Address of last sliver that needs I-space.
+	SUB	R1,R2		;Get distance between APR base and sliver.
+	ASH	#-6+8.,R2	;Get sliver number and put it in high byte.
+	BIS	#2,R2		;Set Read-only bit to make an APR descriptor.
+	ASHC	#-13.+1,R1	;Find lowest APR *2 to trim.
+	ADD	#KISDR0,R1	;And point to this APR's descriptor register.
+;
+; R1 -> Descriptor register for lowest I-APR to trim.
+; R2  = Descriptor value for this lowest register.
+;
+	MOV	(R5)+,R4	;Get pointer to where I-space must start again
+	MOV	R4,R3		;Round I-space area start down to the
+	BIC	#20000-1,R3	; next lower APR boundary.
+	BIC	#100-1,R4	;Address of first sliver that needs I-space.
+	SUB	R3,R4		;Get distance between APR base and sliver.
+	ASH	#-6+8.,R4	;Convert to MMU units and put in high byte.
+	BIS	#2+10,R4	;Read-only, extend downwards.
+	ASHC	#-13.+1,R3	;Find highest APR *2 to trim.
+	ADD	#KISDR0,R3	;And point to this APR's decriptor register.
+;
+; R1 -> Descriptor register for lowest I-APR to trim.
+; R2  = Descriptor value for lowest register.
+; R3 -> Descriptor register for highest I-APR to trim.
+; R4  = Descriptor value for highest register.
+;
+	CMP	R1,R3		;Trying to trim the same APR from both ends?
+	BEQ	20$		;That is clearly unreasonable.  Give up.
+10$:	MOV	R2,(R1)+	;Trim an APR.
+	CLR	R2		;Any intervening APR's get no access.
+	CMP	R1,R3		;Have we reached the last APR to trim yet?
+	BLO	10$		;No, trim another APR for no access.
+	MOV	R4,(R3)		;Yes, trim our last APR.
+20$:	RETURN	R5		;I-APR's trimmed as best we could.
+
+FQFEND
+
+.SBTTL	MORSTA -- Final monitor startup continued...
+
+	FQFSRT
+
+MORSTA:	NOP			;********  DEBUG  ********
+	TST	@#FIBUF+LBISPL	;Copying any I-space code out of the root?
+	BEQ	40$		;No, just go on and set up the FIP Pool.
+	CALL	MOVISP		;Yes, go move it, remap it, and return the
+				; space for more small buffers.
+
+.SBTTL	... Mount the system disk
+
+40$:	REGRES			;Restore the registers we entered STAFQ with.
+	REGSAV			;And save them for the login later.
+	CLRB	FQERNO(R4)	;Mount subfunction code
+	CLR	14(R4)		;Use pack ID as the logical name
+	MOV	#100000!2000,FQMODE(R4) ; Look up pack id
+	MOV	#"SY,FQDEV(R4)	;Device name is "SY",
+	MOV	#0+<377*400>,FQDEVN(R4) ;Unit number "0", specific
+	FCALL	MOUNT		;Mount the system disk
+
+
+.SBTTL	... Log in the first job
+.SBTTL	... And away we go ...
+
+	REGRES			;now, restore them for the last time.
+	MOV	@#PPNTBL,R3	;Log first job into library account.
+	MOV	R3,FQPPN(R4)	;Set PPN in the FIRQB.
+
+;
+;	R0 =  Job number * 2
+;	R1 -> Job Data Block
+;	R2 -> 2nd Job Data Block
+;	R3 =  PPN
+;	R4 -> FIRQB (Work Block)
+;
+
+	FCALL	LINNOP		;Log into [1,2] without password check	;005
+	CALL	CLRFQB		;Clear the work block			;015
+	MOV	#^RDCL,FQNAM1(R4) ;Set name = "DCL"			;005
+	MOVB	#200,FQFIL(R4)	; and get info from the SIL file	;005
+	FCALLI	$UUOTB+<UU.RTS-UU$MIN*2> ;Add DCL			;005
+	MOV	@#NULRTS,R0	;Pick up pointer to newly added RTS	;015
+	BIT	#PF.KBM,R.FLAG(R0) ;Is DCL a KBM?			;006
+	BEQ	55$		;No, that's odd				;006
+	MOV	R0,@#DEFKBM	;Yes, set it as system default		;006
+	MAP	@#FIPJC6,APR=6,DATA,PIC ;Map the JCR entry for this job	;016
+	MOV	@#FIPJCR,R5	;R5 -> JCR entry for this job		;016
+	MOV	R0,JCDRTS(R5)	;Set DCL as the default RTS for this job ;016
+
+55$:	BUFFER	GETLRG,BUFHDR+COMLEN,-1,LRGPOL ;Get a command line buffer ;010
+	BCS	70$		;None, can't start up a COM file then	;010
+	MOV	R4,JCCMDL(R5)	;And set up this job's command line	;016
+	CALLX	MAPBUF		;And map it through APR 6		;010
+	ADD	#BF.CNT,R3	;And point to the count			;010
+	MOV	#COMLEN,R4	;R4 = length of command line		;010
+	MOV	R4,(R3)+	;Set up the length of our command	;010
+.ASSUME	BF.CNT+2	EQ	BUFHDR
+	MOVPIC	#CLNDSK,R0	;R0 -> Command for cleaning system disk	;020
+	MOVB	@#SYSUN2,R1	; Get SY0: FUN * 2			;020
+	BIT	#UO.CLN,UNTOPT(R1) ;Does SY0: need cleaning?		;020
+	BNE	60$		;Yes					;020
+	MOVPIC	#STACOM,R0	;R0 -> Command for a start		;010
+	CMP	@#P$NEW,#P.STRT	;Doing startup or crash recovery?	;010
+	BEQ	60$		;Startup, so all set up			;010
+	MOVPIC	#CRACOM,R0	;R0 -> Command for a crash		;010
+60$:	MOVB	(R0)+,(R3)+	;Copy a byte of the command line	;010
+	SOB	R4,60$		;Now loop for the whole thing		;010
+	MAP	FIPPOL,PIC	;And remap FIP				;010
+	CALL	CLRFQB		;Clear the work block again		;010
+	INC	FQPPN(R4)	;Set the PPN to [0,1]			;008
+	MOV	#^RDCL,FQNAM1(R4) ;Set name to DCL			;010
+	MOV	#^RRTS,FQEXT(R4) ;And file type to RTS			;010
+	MOV	#130000,FQMODE(R4) ;Set mode to "readonly"		;005
+	MOV	#8192.,FQNENT(R4) ;Set line number to 8192.		;010
+	MOV	#15.*2,FQFIL(R4) ; and channel = 15.			;005
+	MOVB	#RUNFQ,FQFUN(R4) ;Set function = run for prot. check	;005
+	MOV	@#FIJBDA,R1	;Get JDB pointer			;005
+	BIS	#JFPOST,JDFLG(R1) ;Indicate posting required		;005
+	MOV	#UUOFQ*400,JDIOST(R1) ;No error and mask as for UUO	;005
+	CALLMR	RUNENT,OPNAP5	;Now go run that file			;007
+
+70$:	ERROR	NOBUFS		;Unable to get command line buffer	;010
+
+STACOM:	.ASCII	/@[0,1]SYSINI.COM START/ ;Command line for a start	;011
+COMLEN	=:	.-STACOM	;Length of command line			;010
+
+CRACOM:	.ASCII	/@[0,1]SYSINI.COM CRASH/ ;Command line for a crash	;011
+COMLEN	=:	.-CRACOM	;Length of command line			;010
+
+CLNDSK: .ASCII	^MOUNT SY0:/REBUIL/OVER^ ;Command for dirty disk start	;020
+COMLEN =:	.-CLNDSK	;Length of command line			;020
+
+.EVEN	;I want to be safe sometimes...					;010
+
+GLOBAL	<PPNTBL,LINNOP,MOUNT,$UUOTB,P$NEW,FIJBDA,$FIPTB,DEFKBM>		;013
+GLOBAL	<RUNENT,OPNAP5,NULRTS,FIJBD2,FIPJCR,FIPJC6,LRGPOL>		;016
+GLOBAL	<SYSUN2,UNTOPT>							;020
+
+.SBTTL	Clear out the work block
+
+;+									;005
+; Exit:									;005
+;	R4 ->	work block						;005
+;-									;005
+CLRFQB:	MOV	@#FIQUE,R4	;Get word block pointer			;005
+10$:	CLR	(R4)+		;Clear out a word			;005
+	BIT	#40-1,R4	;Done?					;005
+	BNE	10$		;Not yet				;005
+	SUB	#40,R4		;Yes, fix up the pointer		;005
+	MOVB	#STAFQ,FQFUN(R4) ;Make sure function code remains right	;005
+	RETURN			;Done					;005
+
+GLOBAL	<FIQUE>								;005
+
+.SBTTL	MOVISP -- Move I-space code out of the root.
+
+MOVISP:	MOV	@#FIBUF+LBISPS,R1 ;Get code's starting virtual address.
+	MOV	R1,R0		;Round this address down to
+	BIC	#100-1,R0	; the next lower MMU boundary.
+	MOV	R1,R5		;Find the distance between the starting
+	SUB	R0,R5		; address and the next lower MMU boundary.
+	ADD	#140000,R5	;Compute the target virtual address
+				; for moving the code.
+	MOV	@#FIBUF+LBISPE,R3 ;Get the code's ending virtual address.
+	SUB	R1,R3		;Get the length of the code to move.
+	MOV	@#FIBUF+LBISPP,R4 ;Get the MMU address of the target area.
+	MOV	R4,@#KDSAR6	; and map it.
+10$:	MOVB	(R1)+,R2	;Get a byte to transfer,
+	PUTUSR			; and use PUTUSR so we remap if needed,
+	SOB	R3,10$		;  until it's all moved out.
+;
+; Now that we've moved the code out, remap it.
+; Current register contents of value:
+;
+; R0 = Virtual starting address rounded down to next lower MMU boundary.
+; R1 = Just past virtual ending address
+; R4 = MMU address of target I-space area.
+;
+	MOV	R0,R3		;Round starting address down to the next
+	BIC	#20000-1,R3	; lower APR boundary.
+	SUB	R3,R0		;Get offset from APR base to MMU base
+	ASH	#-6,R0		; and convert it to MMU units.
+	SUB	R0,R4		;Get new MMU address for first I-space APR.
+	MOV	R1,R2		;Save virtual ending address for later.
+	DEC	R1		;Point at last byte to remap.
+	BIC	#20000-1,R1	;Round ending address down to APR boundary.
+	SUB	R3,R1		;Get the distance between the APR boundaries.
+	ASHC	#-13.,R1	;Compute the number of APR's
+	INC	R1		; that we have to remap.
+	ASHC	#-13.+1,R3	;Get the starting APR * 2.
+	ADD	#KISAR0,R3	;And form a pointer to the address register.
+	SPLC	7		;;;Lock out all interrupts - it can't hurt.
+20$:	MOV	R4,(R3)+	;;;Remap an APR.
+	ADD	#20000/100,R4	;;;Get the MMU address for the next APR.
+	SOB	R1,20$		;;;Continue until we're all remapped.
+	SPLC	3		;;;Lower priority and pray we did it right...
+
+GLOBAL	<FIBUF>
+
+; We are now running with the I-space code moved out and mapped.
+; Just for good measure, we'll zero out the old space before
+;  returning it to the monitor pool.
+;
+; R2 = Virtual ending address of I-space code moved
+;
+	MOV	@#FIBUF+LBISPS,R0 ;Get the starting I-space address again.
+	ADD	#40-1,R0	;Round up to the
+	BIC	#40-1,R0	; next small buffer boundary.
+	BIC	#40-1,R2	;Round the end down similiarly.
+	MOV	R0,R4		;Set up expected pointer to free area.
+	MOV	R2,R1		;Get the length of the
+	SUB	R0,R1		; buffer space to return.
+	MOV	R1,(R0)+	;And put it in the buffer for return
+30$:	CLR	(R0)+		;Clear out the rest of the buffer
+	CMP	R0,R2		; just for good measure so we can see
+	BLO	30$		;  that no one is relying on it.
+	BUFFER	RETURN		;Return the space to the monitor pool!
+	RETURN			;All done with the I-space code.
+
+GLOBAL	<FIBUF>
+
+FQFEND
+
+.END
+

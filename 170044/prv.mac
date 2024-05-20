@@ -1,0 +1,348 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+TITLE	PRV,<PRIVILEGE CONTROL>,0A,10-MAY-91,GPK/KPH/DBM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR PRV
+
+;+
+;
+;  000	GPK  09-Mar-82	Creation
+;  001	GPK  20-Sep-83	Move privileges out of job headers
+;  002	GPK  29-Dec-83	Split ACNT into GACNT/WACNT; rename RGROUP etc.
+;  003	GPK  20-Feb-84	Clear unused parts of masks to 4 words
+;  004	GPK  19-Apr-84	Privilege name changes
+;  005	GPK  15-Oct-84	Rename USER0-7 to USER1-8, add ALL on NAMBIT
+;  006	GPK  30-Oct-84	Fix group-privs handling
+;  007	GPK  27-Feb-85	Fix CHKACC call for possible execution on SYSTAK
+;  008	GPK  04-Apr-85	Add TMPPRV privilege
+;
+;			[RSTS V9.2]
+;  009  KPH  25-Jul-85	Add job control region
+;
+;			[RSTS V10.0]
+;  010	DBM  19-Oct-89	Add OPER prvilege
+;
+;-
+
+FQFSRT	PRV
+
+.ENABL	LSB
+
+;+
+; UU.PRV - Privilege flag control
+;
+;	R0 = Job # * 2
+;	R1 ->	JDB of requestor
+;	R2 ->	JDB2 of requestor
+;	R4 ->	FIRQB
+;			+4-16	Privilege bits to set
+;			+20-32	Privilege bits to clear
+;
+;	On exit:
+;			+4-16	Current privilege bits
+;
+; Note: Clear is done before Set
+;
+;-
+
+	UUOENT	PRV,,SYNC
+
+	CALLX	MAPJCR		;Map this job's JCR			;009
+	ADD	#JCPRIV,R1	;Point to privilege masks		;009
+	CMP	(R4)+,(R4)+	;Point to "set" list
+	MOV	#PRIVSZ/2,R5	;Get count of words to process
+10$:	BIC	20-4(R4),(R1)	;Clear some bits			;009
+	MOV	JCAPRV-JCPRIV(R1),-(SP) ;Get allowed privileges		;009
+	COM	(SP)		;Complement to get what's disallowed
+	BIC	(SP)+,(R4)	;Prune the privileges to set
+	BIS	(R4),(R1)	;Now set them				;009
+30$:	MOV	(R1)+,(R4)+	;Return new current privs to caller	;009
+	SOB	R5,10$		;Loop through "real" words
+40$:	BIT	#17,R4		;Are we past the end of the "set" section?
+	BEQ	50$		;Yes, exit loop
+	CLR	(R4)+		;Clear an unused/reserved word
+	BR	40$		;Loop
+
+50$:	MAP	FIPPOL		;Restore FIP mapping			;009
+	RETURN			;All done
+
+.DSABL	LSB
+
+.SBTTL	Set/cancel third party privilege check
+
+;+
+;	R0 = Job # * 2
+;	R2 ->	JDB2 of requestor
+;	R4 ->	FIRQB
+;			FQPPN	PPN of 3rd party or 0 to cancel
+;			FQNAM1	Privilege mask
+;
+; Note: The alternate privilege mask is only valid if JCALPP is non-zero.
+;-
+
+.ENABL	LSB
+
+	UUOENT	3PP,,SYNC
+
+	CALLX	MAPJCR		;Map this job's JCR entry		;009
+	ADD	#FQPPN,R4	;Point to PPN field			;009
+	MOV	(R4)+,JCALPP(R1) ;Set the requested PPN (or clear it)	;009
+	BEQ	20$		;Zero, nothing more to do		;009
+	ADD	#JCALPV,R1	;Non-zero, point to privilege block	;009
+	MOV	#PRIVSZ/2,R0	;Count of words to move			;009
+10$:	MOV	(R4)+,(R1)+	;Move a word				;009
+	SOB	R0,10$		; until done
+20$:	MAP	FIPPOL		;Restore FIP pool mapping		;009
+	RETURN			;All set				;009
+
+.DSABL	LSB
+
+;+
+; CHKFIL	Check file access rights
+;
+;	Called as an FJMP from the PRV1 segment to finish subfunction
+;	zero of the UU.CHK function.
+;
+;	R4 -> FIRQB @ FQNAM1
+;-
+
+CHKFIL:	MOV	-(R4),R0	;Get PPN to check for			;010
+.ASSUME	FQPPN EQ FQNAM1-2
+	MOVB	FQPROT-FQPPN(R4),R1 ; and protection code
+	MOVB	FQJOB-FQPPN(R4),R2 ;Get caller's job number * 2		;007
+	CALLX	CHKACJ		;Check access rights to this thing	;007
+	SWAB	R0		;Move flags to low byte
+	MOVB	R0,FQERNO-FQPPN(R4) ;Return the data
+	RETURN			;Done
+
+FQFEND
+
+FQFSRT
+
+.SBTTL	Privilege and access checking function
+
+;+
+; This function performs privilege or file access rights checks
+;
+;	R0 =	Job number * 2 of caller
+;	R1 ->	JDB of caller
+;	R2 ->	JDB2 of caller
+;	R4 ->	FIRQB
+;			FQFIL = subfunction code
+;
+; Inputs and outputs:
+;
+; for subfunction 0:
+;			FQPPN =  PPN
+;			FQPROT = Protection code
+;	returns:
+;			FQERNO = access flags (DDPRVO, DDRLO, DDWLO)/400
+;
+; for subfunction 1:
+;			FQNAM1 = privilege name (6 characters ASCII)
+;	returns:
+;			FQERNO = 0 if caller has the privilege, 1 if not
+;			FQNAM1 = privilege mask (PRIVSZ bytes)
+;	errors:
+;			NOSUCH if name unknown
+;
+; for subfunction 2:
+;			FQNAM1 = privilege mask (PRIVSZ bytes)
+;	returns:
+;			FQNAM1 = bit corresponding to name cleared
+;			FQNAM2 = privilege name (6 characters ASCII)
+;	errors:
+;			NOSUCH if no bit set or unknown (unused) bit
+;-
+
+.ENABL	LSB
+
+10$:	ERROR	BADFUO		;Illegal subfunction code
+
+	UUOENT	CHK							;005
+
+	MOVB	FQFIL(R4),R3	;Get subfunction code
+	CMP	R3,#2		;Legal?
+	BHI	10$		;No
+	ADD	#FQNAM1,R4	;Advance FIRQB pointer
+	MOVPIC	#PRVTBL,R2	;Point to privilege name table		;005
+	MOV	#TBLSIZ,R1	; and load count of entries		;005
+	ASL	R3		;Make word offset
+	ADD	R3,PC		; and dispatch
+	 BR	130$		;File protection check			;010
+	 BR	NAMBIT		;Name -> mask
+	 .BR	BITNAM		;Mask -> name
+
+BITNAM:	CLR	R0		;Initialize count
+	ADD	#4*2,R4		;Point beyond mask			;004
+	;BIC	#^C<..PRW3>,-(R4) ;Eliminate unused bits		;004
+	CLR	-(R4)		; (all unused in 4th word)		;008
+.ASSUME	..PRW3 EQ 0							;008
+	BIC	#^C<..PRW2>,-(R4)					;004
+	;BIC	#^C<..PRW1>,-(R4)					;004
+	;BIC	#^C<..PRW0>,-(R4)					;004
+	CMP	-(R4),-(R4)	; (all used in 1st and 2nd words	;008
+.ASSUME	..PRW0 EQ 177777						;008
+.ASSUME	..PRW1 EQ 177777						;008
+20$:	MOVB	(R4)+,R5	;Get a byte of mask
+	BNE	30$		;Found something, look into it
+	INC	R0		;Nothing yet, increment byte number
+	CMP	R0,#PRIVSZ	;Gone too far?
+	BLO	20$		;Not yet
+	ERROR	NOSUCH		;No bit found
+
+30$:	MOV	R5,R3		;Copy the mask obtained
+	DEC	R3		;Bit magic
+	BIC	R3,R5		;Leave only the lowest bit that was set
+	BICB	R5,-(R4)	;Turn it off in caller's FIRQB
+	SWAB	R5		;Move it to high byte
+	BIS	R0,R5		;Merge in byte number to form priv code
+	BIC	#40-1,R4	;Point back to top of FIRQB
+40$:	CMP	R5,(R2)+	;Match on code?
+				;Note: can't match on "ALL" entry	;005
+	BEQ	50$		;Yes, move the name
+	ADD	#6,R2		;No, skip the name
+	SOB	R1,40$		;Look some more
+	ERROR	NOSUCH		;No match, unknown bit
+
+50$:	ADD	#FQNAM2,R4	;Point to where name goes
+	MOV	(R2)+,(R4)+	;Set the name
+	MOV	(R2)+,(R4)+
+	MOV	(R2)+,(R4)+
+	RETURN			;Done
+
+NAMBIT:	TST	(R2)+		;Skip over priv code			;005
+60$:	CMP	(R4),(R2)	;Check match on first 2 chars
+	BNE	70$		;Nope
+	CMP	2(R4),2(R2)	;Second 2 chars
+	BNE	70$		;Nope
+	CMP	4(R4),4(R2)	;Last chance
+	BEQ	80$		;It matches, process that
+70$:	ADD	#8.,R2		;Skip to next entry
+	SOB	R1,60$		;Loop around
+	ERROR	NOSUCH		;No match found
+
+80$:	CLRB	FQERNO-FQNAM1(R4) ;Assume we have the privilege
+	MOV	R4,R1		;Copy FIRQB pointer
+	MOV	-(R2),R5	;Get the privilege code
+	BNE	110$		;It wasn't "ALL", skip			;005
+	MOV	#FIPRVM,R5	;Point to caller's mask			;005
+	MOV	#4,R0		;Number of words to do			;005
+90$:	MOV	-(R2),(R1)+	;Move piece of the mask			;005
+	MOV	(R2),-(SP)	; and copy to stack			;005
+	BIC	(R5)+,(SP)+	;Does he have all that?			;005
+	BEQ	100$		;Yes, skip				;005
+	MOVB	#1,FQERNO-FQNAM1(R4) ;No, indicate that			;005
+100$:	SOB	R0,90$							;005
+	RETURN			;Done					;005
+
+110$:	CALLX	CHKPR5,R4	;Well, does he?				;005
+	ADCB	FQERNO-FQNAM1(R4) ;Return code of 1 if not
+	MOV	#4,R0		;Count of words to clear		;003
+.ASSUME	PRIVSZ/2 LE 4							;003
+120$:	CLR	(R1)+		;Clear out the return area
+	SOB	R0,120$		; until done
+	MOVB	R5,R1		;Get offset
+	ADD	R4,R1		;Form address in FIRQB
+	SWAB	R5		;Get mask to low order
+	BISB	R5,(R1)		;Set the right bit in return mask
+	RETURN			;Done
+
+130$:	FJMP	CHKFIL		;Won't fit in here, off to PRV0		;010
+
+.DSABL	LSB
+
+GLOBAL	<FIPRVM>							;005
+
+;+
+; Define the table of privilege codes
+;
+; This table must be updated at the same time the privilege
+; definitions in KERNEL are updated.
+;-
+
+.MACRO	PRNAME	PRIV
+$$$$$1	=	O'PRIV
+$$$$$2	=	P'PRIV
+.IF	EQ	<$$$$$2 & 377>
+$$$$$1	=	$$$$$1+1
+$$$$$2	=	$$$$$2 / 400 & 377
+.ENDC
+.IF	GE	$$$$$9-<$$$$$1*400+$$$$$2>
+	.ERROR	;Entry for PRIV is out of order
+.MEXIT
+.ENDC
+$$$$$9	=	$$$$$1*400+$$$$$2
+	.BPRIV	<PRIV>
+.NCHR	$$$$$$,<PRIV>
+	.ASCII	/PRIV/
+	.BLKB0	6-$$$$$$
+.ENDM	PRNAME
+
+$$$$$9	=	0							;002
+
+	.WORD	..PRW3,..PRW2,..PRW1,..PRW0 ;Mask for "ALL" (reversed)	;005
+PRVTBL:	.WORD	0		;Fake entry for "ALL"			;005
+	.ASCII	/ALL/<0><0><0>						;005
+	PRNAME	GACNT		;Group accounting functions
+	PRNAME	WACNT		;World accounting functions
+	PRNAME	GREAD		;Read any file in group
+	PRNAME	GWRITE		;Write any file in group
+	PRNAME	WREAD		;Read any file anywhere
+	PRNAME	WWRITE		;Write any file anywhere
+	PRNAME	DATES		;Set system or file dates
+	PRNAME	DEVICE		;Access restricted devices
+	PRNAME	EXQTA		;Exceed quotas
+	PRNAME	HWCFG		;Set hardware configuration data
+	PRNAME	HWCTL		;Do hardware operational control
+	PRNAME	INSTAL		;Install runtime systems etc.
+	PRNAME	JOBCTL		;Control job parameters
+	PRNAME	MOUNT		;Mount disks other than noshare
+	PRNAME	PBSCTL		;Print/Batch services operational ctl
+	PRNAME	RDMEM		;Read memory (except I/O page)
+	PRNAME	USER1		;Customer defined number 1
+	PRNAME	USER2		;Customer defined number 2
+	PRNAME	USER3		;Customer defined number 3
+	PRNAME	USER4		;Customer defined number 4
+	PRNAME	USER5		;Customer defined number 5
+	PRNAME	USER6		;Customer defined number 6
+	PRNAME	USER7		;Customer defined number 7
+	PRNAME	USER8		;Customer defined number 8		;005
+	PRNAME	RDNFS		;Read non-file-structured disk
+	PRNAME	SEND		;Send to restricted receiver
+	PRNAME	SETPAS		;Set own password
+	PRNAME	SHUTUP		;Shut down the system
+	PRNAME	SWCFG		;Set software configuration data
+	PRNAME	SWCTL		;Software operational control
+	PRNAME	SYSIO		;Access files in [0,*]
+	PRNAME	SYSMOD		;Modify the system (poke etc.)
+	PRNAME	TUNE		;Set tuning parameters
+	PRNAME	WRTNFS		;Write non-file-structured disk
+	PRNAME	TMPPRV		;Make program privileged		;008
+	PRNAME	OPER		;Operator privilege			;010
+
+TBLSIZ	=	<.-PRVTBL>/8.	;Table size in words
+
+FQFEND
+
+.END

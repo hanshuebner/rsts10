@@ -1,0 +1,2005 @@
+1	!		
+	!	PROGRAM		: ERRDIS.B2S
+	!	VERSION		: V10.1
+	!	EDIT		: G
+	!	EDIT DATE	: 01-NOV-91
+	! 
+	!
+	!
+	!		C O P Y R I G H T 
+	!
+	!
+	!		      Copyright (C) 1974, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass. 
+	!	
+	!	
+	!	This software is furnished under a license and may be used and 
+	!	copied  only  in accordance with the terms of such license and 
+	!	with the  inclusion  of  the  above  copyright  notice.   This 
+	!	software  or  any  other copies thereof may not be provided or 
+	!	otherwise made available to any other person.  No title to and 
+	!	ownership of the software is hereby transferred. 
+	!	
+	!	The information in this software is subject to change  without 
+	!	notice  and should not be construed as a commitment by Digital 
+	!	Equipment Corporation. 
+	!	
+	!	DIGITAL assumes no responsibility for the use  or  reliability 
+	!	of its software on equipment that is not supplied by DIGITAL. 
+	!	
+	!********************************************************************* 
+	
+	!
+	!
+	!	M O D I F I C A T I O N    H I S T O R Y 
+	!
+	!
+
+	! VER/ED	EDIT DATE	REASON
+	! V9.0-13 VAM	21-Mar-85	Add privilege check. 
+	! V9.5-02 MRK	17-Jul-87	Convert to BP2.
+	!				Add selective zero.		
+	!				Moby bugfixes and code rearrangement.
+	! V9.7-01 VAM	01-Nov-88	Default back to ERROR$:ERRLOG.FIL
+	!				if error occurs opening user-specified
+	!				error log file.
+	! V10.1-E VAM	20-Aug-91	Fix problem when zeroing errors that
+	!				have repeat counts.
+	!				Trap all "unexpected" errors when
+	!				opening user-specified input/output
+	!				files.
+
+	!
+	!
+	!	G E N E R A L    D E S C R I P T I O N 
+	!
+	!
+
+	!	ERRDIS, the main error display program, allows a privileged 
+	!	user to print a summary report (all error types) or a full  
+	!	report (1 or all error types, date and time restrictions) 
+	!	The information printed is extracted from an error log file, 
+	!	normally ERRLOG.FIL or ERRCRS.FIL. 
+	!	An error descriptor file, ERRDAT.FIL, is required to run the 
+	!	program. 
+	!	
+	!	ERRDIS asks all questions and generates summary reports. 
+	!	if the user requests a full (detailed) report or a list of 
+	!	possible bad blocks, ERRDET is chained to and executes 
+	!	these requests. 
+	!	
+	!	ERRDIS is also chained to from ANALY1 so that a crash error 
+	!	file report may be added to the regular crash analysis report. 
+
+	!
+	!
+	!	I / O    C H A N N E L S 
+	!
+	!
+
+	!	CHANNEL #		USED FOR 
+	!	
+	!	2			ERRDAT.FIL, error description file 
+	!	5			Input error file (e.g. ERRLOG.FIL) 
+	!	6
+	!	7			Output file 
+	!	12			ERRDIS.HLP, help file 
+
+	!
+	!
+	!	V A R I A B L E    D E F I N I T I O N S 
+	!
+	!
+
+	!	VARIABLE NAME		USED FOR 
+	!	
+	!	A$		Utility variable
+	!	BYT.POS$	Position for next error record 
+	!	CRLF		Carriage return/line feed 
+	!	CONTR.ERR%	Counter for UDA controller errors 
+	!	CNTRLR.MAX%	Number of DMV/DMP controllers on the system 
+	!	CNTRLR.NO%	Controller number for DMV/DMP
+	!	CR		Carriage return - defined by BASIC
+	!	D$		Utility string 
+	!	DAT%		Day accumulator 
+	!	DDCTBL%		Pointer to base of DDCTBL table
+	!	DDCU$		Holds the DDCU style device name for DMV/DMP
+	!	DDFLAG%		DDFLAG of the DDB, used to determine if the
+	!			device is a DMV or DMP
+	!	DDIDX%		Driver index
+	!	DF$		Default value on user input
+	!	DY%		Value of DD in DD-MMM-YY
+	!	E%		Error value 
+	!	ENTRY.TYP%	Entry type indicator: 
+	!			0	Run 
+	!			3	CHAIN entry from ANALY1 (at line 31000)
+	!			8	CCL entry (at line 30000)
+	!			16	CHAIN entry from ERRDET (at line 31000)
+	!	E1%		Line # on which an error occurred 
+	!	EN.DAT%,EN.DAT$	Limiting final date of errors to be checked
+	!	EN.TIM%,EN.TIM$	Limiting final time of errors to be processed
+	!	ER.DAT%		Date of a particular error
+	!	ER.DSC$		16 character error description 
+	!	ER.MNE$		2 character error mnemonic
+	!	ER.TIM%		Time (excluding seconds) a particular error 
+	!			 occurred
+	!	ER.TYP%		Error code of the error we're working on
+	!	F$		Utility string
+	!	FIL$		Name of file being opened at time of an error
+	!	FIRST.DAT%	Date of first error
+	!	FIRST.MIN%	Time of first error (excluding seconds)
+	!	FIRST.TIM%	Seconds
+	!	HR%		Value of HH in HH:MM
+	!	HT		Horizontal tab - defined by BASIC
+	!	I$		Version/edit #
+	!	I%		Utility variable
+	!	INP$		Input file
+	!	K%		Utility variable
+	!	L$		Total length of an error record (field)
+	!	LAST.DAT%	Date of last error
+	!	LAST.DSK%	Last disk error code
+	!	LAST.MIN%	Time (excluding seconds) of last error
+	!	LAST.TIM%	Seconds
+	!	LAST.READ.BLK%	Last block read from ERRDAT.FIL
+	!	LBB%		List bad blocks indicator (-1 means yes)
+	!	LF		Line feed - defined by BASIC
+	!	LN%		Total length of an error record
+	!	MAX.UNITS%	Maximum number of units per device
+	!	M1%,M2%		Hyphen pointers in date function 
+	!	MN%		Value of MM in HH:MM 
+	!	MTH%		Value of MMM (mapped from 1-13) in DD-MMM-YY 
+	!	MUST$		String of legal options for user input
+	!	NEW.BLK%	New block to be read from ERRDAT.FIL 
+	!	O% 
+	!	OUT$		Output file
+	!	PARAM$		20 byte parameter portion of each error record
+	!	R0$		Error type past record limit indicator (over 
+	!			limit changes R0$ from a space to an asterisk)
+	!	RECRD.LOG$,	Used in fielding individual error totals
+	!	ER.LOG$,
+	!	ER.RCV$,
+	!	RECRD.ALW$
+	!	REPRT%		Type of report the user wants
+	!	REST$		Portion of this error record that we're not 
+	!			 working with yet
+	!	S$		Utility string
+	!	TOT.LIM%,	Error file block limit
+	!	TOT.LIM$
+	!	TOT.LOG%,	Total errors logged, including repeats
+	!	TOT.LOG$
+	!	TOT.REC%,	Total errors received
+	!	TOT.REC$
+	!	TOT.USED%,	Total blocks used
+	!	TOT.USED$
+	!	T1%,T2%		Utility time variables
+	!	TEMP$		Temporary file name
+	!	USER.OPEN%	Indicates which file we're trying to open.
+	!				0 = Other
+	!				1 = Input file (usually ERRLOG.FIL)
+	!				2 = Output file (usually KB:ERRDIS.OUT)
+	!	W%		Utility variable
+	!	XD.MAX%		Maximum units allowed for a DMV/DMP
+	!				DMV = 12 units (0 - 11) 
+	!				DMP = 32 units (0 - 31) 
+	!	YR%		Value of YY in DD-MMM-YY 
+	!	ZERO%		Indicates whether file should be zeroed after
+	!			report (if any) is printed...
+	!				 0 = Do not zero file
+	!				-1 = Zero all errors
+	!				>0 = Zero a specific error type
+	!	ZR$		String used in zeroing error file ( CVT%$(0%) ) 
+
+	!
+	!
+	!	F U N C T I O N / S U B R O U T I N E    D E S C . 
+	!
+	!
+
+	!	FUNCTION/SUBROUTINE		USE 
+	!	
+	!	FNA%			Maps a 3 character month to a #
+	!	FNF$			Creates a unique 6 character string 
+	!				 to be used as (part of) a filename
+	!	FNGCL%			Get command line
+	!	FNJULIAN%		Takes a date string of "dd-mmm-yy" or
+	!				 "yy.mm.dd" form, or the keywords
+	!				 YESTERDAY or TODAY, and returns a
+	!				 RSTS/E internal date word.
+	!	FNMATCH%		Checks the validity of a user's 
+	!				 response
+	!	FNTIM2$			Get a time string in HH:MM:SS
+	!	FNVD%			Checks for a legal date
+	!	FNVT%			Check for a legal time
+
+	!
+	!
+	! 	D E C L A R A T I O N      S T A T E M E N T S
+	!
+	! 
+
+	DECLARE STRING CONSTANT		CTRAP = "6"C + "249"C, &
+					! This is CHR$(6%)+CHR$(-7%) &
+					CRLF = CR + LF, &
+					NL = ""
+
+	DECLARE INTEGER CONSTANT	FIRST.DSK       = 12%, &
+					LAST.DSK        = 21%, &
+					LAST.DEV        = 41%, &
+					MAX.UNITS       = 15%, &
+					BAD.BLOCKS.RPRT = 66%, &
+					FULL.RPRT       = 70%, &
+					SUMMARY.RPRT    = 83%, &
+					ZERO.RPRT       = 90%, &
+					ANALY.ENTRY     = 3%,  &
+					CCL.ENTRY       = 8%,  &
+					ERRDET.ENTRY    = 16%, &
+					READ.ONLY	= 8192%, &
+					SUPRESS.FF	= 8192%, &
+					MT.APPEND	= 128%, &
+					DISK.APPEND	= 2%
+
+	!
+	!
+	!	D I M E N S I O N    S T A T E M E N T S 
+	!
+	! 
+
+	DIM	MON$(12%), DAY%(12%), &
+		P%(11%), &
+		N%(3%), N$(3%), &
+		F%(30%), M%(30%), &
+		TOT%(29%,15%), &
+		XD.TOT%(15%,31%), &
+		PART$(5%) 
+
+	! MON$(),DAY%()	- Month and # of days in month 
+	! P%()		- Used in extracting parameter info 
+	!	Elements are as follows (those *'d are used by the program, 
+	!	note that only 11 of the actual 20 byte field need be used):
+	!
+	!	SUBSCRIPT	CONTENTS 
+	!	1		*Error code
+	!	2		Job #*2
+	!	3		Last field 
+	!	4		*Repeat count
+	!	5-6		Sequence #
+	!	7-8		*Date
+	!	9-10		*Time
+	!	11		*Seconds to next minute
+	!	12-20		Unused
+	! 
+	! N%(),N$()	- Utility arrays
+	! F%()		- Array used in extracting device unit #'s
+	! TOT%(,)	- Array for error totals on specific unit #'s 
+	!		  used for codes 12-40: (TOT%(ER.TYP%-12%,0-15)) 
+	! M%()		- Used for monitor tables part iii SYS call 
+	! XD.TOT%(,)	- Array used for error totals for DMV11/DMP11 
+	! PART$()	- Array used to hold various segments of the 
+	!		  error message
+	!
+	!
+	!
+	!
+
+	!
+	!	
+	!	M A I N    C O D I N G    A R E A 
+	!
+	!
+ 
+ ENTRY_POINT:	
+	ON ERROR GOTO STANDARD_ERROR_TRAP
+		! Set up standard error trap.
+	PRINT IF CCPOS(0%) UNLESS ENTRY.TYP%=ANALY.ENTRY
+		! Return KB to left margin unless we came from ANALY1.
+	I$="V10.1-G"
+		! Set up version/edit.
+	PRINT "ERRDIS";CHR$(9%);I$;CHR$(9%); &
+		CVT$$(RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(0%)),3%),4%) &
+			IF ENTRY.TYP%=0%
+		! Print the system header.
+	LAST.READ.BLK%=0%
+		! Say we haven't read any blocks in yet.
+	PKG.LOC$="ERROR$:" IF ENTRY.TYP%<>ERRDET.ENTRY
+		! If we didn't come from ERRDIS, set up PKG.LOC$.
+	INP$,FIL$=PKG.LOC$+"ERRLOG.FIL"
+		! Initializing default string to ERRLOG.FIL.
+
+ INITIALIZE_DISK:
+	S$=SYS(CHR$(6%)+CHR$(-21%)+CHR$(255%))
+		! Drop any temporary privileges we might have.
+	IF NOT FNPRIV%("SWCTL") THEN
+		PRINT "?SWCTL privilege required"
+		GOTO DROP_PRIVILEGES_AND_EXIT
+	END IF
+		! Some got it and some don't... 
+
+	IF ENTRY.TYP%=ERRDET.ENTRY THEN
+		! If we came back from ERRDET...
+		GOSUB ZERO_AFTER_REPORT IF ZERO%
+		! If ZERO% has something in it, go zero the file.
+		GOTO DROP_PRIVILEGES_AND_EXIT IF NEW.SW%
+	END IF
+		! If we came from ERRDET or ANALY1, go clean up. 
+
+	S$=SYS(CTRAP)
+		! Set Control-C trapping.
+	
+	RESTORE
+		! Set up last disk error code. 
+
+	READ MON$(I%),DAY%(I%) FOR I%=1% TO 12%
+		! Init the month and # of days in the month arrays. 
+
+	S$=SYS(CHR$(6%)+CHR$(-21%)+CHR$(0%))
+		! Regain temporary privleges.
+	USER.OPEN%=0%
+		! Say we're opening ERRDAT.FIL.
+	FIL$=PKG.LOC$+"ERRDAT.FIL"
+	OPEN FIL$+"/RO" FOR INPUT AS FILE 2%
+	NEW.BLK%=1%
+	GOSUB READ_SUBROUTINE
+	FIELD #2%,16% AS ER.DSC$,494% AS D$,2% AS ER.MNE$
+	FIL$=""
+		! Verify the existence of the error description file.
+
+	IF ENTRY.TYP%=ERRDET.ENTRY
+		! If we came back from ERRDET,
+		THEN	FIL$=INP$
+			! then use the name passed back to us
+		ELSE	INP$,FIL$=PKG.LOC$+"ERRLOG.FIL"
+			! otherwise, use "ERRLOG.FIL".
+	END IF
+
+	ENTRY.TYP%=0% IF ENTRY.TYP%=ERRDET.ENTRY 
+		! Do this stupid thing for some random reason.
+
+ INITIALIZE_VARIABLES:
+	ST.DAT$="First Error" 
+	EN.DAT$="Last Error" 
+	ST.TIM$,EN.TIM$=NL 
+		! Initialize report information variables.
+	GOTO VERIFY_INPUT_FILE IF ENTRY.TYP%=ANALY.ENTRY 
+		! We know the input file if appending to ANALYS report.
+	IF ENTRY.TYP% = CCL.ENTRY THEN 
+		F$=FNSWTCH.PRS$(CCL.CMD$,"/I") 
+		INP$,FIL$=F$ IF LEN(F$) 
+		GOTO VERIFY_INPUT_FILE
+	END IF
+
+ PROMPT_INPUT_QUESTION:
+	GOTO PRINT_ERROR_MESSAGE IF FNGCL%("Input File",INP$)<>0%
+	GOTO PROMPT_INPUT_QUESTION IF F$ = "^" 
+		! Ask question if user wants to back up a question (^).
+ 	INP$,FIL$=F$ 
+		! Get the input file spec.
+		! Set the default if necessary.
+		
+ VERIFY_INPUT_FILE:
+	USER.OPEN%=1%
+		! Now, say we're trying the input file.
+	OPEN INP$ FOR INPUT AS FILE 5%
+		! Verify the existence of the input file.
+	CHANGE SYS(CHR$(12%)) TO M%
+	ERROR.FILE.SIZE%=M%(13%)+SWAP%(M%(14%))
+		! Calculate the lengh of the file for duplicating later.
+	USER.OPEN%=0%
+	FIL$=""
+		! We successfully opened it.
+	GOTO VERIFY_OUTPUT_FILE IF ENTRY.TYP%=ANALY.ENTRY
+		! We know the output file if appending to ANALYS report. 
+
+ PROMPT_OUTPUT_QUESTION:	
+	IF ENTRY.TYP% <> CCL.ENTRY THEN 
+	GOTO PRINT_ERROR_MESSAGE IF FNGCL%("Output to","KB:ERRDIS.OUT")<>0%
+       	ELSE 
+		F$=FNSWTCH.PRS$(CCL.CMD$,"/O") 
+      		F$="KB:ERRDIS.OUT" UNLESS LEN(F$) 
+	END IF
+	OUT$=F$ &
+		! Get the output spec, settting the default if necessary. 
+  
+	GOTO PROMPT_INPUT_QUESTION IF F$ = "^" 
+		! Ask previous question if user wants to back up a question (^).
+	I%=INSTR(1%,OUT$,"?") &
+		! Check for the occurrence of a '?'. 
+	IF I% THEN
+		OUT$=LEFT(OUT$,I%-1%)+FNF$+RIGHT(OUT$,I%+1%)
+		OUT$=LEFT(OUT$,I%+5%)+".LOG"+RIGHT(OUT$,I%+6%) &
+			  IF INSTR(1%,OUT$,".")=0%
+		PRINT "(Output File is ";OUT$;")"
+	END IF
+		! If there is 1 then 
+		!	replace it with a unique 6 character 'filename' and 
+		!	insert an extension if none is present. 
+
+ VERIFY_OUTPUT_FILE:	
+	S$=SYS(CHR$(6%)+CHR$(-21%)+CHR$(255%))
+		! Drop privleges before we open an output file. 
+	FIL$=OUT$
+	HND.IDX%=0%
+		! Set the default handler index to indicate disk. 
+	CHANGE SYS(CHR$(6%)+CHR$(-10%)+OUT$) TO F%
+	I%=F%(29%)+SWAP%(F%(30%))
+	HND.IDX%=STATUS AND 255% IF (I% AND 4096%) AND I%>=0%
+		! Correct it via a filename string scan if possible. 
+	USER.OPEN%=2%
+		! Say we're trying the output file.
+	IF HND.IDX%=6% THEN
+    		OPEN OUT$ AS FILE 7%, MODE SUPRESS.FF
+	ELSE	IF ENTRY.TYP%<>ANALY.ENTRY THEN
+			OPEN OUT$ FOR OUTPUT AS FILE 7%
+		ELSE	IF HND.IDX%=14% THEN
+				OPEN OUT$ FOR OUTPUT AS FILE 7%, MODE MT.APPEND
+			ELSE	OPEN OUT$ FOR INPUT AS FILE 7%, MODE DISK.APPEND
+			END IF
+		END IF
+	END IF
+		! If an LP then 
+		!	open it suppressing form feed on close 
+		! else	if non-analys, just open it 
+		!	else append to ANALYS report (tape or disk) 
+
+	USER.OPEN%=0%
+	FIL$=""
+		! Open was successful...
+	S$=SYS(CHR$(6%)+CHR$(-21%)+CHR$(0%))
+		! Get our privleges back. 
+	GOTO GET_HEADER_INFO IF ENTRY.TYP%=ANALY.ENTRY
+		! Skip questions if ANALYS CHAIN.
+
+	! 
+	!
+	!
+	!	R E M A I N I N G    U S E R    I N P U T 
+	!
+	!
+	
+ PROMPT_SELECTION_QUESTION:	
+	SUB.TITLE$=NL
+	IF ENTRY.TYP% <> CCL.ENTRY THEN
+		GOTO PRINT_ERROR_MESSAGE &
+  IF FNGCL%("He[lp], Ba[d Blocks], Su[mmary], Fu[ll] Report or Ze[ro] File", &
+	"Summary")<>0%
+		! See what report type the user wants. 
+	ELSE
+		F$=FNSWTCH.PRS$(CCL.CMD$,"/R")
+		F$="SUMMARY" UNLESS LEN(F$)
+	END IF
+
+	GOTO PROMPT_OUTPUT_QUESTION IF F$ = "^" 
+ 		! Ask previous question if user wants to back up a question (^).
+	IF FNMATCH%(F$,"HELP",2%) THEN
+		! If 'HELP' is requested then 
+		GOSUB DISPLAY_HELP_SUBROUTINE
+		!	Go and try to print the file. 
+		GOTO PRINT_ERROR_MESSAGE IF E%
+		!	Exit on unexpected (other than can't find file or 
+		!	 account).
+		GOTO DROP_PRIVILEGES_AND_EXIT IF ENTRY.TYP%=CCL.ENTRY
+		GOTO PROMPT_SELECTION_QUESTION 
+		!	Repeat question. 
+	END IF
+
+	LBB%=0% 
+		! Set 'LIST BAD BLOCKS' to no.
+	ER.COD%=62%
+		! Also, set error type to only disks. 
+	REPRT%=FNMATCH%(F$,"SUMMARY FULL BADBLOCKS ZEROFILE",2%)
+ 		! See what report type the user wants. 
+	GOTO ZERO_SETUP IF REPRT%=BAD.BLOCKS.RPRT
+		! REPRT%=BAD.BLOCKS.RPRT signals list bad blocks only.
+	GOTO PROMPT_BAD.BLOCKS_QUESTION IF REPRT%=SUMMARY.RPRT
+		! REPRT%=SUMMARY.RPRT signals summary.
+	GOTO PROMPT_ZERO.TYPE_QUESTION IF REPRT% = ZERO.RPRT
+		! REPRT%=ZERO.RPRT signals zero file.
+	GOTO PROMPT_SELECTION_QUESTION UNLESS REPRT%=FULL.RPRT
+		! REPRT%=FULL.RPRT signals full. 
+		! Skip error type ? if summary report. 
+
+ PROMPT_ERROR.TYPE_QUESTION:
+	IF ENTRY.TYP% <> CCL.ENTRY THEN
+		GOTO PRINT_ERROR_MESSAGE &
+			IF FNGCL%("Specific Error Type","All")<>0%
+	ELSE
+		F$=FNSWTCH.PRS$(CCL.CMD$,"/T")
+		IF F$="ALL" THEN
+			NOTAPE$=FNSWTCH.PRS$(CCL.CMD$,"/NOTAPE")
+                ELSE
+			GOTO PROMPT_SELECTION_QUESTION
+			F$=F$+"/"+NOTAPE$ IF LEN(NOTAPE$)
+  		END IF
+	END IF
+
+	GOTO PROMPT_SELECTION_QUESTION IF F$ = "^"
+		! Ask previous question if user wants to back up a question (^).
+
+   	K%=INSTR(1%,F$+"/","/") 
+	SW$=RIGHT(F$,K%+1%)
+	F$=LEFT(F$,K%-1%)
+		! Determine the error type.
+	F$="ALL" IF LEN(F$)=0%
+		! Set the default if null response. 
+	IF FNMATCH%(F$,"ALL",2%) THEN
+		! 	If 'ALL' then
+		ER.COD%=-62%
+		SUB.TITLE$="(All Types) "
+		GOTO PROMPT_STARTING.DATE_QUESTION IF LEN(SW$)=0%
+		!	Set the error code to -62 and get out. 
+		F$=SW$
+		GOTO PROMPT_ERROR.TYPE_QUESTION UNLESS FNMATCH%(F$,"NOTAPE",3%)
+		ER.COD%=-63%
+		SUB.TITLE$="(All except Magtape) "
+		GOTO PROMPT_STARTING.DATE_QUESTION
+	END IF
+		!	Set code to -63 if they want all but magtape. 
+
+	GOSUB VERIFY_ERROR_TYPE
+	IF ER.COD%=-1% THEN
+		GOTO DROP_PRIVILEGES_AND_EXIT IF ENTRY.TYP% = CCL.ENTRY
+		GOTO PROMPT_ERROR.TYPE_QUESTION
+		! Repeat question.
+	END IF
+
+ PROMPT_STARTING.DATE_QUESTION:
+	IF ENTRY.TYP% = CCL.ENTRY THEN
+		F$=FNSWTCH.PRS$(CCL.CMD$,"/S")
+	ELSE
+		GOTO PRINT_ERROR_MESSAGE &
+			IF FNGCL%("Starting Date <First Error>",NL)<>0%
+		! Get the starting date.
+	END IF
+
+	GOTO PROMPT_ERROR.TYPE_QUESTION IF F$ = "^"
+		! Ask previous question if user wants to back up a question (^).
+
+ VERIFY_STARTING.DATE:
+	STARTING.DATE.ASKED% = 0%
+	ST.DAT%=0%
+	ST.TIM%=1440%
+	GOTO PROMPT_ENDING.DATE_QUESTION IF F$=NL
+        STARTING.DATE.ASKED% = 1%
+	ST.DAT%=FNJULIAN%(F$) 
+	GOTO PROMPT_STARTING.DATE_QUESTION IF ST.DAT%=0%
+	ST.DAT$=DATE$(ST.DAT%)
+		! Verify date - null means earliest.
+
+ PROMPT_STARTING.TIME_QUESTION:
+	ST.TIM$=" (First Error)"
+	F$=NL
+	IF ENTRY.TYP% <> CCL.ENTRY THEN
+		 GOTO PRINT_ERROR_MESSAGE &
+			 IF FNGCL%("Starting Time <First Error>",NL)<>0%
+	END IF
+		! Get the starting time.
+
+	GOTO PROMPT_STARTING.DATE_QUESTION IF F$ = "^"
+		! Ask previous question if user wants to back up a question (^).
+
+	ST.TIM%=1440%
+	GOTO PROMPT_ENDING.DATE_QUESTION IF F$=NL
+	ST.TIM%=FNVT%(F$)
+	GOTO PRINT_ERROR_MESSAGE IF E%>0%
+	GOTO PROMPT_STARTING.TIME_QUESTION IF ST.TIM%<0%
+	ST.TIM$=", "+F$
+		! Verify the starting time - null means earliest. 
+
+ PROMPT_ENDING.DATE_QUESTION:
+	IF ENTRY.TYP% = CCL.ENTRY THEN
+		F$=FNSWTCH.PRS$(CCL.CMD$,"/E")
+	ELSE
+		GOTO PRINT_ERROR_MESSAGE &
+			IF FNGCL%("Ending Date <Last Error>",NL)<>0%
+	END IF
+		! Get the ending date.
+
+    GOTO PROMPT_STARTING.TIME_QUESTION IF STARTING.DATE.ASKED% = 1% AND F$ = "^"
+		! Ask previous question if user wants to back up a question (^)
+        	!  and starting time was entered.
+    GOTO PROMPT_STARTING.DATE_QUESTION IF F$ = "^"
+		! Ask previous question if user wants to back up a question (^)
+		!  and starting time was not entered.
+
+	ENDING.DATE.ASKED%=0%
+	EN.DAT%=29365%		
+		! RSTS/E internal representation of "31-Dec-99"
+	EN.TIM%=1%
+	GOTO CHECK_DATE_RANGE IF F$=NL
+	ENDING.DATE.ASKED% = 1%
+	EN.DAT%=FNJULIAN%(F$)
+	GOTO PROMPT_ENDING.DATE_QUESTION IF EN.DAT%=0%
+	EN.DAT$=DATE$(EN.DAT%)
+		! Verify the ending date - set default to 31-Dec-99 (which
+		!  is the largest date we can handle).
+
+ PROMPT_ENDING.TIME_QUESTION:
+	EN.TIM$=" (Last Error)"
+	F$=NL
+	IF ENTRY.TYP% <> CCL.ENTRY THEN
+		 GOTO PRINT_ERROR_MESSAGE &
+			 IF FNGCL%("Ending Time <Last Error>",NL)<>0% 
+	END IF
+		! Get the ending time. 
+
+	GOTO PROMPT_ENDING.DATE_QUESTION IF F$ = "^"
+		! Ask previous question if user wants to back up a question (^).
+        EN.TIM%=1%
+	GOTO CHECK_DATE_RANGE IF F$=NL
+	EN.TIM%=FNVT%(F$)
+	GOTO PRINT_ERROR_MESSAGE IF E%>0%
+	GOTO PROMPT_ENDING.TIME_QUESTION IF EN.TIM%<0%
+	EN.TIM$=", "+F$
+		! Verify the ending time - null means earliest. 
+
+ CHECK_DATE_RANGE:
+	IF ST.DAT% > EN.DAT% THEN
+		PRINT "?Ending Date must be after Starting Date";CRLF
+		IF ENTRY.TYP%=CCL.ENTRY
+			THEN	GOTO DROP_PRIVILEGES_AND_EXIT
+			ELSE	GOTO PROMPT_STARTING.DATE_QUESTION
+		END IF
+	END IF
+		! Make sure that the Starting Date happens before the
+		!  Ending Date...
+	GOTO ZERO_SETUP
+		! Else, go on to the "Zero" question.
+
+ PROMPT_BAD.BLOCKS_QUESTION:
+	GOTO ZERO_SETUP IF ENTRY.TYP% = CCL.ENTRY
+	GOTO PRINT_ERROR_MESSAGE IF FNGCL%("List Bad Blocks (Yes/No)","No")<>0%
+		! Should bad blocks be listed? 
+	GOTO PROMPT_SELECTION_QUESTION IF F$ = "^"
+		! Ask previous question if user wants to back up a question (^).
+	LBB%=FNMATCH%(F$,"YES NO",1%)
+	GOTO PROMPT_BAD.BLOCKS_QUESTION IF LBB%=0%
+		! Note - a full response of YES is required for 
+		!  this question - Y, YE are unacceptable. 
+	LBB%=(LBB%=89%)
+		! LBB% = -1 if you want bad blocks.
+
+ ZERO_SETUP:
+	ZERO%=0%
+	GOTO GET_HEADER_INFO IF INSTR(1%,INP$,"/RO")
+	IF ENTRY.TYP% = CCL.ENTRY THEN
+		F$=FNSWTCH.PRS$(CCL.CMD$,"/Z")
+		F$="NO" UNLESS LEN(F$)
+		GOTO CHECK_INPUT_RESPONSE
+	END IF
+
+	IF REPRT% = FULL.RPRT AND (ER.COD% <> -62% AND ER.COD% <> -63%) &
+		THEN	ZERO.WHICH$ = ER.MNE$ + " Errors" &
+		ELSE	ZERO.WHICH$ = "Error File"
+	END IF
+		! If the report is a FULL, and they HAVE NOT asked to
+		!  see ALL errors, then ask if they want to Zero that
+		!  SPECIFIC error type, otherwise ask them if they want
+		!  to ZERO ALL errors.
+
+ PROMPT_ZERO_QUESTION:
+	GOTO PRINT_ERROR_MESSAGE &
+		IF FNGCL%("Zero "+ZERO.WHICH$+" upon completion (Yes/No)", &
+			  "No")<>0%
+		IF F$ = "^" THEN
+		     GOTO PROMPT_BAD.BLOCKS_QUESTION IF REPRT% = SUMMARY.RPRT
+			! 	Ask previous question if user wants to back up 
+			!	 a question (^) and they want a summary report.
+		     GOTO PROMPT_SELECTION_QUESTION IF REPRT% = BAD.BLOCKS.RPRT
+			! 	Ask previous question if user wants to back up
+			!	 a question (^) and they want to list the bad
+			!	 blocks.
+		     GOTO PROMPT_ENDING.TIME_QUESTION IF ENDING.DATE.ASKED% = 1%
+			! 	Ask previous question if user wants to back up
+			!	 a question (^) and if they want a full report  
+			!	 where the ending date has been entered.
+		     GOTO PROMPT_ENDING.DATE_QUESTION 
+			! 	Ask previous question if user wants to back up 
+			!	 a question (^) and if they want a full report
+			!	 where the ending date has not been entered.
+		END IF
+
+ CHECK_INPUT_RESPONSE:
+	ZERO%=FNMATCH%(F$,"YES NO",3%+2%*(ASCII(F$)=78%))
+	GOTO ZERO_SETUP IF ZERO%=0%
+		! Note - a full response of YES is required for 
+		!  this question - Y, YE are unacceptable. 
+	ZERO%=(ZERO%=89%)
+		! Set ZERO% to -1 if the answer was YES,
+		!  otherwise make it 0.
+
+	IF ZERO% <> 0% THEN 
+		IF REPRT% = FULL.RPRT AND (ER.COD% <> -62% AND ER.COD% <> -63%)
+			THEN	ZERO%=ER.COD% + 1% 
+		END IF
+
+	END IF
+		! If they want to Zero a SPECIFIC error type, set ZERO% to 
+		!  the error code + 1...
+		! Otherwise, just leave it alone (-1 or 0).
+
+	GOTO GET_HEADER_INFO
+		! Go print the report.
+
+ PROMPT_ZERO.TYPE_QUESTION:
+	GOTO PRINT_ERROR_MESSAGE &
+		IF FNGCL%("Zero Which Error Type","All")<>0%
+	GOTO PROMPT_SELECTION_QUESTION IF F$="^"
+		! Ask previous question if user wants to back up a question (^).
+	IF F$="ALL"
+		THEN ZERO%=-1%
+			! ZERO%=-1% means zero the file.
+		GOTO ZERO_EXIT
+			! Go off and zero the file.
+	END IF
+		 
+	GOSUB VERIFY_ERROR_TYPE
+	IF ER.COD%=-1% THEN
+		GOTO DROP_PRIVILEGES_AND_EXIT IF ENTRY.TYP% = CCL.ENTRY
+		GOTO PROMPT_ZERO.TYPE_QUESTION
+		! Repeat question.
+	END IF
+
+	ZERO%=ER.COD% + 1%
+	GOTO ZERO_EXIT
+
+ GET_HEADER_INFO:	
+	GOSUB EXTRACT_HEADER_SUBROUTINE
+		! Extract totals from header. 
+	GOTO PRINT_SUMMARY_HEADER IF NEW.%
+
+ PRINT_REPORT_HEADER:
+	S$="Summary"
+	S$="Bad Block" IF REPRT%=BAD.BLOCKS.RPRT
+	S$="Full" IF REPRT%=FULL.RPRT
+	PRINT #7%,"  ERRDIS ";S$;" Report ";SUB.TITLE$; &
+ 	  "taken on ";DATE$(0%);", ";TIME$(0%);CRLF; &
+	  "     Input File: ";INP$;TAB(41%);"Output File: ";OUT$
+		! Print the report header. 
+
+ PRINT_SUMMARY_HEADER:
+	IF TOT.REC%=0% THEN
+		PRINT #7%,CRLF;CRLF;"No Errors have been Received"
+		PRINT #7%,CRLF;CRLF; &
+			"List of Bad Blocks can not be Determined" &
+				IF LBB% AND REPRT%<>FULL.RPRT
+		GOTO ZERO_EXIT
+	END IF
+		! If no errors have been received, skip scan. 
+	PRINT #7%,"     Requested Date/Time Range:";CRLF; &
+		HT;ST.DAT$;ST.TIM$;" through ";EN.DAT$;EN.TIM$ &
+			UNLESS REPRT%=SUMMARY.RPRT
+				! Print header info exclusive to summary report.
+	GOTO GET_BAD.BLOCKS_INFO UNLESS REPRT%=SUMMARY.RPRT
+		! Go to next question unless summary has been requested.
+	GOSUB EXTRACT_UNIT_SUBROUTINE
+		! Extract unit # specifics.
+	PRINT #7%,"     Reported Date/Time Range:";CRLF; &
+		HT;DATE$(FIRST.DAT%);", ";FNTIM2$(FIRST.TIM%,FIRST.MIN%); &
+	      " through ";DATE$(LAST.DAT%);", ";FNTIM2$(LAST.TIM%,LAST.MIN%); &
+		CRLF;CRLF;"      ERROR";TAB(23);"TOTAL";TAB(41%); &
+	      	"UNIT NUMBERS";TAB(66%);"CONTROLLER"; &
+		CRLF;"CODE-DESCRIPTION";TAB(22%);"REC/LOG";TAB(33%); &
+		"0   1   2   3   4   5   6   7      ERRORS";CRLF
+			! Print out header info for specific error types.
+	GET #5%, RECORD 1%
+	FOR ER.TYP%=0% TO 61%
+		NEW.BLK%=ER.TYP%+1%
+		GOSUB READ_SUBROUTINE
+		GOTO PRINT_TOTALS IF CVT$$(ER.MNE$,-2%)=NL
+		FIELD #5%, ER.TYP%*8% AS D$, 2% AS N$(0%), 2% AS N$(1%), &
+			2% AS N$(2%), 2% AS N$(3%)
+		N%(K%)=CVT$%(N$(K%)) FOR K%=0% TO 3%
+		GOTO PRINT_TOTALS IF N%(2%)=0%
+		R0$=" "
+		R0$="*" IF N%(0%)=N%(3%)
+		R0$=R0$+SPACE$(4%-LEN(NUM1$(N%(2%))))+ &
+			FNUNSIGNED$(N%(2%))+"/"+NUM1$(N%(1%))
+		PRINT #7%,ER.MNE$;" ";ER.DSC$;TAB(20%);R0$;
+		I%=-1%
+		GOTO PRINT_CONTROLLER_ERRORS UNLESS ER.TYP%>=FIRST.DSK &
+			AND ER.TYP%<=LAST.DEV AND ER.TYP%<>24%
+		GOSUB PRINT_MATRIX_SUBROUTINE IF ER.TYP% = 40%
+		GOTO PRINT_CONTROLLER_ERRORS IF ER.TYP% = 40%
+		FOR UNIT%=0% TO MAX.UNITS
+			I%=I%+1%
+			GOTO NEXT_SPECIFIC_ERROR UNLESS TOT%(ER.TYP%-12%,UNIT%)
+			IF I%>7% THEN
+				I%=I%-((I%/8%)*8%)
+				K%=(UNIT%/8%)*8%
+				PRINT #7%
+				PRINT #7%,"   Units ";K%;" - ";K%+7%;
+			END IF
+			PRINT #7%,TAB(33%+I%*4%); &
+				NUM1$(TOT%(ER.TYP%-12%,UNIT%));
+
+ NEXT_SPECIFIC_ERROR:
+		NEXT UNIT%
+
+ PRINT_CONTROLLER_ERRORS:
+		IF ER.MNE$="DU"
+			THEN PRINT #7%,TAB(68%);CONTR.ERR%
+		ELSE PRINT #7%, TAB(69%);"N/A";
+			PRINT #7%
+		END IF
+		! If this is a UDA device, then have to print the count for 
+		!	controller errors as opposed to disk unit errors 
+		! else for the other type of devices, print "N/A".
+
+ PRINT_TOTALS:
+	NEXT ER.TYP%
+		! For all error types: 
+		! If this is a defined type which had errors then 
+		!	print the mnemonic, description, # received/#logged 
+		!	(precede by * if some missed due to limits) 
+		!	and the unit specifics where applicable. 
+
+	PRINT #7%,CRLF; &
+	  "Total of";TOT.LOG%;"Errors Logged out of "; &
+		FNUNSIGNED$(TOT.REC%);" Received"
+	GOTO ADJUST_BAD.BLOCKS_INDICATOR IF NEW.%
+	PRINT #7%, &
+	  	NUM1$(TOT.USED%);" out of";TOT.LIM%; &
+	  	"Blocks have been used in ";INP$
+		! 	Finally, print some totals. 
+
+ ADJUST_BAD.BLOCKS_INDICATOR:
+	IF LBB% THEN
+		IF LBB1% THEN
+			REPRT%=BAD.BLOCKS.RPRT
+		ELSE	PRINT #7%, &
+			"No Disk Errors have occurred"
+		END IF
+	END IF
+		! Readjust report type to 'BAD BLOCKS' if a list of bad 
+		!  blocks is desired and disk error were recorded - if 
+		!  this is the case, must CHAIN to ERRDET.
+
+ GET_BAD.BLOCKS_INFO:
+	IF REPRT%<>SUMMARY.RPRT THEN
+		S$=NL
+		S$="not " UNLESS ZERO%
+		PRINT #7%,TAB(5%);INP$;" will "; &
+			S$;"be Zeroed upon completion"&
+				UNLESS NEW.%
+		S$=SYS(CHR$(8%)+CVT%$(ER.COD%)+CVT%$(ST.DAT%)+ &
+			CVT%$(ST.TIM%)+CVT%$(EN.DAT%)+CVT%$(EN.TIM%)+ &
+			CVT%$(ZERO%)+CVT%$(HND.IDX%)+CVT%$(ENTRY.TYP%)+ &
+			INP$+"?"+OUT$)
+		PRINT #7%
+		CLOSE 2%,5%,7%
+		CHAIN PKG.LOC$+"ERRDET" LINE 31000
+	END IF
+		! If user wants a detailed report or a list of bad blocks 
+		!	then save all needed values close up and CHAIN.
+		! Note: if both a summary and a bad block report are 
+		!  desired the summary report will be printed first, 
+		!  the report type will be changed to 'BAD BLOCKS' and 
+		!  ERRDET will be chained to. 
+
+ ZERO_EXIT:
+	PRINT #7% UNLESS REPRT%=ZERO.RPRT
+	GOSUB ZERO_FILE_SUBROUTINE IF ZERO%=-1%
+		! Zero the file if so desired.
+	GOSUB ZERO_SPECIFIC_TYPE_SUBROUTINE IF ZERO% >= 1%
+		! Zero some of the errors and clear the header if so desired.	
+	GOTO DROP_PRIVILEGES_AND_EXIT IF ENTRY.TYP%=ANALY.ENTRY &
+		     OR ENTRY.TYP%=CCL.ENTRY
+		! Exit if chained to by ANALY1. 
+	IF REPRT%=ZERO.RPRT &
+		THEN	PRINT #7%
+		ELSE	PRINT #7%, STRING$(76%,42%)
+	END IF
+		! If we're ending the [Ze]ro command, just leave a blank line.
+		! Otherwise, print a line of '*'s before going back.
+	GOTO INITIALIZE_VARIABLES
+		! Repeat ?'s from the beginning.
+
+ ZERO_AFTER_REPORT:
+	SELECT ZERO%
+		CASE -1%
+			GOSUB ZERO_FILE_SUBROUTINE
+				! If they want to zero everything, go do it.
+		CASE ELSE
+			OPEN INP$ AS FILE 5%
+				! Re-open the input file (because CHAIN
+				!  closes it).
+			CHANGE SYS(CHR$(12%)) TO M%
+			ERROR.FILE.SIZE%=M%(13%)+SWAP%(M%(14%))
+				! Get the size of the input file (in blocks).
+			GOSUB ZERO_SPECIFIC_TYPE_SUBROUTINE
+				! Go zero the type in question.
+	END SELECT
+
+	RETURN
+		! Go back for more.
+
+
+	! 
+	!	
+	!
+	!	D A T A 
+	!
+	!
+
+	DATA	JAN, 31,   FEB, 28,   MAR, 31,   APR, 30, &
+		MAY, 31,   JUN, 30,   JUL, 31,   AUG, 31, &
+		SEP, 30,   OCT, 31,   NOV, 30,   DEC, 31 &
+
+10000	! 
+	!
+	!
+	!	S U B R O U T I N E S 
+	!
+	!
+	! 
+	!
+	!
+	!	E X T R A C T    H E A D E R    I N F O 
+	!
+	! 
+
+ EXTRACT_HEADER_SUBROUTINE:
+	IF ERROR.FILE.SIZE% < 1% THEN
+		TOT.REC%=0%
+		RETURN
+	END IF
+		! If the input file isn't at least one block long,
+		!  then pretend that no errors have been received.
+
+	GET #5%, RECORD 1%
+	FIELD #5%,496% AS D$,2% AS TOT.LOG$,2% AS TOT.REC$, &
+	  2% AS TOT.USED$,2% AS BYT.POS$,2% AS TOT.LIM$
+		! Get the general control record from the error file. 
+	TOT.LOG%=CVT$%(TOT.LOG$)
+	TOT.REC%=CVT$%(TOT.REC$)
+	TOT.USED%=CVT$%(TOT.USED$)
+	TOT.LIM%=CVT$%(TOT.LIM$)
+		! Get various totals, saving those which may be needed later. 
+	RETURN IF TOT.REC%=0%
+		! Don't bother scanning further if no errors were received. 
+	TOT%(I%-12%,UNIT%)=0% FOR UNIT%=0% TO MAX.UNITS &
+		FOR I%=FIRST.DSK TO LAST.DEV 
+	XD.TOT%(I%,J%) = 0% FOR J% = 0% TO 31% &
+			      FOR I% = 0% TO 15%
+	RETURN
+
+
+	! 
+	!
+	!
+	!	E X T R A C T    U N I T    #    S P E C I F I C S 
+	!
+	!
+
+ EXTRACT_UNIT_SUBROUTINE:
+	FIRST.DAT%,LBB1%,CONTR.ERR%=0%
+	FOR I%=2% TO TOT.USED%
+		! 	For all possible error blocks: 
+		OUT.PREV%=0%
+		!	Clear the "PREVIOUS BYTES SCANNED" counter. 
+		GET #5%, RECORD I%
+
+ GET_ERROR_TYPE:
+		FIELD #5%,OUT.PREV% AS D$,2% AS L$
+		!	Get the next physical record (which may contain several
+		!	 logical error records). 		
+		LN%=CVT$%(L$)
+ 		!	Try to extract the length of this error record (LN%). 
+	      GOTO NEXT_ERROR_BLOCK IF LN%=0% OR LN%<22% OR (LN%+OUT.PREV%)>512%
+		!	If this is zero (cleared condition) or for some reason 
+		!	 contains an impossible value, skip to the next
+		!	 physical record. 
+		FIELD #5%,OUT.PREV% AS D$,2% AS L$,20% AS PARAM$
+		CHANGE LEFT(PARAM$,11%) TO P%
+		ER.TYP%=P%(1%)
+		!	Now that we're sure we have a legal record, field the 
+		!	parameter portion.		
+		IF FIRST.DAT%=0% THEN
+			FIRST.DAT%=P%(7%)+SWAP%(P%(8%))
+			FIRST.TIM%=P%(9%)+SWAP%(P%(10%))
+			FIRST.MIN%=P%(11%)
+		END IF
+
+		!	For clarity, pinpoint the error type. 
+		!	If this is the very first legal record, save the 
+		!	 precise date and time it occurred. 
+
+		GOTO UPDATE_BLOCK_COUNTER &
+			UNLESS ER.TYP%>=FIRST.DSK AND ER.TYP%<=LAST.DEV &
+				AND ER.TYP%<>24%
+		!	Skip the unit # check unless we have a peripheral 
+		!	 device.
+		LBB1%=-1% IF ER.TYP%<=LAST.DSK
+		FIELD #5%,(OUT.PREV%+22%) AS D$,(LN%-22%) AS REST$
+		F$=RIGHT(REST$,((SWAP%(CVT$%(REST$)) AND 255%)*2%)+3%)
+		CHANGE MID(F$,3%,18%) TO F%
+		!	Extract the required bytes of field 2 by jumping past
+		!	 the length of field 1. 
+		CONTR.ERR%=CONTR.ERR%+1% IF ER.TYP%=21% AND F%(4%)
+		GOTO UPDATE_BLOCK_COUNTER IF ER.TYP%=21% AND F%(4%)
+		!	F%(4%) is a flag to indicate that it's a UDA controller 
+		!	 error.
+		!		If f%(4%) and the ER.TYP% is a UDA device: 
+		!			- Add 1 to the UDA controller error 
+		!			  total.
+		!			- Bypass adding to the unit number 
+		!			  totals .
+		IF ER.TYP% = 40% THEN
+			GOSUB ERROR_HANDLER_SUBROUTINE
+		ELSE
+			TOT%(ER.TYP%-12%,F%(17%))= &
+					TOT%(ER.TYP%-12%,F%(17%))+1%+P%(4%) &
+					IF F%(18%) IF ER.TYP%>=FIRST.DSK &
+						  AND ER.TYP%<=LAST.DSK
+		!	For disks, adjust appropriate total if explicit
+		!	 unit # is available. 
+			TOT%(ER.TYP%-12%,F%(5%))= &
+					TOT%(ER.TYP%-12%,F%(5%))+1%+P%(4%) &
+					IF F%(6%) IF ER.TYP%>23% &
+						 AND ER.TYP%<=LAST.DEV
+		!	For other devices, extract the unit # from the DDB.
+		END IF
+
+ UPDATE_BLOCK_COUNTER:
+		OUT.PREV%=OUT.PREV%+LN%
+		!	Bump the total length checked so far. 
+		GOTO GET_ERROR_TYPE IF OUT.PREV%<490%
+		!	Continue with the same record unless there is no room 
+		!	 (22 bytes minimum are required; 2 for length field + 
+		!	 20 for the parameter portion). 
+ NEXT_ERROR_BLOCK:
+	NEXT I%
+	LAST.DAT%=P%(7)+SWAP%(P%(8%))
+	LAST.TIM%=P%(9%)+SWAP%(P%(10%))
+	LAST.MIN%=P%(11%)
+		! Save the exact time and date of the last error.
+
+	RETURN
+
+	!
+	!
+	!	E X T R A C T   E R R O R   T Y P E   S P E C I F I C S
+	!
+	!
+
+ VERIFY_ERROR_TYPE:
+	FOR I% = 0% TO 61%
+		NEW.BLK%=I%+1%
+		GOSUB READ_SUBROUTINE
+		IF F$=CVT$$(ER.MNE$,-2%) AND CVT$$(ER.MNE$,-2%)<>NL THEN
+			ER.COD%=I%
+			SUB.TITLE$="("+F$+" only) "
+			GOTO VERIFY_ERROR_TYPE_EXIT
+		END IF
+	NEXT I%
+	PRINT "Unrecognized Error Type - ";F$
+		! Try to match user's input - print error message if can't.
+	ER.COD%=-1%
+		! Return ER.COD% with -1% in it, to indicate error.
+
+ VERIFY_ERROR_TYPE_EXIT:
+	RETURN
+
+	! 
+	!
+	!	C a c h e d   R e a d   S u b r o u t i n e 
+	!
+	! This subroutine will read a block from ERRDAT.FIL.  It keeps track 
+	! of the last block read, and will not do a disk access unless it's 
+	! really necessary. 
+	!
+	! 
+
+ READ_SUBROUTINE:
+	RETURN IF NEW.BLK%=LAST.READ.BLK%
+	GET #2%, RECORD NEW.BLK%
+	LAST.READ.BLK%=NEW.BLK%
+	RETURN
+	! Fairly self-explanatory, I should think. 
+
+	! 
+	!
+	!
+	!	Z E R O    T H E    E N T I R E    E R R O R    F I L E 
+	!
+	!
+
+ ZERO_FILE_SUBROUTINE:
+	ZR$=CVT%$(0%)
+		! Set up 'ZERO' string. 
+	CLOSE 5%
+		! Make sure the file's closed - we need write access. 
+
+ GET_ZERO_FILE:
+	OPEN INP$ FOR INPUT AS FILE 5%
+	IF (STATUS AND 1024%) THEN
+		CLOSE 5%
+		SLEEP 2%
+		GOTO GET_ZERO_FILE
+	END IF
+		! Open the file and keep trying till we have write access. 
+
+	GET #5%, RECORD 1%
+		! Get the control record. 
+	FOR I%=0% TO 61%
+		FIELD #5%,I%*8% AS D$, 2% AS RECRD.LOG$, 2% AS ER.LOG$, &
+			2% AS ER.RCV$, 2% AS RECRD.ALW$
+		LSET RECRD.LOG$=ZR$
+		LSET ER.LOG$=ZR$
+		LSET ER.RCV$=ZR$
+	NEXT I%
+		! Zero out RECRD.LOG$(# of records logged for error type i%), 
+		!  ER.LOG$ (# logged and repeated) and ER.RCV$ (# received). 
+		!  Note that RECRD.ALW$, max allowed, will stay untouched. 
+	FIELD #5%, 496% AS D$, 2% AS TOT.LOG$, 2% AS TOT.REC$, &
+		2% AS TOT.USED$, 2% AS BYT.POS$, 2% AS TOT.LIM$
+	K%=CVT$%(TOT.USED$)
+	LSET TOT.USED$=CVT%$(2%)
+	LSET TOT.LOG$=ZR$
+	LSET TOT.REC$=ZR$
+	LSET BYT.POS$=ZR$
+	PUT #5%,RECORD 1%
+	FIELD #5%,512% AS D$
+	LSET D$=STRING$(512%,0%)
+	PUT #5%,RECORD I% FOR I%=2% TO K%
+		! Save the control record, zero all others. 
+	CLOSE 5%
+	RETURN
+
+	!
+	!
+	!    Z E R O    A    S P E C I F I C   E R R O R    T Y P E
+	!
+	!
+
+ ZERO_SPECIFIC_TYPE_SUBROUTINE:
+	ON ERROR GOTO ZERO_SPECIFIC_ERROR_TRAP
+		! Set up a local error trap.
+	OPEN INP$ FOR OUTPUT AS FILE #6%, FILESIZE ERROR.FILE.SIZE%, MODE 32%
+		! Open a tentative file for output, using the same name as 
+		!  our current error file. 
+		! Pre-extend it to the same length as the current file. 
+
+	ER.COD%=ZERO%-1%
+		! Get value of error code to be zeroed.
+
+	GET #5%, RECORD 1%
+	FIELD #5%,496% AS D$,2% AS TOT.LOG$,2% AS TOT.REC$, &
+		2% AS TOT.USED$,2% AS BYT.POS$,2% AS TOT.LIM$
+		! Get the general control record from the original error file.
+	TOT.LOG%=CVT$%(TOT.LOG$)
+	TOT.REC%=CVT$%(TOT.REC$)
+	TOT.USED%=CVT$%(TOT.USED$)
+	TOT.LIM%=CVT$%(TOT.LIM$)
+		! Get various totals, saving those which may be needed later.
+	GOTO ZERO_SPECIFIC_CANCEL IF TOT.REC%=0%
+		! Don't bother updating anything if no errors were received.
+	PUT #6%+SWAP%(5%), BLOCK 1%
+		! Put general control from the error file to the temp file.
+	OUT.PREV%=0%
+	IN.PREV%=0%
+	OUT.BLK%=2%
+	IN.BLK%=2%
+		! Initialize variables.
+	GET #5%, BLOCK 2%
+		! Get second block of original file.
+
+ READ_WRITE_RECORD:
+	GOSUB READ_RECORD_SUBROUTINE
+		! Go to subroutine that will read a record.
+	GOTO PUT_LAST_BLOCK IF LN%=0%
+		! Go to the section of code that will put a block
+		!  if all the records in the block have been read.
+	GOSUB WRITE_RECORD_SUBROUTINE IF ER.COD% <> CURRENT.ERROR.CODE%
+		! Go to subroutine that will write a record to the
+		!  temporary file if the record error type matches
+		!  the inputted error type.
+	GOTO READ_WRITE_RECORD
+  		! Continue the process by reading in next record.
+ 
+ PUT_LAST_BLOCK:
+	CLOSE 5%
+	X%=512%-OUT.PREV%
+	FIELD #6%, OUT.PREV% AS X$, X% AS R$
+	LSET R$=STRING$(X%,0%)
+		! Clear out the unused portion of the last block,
+	PUT #6%
+		!  and put it out there.
+
+	ZERO.COD%=ER.COD% * 8%
+	BUFF%=496%-ZERO.COD%-8%
+	GET #6%, BLOCK 1%
+		! Get the control record.
+	FIELD #6%,ZERO.COD% AS X$,2% AS RECORD.LOG$,2% AS ER.LOG$, &
+		2% AS ER.REC$,2% AS RECORD.ALW$,BUFF% AS Y$, &
+		2% AS TOT.LOG$,2% AS TOT.REC$,2% AS TOT.USED$,2% AS BYT.POS$, &
+		2% AS TOT.LIM$
+	ER.LOG%=CVT$%(ER.LOG$)
+	ER.REC%=CVT$%(ER.REC$)
+	LSET ER.LOG$,RECORD.LOG$,ER.REC$=CVT%$(0%) 
+		! Zero out RECORD.LOG(# of records logged for a specific error
+		!  type) and ER.LOG(# logged and repeated).
+	TOT.LOG%=(CVT$%(TOT.LOG$))-ER.LOG%
+	LSET TOT.LOG$=CVT%$(TOT.LOG%)
+		! Set TOT.LOG(# total errors logged, including repeats) to the
+		!  total number of errors, minus the total number of specific
+		!  errors zeroed.
+	TOT.REC%=(CVT$%(TOT.REC$))-ER.REC%
+	LSET TOT.REC$=CVT%$(TOT.REC%)
+		! Set TOT.REC(# total errors received) to the total number of 
+		!  errors received - the received number of specific errors 
+		!  zeroed.
+	LSET TOT.USED$=CVT%$(OUT.BLK%)
+		! Set TOT.USED(# of blocks used) to last block read.
+	LSET BYT.POS$=CVT%$(OUT.PREV%)
+		! Set byte.pos to the previous bytes scanned counter.
+	PUT #6%, BLOCK 1%
+		! Put updated block to temporary file.
+	CLOSE 6%
+		! Close the tentative file, thereby superseding the
+		!  original file.
+	GOTO ZERO_SPECIFIC_RETURN
+		! And, go back.
+
+ ZERO_SPECIFIC_ERROR_TRAP:
+	S$=SYS(CTRAP)
+		! Reset ^C trapping.
+	SELECT ERR
+		CASE 28
+			PRINT #7%, "%Control-C detected - Zero operation will be aborted"
+		CASE ELSE
+			PRINT #7%, "?Error while zeroing ";ER.MNE$;" errors - ";ERT$(ERR)
+			PRINT #7%, "?ZERO operation aborted"
+	END SELECT
+		! Tell 'em what happened.
+	RESUME ZERO_SPECIFIC_CANCEL
+		! And, go cancel the update.
+
+ ZERO_SPECIFIC_CANCEL:
+	CLOSE -5%,-6%
+		! Close both files without updating.
+		! The tentative file will go away.
+
+ ZERO_SPECIFIC_RETURN:
+	ON ERROR GOTO STANDARD_ERROR_TRAP
+		! Reset normal error trap.
+	RETURN
+
+	! 
+	!
+	!
+	!	D M V / D M P   E R R O R   H A N D L E R 
+	!
+	!
+	! This subroutine is used to total the number of DMV/DMP errors 
+	! on a per unit per controller basis.
+	!
+	!
+
+ ERROR_HANDLER_SUBROUTINE:
+	OFF%=OUT.PREV%+22%+2%
+	FOR K% = 1% TO P%(3%)
+		L% = (SWAP%(CVT$%(REST$)) AND 255%)*2%
+		PART$(K%) = MID(REST$,3%,L%) IF L% > 0%
+		OFF% = OFF%+L%+2%
+		REST$ = RIGHT(REST$,L%+3%)
+	NEXT K% 
+	! Parse out parts of the error message. 
+
+	GOTO GET_CONTROLER IF LEN(DDCU$)
+		! If DDCU$ is already defined then skip this routine because 
+		!  we've already been here once. 
+	DDCU$ = "DMP-"
+	XD.MAX% = 31%
+	DDFLAG% = SWAP%(CVT$%(MID(PART$(2%),17%,2%)))
+	DDIDX%  = SWAP%(CVT$%(MID(PART$(2%),9%,2%))) AND 255%
+	DDCU$ = "DMV-" IF DDFLAG% AND 128%
+	XD.MAX% = 11% IF DDFLAG% AND 128%
+		! Otherwise, determine if we have a DMV'S or DMP'S.
+	CHANGE SYS(CHR$(6%)+CHR$(-29%)) TO M%
+	DDCTBL% = M%(3%)+SWAP%(M%(4%))
+	UCTTBL% = M%(5%)+SWAP%(M%(6%))
+	K% = PEEK(DDCTBL%+DDIDX%)
+	OFFSET% = SWAP%(K%) AND 255%
+	CNTRLR.MAX% = K% AND 255%
+	UCTTBL% = UCTTBL%+OFFSET%
+		! Get the number of controllers on the system along with 
+		!  the correct pointer into the units table. 
+
+ GET_CONTROLER:
+	UNIT.CNT% = 0%
+	FOR CNTRLR.NO% = 0% TO CNTRLR.MAX%-1%
+		UNTS% = PEEK(UCTTBL%+(CNTRLR.NO%*2%))
+		IF (UNIT.CNT%+(UNTS%-1%)) < F%(5%) THEN
+			UNIT.CNT% = UNIT.CNT%+UNTS%
+		ELSE
+			K% = F%(5%) - UNIT.CNT%
+			XD.TOT%(CNTRLR.NO%,K%) = &
+					XD.TOT%(CNTRLR.NO%,K%)+1%+P%(4%)
+			GOTO END_ERROR_HANDLER_SUBROUTINE
+		END IF
+	NEXT CNTRLR.NO% 
+	! Determine which controler and unit number this unit is. 
+	! If we've found it, bump the error counter, otherwise keep 
+	!  searching. 
+
+ END_ERROR_HANDLER_SUBROUTINE:
+	RETURN
+ 
+
+	! 
+	!
+	!
+	!	R O U T I N E   T O   P R I N T   D M V / D M P   M A T R I X 
+	!
+	!
+	
+ PRINT_MATRIX_SUBROUTINE:
+	FOR CNTRLR.NO% = 0% TO CNTRLR.MAX%-1%
+		I% = -1%
+		PRINT #7%
+		PRINT #7%,"   ";DDCU$+NUM1$(CNTRLR.NO%);
+		FOR UNIT% = 0% TO XD.MAX%
+			I% = I%+1%
+			GOTO NEXT_CONTROLER UNLESS XD.TOT%(CNTRLR.NO%,UNIT%)
+			IF I% > 7% THEN
+				I% = I%-((I%/8%)*8%)
+				K% = (UNIT%/8%)*8%
+				PRINT #7%
+				PRINT #7%,"     Units ";K%;" - ";K%+7%;
+			END IF
+			PRINT #7%,TAB(33%+I%*5%); &
+				NUM1$(XD.TOT%(CNTRLR.NO%,UNIT%));
+
+ NEXT_CONTROLER:
+		NEXT UNIT%
+	NEXT CNTRLR.NO%
+	RETURN
+
+
+	! 
+	!
+	!
+	!	H E L P    F I L E    P R O C E S S I N G 
+	!
+	!
+
+ DISPLAY_HELP_SUBROUTINE:
+	ON ERROR GOTO END_DISPLAY_HELP_SUBROUTINE
+		! Set the error trap.
+	OPEN "HELP$:ERRDIS.HLP/RO" FOR INPUT AS FILE 12%
+		! Try to access the help file. 
+	WHILE 0%<>1%
+		INPUT LINE #12%,F$
+		PRINT F$;
+	NEXT
+		! Print the entire file. 
+
+ PRINT_ERROR_DESCRIPTION:
+	PRINT "MNEMONIC";HT;"DESCRIPTION";CRLF
+	FOR ER.TYP%=0% TO 61%
+		NEW.BLK%=ER.TYP%+1%
+		GOSUB READ_SUBROUTINE
+		PRINT ER.MNE$;HT;HT;ER.DSC$ IF ER.MNE$<>NL
+	NEXT ER.TYP%
+	PRINT
+		! Plow thru error description file. 
+	CLOSE 12%
+		! Close the help file. 
+
+ SET_ERROR_TRAP:
+	ON ERROR GOTO STANDARD_ERROR_TRAP
+	RETURN
+		! Reset error trap and return. 
+
+ END_DISPLAY_HELP_SUBROUTINE:
+	RESUME PRINT_ERROR_DESCRIPTION IF ERR=11% OR ERR=5%
+		! Catch 'END OF FILE' and can't find help file. 
+	E%=ERR
+		! Set E%=ERR on all others. 
+	RESUME SET_ERROR_TRAP
+ 
+ 	!
+	!
+	!	R E A D   A   R E C O R D 
+	!
+	!
+
+	READ_RECORD_SUBROUTINE: 
+	IF IN.PREV%<512% THEN
+		! If the previous bytes scanned is less than the number of
+		!  bytes allowed in a block, then
+		FIELD #5%, IN.PREV% AS X$, 2% AS X$
+		LN%=CVT$%(X$)
+		! get the length of the record.
+		IF LN%>0% THEN
+			! If there is a record, then
+			FIELD #5%, IN.PREV% AS X$, LN% AS REC$
+			CURRENT.ERROR.CODE%=ASCII(MID(REC$,3%,1%))
+				! get the error code of the record,
+			IN.PREV%=IN.PREV%+LN%
+				! add the length of the record to the previous
+				! bytes scanned counter.
+			RETURN
+		END IF
+	END IF
+
+	IN.BLK%=IN.BLK% +1%
+		! Else the number of bytes scanned exceeds the number of bytes
+		!  allowed in the block, so increment the block counter by one.
+	LN%=0%
+	RETURN IF IN.BLK%>TOT.USED%
+		! Exit the subroutine if the number of blocks read in is more
+		!  than to the number of blocks used.
+	GET #5%, BLOCK IN.BLK%
+		! Get the next block.
+	FIELD #5%,2% AS X$ 
+	LN%=CVT$%(X$)
+		! Get the length of the record.
+	FIELD #5%,LN% AS REC$
+	CURRENT.ERROR.CODE%=ASCII(MID(REC$,3%,1%))
+		! Get the error code of the record.
+	IN.PREV%=LN%
+		! Set the length of the record to the previous bytes
+		!  scanned counter.
+	RETURN
+
+	!
+	!
+	!	W R I T E   A   R E C O R D
+	!
+	!
+
+ WRITE_RECORD_SUBROUTINE:
+	IF (OUT.PREV% + LN%) > 512% THEN
+		! If the record is too long to be put into this block, then
+		X%=512%-OUT.PREV%
+		FIELD #6%, OUT.PREV% AS X$, X% AS R$
+		LSET R$=STRING$(X%,0)
+			! clear the remainder of the block
+		PUT #6%, BLOCK OUT.BLK%
+			! put block,
+		OUT.PREV%=LN%
+		OUT.BLK%=OUT.BLK%+1%
+			! incrament the block counter,
+		FIELD #6%, LN% AS R$
+		LSET R$=REC$
+			! put record into new block.
+		RETURN
+	END IF
+
+	FIELD #6%, OUT.PREV% AS X$, LN% AS R$
+	LSET R$=REC$
+		! Else IF record is not too long then put record into block,
+	OUT.PREV%=OUT.PREV%+LN%
+		! update the previous bytes scanned counter.
+	RETURN
+
+15000	! 
+	!
+	!
+	!	F U N C T I O N S 
+	!
+	!
+
+	DEF FNA%(A$)
+	!
+	! FUNCTION	FNA%	Map months JAN thru DEC to integer 1 to 12.
+	! PARAMETER	A$	String (should be a month) to map.
+	! RETURNS	FNA%	1-12=matched month
+	!			13  =no match
+
+	GOTO SET_FUNCTION IF CVT$$(A$,32%)=MON$(W%) FOR W%=1% TO 12%
+	W%=13%
+	! Try to match the month - 13 means no match.
+ 
+ SET_FUNCTION:
+	FNA%=W%
+	END DEF
+	! Set the function.
+
+15100	DEF FNF$
+	!
+	! FUNCTION	FNF$	Set up a 6 character string to be used as a
+	!			 filename. 
+	! RETURNS	FNF$	A filename created from the current 
+	!			date and time in the form MDDHMM where: 
+	!				M = A thru L for JAN thru DEC 
+	!				DD= day of the month 
+	!				H = A thru X for 00 thru 23 
+	!			    	     hours since midnight
+	!				MM= 'LEFTOVER' minutes
+
+	D$=DATE$(0%)
+		! Get the current date. 
+	D$=CHR$(64%+FNA%(MID(D$,4%,3%)))+LEFT(D$,2%)
+		! Form a 3 character string consisting of:
+		!  The month # mapped into a letter (1+A,...,12=L)
+		! 	+ the day of the month. 
+	T%=TIME(0%)/60%
+		! Get the clock time (in minutes) since midnight. 
+	D$=D$+CHR$(65%+T%/60%)+ &
+		RIGHT(NUM1$(100%+T%-(T%/60%)*60%),2%)
+		! Tack on to the 1st string another 3 character string 
+		!  consisting of the # of hours since midnight mapped 
+		!  into a letter (0=a,...,23=x) + the # of 'LEFTOVER'
+		!  minutes since midnight (force this to 2 digits). 
+	FNF$=D$
+	END DEF
+
+15200	DEF FNTIM2$(T1%,T2%)
+	!
+	! FUNCTION	FNTIM2$		Get time string of the form
+	!				 HH:MM:SS 
+	!
+
+	Q$=TIME$(T1%)
+		! Get the 'normal' time string.
+	T2%=60% IF T2%=0%
+	Q$=LEFT(Q$,5%)+":"+RIGHT(NUM1$(100%+60%-T2%),2%)+ &
+		RIGHT(Q$,6%)
+		! Tack on seconds before the next minute.
+	FNTIM2$=Q$
+		! Set the function.
+	END DEF
+
+15300	DEF FNVT%(TIM$)
+	!
+	! FUNCTION	FNVT%	Verify time
+	! 
+	! PARAMETERS	TIM$	String to check
+	! 
+	! RETURNS	FNVT%	-1 = error 
+	!			>0= legal time( as minutes before 
+	!			     midnight)
+	!		E%	0 = no error
+	!			>0= error
+
+	ON ERROR GOTO CATCH_ERROR
+	FNVT%=-1%
+	I%=INSTR(1%,TIM$,":")
+	EXIT DEF IF I%<2% OR I%=LEN(TIM$)
+		! Verify form (HH:MM).
+	HR%=VAL(LEFT(TIM$,I%-1%))
+	MN%=VAL(MID(TIM$,I%+1%,2%))
+	AP$=RIGHT(TIM$,I%+3%)
+		! Extract hours and minutes. 
+	EXIT DEF IF HR%<0% OR HR%>23% OR MN%<0% OR MN%>59%
+	EXIT DEF IF LEN(AP$)<>0% AND (AP$<>"AM" AND AP$<>"PM")
+	EXIT DEF IF (AP$="AM" OR AP$="PM") AND HR%>12%
+
+	IF AP$="AM" THEN
+		HR%=HR%-12% IF HR%=12% AND MN%>=01% AND MN%<=59% 
+	END IF
+
+	IF AP$="PM" THEN
+                IF HR%=12% AND MN%=0% THEN
+			HR%=0%
+               	ELSE
+ 			IF HR%>=01% AND HR%<=11% THEN
+				HR%=HR%+12%
+			END IF
+		END IF
+	END IF
+		! Verify these are within allowable ranges. 
+
+	AP$="  "
+        FNVT%=1440%-(HR%*60%+MN%)
+		! Set the function.
+	EXIT DEF
+
+ CATCH_ERROR:
+	E%=ERR IF ERR<>52%
+	EXIT DEF
+		! VAL() errors signal illegal time. 
+		! Flag all other errors. 
+
+ 	END DEF
+		! Reset error trap. 
+
+
+
+15400	DEF FNJULIAN%(ARG$)
+	!
+	! FUNCTION	FNJULIAN%
+	! 
+	!	This function takes a date in either alphabetic (dd-mmm-yy) or
+	!	ISO numeric (yy.mm.dd) format and returns an integer
+	!	representing that date in RSTS Julian format, which is
+	! 
+	!		(day of year)+[(number of years since 1970)*1000] 
+	! 
+	!	Error checking is done for both formats to insure that 
+	!	illegal dates are not entered.  If an error of any type 
+	!	is found, the function returns a zero. 
+	! 
+
+	ON ERROR GOTO CATCH_ERRORS_DATE
+	X$=EDIT$(ARG$,32%+4%+2%)
+	! Now, X$ contains the user argument (this is necessary
+	!  because we change X$ if TODAY or YESTERDAY is given).
+	! Set up a new error trap. 
+ 
+	TMP$=EDIT$(DATE$(0%),32%)
+	IF INSTR(1%,TMP$,"-") THEN
+		CUR.YEAR$=RIGHT(TMP$,8%) 
+	ELSE
+		CUR.YEAR$=LEFT(TMP$,2%)
+	END IF
+	! Get the current date, and make it all uppercase.
+	! Strip off the current year (in case they don't enter it).
+	! Make sure it works with alphabetic or ISO format. 
+ 
+	Y%=FNMATCH%(X$,"YESTERDAY TODAY",3%)
+	! See if they entered the keyword "YESTERDAY" or "TODAY".
+	IF Y%<>0% THEN
+	! If they did, then...
+		X$=TMP$
+		! Use today's date as THE date.
+		Y%=(Y%=89%)
+		! Y% will be -1 if they entered YESTERDAY, or 0 if they
+		!  entered TODAY (or if they entered neither) -
+		!   we use this in CALCULATE_JULIAN_DATE below.
+	END IF
+
+ CHECK_DATE_INPUT:
+	DASH%=INSTR(1%,X$,"-")
+	DOT%=INSTR(1%,X$,".")
+	IF (DASH%<>0%)+(DOT%<>0%)<>-1% THEN
+		TMP%=0%
+		GOTO END_FNJULIAN
+	END IF
+	! See if there's a hyphen or a dot.
+	! We've got to have one or the other, but not both.
+ 
+	GOTO ALPHABETIC_FORMAT IF DASH%
+	! Go to the proper place. 
+ 
+	! 
+	!	Here we handle ISO numeric date format. 
+	! 
+
+ 	DOT.2%=INSTR(DOT%+1%,X$,".")
+	IF DOT.2% = 0% THEN
+		X$=CUR.YEAR$+"."+X$
+		GOTO CHECK_DATE_INPUT
+	END IF
+	! If they didn't include the year, add it on. 
+	! Go back and re-evaluate the input. 
+ 
+	YEAR%=VAL(LEFT(X$,DOT%-1%))
+	MONTH%=VAL(MID(X$,DOT%+1%,DOT.2%-DOT%-1%))
+	DAY%=VAL(RIGHT(X$,DOT.2%+1%))
+	GOTO CHECK_ERRORS_DATE
+	! Pull the year, month and day out. 
+ 
+	! 
+	!	Here we take care of alphabetic format. 
+	! 
+ 
+ ALPHABETIC_FORMAT:
+	DASH.2%=INSTR(DASH%+1%,X$,"-")
+	IF DASH.2%=0% THEN
+		X$=X$+"-"+CUR.YEAR$
+		GOTO CHECK_DATE_INPUT
+	END IF
+	! Same thing as for the dot. 
+ 
+	DAY%=VAL(LEFT(X$,DASH%-1%))
+	MONTH%= &
+	(INSTR(1%,"-***-JAN-FEB-MAR-APR-MAY-JUN-JUL-AUG-SEP-OCT-NOV-DEC", &
+		MID(X$,DASH%,DASH.2%-DASH%))-1%)/4%
+	YEAR%=VAL(RIGHT(X$,DASH.2%+1%))
+	! Pull the stuff apart. 
+ 
+	! 
+	!	Error checking. 
+	! 
+
+ CHECK_ERRORS_DATE: 
+	DAYS.IN.MONTH%=VAL(MID(" 312831303130313130313031",MONTH%*2%,2%))
+	DAYS.IN.MONTH%=29% IF (MONTH%=2% AND (YEAR% AND 3%)=0%)
+	IF	YEAR%<70% OR YEAR%>99% OR &
+		MONTH%<1% OR MONTH%>12% OR &
+		DAY%<1% OR DAY%>31% OR &
+		DAY%>DAYS.IN.MONTH% THEN
+			TMP%=0%
+			GOTO END_FNJULIAN
+	END IF
+	! If anything is wrong with any of the values, punt. 
+	! Don't forget about leap years. 
+ 
+	TOTAL.DAYS%=0%
+	! Initialize the day accumulator. 
+ 
+	GOTO CALCULATE_JULIAN_DATE IF MONTH%=1%
+		! If it's January, don't go through the loop. 
+	FOR I1%=1% TO MONTH%-1%
+		DAYS.IN.MONTH%=VAL(MID(" 312831303130313130313031",I1%*2%,2%))
+		DAYS.IN.MONTH%=29% IF (I1%=2% AND (YEAR% AND 3%)=0%)
+			! Again, take care of leap years. 
+		TOTAL.DAYS%=TOTAL.DAYS%+DAYS.IN.MONTH%
+			! Add up the days. 
+	NEXT I1%
+
+ CALCULATE_JULIAN_DATE: 
+	TOTAL.DAYS%=TOTAL.DAYS%+DAY%
+	TMP%=TOTAL.DAYS%+(YEAR%-70%)*1000%
+		! Calculate the Julian date. 
+	TMP%=TMP%+Y%
+		! Figure in the effect of YESTERDAY or TODAY...
+		!  If they said TODAY, or didn't use either of those
+		!  keywords, then Y% will be 0 and this won't make a difference.
+		!  If they said YESTERDAY, then Y% will be -1, and adding it
+		!  will have the effect of subtracting a day from today's
+		!  date, thus making it YESTERDAY.
+		!  (Spiffy, huh?)
+
+	GOTO END_FNJULIAN
+		! Skip the error stuff. 
+ 
+ CATCH_ERRORS_DATE:
+	TMP%=0%
+	RESUME END_FNJULIAN
+	! If any errors occur, punt. 
+ 
+ END_FNJULIAN:
+	FNJULIAN%=TMP%
+	END DEF
+ 
+15500	DEF FNGCL%(T$,DF$)
+	!
+	! FUNCTION	FNGCL%	Get some user input
+	! 
+	! PARAMETERS	T$	Text to output
+	!		DF$	Default on null response
+	! 
+	! RETURNS	FNGCL%	0% = ok
+	!			>0%= error
+
+	ON ERROR GOTO CATCH_COMMAND_INPUT_ERRORS
+		! Set the error trap.
+	E1%,FNGCL%=0%
+	PRINT IF CCPOS(0%)
+	PRINT T$;
+	PRINT " <";DF$;">"; IF DF$<>NL
+		! Print the text.
+	INPUT LINE F$
+		! Get the input.
+	F$=CVT$$(F$,32%+4%+2%)
+	F$=CVT$$(DF$,32%+4%+2%) IF F$=NL
+		! Set the default. 
+	EXIT DEF
+		! And, go exit.
+
+ CATCH_COMMAND_INPUT_ERRORS:
+	IF ERR=11%
+		THEN	E%,FNGCL%=-1%
+		ELSE	E%,FNGCL%=ERR
+			E1%=ERL
+	END IF
+	RESUME END_FNGCL
+		! Trap all command input errors. 
+
+ END_FNGCL:
+	END DEF
+		! Reset error trap and exit. 
+
+
+15600	DEF FNMATCH%(INP$,MUST$,MIN%)
+	! FUNCTION	FNMATCH%	Verify that the user supplied input  
+	!				matches , at least to some minimum
+	!				length, one of the 'LEGAL' options.
+	!				Further, verify that all characters
+	!				in the user input are legal. 
+	!				E.G.	MUST$=summary, MIN%=2%
+	!					INP$=user input=summarg would
+	!					 not be allowed
+	! 
+	! PARAMETERS	INP$		User's input
+	!		MUST$		String of legal options for the ?,
+	!				 separated by spaces
+	!		MIN%		Minimum # of characters to match 
+	!				 (will always be at least 2) 
+	!
+	! RETURNS	FNMATCH%	0  =  illegal 
+	!				ASCII(user input) = ok
+	
+	FNMATCH%=0%
+		! Initialize the function. 
+	K%=LEN(INP$)
+	GOTO END_FNMATCH IF K%<MIN%
+		! Get the length of the user supplied input - unacceptable 
+		! if less than the minimum # of characters. 
+	WHILE MUST$<>NL
+		P%=INSTR(1%,MUST$+" "," ")
+		OPT$=LEFT(MUST$,P%-1%)
+		MUST$=RIGHT(MUST$,P%+1%)
+		IF LEFT(INP$,K%)=LEFT(OPT$,K%) THEN
+			FNMATCH%=ASCII(INP$)
+			GOTO END_FNMATCH
+		END IF
+	NEXT
+		! For each possible option: 
+		!	extract the next option and remove it from the 
+		!	original string. 
+		!	If the user input matches exactly then 
+		!		reset the function and get out. 
+
+ END_FNMATCH:
+	END DEF
+
+15700	DEF FNSWTCH.PRS$(STRING.$,SWITCH$)
+	! 
+	! FUNCTION	FNSWTCH.PRS$	 Searches through STRING.$ looking 
+	!				  for a match for SWITCH$. 
+	! 
+	! PARAMETERS	STRING.$	String to scan.
+	!		SWITCH$		Switch we're scanning for.
+	! 
+	! RETURNS	FNSWTCH.PRS$	If no match is found, then a null is 
+	!				 returned.
+	!				Otherwise the value of the switch is 
+	!				 returned if an equal sign is found.
+	!				Otherwise the switch itself, without 
+	!				 the "/", is returned.
+	! 
+
+	FNSWTCH.PRS$=NL
+		! Initialize the returned value to null. 
+	SWITCH$="/"+SWITCH$ IF INSTR(1%,SWITCH$,"/") = 0
+	MATCH%=INSTR(1%,STRING.$,SWITCH$)
+		! Look for the switch in STRING.$.
+	GOTO END_FNSWTCH IF MATCH% = 0
+		! Exit if the switch was not found. 
+	SLASH%=INSTR(MATCH%+1%,STRING.$,"/")
+	SLASH%=LEN(STRING.$)+1% IF SLASH% = 0
+	FIELD.$=MID(STRING.$,MATCH%+1%,(SLASH%-MATCH%)-1%)
+	EQUAL%=INSTR(1%,FIELD.$,"=")
+		! Extract the switch and its possible value 
+		!  from the string. 
+	IF EQUAL% THEN
+		FNSWTCH.PRS$=RIGHT(FIELD.$,EQUAL%+1%)
+	ELSE
+		FNSWTCH.PRS$=FIELD.$
+	END IF
+		! If there's a "=" then 
+		!	return the value of the switch. 
+		! Else 
+		!	return the switch itself without the "/". 
+
+ END_FNSWTCH:
+	END DEF
+
+	! 
+	!
+	!	P r i v i l e g e   C h e c k   F u n c t i o n 
+	!
+	! 
+
+15800	DEF	FNPRIV%(X$)
+	X$=SYS(CHR$(6%)+CHR$(32%)+CHR$(1%)+STRING$(3%,0%)+X$)
+	FNPRIV%=(ASCII(MID(X$,3%,1%))=0%)
+	END DEF
+
+	! This function takes a privilege name as it's argument, and returns 
+	!  -1 if the user has the specified privilege, or 0 if not. 
+	
+	!
+	!
+	!	U n s i g n e d   I n t e g e r   C o n v e r s i o n
+	!
+	!
+
+15900	DEF	FNUNSIGNED$(X%)=NUM1$((X% EQV 32767%)+32768.)
+
+
+	! 
+	!
+	!
+	!	E R R O R    H A N D L I N G 
+	!
+	!
+
+ STANDARD_ERROR_TRAP:
+	E%=ERR 
+	RESUME UNEXPECTED_ERROR_EXIT IF ENTRY.TYP%=CCL.ENTRY
+	RESUME PRINT_ERROR_MESSAGE
+		! Save the error code and line #. 
+
+ PRINT_ERROR_MESSAGE:
+	GOTO END_PROGRAM IF E%=28% OR E%=-1%
+		! Catch CONTROL/C and CONTROL/Z on input. 
+
+	IF LEN(FIL$)<>0% &
+		THEN	PRINT ERT$(E%);" - ";FIL$ &
+		ELSE	PRINT ERT$(E%) &
+	END IF
+		! Print the error message.
+
+	SELECT USER.OPEN%
+		CASE 1%
+			INP$,FIL$=PKG.LOC$+"ERRLOG.FIL"
+			GOTO PROMPT_INPUT_QUESTION
+		CASE 2%
+			GOTO PROMPT_OUTPUT_QUESTION
+		CASE ELSE
+			GOTO CANNOT_CONTINUE_MESSAGE
+	END SELECT
+		! If USER.OPEN% has something in it, then this
+		!  was an "expected" error (that is, a user-specified
+		!  file could not be opened).
+		! If it was the input file, reset it to the default
+		!  before going back to ask again.
+		! If USER.OPEN% is not 1 or 2, this is an unexpected
+		!  (and therefore fatal) error, so punt.
+
+ UNEXPECTED_ERROR_EXIT:
+	PRINT ERT$(E%)
+		! Print the error text, if necessary.
+
+ CANNOT_CONTINUE_MESSAGE:
+	PRINT "?ERRDIS can not continue"
+	GOTO END_PROGRAM
+		! Unexpected errors are fatal. 
+
+
+	!
+	!
+	!
+	!	C C L    E N T R Y    P O I N T 
+	!
+	
+30000	ON ERROR GOTO STANDARD_ERROR_TRAP
+	ENTRY.TYP%=CCL.ENTRY
+	S$=SYS(CTRAP)
+	CCL.CMD$=SYS(CHR$(7%))
+	NEW.%=LEN(FNSWTCH.PRS$(CCL.CMD$,"/NEW"))
+	GOTO ENTRY_POINT
+		! Get the CCL command from core common. 
+
+	! 
+	!
+	!
+	!	C H A I N    E N T R Y    F R O M    E R R D E T 
+	!		O R    A N A L Y 1 
+	!
+
+31000	ON ERROR GOTO STANDARD_ERROR_TRAP
+	ENTRY.TYP%=ERRDET.ENTRY
+	S$=SYS(CTRAP)
+	S$=SYS(CHR$(7%))
+		! Extract input file name from core common. 
+	GOTO APPEND_CRASH_FILE IF LEFT(S$,6%)="ANALY1"
+		! If CHAIN from ANALY1, go extract filename, etc. before 
+		!  continuing. 
+	ZERO%=CVT$%(S$)
+	INP$=RIGHT(S$,3%)
+	NEW.SW%=INSTR(1%,INP$,"/NEW")
+	INP$=LEFT(INP$,NEW.SW%-1%) IF NEW.SW%
+	PKG.LOC$="ERROR$:"
+	GOTO INITIALIZE_DISK
+
+ APPEND_CRASH_FILE:
+	ENTRY.TYP%=ANALY.ENTRY
+	S$=RIGHT(S$,7%)
+	I%=INSTR(1%,S$,"?")
+	OUT$=LEFT(S$,I%-1%)
+	INP$,FIL$=RIGHT(S$,I%+1%)
+	REPRT%=FULL.RPRT
+	ER.COD%=-62%
+	ST.DAT%,ZERO%=0%
+	ST.TIM%=1440%
+	EN.DAT%=29365%
+	EN.TIM%=1%
+	SUB.TITLE$="(All Types) "
+	GOTO ENTRY_POINT
+		! We will be appending a full error crash file report. 
+
+ DROP_PRIVILEGES_AND_EXIT:
+	S$=SYS(CHR$(6%)+CHR$(-21%))
+		! Permanently drop privileges. 
+	S$=SYS(CHR$(9%))
+		! Remove ourselves from memory. 
+
+ END_PROGRAM:
+	END

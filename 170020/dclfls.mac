@@ -1,0 +1,1495 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.LIBRARY	/DCL:DCLMAC.MLB/
+.NLIST
+.INCLUDE	/DCL:DCLPFX.MAC/
+.LIST
+TITLE	DCLFLS,<DCL Working With Files>,0A,10-MAY-91,CEK/JFM/GMB/BTB
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DCLFLS
+;+
+;  001	JFM  05-DEC-82	Created from DCLCMD
+;  002	JFM  20-JAN-83	Made qualifiers conflict with EDT and TECO both ways
+;  003	JFM  20-JAN-83	Allowed DIFFERENCES to accept wildcard filenames
+;  004	JFM  20-JAN-83	Added /[NO]CREATE qualifier for EDIT/EDT
+;  005	JFM  31-JAN-83	Changed EDIT/TECO/CREATE so that it works - added "=".
+;  006	JFM  05-MAR-84	Changed U$ANUM to U$U32 for /ALLOCATION qualifiers
+;  007	JFM  12-MAR-84	Added BACKUP and RESTORE interface
+;  008	JFM  08-MAY-84	Added SET PROTECTION integer range
+;  009	JFM  08-JUL-84	DCL does even less parsing on BACKUP commands
+;  010	JFM  14-SEP-84	/CONTIGUOUS translates to /MO:16, not :64
+;  011	JFM  14-DEC-84	/OUTPUT on TYPE command has gone away
+;  012	JFM  14-MAR-85	Removed extraneous .MCALLs
+;  013  GMB  29-May-85	Moved the BACKUP command to DCLDSP
+;  014  GMB  03-Jun-85	Changed all /PROTECTION=n to range 0-255
+;  015  GMB  15-Aug-85	Removed /REPLACE from TYPE command
+;  016  GMB  08-May-86	Added /[NO]WARNINGS to RENAME
+;			Added /SELECT to all of the PIP commands
+;			Added /[NO]RETAIN_DATES to COPY
+;
+;			[V9.4]
+;  017  GMB  01-Mar-87	Added /CONFIRM qualifer as synonym for /QUERY
+;
+;			[RSTS/E V9.7]
+;  018	JFM  20-Sep-88	Unglobalized SEL.THR
+;
+;			[RSTS/E V10.0]
+;  019	BTB  31-Mar-90	Added /TRANSFER_MODE to COPY command
+;  020	BTB  02-MaY-90	Use $DISALLOW instead of explicit check for 
+;			/TRANSFER_MODE without remote filespec
+;-
+
+	.PSECT	DCLFLS,RO,REL,CON
+	DEFORG	DCLFLS
+
+	$CUI	TABLE			;Include macros for CUI tables
+
+.MCALL	PUTCCL,PUTSPA,PUTSTR,PUTFIL,PUTTIME,PUTRFIL
+.MCALL	LOOKUP,CRETNT
+
+.SBTTL	APPEND Command
+
+; Qualifier list
+
+APP.QL:	DEFQUAL	BEF.Q,QF.LOCL,ARG=REQ	;	/BEFORE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	CRTD.Q,QF.LOCL,CONF=MOD.Q,REQUIRE=<BEF.Q,SIN.Q>
+					;	/CREATED
+	DEFQUAL	LOG.Q,QF.NEG		;	/[NO]LOG
+	DEFQUAL	MOD.Q,QF.LOCL,CONF=CRTD.Q,REQUIRE=<BEF.Q,SIN.Q>
+					;	/MODIFIED
+	DEFQUAL	QUER.Q,QF.NEG,CONF=CONF.Q;	/[NO]QUERY
+	DEFQUAL CONF.Q,QF.NEG,CONF=QUER.Q;	/[NO]CONFIRM
+	DEFQUAL	SIN.Q,QF.LOCL,ARG=REQ	;	/SINCE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	SEL.Q,FLAGS=QF.LOCL!QF.ALIS,ARG=REQ
+					;	/SELECT=(...)
+	 DEFARG SIZ.K,FLAGS=QF.ALIS,ARG=REQ;	 SIZE=
+	  DEFARG MAX.K,ARG=REQ		;	  MAXIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG MIN.K,ARG=REQ		;	  MINIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG TYPE=U$U32		;	  nnn
+	  ENDARG
+	 ENDARG
+	ENDQUAL
+
+APP.CMD::$THR
+	$DEFCMD	QUAL=APP.QL
+	$PARM	PARM1,RF.N.W,PROMPT=FROM$P,OCCURS=6.
+					;	filespec,...
+	$PARM	PARM2,RF..W,PROMPT=TO$P	;	filespec
+	DFLTCQ	QUER.Q,AFFIRM=NO	;Default is /NOQUERY.
+	DFLTCQ	LOG.Q			;Default is /LOG.
+	$ENDCMD
+
+	$IF	NET=NO			;If it's a non-network transfer then
+	PUTCCL	...PIP			;  "PIP"
+	PUTSPA	
+	$FETP	PARM2	
+	PUTFIL	FLAGS=F.RT11		;  "filespec"
+	LOOKUP	DIRECTORY		;  Make sure output directory exists.
+	PUTSTR	"="			;  "="
+	$FETP	PARM1
+10$:	PUTFIL	DEFTYP=<>,FLAGS=F.RT11	;  "filespec"
+	LOOKUP	FILE,DEFTYP=<>		;  Make sure input file exists.
+	$FETNP				;  More input filespecs?
+	$IF	PRESENT			;  If so then
+	PUTSTR	""<COMMA>		;    ","
+	$GOTO	10$			;    Loop until no more 
+					;    input filespecs.
+	$ENDIF	
+	PUTSTR	"/AP"			;  "/AP"
+
+	$CALL	SEL.THR			;  Translate the wildcard selection
+					;  qualifiers.
+	$CALL	QLOG			;  Translate /[NO]LOG
+	$CALL	QSEL			;  Translate /SELECT
+	$ELSE				;Else network file transfer.
+	PUTCCL	...NFT			;  "NFT"
+	PUTSTR	""<SPACE>"AP"<SPACE>	;  "AP"
+	$FETP	PARM2	
+	PUTSTR				;  "filespec"
+
+	PUTSTR	"="			;  "="
+	$FETP	PARM1
+	PUTRFIL	NODE=YES		;  "filespec"
+20$:	$FETNP				;  More input filespecs?
+	$IF	PRESENT			;  If so then
+	PUTSTR	""<COMMA>		;    ","
+	PUTRFIL	NODE=NO			;    "filespec"
+	$GOTO	20$			;    ...
+	$ENDIF	
+	$CALL	QLOG			;  Translate /[NO]LOG
+	$CALL	QQUERY			;  Translate /[NO]QUERY
+	$ENDIF
+	$ENDTHR
+
+GLOBAL	<...PIP,...NFT>
+
+.SBTTL COPY Command
+
+; Qualifier list
+
+COP.QL:	DEFQUAL	ALLO.Q,QF.LOCL,CONF=OVE.Q,ARG=REQ;	/ALLOCATION=n
+	 DEFARG	TYPE=U$U32		;		 =n	
+	 ENDARG
+	DEFQUAL	BEF.Q,QF.LOCL,ARG=REQ	;		/BEFORE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	BLO.Q,QF.LOCL,CONF=OVE.Q,ARG=REQ;	/BLOCKSIZE=n
+	 DEFARG	TYPE=U$INT
+	 ENDARG
+	DEFQUAL	CONTIG.Q,QF.NEG,CONF=OVE.Q;		/[NO]CONTIGUOUS
+	DEFQUAL	CRTD.Q,QF.LOCL,CONF=MOD.Q,REQUIRE=<BEF.Q,SIN.Q>
+					;		/CREATED
+	DEFQUAL	CLU.Q,QF.LOCL,CONF=OVE.Q,ARG=REQ;	/CLUSTER_SIZE=n
+	 DEFARG	TYPE=U$S16,MINVAL=-256,MAXVAL=256
+	 ENDARG
+	DEFQUAL	LOG.Q,QF.NEG		;		/[NO]LOG
+	DEFQUAL	MOD.Q,QF.LOCL,CONF=CRTD.Q,REQUIRE=<BEF.Q,SIN.Q>
+					;		/MODIFIED
+	DEFQUAL	SIN.Q,QF.LOCL,ARG=REQ	;		/SINCE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDQUAL
+	DEFQUAL	RETD.Q,QF.NEG		;		/[NO]RETAIN_DATES
+	DEFQUAL	OVE.Q,QF.LOCL!QF.NEG,CONF=<ALLO.Q,BLO.Q,CONTIG.Q,PROT.Q,REP.Q>
+					;		/[NO]OVERLAY
+	DEFQUAL	POS.Q,QF.LOCL,ARG=REQ	;		/POSITION=option
+	 DEFARG	MID.K			;		 =MIDDLE
+	 DEFARG	IND.K			;		 =INDEX
+	 DEFARG	TYPE=U$U16		;		 =n
+	 ENDARG
+	DEFQUAL	PROT.Q,QF.LOCL,CONF=OVE.Q,ARG=REQ;	/PROTECTION=n
+	 DEFARG	TYPE=U$U8
+	 ENDARG
+	DEFQUAL	SEL.Q,FLAGS=QF.LOCL!QF.ALIS,ARG=REQ
+					;		/SELECT=(...)
+	 DEFARG SIZ.K,FLAGS=QF.ALIS,ARG=REQ;		 SIZE=
+	  DEFARG MAX.K,ARG=REQ		;		  MAXIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG MIN.K,ARG=REQ		;		  MINIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG TYPE=U$U32		;		  nnn
+	  ENDARG
+	 ENDARG
+	DEFQUAL	QUER.Q,QF.NEG,CONF=CONF.Q;		/[NO]QUERY
+	DEFQUAL CONF.Q,QF.NEG,CONF=QUER.Q;		/[NO]CONFIRM
+	DEFQUAL	REP.Q,QF.NEG,CONF=OVE.Q;		/[NO]REPLACE
+	DEFQUAL	TRA.Q,ARG=REQ		;		/TRANSFER_MODE=mode ;019
+	 DEFARG	AUT.K			;		 =AUTOMATIC	;019
+	 DEFARG	BLO.K			;		 =BLOCK		;019
+	 DEFARG	REC.K			;		 =RECORD	;019
+	 ENDARG
+	ENDQUAL
+
+COP.CMD::$THR
+	$DEFCMD	QUAL=COP.QL
+				;		filespec,...
+	$PARM	PARM1,RF.N.W,PROMPT=FROM$P,OCCURS=6.;
+	$PARM	PARM2,RF..W,PROMPT=TO$P;	filespec
+	DFLTCQ	QUER.Q,AFFIRM=NO;Default to /NOQUERY
+	DFLTCQ	LOG.Q		;Default to /LOG
+	;DFLTCQ	RETD.Q,AFFIRM=NO;Default to /NORETAIN_DATES
+	DFLTCQ	OVE.Q,AFFIRM=NO	;Default to /NOOVERLAY
+	$ENDCMD
+
+	$IF	NET=NO		;If it's a local transfer then
+	$DISALLOW <TRA.Q>,U.IQ	;/TRANSFER_MODE? is not allowed		;020
+	PUTCCL	...PIP		;  "PIP"
+	PUTSPA	
+	$FETP	PARM2		
+	PUTFIL	FLAGS=F.RT11	;  "filespec"
+	LOOKUP	DIRECTORY	;  Make sure output directory exists.
+
+	$CALL	QPOS		;  Translate /POSITION
+	$CALL	QPROT		;  Translate /PROTECTION
+	$CALL	QALLO		;  Translate /ALLOCATION
+
+	$FETCQ	RETD.Q		;  Did he say /[NO]RETAIN_DATES?
+	$IF	YES		;  If /RETAIN_DATES then
+	PUTSTR	"/RETAIN"	;    "/RETAIN"
+	$ELSE			;  Else
+	PUTSTR	"/NE"		;    "/NE"
+	$ENDIF			;  Endif
+
+	$FETP	PARM2		;  Fetch the output device.
+;Here we are trying to determine if the device is a disk. If it isn't,
+;then the qualifier /CONTIGUOUS has no meaning, and should be ignored.
+	$DO			;
+	CALBX	U$FSS <U.CMN+U.LEN,#U.CMN+U.STR>
+				;  FSS the output filespec
+	.ASSUME	DSKHND EQ 0	;  Assume that the device handler index is 0.
+	CLR	R0		;  Guess that the device is disk.
+	TSTB	XRB+14		;  Is the device disk?
+	BEQ	10$		;  Yes, R0 = 0  -> success.
+	COM	R0		;  No,  R0 = -1 -> failure
+10$:	$ENDDO			;
+	$IF	SUCCESS		;  If the device is disk 
+	$FETCQ	CONTIG.Q	;    Did he say /[NO]CONTIGUOUS?
+	$IF	PRESENT		;    If so then
+	$IF	YES		;      If /CONTIGUOUS then
+	PUTSTR	"/MO:16"	;        "/MO:16"
+	$ELSE			;      Else /NOCONTIGUOUS.
+	PUTSTR	"/MO:0"		;        "/MO:0"
+	$ENDIF			;    Else let PIP figure out the right default.
+	$ENDIF			;
+	$ENDIF			;
+
+	$CALL	QCLU		;  Translate /CLUSTER_SIZE
+
+	$FETCQ	BLO.Q		;  Did he say /BLOCKSIZE=n?
+	$IF	PRESENT		;  If so then
+	PUTSTR	"/BSIZE:"	;    "/BSIZE:"
+	$FETA			;    Get the argument.
+	PUTSTR			;    "n"
+	$ENDIF
+	
+	$FETCQ	OVE.Q		;  Did he say /OVERLAY or /NOOVERLAY?
+	$IF	PRESENT		;  If so then
+	$IF	YES		;    If /OVERLAY then
+	PUTSTR	"/UP"		;      "/UP"
+	$GOTO	30$
+	$ENDIF
+	$ENDIF			;  Else /NOOVERLAY.
+
+	$CALL	QREP		;  Translate /[NO]REPLACE
+
+30$:	PUTSTR	"="		;  "="
+	$FETP	PARM1
+40$:	PUTFIL	DEFTYP=<>,FLAGS=F.RT11
+				;  "filespec"
+	LOOKUP	FILE,DEFTYP=<>	;  Make sure the input file exists.
+	$FETNP			;  Any more input filespecs?
+	$IF	PRESENT		;  If so then
+	PUTSTR	""<COMMA>	;    ","
+	$GOTO	40$		;    ...
+	$ENDIF
+
+	$CALL	SEL.THR		;  Translate the wildcard selection qualifiers.
+	$CALL	QSEL		;  Translate /SELECT
+	$CALL	QLOG		;  Translate /[NO]LOG
+	$ELSE			;Else network file transfer.
+	PUTCCL	...NFT		;  "NFT"
+	PUTSTR	""<SPACE>"CO"<SPACE>;"CO"
+	$FETP	PARM2		
+	PUTSTR			;  "filespec"
+
+	$FETCQ	CONTIG.Q	;  Did he say /[NO]CONTIGUOUS?
+	$IF	PRESENT		;  If so then
+	$IF	YES		;    If /CONTIGUOUS then
+	PUTSTR	"/CONT"		;      "/CONT"
+	$ELSE			;    Else
+	PUTSTR	"/NOCONT"	;      "/NOCONT"
+	$ENDIF
+	$ENDIF			;  Else let NFT pick the right default.
+
+	$FETCQ	REP.Q		;  Did he say /[NO]REPLACE?
+	$IF PRESENT		;  If so then
+	$IF	YES		;    If /REPLACE THEN
+	PUTSTR	"/SU"		;      "/SU"
+	$ELSE			;    Else
+	PUTSTR	"/NOSU"		;      "/NOSU"
+	$ENDIF
+	$ENDIF	
+
+	PUTSTR	"="		;  "="
+	$FETP	PARM1
+	PUTRFIL	NODE=YES	;  "filespec"
+50$:	$FETNP			;  Any more input filespecs?
+	$IF	PRESENT		;  If so then
+	PUTSTR	""<COMMA>	;    ","
+	PUTRFIL	NODE=NO		;    "filespec"
+	$GOTO	50$		;    ...
+	$ENDIF
+
+	$FETCQ	TRA.Q		;  Did he say /TRANSFER_MODE?		;019
+	$IF PRESENT		;  If so then				;019
+	$FETKA	REC.K 		;    Did he say =RECORD?		;019
+	$IF	PRESENT		;    If so then				;019
+	PUTSTR	"/RE"		;      "/RE"				;019
+	$ELSE			;    Else				;019
+	$FETKA	BLO.K 		;      Did he say =BLOCK?		;019
+	$IF	PRESENT		;      If so then			;019
+	PUTSTR	"/BL"		;        "/BL"				;019
+	$ENDIF			;					;019
+	$ENDIF			;					;019
+	$ENDIF			; /AUTOMATIC = default			;019
+
+	$CALL	QQUERY		;  Translate /[NO]QUERY
+	$CALL	QLOG		;  Translate /[NO]LOG
+	$ENDIF
+	$ENDTHR
+
+GLOBAL	<U.CMN,U.IQ,U.POS,LX.ERP>
+GLOBAL	<...PIP,...NFT>
+
+.SBTTL CREATE Command
+
+; Qualifier list
+
+CRE.QL:	DEFQUAL	ALLO.Q,QF.LOCL,ARG=REQ;			/ALLOCATION=n
+	 DEFARG	TYPE=U$U32
+	 ENDARG
+	DEFQUAL	CLU.Q,QF.LOCL,ARG=REQ;			/CLUSTER_SIZE=n
+	 DEFARG TYPE=U$S16,MINVAL=-256,MAXVAL=256
+	 ENDARG
+	DEFQUAL	CONTIG.Q,QF.NEG;			/[NO]CONTIGUOUS
+	DEFQUAL	REP.Q,QF.NEG;				/[NO]REPLACE
+	DEFQUAL	POS.Q,QF.LOCL,ARG=REQ	;		/POSITION=option
+	 DEFARG	MID.K			;		 =MIDDLE
+	 DEFARG	IND.K			;		 =INDEX
+	 DEFARG	TYPE=U$U16		;		 =n
+	 ENDARG
+	DEFQUAL	PROT.Q,QF.LOCL,ARG=REQ	;		/PROTECTION=n
+	 DEFARG	TYPE=U$U8
+	 ENDARG
+	ENDQUAL
+
+CRE.CMD::$THR
+	$DEFCMD	QUAL=CRE.QL
+	$PARM	PARM1,LF.N,PROMPT=FIL$P
+	DFLTCQ	CONTIG.Q,AFFIRM=NO;Default to /NOCONTIGUOUS.
+	$ENDCMD
+
+	PUTCCL	...PIP		;"PIP"
+	PUTSPA
+	$FETP	PARM1
+	PUTFIL	FLAGS=F.RT11,DEFTYP=<>
+				;"filespec"
+	CRETNT	DEFTYP=<>	;Create output file tentatively.
+
+
+	$CALL	QPOS		;Translate /POSITION
+	$CALL	QPROT		;Translate /PROTECTION
+	$CALL	QALLO		;Translate /ALLOCATION
+	$CALL	QCLU		;Translate /CLUSTER_SIZE
+	$CALL	QREP		;Translate /[NO]REPLACE
+
+	$FETCQ	CONTIG.Q	;Is it /CONTIGUOUS or /NOCONTIGUOUS?
+	$IF	YES		;If /CONTIGUOUS then
+	PUTSTR	"/MO:16"	;  "/MO:16"
+	$ENDIF			;Endif
+
+	PUTSTR	"=_KB:/NOLO"
+	$ENDTHR
+
+GLOBAL	<...PIP>
+
+.SBTTL DELETE Command
+
+; Qualifier list
+
+DEL.QL:	DEFQUAL	BEF.Q,QF.LOCL,ARG=REQ	;		/BEFORE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	CRTD.Q,QF.LOCL,CONF=<MOD.Q>,REQUIRE=<BEF.Q,SIN.Q>
+					;		/CREATED
+	DEFQUAL	ERA.Q,QF.LOCL		;		/ERASE
+	DEFQUAL	LOG.Q,QF.NEG		;		/[NO]LOG
+	DEFQUAL	MOD.Q,QF.LOCL,CONF=<CRTD.Q>,REQUIRE=<BEF.Q,SIN.Q>
+					;		/MODIFIED
+	DEFQUAL	QUER.Q,QF.NEG,CONF=CONF.Q;		/[NO]QUERY
+	DEFQUAL CONF.Q,QF.NEG,CONF=QUER.Q;		/[NO]CONFIRM
+	DEFQUAL	SIN.Q,QF.LOCL,ARG=REQ	;		/SINCE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	WAR.Q,QF.LOCL!QF.NEG	;		/[NO]WARNINGS
+	DEFQUAL	SEL.Q,FLAGS=QF.LOCL!QF.ALIS,ARG=REQ
+					;		/SELECT=(...)
+	 DEFARG SIZ.K,FLAGS=QF.ALIS,ARG=REQ;		 SIZE=
+	  DEFARG MAX.K,ARG=REQ		;		  MAXIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG MIN.K,ARG=REQ		;		  MINIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG TYPE=U$U32		;		  nnn
+	  ENDARG
+	 ENDARG
+	ENDQUAL
+
+DEL.CMD::$THR
+	$DEFCMD	QUAL=DEL.QL
+
+	$PARM	PARM1,RF.N.W,PROMPT=FILS$P,OCCURS=6.
+					;Prompt for and parse a filespec.
+	DFLTCQ	QUER.Q,AFFIRM=NO	;Default to /NOQUERY.
+	DFLTCQ	LOG.Q			;Default to /LOG.
+	DFLTCQ	CRTD.Q			;Default to /CREATED (not /MODIFIED).
+	$ENDCMD	
+
+	$IF	NET=NO			;If it's a local DELETE then
+	PUTCCL	...PIP			;  "PIP"
+	PUTSPA		
+	$FETP	PARM1	
+10$:	PUTFIL	DEFTYP=<>,FLAGS=F.RT11	;  "filespec"
+	LOOKUP	DIRECTORY		;  Make sure the directory exists,
+					;  but don't worry about the file.
+	$FETNP				;  Did he specify more files?
+	$IF	PRESENT			;  If so then
+	PUTSTR	""<COMMA>		;    ","
+	$GOTO	10$			;    ...
+	$ENDIF				;  Endif
+	PUTSTR	"/DE"			;  "/DE"
+	$CALL	QWAR			;  Translate /[NO]WARNINGS (must follow
+					;  ... "/DE")
+	$CALL	SEL.THR			;  Translate the wildcard selection
+					;  qualifiers.
+	$CALL	QSEL			;  Translate /SELECT
+	$CALL	QLOG			;  Translate /[NO]LOG
+
+	$FETCQ	ERA.Q			;  Did he specify /ERASE?
+	$IF	PRESENT			;  If so then
+	PUTSTR	"/WO"			;    "/WO"
+	$ENDIF				;  Endif
+
+	$ELSE				;Else this is a network delete.
+	PUTCCL	...NFT			;  "NFT"
+	PUTSTR	""<SPACE>"DEL"<SPACE>	;  "DEL"
+	$FETP	PARM1	
+	PUTRFIL	NODE=YES		;  "filespec"
+20$:	$FETNP				;  Did he specify more files?
+	$IF	PRESENT			;  If so then
+	PUTSTR	""<COMMA>		;    ","
+	PUTRFIL	NODE=NO			;    "filespec"
+	$GOTO	20$			;    ...
+	$ENDIF				;  Endif
+
+	$CALL	QQUERY			;  Translate /[NO]QUERY
+	$CALL	QLOG			;  Translate /[NO]LOG
+	$ENDIF				;Endif
+	$ENDTHR
+
+GLOBAL	<...PIP,...NFT>
+
+.SBTTL DIFFERENCES Command
+
+; Qualifier list
+
+DIF.QL:	DEFQUAL	OUT.Q,ARG=REQ	;	/OUTPUT=filespec
+	 DEFARG	TYPE=LF.N
+	 ENDARG
+	DEFQUAL	IGN.Q,ARG=REQ	;	/IGNORE=BLANKLINES
+	 DEFARG	BLA.K
+	 ENDARG
+	DEFQUAL	MAT.Q,ARG=REQ	;	/MATCH=n
+	 DEFARG	TYPE=U$INT
+	 ENDARG
+	DEFQUAL	MAX.Q,ARG=REQ	;	/MAXIMUM_DIFFERENCES=n
+	 DEFARG	TYPE=U$INT
+	 ENDARG
+	ENDQUAL
+
+DIF.CMD::$THR
+	$DEFCMD	QUAL=DIF.QL
+	$PARM	PARM1,LF.N.W,PROMPT=FIL1$P
+	$PARM	PARM2,LF.N.W,PROMPT=FIL2$P
+	$ENDCMD
+	PUTCCL	...FIL
+	PUTSPA
+	$FETCQ	OUT.Q		;Did he specify /OUTPUT=filespec?
+	$IF	PRESENT		;If so then
+	$FETA		
+	PUTFIL	DEFTYP=DIF,FLAGS=F.RT11
+				;  "filespec"
+	CRETNT	DEFTYP=DIF	;  Create output file tentatively.
+	PUTSTR	"="		;  "="
+	$ENDIF			;Else default to KB:.
+
+	$FETP	PARM1
+	PUTFIL	DEFTYP=<>,FLAGS=F.RT11
+				;"filespec" (full expansion)
+	LOOKUP	FILE,DEFTYP=<>	;Make sure input file 1 exists.
+
+	PUTSTR	""<COMMA>	;","
+	$FETP	PARM2
+	PUTFIL	DEFTYP=<>,FLAGS=F.RT11
+				;"filespec" (full expansion)
+	LOOKUP	FILE,DEFTYP=<>	;Make sure input file 2 exists.
+
+	$FETCQ	IGN.Q
+	$IF	PRESENT
+	PUTSTR	"/NOBL"
+	$ELSE
+	PUTSTR	"/BL"
+	$ENDIF
+
+	$FETCQ	MAT.Q
+	$IF	PRESENT
+	PUTSTR	"/MA:"
+	$FETA
+	PUTSTR
+	$ENDIF			;Else default to /MATCH=3.
+
+	$FETCQ	MAX.Q
+	$IF	PRESENT
+	PUTSTR	"/LI:"
+	$FETA
+	PUTSTR
+	$ENDIF
+	$ENDTHR
+
+GLOBAL	<...FIL>
+
+.SBTTL DIRECTORY Command
+
+; Qualifier list
+
+DIR.QL:	DEFQUAL	BRI.Q,CONF=<FUL.Q,TOT.Q>;	/BRIEF
+	DEFQUAL	DAT.Q,QF.NEG!QF.LOCL,CONF=<TOT.Q>,ARG=OPT;
+				;		/[NO]DATE[=option]
+	 DEFARG	CRED.K		;		 =CREATED
+	 DEFARG	MOD.K		;		 =MODIFIED
+	 DEFARG	ALL.K		;		 =ALL
+	 ENDARG
+	DEFQUAL	FUL.Q,CONF=<BRI.Q,TOT.Q>;	/FULL 
+	DEFQUAL	OUT.Q,ARG=REQ	;		/OUTPUT=filespec
+	 DEFARG	TYPE=LF.N
+	 ENDARG
+	DEFQUAL	PROT.Q,QF.NEG!QF.LOCL,CONF=<TOT.Q>
+				;		/[NO]PROTECTION
+	DEFQUAL	SIZ.Q,QF.NEG!QF.LOCL,ARG=OPT; 	/[NO]SIZE[=option]
+	 DEFARG	ALLN.K		;		 =ALLOCATION
+	 DEFARG	USED.K		;		 =USED
+	 ENDARG
+	DEFQUAL	BEF.Q,QF.LOCL,ARG=REQ;		/BEFORE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	CRTD.Q,QF.LOCL,CONF=MOD.Q,REQUIRE=<BEF.Q,SIN.Q>
+				;		/CREATED   
+	DEFQUAL	MOD.Q,QF.LOCL,CONF=CRTD.Q,REQUIRE=<BEF.Q,SIN.Q>
+				;		/MODIFIED  
+	DEFQUAL	SIN.Q,QF.LOCL,ARG=REQ;		/SINCE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	TOT.Q,CONF=<BRI.Q,DAT.Q,FUL.Q,PROT.Q>
+				;		/TOTAL
+	DEFQUAL	SEL.Q,FLAGS=QF.LOCL!QF.ALIS,ARG=REQ
+				;		/SELECT=(...)
+	 DEFARG SIZ.K,FLAGS=QF.ALIS,ARG=REQ;	 SIZE=
+	  DEFARG MAX.K,ARG=REQ	;		  MAXIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG MIN.K,ARG=REQ	;		  MINIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG TYPE=U$U32	;		  nnn
+	  ENDARG
+	 ENDARG
+
+	ENDQUAL
+
+DIR.CMD::$THR
+	$DEFCMD	QUAL=DIR.QL
+	$PARM	PARM1,RF..W,PF.OPT,OCCURS=6.
+	$FETCQ	BRI.Q		;Did he say /BRIEF?
+	$IF	PRESENT		;If so then
+	DFLTCQ	DAT.Q,AFFIRM=NO	;  Default to  /NODATE.
+	DFLTCQ	SIZ.Q,AFFIRM=NO	;  Default to /NOSIZE.
+	DFLTCQ	PROT.Q,AFFIRM=NO;  Default to /NOPROTECTION.
+	$ELSE			;Else
+	$FETCQ	FUL.Q		;  Did he say /FULL?
+	$IF	PRESENT		;  If so then
+	DFLTCQ	DAT.Q		;    Default to /DATE.
+	DFLTCQ	SIZ.Q		;    Default to /SIZE.
+	DFLTCQ	PROT.Q		;    Default to /PROTECTION.
+	$ELSE			;  Else he didn't say either /BRIEF or /FULL.
+	.IF	DF SNGDIR	;    If we're in single-column format then
+	$FETCQ	DAT.Q		;      Did he specify /DATE?
+	$IF	ABSENT		;      If not then
+	PUTCQ	DAT.Q		;        Default to /DATE.
+	DFLTKA	DAT.Q,CRED.K	;        Default to =CREATED.
+	$ENDIF
+	.IFF			;    Else
+	DFLTCQ	DAT.Q,AFFIRM=NO	;      Default to /NODATE.
+	.ENDC
+	DFLTCQ	SIZ.Q		;    Default to /SIZE.
+	DFLTCQ	PROT.Q		;    Default to /PROTECTION.
+	$ENDIF
+	$ENDIF
+	$ENDCMD
+
+	$IF	NET=YES		;If it's a network DIRECTORY then
+	PUTCCL	...NFT		;  "NFT"
+	PUTSTR	""<SPACE>"DI"<SPACE>;"DI"
+	$FETCQ	OUT.Q		;  Did he say /OUTPUT=filespec?
+	$IF	PRESENT		;  If so then
+	$FETA		
+	PUTFIL	DEFTYP=DIR,FLAGS=F.RSX
+				;    "filespec[.DIR]" (RSX expansion)
+	CRETNT	DEFTYP=DIR	;    Create output file tentatively.
+	PUTSTR	"="		;    "="
+	$ENDIF			;  Else default to _KB:.
+
+	$FETP	PARM1		;
+	PUTRFIL	NODE=YES	;  "filespec"
+10$:	$FETNP			;  Did he specify more filespecs?
+	$IF	PRESENT		;  If so then
+	PUTSTR	""<COMMA>	;    ","
+	PUTRFIL	NODE=NO		;    "filespec"
+	$GOTO	10$		;    ...
+	$ENDIF
+	$FETCQ	BRI.Q		;  Did he specify /BRIEF?
+	$IF	PRESENT		;  If so then
+	PUTSTR	"/BR"		;    "/BR"
+	$ENDIF
+	$FETCQ	FUL.Q		;  Did he specify /FULL?
+	$IF	PRESENT		;  If so then
+	PUTSTR	"/FU"		;    "/FU"
+	$ENDIF			;  If neither, use NFT's default.
+	$FETCQ	TOT.Q		;  Did he specify /TOTAL?
+	$IF	PRESENT		;  If so then
+	PUTSTR	"/TO"		;    "/TO"
+	$ENDIF			;  Endif
+
+	$ELSE			;Else it's a local DIRECTORY.
+
+	PUTCCL	...PIP		;  "PIP"
+	PUTSPA			;  " "
+	$FETCQ	OUT.Q		;  Did he say /OUTPUT=filespec?
+	$IF	PRESENT		;  If so then
+	$FETA			;    Fetch the argument
+	PUTFIL	DEFTYP=DIR,FLAGS=F.RT11
+				;    "filespec[.DIR]" (full expansion)
+	CRETNT	DEFTYP=DIR	;    Create output file tentatively.
+	$ENDIF			;  Endif, default to _KB:.
+
+	$FETCQ	TOT.Q		;  Did he say /TOTAL?
+	$IF	PRESENT		;  If so then
+	PUTSTR	"/DI:SU"	;    "/DI:SU"--list only totals.
+	$GOTO	DOSIZE		;    Check for /SIZE, everything else conflicts
+	$ENDIF			;  Endif
+
+	.IF	DF SNGDIR	;  If we're in single-column format then
+	PUTSTR	"/DI:HD:TY"	;    "/DI:HD" (headers, file name and type)
+	.IFF			;  Else
+	PUTSTR	"/DI:W:HD"	;    "/DI:W:HD" (wide listing, with headers)
+	.ENDC			;  Endif
+
+	$FETCQ	DAT.Q		;  Is it /DATE or /NODATE?
+	$IF	YES		;  If /DATE then
+	$FETKA	CRED.K		;    Did he say =CREATED?
+	$IF	PRESENT		;    If so then
+	PUTSTR	":TI"		;      ":TI"
+	$ELSE			;    Else
+	$FETKA	MOD.K		;      Did he say =MODIFIED?
+	$IF	PRESENT		;      If so then
+	PUTSTR	":LA"		;        ":LA"
+	$ELSE			;      Else
+	$FETKA	ALL.K		;        Did he say =ALL?
+	$IF	PRESENT		;        If so then
+	PUTSTR	":LA:TI"	;          ":LA:TI"
+	$ELSE			;        Else
+	PUTSTR	":LA:TI"	;          Default to =ALL.
+	$ENDIF			;        Endif
+	$ENDIF			;      Endif
+	$ENDIF			;    Endif
+	$ENDIF			;  Endif
+
+	$FETCQ	PROT.Q		;  Is it /[NO]PROTECTION 
+	$IF	YES		;  If /PROTECTION then
+	PUTSTR	":PR"		;    ":PR"
+	$ENDIF			;  Endif
+
+	$FETCQ	FUL.Q		;  Did he say /FULL?
+	$IF	PRESENT		;  If so then
+	PUTSTR	":RT:SA:PO:CL"	;    List RTS, symbolic attributes,
+				;    position, clustersize.
+	$ENDIF			;  Endif
+
+DOSIZE:	$FETCQ	SIZ.Q		;  Is it /SIZE or /NOSIZE?
+	$IF	YES		;  If /SIZE then
+	$FETKA	USED.K		;    Did he specify =USED?
+	$IF	PRESENT		;    If so then
+	PUTSTR	":SI"		;      ":SI"
+	$ELSE			;    Else
+	$FETKA	ALLN.K		;      Did he specify =ALLOCATION?
+	$IF	PRESENT		;      If so then
+	PUTSTR	":AL"		;        ":AL"
+	$ELSE			;      Else he didn't specify.
+	PUTSTR	":SI"		;        Assume USED.
+	$ENDIF			;      Endif
+	$ENDIF			;    Endif
+	$ENDIF	;ELSE NO	;  Endif 
+
+	PUTSTR	"="		;  "="
+	$FETP	PARM1		;  Did he specify a filespec?
+	$IF	PRESENT		;  If so then
+20$:	PUTFIL	FLAGS=F.RT11	;    "filespec"
+	LOOKUP	DIRECTORY	;    Make sure the directory exists.
+	$FETNP			;    Did he specify more filespecs?
+	$IF	PRESENT		;    If so then
+	PUTSTR	""<COMMA>	;      ","
+	$GOTO	20$		;      ...
+	$ENDIF			;    Endif
+	$ELSE	;ABSENT		;  Else he didn't specify a filespec.
+	PUTSTR	":*.*"		;    Default to ":*.*".
+	$ENDIF			;  Endif
+
+	$CALL	QSEL		;  Translate /SELECT
+	PUTCQ	QUER.Q,AFFIRM=NO;  Say /NOQUERY, to make SEL.THR happy.
+	$CALL	SEL.THR		;  Translate wildcard selection qualifiers.
+	$ENDIF			;Endif
+	$ENDTHR
+
+GLOBAL	<...PIP,...NFT>
+
+.SBTTL EDIT Command
+
+; Qualifier list
+
+EDI.QL:	DEFQUAL	COM.Q,QF.NEG,REQUIRE=<EDT.Q>,CONF=<TEC.Q>,ARG=REQ
+					;	/[NO]COMMAND=filespec
+	 DEFARG	TYPE=LF.N
+	 ENDARG
+	DEFQUAL	CRE.Q,QF.NEG		;	/[NO]CREATE
+	DEFQUAL	EDT.Q,CONF=<TEC.Q,FIN.Q,INS.Q,INI.Q,MEM.Q,SCR.Q,VTE.Q>
+					;	/EDT 
+	DEFQUAL	FIN.Q,REQUIRE=<TEC.Q>,CONF=<EDT.Q>
+					;	/FIND
+	DEFQUAL	FMT.Q,REQUIRE=<EDT.Q>,CONF=<TEC.Q>,ARG=REQ
+					;	/FORMAT=keyword
+	 DEFARG	VAR.K			;	 =VARIABLE
+	 DEFARG	STR.K			;	 =STREAM
+	 ENDARG
+	DEFQUAL	INS.Q,QF.NEG,CONF=<OUT.Q,RON.Q,EDT.Q>,REQUIRE=<TEC.Q>
+					;	/[NO]INSPECT
+	DEFQUAL	INI.Q,QF.NEG,REQUIRE=<TEC.Q>,CONF=<EDT.Q>
+					;	/[NO]INI
+	DEFQUAL	JOU.Q,QF.NEG,CONF=<RON.Q,TEC.Q>,REQUIRE=<EDT.Q>,ARG=OPT
+					;	/[NO]JOURNAL[=filespec]
+	 DEFARG	TYPE=LF.N
+	 ENDARG
+	DEFQUAL	MEM.Q,QF.NEG,REQUIRE=<TEC.Q>,CONF=<EDT.Q>
+					;	/[NO]MEMORY
+	DEFQUAL	OUT.Q,QF.NEG,CONF=<INS.Q,RON.Q>,ARG=REQ
+					;	/[NO]OUTPUT=filespec
+	 DEFARG	TYPE=LF.N
+	 ENDARG
+	DEFQUAL	RON.Q,QF.NEG,CONF=<INS.Q,JOU.Q,OUT.Q>
+					;	/[NO]READ_ONLY
+	DEFQUAL	REC.Q,QF.NEG,CONF=<RON.Q,TEC.Q>,REQUIRE=<EDT.Q>
+					;	/[NO]RECOVER
+;///RECOVER should also conflict with /NOOUTPUT.//
+	DEFQUAL	SCR.Q,QF.NEG,REQUIRE=<TEC.Q>,CONF=<EDT.Q>,ARG=OPT
+					;	/[NO]SCROLL[=n]
+	 DEFARG	TYPE=U$INT
+	 ENDARG
+	DEFQUAL	TEC.Q,CONF=<EDT.Q,COM.Q,FMT.Q,JOU.Q,REC.Q>
+					;	/TECO 
+	DEFQUAL	VTE.Q,QF.ALIS,REQUIRE=<TEC.Q>,CONF=<EDT.Q>,ARG=OPT
+					;	/VTEDIT[=option]
+	 DEFARG	SEE.K			;	 =SEEALL
+	 DEFARG	HOL.K			;	 =HOLD
+	 ENDARG
+	ENDQUAL
+
+EDI.CMD::
+	$THR
+	$DEFCMD	QUAL=EDI.QL
+	$FETCQ	TEC.Q			;Did he say /TECO?
+	$IF	PRESENT			;If so then
+	$PARM	PARM1,LF.N,PF.OPT	;  Parse an optional filespec.
+	$ELSE				;Else
+	$PARM	PARM1,LF.N,PROMPT=FIL$P	;  Prompt for and parse the filespec.
+	$ENDIF				;Endif
+
+	DFLTCQ	EDT.Q			;Default to /EDT.
+	$FETCQ	EDT.Q			;Is it EDIT/EDT?
+	$IF	PRESENT			;If so then
+	$FETCQ	RON.Q			;  Did he say /[NO]READ_ONLY?
+	$IF	PRESENT			;  If so then
+	$IF	YES			;    If /READ_ONLY then
+	PUTCQ	JOU.Q,AFFIRM=NO		;      That means /NOJOURNAL.
+	PUTCQ	OUT.Q,AFFIRM=NO		;      That means /NOOUTPUT.
+	$ELSE				;    Else /NOREAD_ONLY.
+	PUTCQ	JOU.Q			;      That means /JOURNAL.
+	PUTCQ	OUT.Q			;      That means /OUTPUT.
+	$ENDIF
+	$ELSE				;  Else
+	DFLTCQ	JOU.Q			;    Default to /JOURNAL
+	DFLTCQ	OUT.Q			;    Default to /OUTPUT
+	$ENDIF
+	$ENDCMD
+
+	PUTCCL	...EDT			;  "EDT"
+	$FETCQ	OUT.Q			;  Find out about the output file.
+	$IF	NO			;  If /NOOUTPUT then
+	$FETP	PARM1			;    Fetch the file to edit.
+	LOOKUP	FILE			;    Make sure the file exists.
+	$ELSE				;  Else /OUTPUT.
+	$FETA				;    Did user specify /OUTPUT=filespec?
+	$IF	PRESENT			;    If so then
+	$FETP	PARM1			;      Fetch the input filespec.
+	LOOKUP	FILE			;      Make sure the input file exists.
+	$ENDIF
+	$ENDIF
+
+	$FETCQ	JOU.Q			;  Is it /JOURNAL or /NOJOURNAL?
+	$IF	NO			;  If /NOJOURNAL then
+	PUTSTR	"/-JOU"			;    "/-JOU"
+	$ENDIF
+
+	$FETCQ	REC.Q			;  Did he say /RECOVER or /NORECOVER?
+	$IF	PRESENT			;  If so then
+	$IF	YES			;    If /RECOVER then
+	PUTSTR	"/REC"			;      "/REC"
+	$ENDIF
+	$ENDIF
+
+	$FETCQ	CRE.Q			;  Did he say /CREATE or /NOCREATE?
+	$IF	PRESENT			;  If so then
+	$IF	NO			;    If /NOCREATE then
+	PUTSTR	"/-CRE"			;      "/CRE"
+	$ENDIF				;    Endif
+	$ENDIF				;  Endif
+
+	$FETCQ	COM.Q			;  Did he say /COMMAND=filespec or 
+					;  /NOCOMMAND?
+	$IF	PRESENT			;  If so then
+	$IF	NO			;    If /NOCOMMAND then
+	PUTSTR	"/-COM"			;      "/-COM"
+	$ENDIF
+	$ENDIF
+	
+	$FETCQ	FMT.Q			;  Did he say 
+					;  /FORMAT={STREAM | VARIABLE}?
+	$IF	PRESENT			;  If so then
+	$FETKA	VAR.K	
+	$IF	PRESENT			;    If /FORMAT=VARIABLE then
+	PUTSTR	"/VAR"			;      "/VAR"
+	$ELSE	;STR.K			;    Else /FORMAT=STREAM.
+	PUTSTR	"/STR"			;      "STR"
+	$ENDIF
+	$ENDIF
+
+	PUTSPA
+	$FETCQ	OUT.Q			;  Find out about output files.
+	$IF	YES			;  If /OUTPUT then
+	$FETA				;    Fetch the output filespec.
+	$IF	PRESENT			;    If specified then
+	PUTSTR				;      "filespec"
+	$ELSE				;    Else
+	$FETP	PARM1			;      "filespec" (use input filespec)
+	PUTSTR
+	$ENDIF
+	CRETNT	DEFTYP=<>		;    Create output file tentatively.
+	$ENDIF				;  Else no output filespec.
+
+	$FETCQ	JOU.Q			;  Is it /JOURNAL[=filespec] 
+					;  or /NOJOURNAL?
+	$IF	YES			;  If /JOURNAL[=filespec] then
+	PUTSTR	""<COMMA>		;    ","
+	$FETA				;    Did he give a filespec?
+	$IF	PRESENT			;    If so then
+	PUTSTR				;      "filespec"
+	CRETNT	DEFTYP=JOU		;      Create the journal file 
+					;      tentatively.
+	$ELSE				;    Else create the default filespec.
+	$FETCQ	OUT.Q			;      Did he specify an output file?
+	$IF	YES
+	$FETA	
+	$IF	PRESENT			;      If so then
+	$GOTO	10$			;        Use that file
+	$ENDIF
+	$ENDIF				;      Else
+	$FETP	PARM1			;        Use input file.
+10$:	PUTFIL	FLAGS=F.NOTYP		;        "filespec" (with no filetype;
+					;        let EDT default to .JOU)
+	$ENDIF
+	$ENDIF
+
+	PUTSTR	"="			;  "="
+	$FETP	PARM1			;
+	PUTSTR				;  "filespec"
+
+	$FETCQ	COM.Q			;  Did he say /COMMAND=filespec or 
+					;  /NOCOMMAND?
+	$IF	PRESENT			;  If so then
+	$IF	YES			;    If /COMMAND=filespec then
+	PUTSTR	""<COMMA>		;      ","
+	$FETA	
+	PUTSTR				;      "filespec"
+	LOOKUP	FILE,DEFTYP=EDT		;      Make sure command file exists.
+	$ENDIF	
+	$ENDIF
+
+	$ELSE				;Else EDIT/TECO.
+	DFLTCQ	CRE.Q,NO		;  Default to /NOCREATE.
+	DFLTCQ	INI.Q			;  Default to /INI.
+	DFLTCQ	MEM.Q			;  Default to /MEMORY.
+	$FETCQ	OUT.Q			;  Did he say /[NO]OUTPUT?
+	$IF	PRESENT			;  If so then
+	$IF	NO			;    If /NOOUTPUT  then
+	PUTCQ	RON.Q			;      That means /READ_ONLY.
+	$ELSE				;    Else /OUTPUT=filespec.
+	PUTCQ	RON.Q,AFFIRM=NO		;      That means /NOREAD_ONLY.
+	$ENDIF
+	$ENDIF
+
+	$FETCQ	INS.Q			;  Did he say /[NO]INSPECT?
+	$IF	PRESENT			;  If so then
+	$IF	YES			;    If /INSPECT then
+	PUTCQ	RON.Q			;      That means /READ_ONLY.
+	$ELSE				;    Else /NOINSPECT.
+	PUTCQ	RON.Q,AFFIRM=NO		;      That means /NOREAD_ONLY.
+	$ENDIF
+	$ENDIF
+	DFLTCQ	RON.Q,AFFIRM=NO		;  Default to /NOREAD_ONLY.
+	$ENDCMD
+
+	PUTCCL	...TEC			;  "TECO"
+	PUTSPA
+	$FETCQ	OUT.Q			;  Did he say /[NO]OUTPUT?
+	$IF	PRESENT			;  If so then
+	$IF	YES			;    If /OUTPUT=filespec then
+	$FETA
+	PUTSTR				;      "filespec"
+	CRETNT				;      Create the output file 
+					;      tentatively.
+	PUTSTR	"="			;      "="
+	$ENDIF
+	$ENDIF
+
+	$FETP	PARM1			;  Did he specify a filespec?
+	$IF	PRESENT			;  If so then
+	PUTSTR				;    "filespec"
+	LOOKUP	DIRECTORY		;    Make sure directory exists.
+	$ENDIF
+
+	$FETCQ	CRE.Q			;  Is it /CREATE or /NOCREATE?
+	$IF	NO			;  If /NOCREATE then
+	PUTSTR	"/NOCREATE"		;    "/NOCREATE"
+	$ELSE				;  Else
+	$FETCQ	OUT.Q			;    Did he also say /OUTPUT?
+	$IF	ABSENT			;    If not then
+	PUTSTR	"="			;      "="
+	$ENDIF				;    Endif
+	$ENDIF				;  Endif
+
+	$FETCQ	FIN.Q			;  Did he say /FIND?
+	$IF	PRESENT			;  If so then
+	PUTSTR	"/FIND"			;    "/FIND"
+	$ENDIF
+
+	$FETCQ	INI.Q			;  Is it /INI or /NOINI?
+	$IF	NO			;  If /NOINI then
+	PUTSTR	"/NOINI"		;    "/NOINI"
+	$ENDIF
+	
+	$FETCQ	MEM.Q			;  Is it /MEMORY or /NOMEMORY?
+	$IF	NO			;  If /NOMEMORY then
+	PUTSTR	"/NOMEMORY"
+	$ENDIF
+
+	$FETCQ	SCR.Q			;  Did he say /SCROLL[=n]?
+	$IF	PRESENT			;  If so then
+	PUTSTR	"/SCROLL"		;    "/SCROLL"
+	$FETA				;    Did he give an argument?
+	$IF	PRESENT			;    If so then
+	PUTSTR	":"			;      ":"	
+	PUTSTR				;      "n"
+	$ENDIF
+	$ENDIF
+
+	$FETCQ	RON.Q			;  Is it /READ_ONLY or /NOREAD_ONLY?
+	$IF	YES			;  If /READ_ONLY then
+	PUTSTR	"/INSPECT"		;    "/INSPECT"
+	$ENDIF
+
+	$FETCQ	VTE.Q			;  Did he say /VTEDIT?
+	$IF	PRESENT			;  If so then
+	PUTSTR	"/VTEDIT"		;    "/VTEDIT"
+	$FETKA	HOL.K			;    Did he say =HOLD?
+	$IF	PRESENT			;    If so then
+	PUTSTR	":HOLD"			;      ":HOLD"
+	$ENDIF
+	$FETKA	SEE.K			;    Did he say =SEEALL?
+	$IF	PRESENT			;    If so then
+	PUTSTR	":SEEALL"		;      ":SEEALL"
+	$ENDIF
+	$ENDIF
+	$ENDIF
+	$ENDTHR
+	
+GLOBAL	<...EDT,...TEC>
+
+.SBTTL RENAME Command
+
+; Qualifier list
+
+REN.QL:	DEFQUAL	BEF.Q,QF.LOCL,ARG=REQ	;	/BEFORE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	CRTD.Q,QF.LOCL,CONF=MOD.Q,REQUIRE=<BEF.Q,SIN.Q>
+					;	/CREATED
+	DEFQUAL	LOG.Q,QF.NEG		;	/[NO]LOG
+	DEFQUAL	MOD.Q,QF.LOCL,CONF=CRTD.Q,REQUIRE=<BEF.Q,SIN.Q>
+					;	/MODIFIED
+	DEFQUAL	PROT.Q,QF.LOCL,ARG=REQ	;	/PROTECTION=n
+	 DEFARG	TYPE=U$U8
+	 ENDARG
+	DEFQUAL	QUER.Q,QF.NEG,CONF=CONF.Q;	/[NO]QUERY
+	DEFQUAL CONF.Q,QF.NEG,CONF=QUER.Q;	/[NO]CONFIRM
+	DEFQUAL	REP.Q,QF.NEG!QF.LOCL	;	/[NO]REPLACE
+	DEFQUAL	SIN.Q,QF.LOCL,ARG=REQ	;	/SINCE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	WAR.Q,QF.LOCL!QF.NEG	;	/[NO]WARNINGS
+	DEFQUAL	SEL.Q,FLAGS=QF.LOCL!QF.ALIS,ARG=REQ
+					;	/SELECT=(...)
+	 DEFARG SIZ.K,FLAGS=QF.ALIS,ARG=REQ;	 SIZE=
+	  DEFARG MAX.K,ARG=REQ		;	  MAXIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG MIN.K,ARG=REQ		;	  MINIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG TYPE=U$U32		;	  nnn
+	  ENDARG
+	 ENDARG
+	ENDQUAL
+
+REN.CMD::$THR
+	$DEFCMD	QUAL=REN.QL
+	$PARM	PARM1,LF.N.W,PROMPT=FROM$P,OCCURS=6.
+	$PARM	PARM2,LF..W,PROMPT=TO$P
+	DFLTCQ	QUER.Q,AFFIRM=NO;Default to /NOQUERY.
+	DFLTCQ	LOG.Q		;Default to /LOG.
+	DFLTCQ	REP.Q,AFFIRM=NO	;Default to /NOREPLACE.
+	$ENDCMD
+
+	PUTCCL	...PIP		;"PIP"
+	PUTSPA
+	$FETP	PARM2	
+	PUTFIL	FLAGS=F.RT11	;"filespec"
+
+	$CALL	QPROT		;Translate /PROTECTION
+
+	PUTSTR	"="		;"="
+	$FETP	PARM1
+10$:	PUTFIL	DEFTYP=<>,FLAGS=F.RT11
+				;"filespec" (full expansion)
+	LOOKUP	FILE,DEFTYP=<>	;Make sure that file exists.
+	$FETCQ	REP.Q		;Is it /REPLACE or /NOREPLACE?
+	$IF	YES		;If /REPLACE then
+	PUTSTR	"/SI:-1"	;  "/SI:-1"
+	$ENDIF
+	$FETNP			;Did he specify more filespecs?
+	$IF	PRESENT		;If so then
+	PUTSTR	""<COMMA>	;  ","
+	$GOTO	10$		;  ...
+	$ENDIF	
+
+	PUTSTR	"/RE"		;"/RE"
+	$CALL	QWAR		;Translate /[NO]WARNINGS (must follow "/RE")
+	$CALL	SEL.THR		;Translate the wildcard selection qualifiers.
+	$CALL	QSEL		;Translate /SELECT
+	$CALL	QLOG		;Translate /[NO]LOG
+	$ENDTHR
+
+GLOBAL	<...PIP>
+
+.SBTTL SET PROTECTION Command
+
+; Qualifier list
+
+SEPR.QL:DEFQUAL	BEF.Q,CONF=DEF.Q,ARG=REQ	;	/BEFORE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	CRTD.Q,CONF=<MOD.Q,DEF.Q>,REQUIRE=<BEF.Q,SIN.Q>
+						;	/CREATED
+	DEFQUAL	LOG.Q,QF.NEG,CONF=DEF.Q		;	/[NO]LOG
+	DEFQUAL	MOD.Q,CONF=<CRTD.Q,DEF.Q>,REQUIRE=<BEF.Q,SIN.Q>
+						;	/MODIFIED
+	DEFQUAL	QUER.Q,QF.NEG,CONF=<CONF.Q,DEF.Q> ;	/[NO]QUERY
+	DEFQUAL	CONF.Q,QF.NEG,CONF=<QUER.Q,DEF.Q> ;	/[NO]CONFIRM
+	DEFQUAL	SIN.Q,CONF=DEF.Q,ARG=REQ	;	/SINCE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	DEF.Q,CONF=<BEF.Q,CRTD.Q,LOG.Q,MOD.Q,QUER.Q,CONF.Q,SIN.Q,PARM2>
+						;	/DEFAULT
+	DEFQUAL	SEL.Q,FLAGS=QF.LOCL!QF.ALIS,ARG=REQ
+						;	/SELECT=(...)
+	 DEFARG SIZ.K,FLAGS=QF.ALIS,ARG=REQ	;	 SIZE=
+	  DEFARG MAX.K,ARG=REQ			;	  MAXIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG MIN.K,ARG=REQ			;	  MINIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG TYPE=U$U32			;	  nnn
+	  ENDARG
+	 ENDARG
+	ENDQUAL
+
+SEPR.CMD::$THR
+	$DEFCMD QUAL=SEPR.QL
+	$FETCQ	DEF.Q			;Did he say /DEFAULT?
+	$IF	PRESENT			;If so then
+	$PARM	PARM1,U$U8,PF.OPT!PF.COL;  Parse optional protection code.
+	$ELSE				;Else
+	$PARM	PARM1,U$U8,PF.COL,PROMPT=PROT$P
+					;  Prompt for and parse required
+					;  protection code.
+	$PARM	PARM2,LF.N.W,PROMPT=FILS$P,OCCURS=6.,CONF=DEF.Q
+					;  Prompt for and parse filespec.
+	$ENDIF				;Endif
+	DFLTCQ	LOG.Q			;Default to /LOG.
+	DFLTCQ	QUER.Q,AFFIRM=NO	;Default to /NOQUERY.
+	$ENDCMD
+
+	$FETCQ	DEF.Q			;Was /DEFAULT specified?
+	$IF	PRESENT			;If so then
+	$FETP	PARM1			;  Was a protection code specified?
+	$IF	ABSENT			;  If not then
+	$DO				;    Go to system-wide default.
+	CALLX	CLRFQX			;    Zero FIRQB and XRB.
+	DECB	FIRQB+FQPROT-1		;    Protection code is real.
+	MOVB	#UU.DEA,FIRQB+FQFUN	;    Deassign the ...
+	.ULOG				;    protection code.
+	.ASSERT	FIRQB EQ #0, BYTE	;    No error is possible.
+	$ENDDO				;
+	$ELSE				;  Else
+	$DO				;
+	CALLX	CLRFQX			;    Clear FIRQB and XRB.
+	MOVB	U.CMN+U.LOW,FIRQB+FQPROT;    Put protection code in FIRQB.
+	DECB	FIRQB+FQPROT-1		;    Protection code is real.
+	MOVB	#UU.ASS,FIRQB+FQFUN	;    Set the default ...
+	.ULOG				;    protection code.
+	.ASSERT	FIRQB EQ #0, BYTE	;    No error is possible.
+	$ENDDO				;  
+	$ENDIF				;  Endif
+	$ELSE				;Else /DEFAULT wasn't specified.
+	PUTCCL	...PIP			;  "PIP"
+	PUTSPA				;  " "
+	$FETP	PARM1			; 
+	PUTSTR	"/PR:"			;  "/PR:"
+	PUTSTR				;  "prot"
+	PUTSTR	"="			;  "="
+	$FETP	PARM2			;
+10$:	PUTFIL	DEFTYP=<>,FLAGS=F.RT11	;  "filespec"
+	LOOKUP	FILE,DEFTYP=<>		;  Make sure that file exists.
+	$FETNP				;  Are there more input filespecs?
+	$IF	PRESENT			;  If so then
+	PUTSTR	""<COMMA>		;    ","
+	$GOTO	10$			;    ...
+	$ENDIF
+	PUTSTR	"/RE"			;  "/RE"
+
+	$CALL	SEL.THR			;  Translate the wildcard selection
+					;  ... qualifiers.
+	$CALL	QSEL			;  Translate /SELECT
+	$CALL	QLOG			;  Translate /[NO]LOG
+	$ENDIF				;Endif
+	$ENDTHR
+
+GLOBAL	<...PIP>
+
+.SBTTL TYPE Command
+
+; Qualifier list
+
+TYP.QL:	DEFQUAL	BEF.Q,QF.LOCL,ARG=REQ		;/BEFORE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	CRTD.Q,QF.LOCL,CONF=MOD.Q,REQUIRE=<BEF.Q,SIN.Q>
+						;/CREATED
+	DEFQUAL	LOG.Q,QF.NEG			;/[NO]LOG
+	DEFQUAL	MOD.Q,QF.LOCL,CONF=CRTD.Q,REQUIRE=<BEF.Q,SIN.Q>
+						;/MODIFIED
+	DEFQUAL	QUER.Q,QF.NEG,CONF=CONF.Q	;/[NO]QUERY
+	DEFQUAL	CONF.Q,QF.NEG,CONF=QUER.Q	;/[NO]CONFIRM
+	DEFQUAL	SIN.Q,QF.LOCL,ARG=REQ		;/SINCE=time
+	 DEFARG	TYPE=U$DATE
+	 ENDARG
+	DEFQUAL	SEL.Q,FLAGS=QF.LOCL!QF.ALIS,ARG=REQ
+						;/SELECT=(...)
+	 DEFARG SIZ.K,FLAGS=QF.ALIS,ARG=REQ	; SIZE=
+	  DEFARG MAX.K,ARG=REQ			;  MAXIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG MIN.K,ARG=REQ			;  MINIMUM=nnn
+	   DEFARG TYPE=U$U32
+	   ENDARG
+	  DEFARG TYPE=U$U32			;  nnn
+	  ENDARG
+	 ENDARG
+	ENDQUAL
+
+TYP.CMD::$THR
+	$DEFCMD	QUAL=TYP.QL
+	$PARM	PARM1,RF.N.W,PROMPT=FILS$P,OCCURS=6.
+	DFLTCQ	QUER.Q,AFFIRM=NO	;Default to /NOQUERY.
+	DFLTCQ	LOG.Q,AFFIRM=NO		;Default to /NOLOG
+	$ENDCMD
+
+	$IF	NET=YES			;If network TYPE then
+	PUTCCL	...NFT			;  "NFT"
+	PUTSTR	""<SPACE>"TY"<SPACE>	;  " TY "
+	$FETP	PARM1			;  Fetch the parameter
+	$IF	NET=NO			;  If it's a local filespec
+	LOOKUP	FILE			;    Make sure the file exists
+	$ENDIF				;  Endif
+	PUTRFIL	NODE=YES		;  "filespec"
+10$:	$FETNP				;  Did he give more input filespecs?
+	$IF	PRESENT			;  If so then
+	PUTSTR	""<COMMA>		;    ","
+	PUTRFIL	NODE=NO			;    "filespec"
+	$GOTO	10$			;    ...
+	$ENDIF				;  Endif
+	$CALL	QQUERY			;  Translate /[NO]QUERY
+
+	$ELSE	;NET=NO			;Else local TYPE.
+
+	PUTCCL	...PIP			;  "PIP"
+	PUTSTR	""<SPACE>"="		;  " ="
+	$FETP	PARM1			;  Fetch filespec
+20$:	PUTFIL	DEFTYP=<>,FLAGS=F.RT11	;  "filespec"
+	PUTSTR	"/RMS:FA"		;  "/RMS:FA" whether it's RMS or not
+	LOOKUP	FILE			;  Make sure the file exists
+	$FETNP				;  Did he give more input filespecs?
+	$IF	PRESENT			;  If so then
+	PUTSTR	""<COMMA>		;    ","
+	$GOTO	20$			;    ...
+	$ENDIF				;  Endif
+
+	$CALL	SEL.THR			;  Translate wildcard selection quals
+	$CALL	QSEL			;  Tranlate /SELECT
+	$CALL	QLOG			;  Translate /[NO]LOG
+	$ENDIF				;Endif
+	$ENDTHR
+	
+GLOBAL	<...PIP,...NFT>
+
+.SBTTL SEL.THR--Translate wildcard selection qualifiers for PIP
+;+
+; SEL.THR--Translate wildcard selection qualifiers for PIP
+;
+; INPUT QUALIFIERS:
+;	BEF.Q	/BEFORE=date (optional)
+;	SIN.Q	/SINCE=date (optional)
+;	CRE.Q	/CREATED (optional, default)
+;	MOD.Q	/MODIFIED (optional)
+;	QUER.Q	/[NO]QUERY (/NOQUERY is default)
+;
+; $CALL	SEL.THR		(used from within a $THR block)
+;
+; OUTPUTS:
+;	A string of the following form is appended to TRNBUF.
+;
+;	[/BE:dd-mmm-yy] [/IN] [/CRE] [/SIN:dd-mmm-yy]
+;	                      [/DLA]
+;-
+
+
+SEL.THR:$THR								;018
+	DFLTCQ	CRTD.Q		;Default to /CREATED (not /MODIFIED).
+	DFLTCQ	QUER.Q,AFFIRM=NO;Default to /NOQUERY.
+	$FETCQ	BEF.Q		;Did he specify /BEFORE=date?
+	$IF	PRESENT		;If so then
+	PUTSTR	"/BE:"		;  "/BE:"
+	$FETA			;
+	PUTTIME			;  "date"
+	$ENDIF	
+
+	$CALL	QQUERY		;Translate /[NO]QUERY
+
+	$FETCQ	SIN.Q		;Did he say /SINCE=date?
+	$IF	PRESENT		;If so then
+	PUTSTR	"/SIN:"		;  "/SIN:"
+	$FETA			;
+	PUTTIME			;  "date"
+	$ELSE			;Else /SINCE wasn't specified.
+	$FETCQ	BEF.Q		;  Was /BEFORE specified?
+	$IF	ABSENT		;  If not then
+	$RETURN			;    Return without translating /CRE or /MOD.
+	$ENDIF			;  Endif
+	$ENDIF			;Endif
+
+; Either /BEFORE or /SINCE or both were specified.
+
+	$FETCQ	CRTD.Q		;Is it /CREATED?
+	$IF	PRESENT		;If so then
+	PUTSTR	"/CRE"		;  "/CRE"
+	$ELSE			;Else /MODIFIED.
+	PUTSTR	"/DLA"		;  "/DLA"
+	$ENDIF			;Endif
+	$ENDTHR
+
+.SBTTL	QALLO	- Translate /ALLOCATION
+
+QALLO:	$THR
+	$FETCQ	ALLO.Q		;Did he say /ALLOCATION=n?
+	$IF	PRESENT		;If so then
+	PUTSTR	"/SI:"		;  "/SI:"
+	$FETA
+	PUTSTR			;  "n"
+	$ENDIF			;Endif
+	$ENDTHR
+
+
+.SBTTL	QCLU	- Translate /CLUSTER_SIZE
+
+QCLU:	$THR
+	$FETCQ	CLU.Q		;Did he say /CLUSTER_SIZE=n?
+	$IF	PRESENT		;If so then
+	PUTSTR	"/CL:"		;  "/CL:"
+	$FETA			;  Get the argument.
+	$DO			;  Test for argument > 0
+       ;CLR	R0		;    R0 was cleared by $DO
+	TST	U.CMN+U.LOW	;    Is it > 0 ?
+	BGT	15$		;    Yes. We will force a negative sign
+	COM	R0		;    No. We don't want to touch sign
+15$:	$ENDDO			;  End of test
+	$IF	PRESENT		;  If arg > 0 then
+	PUTSTR	"-"		;    "-"   (force argument negative)
+	$ENDIF			;  Endif
+	PUTSTR			;  "n"
+	$ENDIF			;Endif
+				;Negative clustersize means
+				;don't fail if the PCS is larger.
+	$ENDTHR
+
+
+.SBTTL	QLOG	- Translate /[NO]LOG
+
+QLOG:	$THR
+	$FETCQ	LOG.Q		;Did he specify /LOG?
+	$IF	YES		;If /LOG
+	PUTSTR	"/LO"		;  "/LO"
+	$ELSE			;Else
+	PUTSTR	"/NOLO"		;  "/NOLO"
+	$ENDIF			;Endif
+	$ENDTHR
+
+
+.SBTTL	QPOS	- Translate /POSITION
+
+QPOS:	$THR
+	$FETCQ	POS.Q		;Did he say /POSITION?
+	$IF	PRESENT		;If so then
+	PUTSTR	"/PO:"		;  "/PO:"
+	$FETKA	MID.K		;  Is it =MIDDLE?
+	$IF	PRESENT		;  If so then
+	PUTSTR	"-1"		;    "-1"
+	$ELSE			;  Else
+	$FETKA	IND.K		;    Is it =INDEX?
+	$IF	PRESENT		;    If so then
+	PUTSTR	"-2"		;       "-2"
+	$ELSE			;    Else
+	$FETA			;      Fetch position
+	PUTSTR			;      "n"
+	$ENDIF			;    Endif
+	$ENDIF			;  Endif
+	$ENDIF			;Endif
+	$ENDTHR
+
+
+.SBTTL	QPROT	- Translate /PROTECTION
+
+QPROT:	$THR
+	$FETCQ	PROT.Q		;Did he say /PROTECTION=n?
+	$IF	PRESENT		;If so then
+	PUTSTR	"/PR:"		;  "/PR:"
+	$FETA
+	PUTSTR			;  "n"
+	$ENDIF			;Endif
+	$ENDTHR
+
+
+.SBTTL	QQUERY	- Translate /QUERY and /CONFIRM
+
+QQUERY:	$THR
+	$FETCQ	QUER.Q		;Is it /QUERY?
+	$IF	YES		;If so then
+	PUTSTR	"/IN"		;  "/IN"
+	$ENDIF			;Endif
+	$FETCQ	CONF.Q		;Is it /CONFIRM?
+	$IF	YES		;If so then
+	PUTSTR	"/IN"		;  "/IN"
+	$ENDIF			;Endif
+	$ENDTHR
+
+
+.SBTTL	QREP	- Translate /[NO]REPLACE
+
+QREP:	$THR
+	$FETCQ	REP.Q		;Did he specify /REPLACE or /NOREPLACE?
+	$IF	ABSENT		;If he didn't specify then
+	PUTSTR	"/NOS:QU"	;  "/NOS:QU" (query before superseding)
+	$ELSE			;Else
+	$IF	NO		;  If /NOREPLACE then
+	PUTSTR	"/NOS"		;    "/NOS"
+	$ENDIF			;  Endif (else replace)
+	$ENDIF			;Endif
+	$ENDTHR
+
+
+.SBTTL	QWAR	- Translate /[NO]WARNINGS
+
+QWAR:	$THR
+	$FETCQ	WAR.Q		;Did he specifiy /[NO]WARN?
+	$IF	PRESENT		;If so then
+	$IF	NO		;  If it was /NOWARN then
+	PUTSTR	":NO"		;    ":NO"
+	$ENDIF			;  Endif
+	$ENDIF			;Endif
+	$ENDTHR
+
+
+.SBTTL	QSEL	- Translate /SELECT
+
+QSEL:	$THR
+	$FETCQ	SEL.Q		;Is there a /SELECT?
+	$IF	PRESENT		;If so then
+	$FETKA	SIZ.K		;  Is there a =SIZE?
+	$IF	PRESENT		;  If so then
+	$FETKA	MAX.K		;    Is there a =MAXIMUM?  
+	$IF	PRESENT		;    If so then
+	PUTSTR	"/LE:"		;      "/LE:"
+	$FETA
+	PUTSTR			;      nnn
+	$ENDIF			;    Endif
+	$FETKA	MIN.K		;    Is there a =MINIMUM?
+	$IF	PRESENT		;    If so then
+	PUTSTR	"/GE:"		;      "/GE:"
+	$FETA
+	PUTSTR			;      nnn
+	$ENDIF			;    Endif
+	$FETA			;    Is there a number?
+	$IF	PRESENT		;    If so then
+	PUTSTR	"/EQ:"		;      "/EQ:"
+	PUTSTR			;      nnn
+	$ENDIF			;    Endif
+	$ENDIF			;  Endif
+	$ENDIF			;Endif
+	$ENDTHR
+
+	.END

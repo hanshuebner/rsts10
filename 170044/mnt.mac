@@ -1,0 +1,979 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+TITLE	MNT,<RSTS disk utilities>,0I,31-JAN-92,MHB/ABC/SJK/TG/JTC/FEK/GPK/WJS/DRP/TWH/FRL/KPH/WRM/VAM
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR MNT
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	TG   27-Jun-80	Added Named directory code
+;  002	TG   27-Jun-80	Added MOUNT/NOID code
+;  003	TG   17-Jul-80	Fixed UU.CLN code
+;  004	MND  31-MAR-81	Prohibit NAME.SYS usage, NAMED DIR. non-supported V7.1
+;  005	JTC  14-Oct-81	Add internal entry point for "mount by FUN"
+;
+;  000  FEK  19-Jul-82	CREATON - COPIED FROM V7.2-
+;  001	FEK  19-Jul-82	Add setup of UNTLVL table & MFDPTR
+;  002	FEK  31-AUG-82	Add GFD support
+;  003	GPK  06-Oct-82	New mount modes: noshare, override-nowrite
+;  004	GPK  26-Oct-82	Force private if noshare specified, override-nowrite
+;			on system disk
+;  005	GPK  28-Oct-82	Bugfix in 004; make UU.MNT callable for logout
+;  006	WJS  29-Oct-82	New UUOENT for EMT Logger
+;  007	FEK  04-Nov-82	Fix problem with dismounting of R/O disks
+;  008	GPK  08-Dec-82	Fix bug in mounting R/O disks
+;  009	GPK  09-Dec-82	Fix loss of requests in FIP queue
+;  010	FEK  26-Jan-83	ADD info if disk is dual-ported
+;  011  DRP  14-Feb-83	Invalidate directory lookup cell when creating
+;			a new account.
+;
+;				[RSTS V9.0]
+;  012	GPK  25-Mar-83	Multiple privileges
+;  013	GPK  20-Sep-83	Dismount function enhancements
+;  014	DRP  03-Oct-83	Table changes to UNTCNT, UNTOWN/UNTOPT and 
+;			UNTCLU/UNTERR
+;  015	TWH  01-DEC-83	ADD CALL TO AUTOSZ
+;  016	GPK  12-Mar-84	Change privs checks, add noshare with job number,
+;			check consistent revs on public structure;
+;			disable cacheing on DV:
+;  017  FRL  01-Apr-84  V9.0 logicals
+;  018  FRL  01-Apr-84  Removed pack-id check on dismount
+;  019	DRP  02-Apr-84	Add logged-in quota support
+;  020	GPK  17-Apr-84	Privilege name changes
+;  021	KPH  28-Jun-84	Invalidate FIBUF on failed mount attempts
+;			Add UU.TRM hook (moved from resident code)
+;  022	GPK  01-Aug-84	Bugfix in non-priv mount
+;  023	GPK  07-Aug-84	Require INSTAL priv to set system-logical name
+;  024  FRL  01-Nov-84  Return other error if SY0 non-mount attempted
+;  025  FRL  07-Dec-84  Return other error if rev level is too high
+;  026	GPK  22-Jan-85	Mount RDS < 1.2 Readonly if SY0:
+;  027	GPK  28-Feb-85	Honor read-only bit for SY0:
+;
+;			[RSTS V9.1]
+;  028  KPH  29-Mar-85	Resident SATT processing
+;  029  KPH  30-May-85	Remove extra ZAPUNT calls
+;			Add explicit SATT unload function
+;  030  KPH  22-Aug-85	Invalidate SATUNT when loading SATT (since it
+;			will contain stale data)
+;
+;			[RSTS V9.3]
+;  031	DRP  08-May-86	Remap the QT buffer on return from RETENT
+;  032  KPH  28-May-86	Fix SATT size rounding problem in INISAT
+;
+;			[RSTS V9.5]
+;  033	PJH  07-Jul-87	Add large disk support
+;
+;			[RSTS V9.6]
+;  034	DRP  31-Dec-87	Return QTBs of public disks mounted read-only when
+;			a dismount is issued.
+;  035	PJH  11-Mar-88	Force a virtual disk public mount as Readonly
+;
+;			[RSTS V9.7]
+;  036	FEK  25-Oct-88	Add Drive status function to return DU CSRs
+;  037	DRP  03-May-89	Remove enforcement of read only virtual disk.
+;
+;			[RSTS V10.0]
+;  038  WRM  06-Nov-89	Changes for extended logicals feature
+;
+;			[RSTS V10.1]
+;  039	FEK  10-Apr-91	Move Disk CSR lookup code to UUO.MAC
+;  040  VAM  03-Dec-91	Add ZAPUNT calls to dismount/deselect disk on
+;			certain mount errors.
+;  041	FEK  26-Dec-91	Set date/time of last mount/dismount
+;-
+
+
+FQFSRT	MNT
+
+.SBTTL	MOUNT/DISMOUNT/LOCK/UNLOCK
+
+;+
+; UU.MNT - MOUNT/DISMOUNT/LOCK/UNLOCK A DISK.
+;
+;	R4 -> FIRQB
+;		FQERNO = 0 => MOUNT
+;		         2 => DISMOUNT
+;		         4 => Restrict
+;		         6 => Unrestrict
+;			10 => Load SATT					;028
+;			12 => Unload SATT				;029
+;			14 => Reserved					;036
+;			16 => Drive STATUS				;036
+;		FQSIZM = Job number if Noshare			[MOUNT]	;015
+;			 (0 for self, or if share)			;015
+;		FQNAM1 = PACK ID (2 WORDS)			[MOUNT]	;018
+;		+14    = 0   => USE PACK ID AS THE LOGICAL NAME	[MOUNT]
+;		         <>0 => USE NAME IN +16,+20,+24 AS LOGICAL NAME [MOUNT] ;017
+;		+16    = LOGICAL NAME (2 WORDS) IF +14 <>0	[MOUNT]
+;		FQMODE = BIT 15 = 0 => DEFAULTS			[MOUNT]
+;		         BIT 15 = 1 => REAL MODE		[MOUNT]
+;				BIT 14 => PRIVATE		[MOUNT]
+;				BIT 13 => READ ONLY		[MOUNT]
+;				BIT 12 => Override-nowrite	[MOUNT]
+;				BIT 11 => Noshare (one-user)	[MOUNT]
+;				BIT 10 => SELF LOOKUP PACK ID	[MOUNT]
+;				BIT  9 => Mount 0.0 r/w		[MOUNT]	;015
+;				BIT  8 => /NOQUOTA		[MOUNT]	;019
+;				BIT  7 => WRITE CHECK UNIT	[MOUNT]
+;				BIT  6 => WRITE CHECK FIP	[MOUNT]
+;		FQDEV,FQDEVN = DISK DEVICE NAME
+;
+;	IN FIRQB ON RETURN
+;		+FQSIZ      = Size of loaded SATT		[LOAD satt] ;028
+;		+16,+20,+24 = LOGICAL NAME USED 		[MOUNT]	;017
+;		FQFLAG = Flags set for disk			[MOUNT]	;015
+;			 (sign bit set if dirty disk not mounted	;015
+;			 because of insufficient privilege)		;015
+;		FQFIL  = UNTCNT entry for this disk		[STATUS];036
+;		FQPPN  = CSR for this disk			[STATUS];036
+;-
+
+
+.ENABL	LSB
+
+	UUOENT	MNT,,,LOGABL,DOLOG	;MOUNT, ETC.			;015
+
+MOUNT::	MOVB	FQERNO(R4),R5	;GET THE FUNCTION CODE			;021
+	BIT	#1,R5		;Is this the UU.TRM hook		;021
+	BEQ	10$		;No, not this time, what a relief	;021
+	CLRB	FQERNO(R4)	;Yes, so this is a (very) old style call ;021
+	FJMPI	$UUOTB+<UU.TRM-UU$MIN*2> ;Off to set terminal		;021
+
+10$:	CALLX	GUNOWN,R5	;Get name, ignoring mounted or owned	;021
+	 BR	70$		;IT IS DISK
+20$:	ERROR	DEVNFS		;ERROR
+
+30$:	ERROR	INUSE		;BUT IT WAS IN USE
+
+40$:	ERROR	PRVIOL		;ILLEGAL OPERATION REQUESTED
+
+50$:	CALLX	ZAPUNT		;Rev level is too high.  Dismount unit	;040
+	ERROR	BADDIR		; and then give error.			;040
+
+60$:	ERROR	NOTAVL		;DISK UNIT IS DISABLED
+
+70$:	TST	FQDEVN(R4)	;WAS THE DEVICE NAME SPECIFIC?
+	BEQ	40$		;NO, ERROR
+	BIC	#^C<16>,R5	;Get 0 - 16 (even)			;028
+	BEQ	80$		;Zero, then it's a mount request	;014
+	CMP	R5,#16		;is it a status request?		;036
+	BEQ	75$		; Yes!					;039
+	MOV	@#FIPUNT,-(SP)	;Otherwise, save the Fip Unit Number	;014
+	FJMP	NONMNT		; and do the requested function		;014
+
+75$:	FJMP	DODSTS		; Yes, so go do it			;039
+
+80$:	CMP	(R1),#UC.MNT	;IS UNIT SIMPLY NOT MOUNTED?
+	BHI	60$		;NO, AND NOT MOUNTABLE
+	BLO	30$		;NO, ALREADY MOUNTED
+	CALLX	AUTOSZ		;INITIALIZE THE SIZE TABLES		;015
+	SUB	#UNTCNT,R1	;GET THE REAL FIP UNIT NUMBER *2
+	MOVB	#-1,@#LSTFUN	;REINITIALIZE DIRECTORY LOOKUP CELL
+	MOV	#UO.WCU,UNTOPT(R1) ;Say write check unit		;014
+	CALLX	READPL		;READ THAT 1ST BLOCK (PACK LABEL)
+
+GLOBAL	<UNTCNT,UNTOWN,LSTFUN,$UUOTB,FIPUNT,DODSTS>			;039
+
+	;MOV	#1,R2		;READPL RETURNS WITH R2=1 AND R3=0
+	MOV	#FIBUF+4,R5	;GET POINTER INTO THE BUFFER
+	MOV	(R5)+,R0	;SET THE MFD POINTER (NEW STYLE)
+	MOV	(R5)+,-(SP)	;SAVE THE REV LEVEL
+	MOV	(R5)+,R3	;GET THE PACK CLUSTER SIZE
+	BIT	#UC.NEW,(R5)	;IS IT A PACK WITH A REV LEVEL?
+	BEQ	90$		;NO, SO CLEAR THE REV
+	CMPB	1(SP),R2	;CAN WE USE THIS PACK??? (SEE ABOVE)
+	BHI	50$		; NO, REV LEVEL IS TO HIGH.		;025
+	BR	100$		;SKIP THE OLD STYLE STUFF
+
+90$:	CLR	(SP)		; NO, SO MAKE SURE THE REV IS 0
+	MOV	R2,R0		;REPLACE MFD POINTER WITH 1 (OLD STYLE)
+100$:	MOV	R0,MFDPTR(R1)	;STASH THE MFD-> INTO THE TABLE
+	MOV	(SP),UNTLVL(R1)	;REMEMBER THE LEVEL OF THIS DISK
+	MOV	(R5)+,(SP)	;SAVE THE "CLEAN" BIT AND PUBLIC/PRIVATE, ETC.
+	BIT	#UC.TOP,(SP)	;Link to the top?			;014
+	BEQ	110$		;No					;014
+	BIS	#UO.TOP,UNTOPT(R1) ;Yes, then set the option bit	;014
+110$:	BIC	#^C<UC.MNT!UC.PRI!UC.DLW!UC.RO>,(SP) ; STATUS BITS ON STACK ;014
+	ADD	#FQNAM1,R4	;NOW INDEX TO PACK ID IN FIRQB
+	MOV	FQMODE-FQNAM1(R4),-(SP) ;GET MODE VALUES
+	BMI	120$		;REAL ?
+	CLR	(SP)		;NOPE - SORRY
+120$:	BIT	#1000,(SP)	;Special mode for DSKCVT?		;015
+	BEQ	130$		;No					;015
+	TSTPRV	SYSMOD,@#FIPRVM	;Yes, but do you have the privilege?	;020
+	BEQ	40$		;No, reject				;015
+	BIS	#UC.NSH,(SP)	;Force noshare				;015
+130$:	CLR	R0		;Assume shared				;015
+	BIT	#UC.NSH,(SP)	;Asking for no-share?			;015
+	BEQ	140$		;No, skip				;015
+	MOVB	FQSIZM-FQNAM1(R4),R0 ;Get job number to give it to	;015
+	ASL	R0		; make it * 2				;015
+	BNE	140$		;Have one, skip				;015
+	MOVB	@#FIJOB,R0	;Use caller's				;015
+140$:	MOVB	R0,FQSIZM-FQNAM1(R4) ;Save job number if any		;015
+	BEQ	160$		;Shared, skip				;015
+	CMP	R0,#JOBMX2	;Legal?					;015
+	BHI	290$		;No, reject it				;015
+	MOV	JOBTBL(R0),R0	;Get JDB pointer			;015
+	BEQ	290$		;No job, error				;015
+	MOV	JDJDB2(R0),R0	;Get JDB2 pointer			;015
+	CMP	J2PPN(R0),@#FIUSER ;Same as caller's?			;015
+	BNE	160$		;No, so check for privs			;015
+150$:	BIT	#^C<100000!UC.NSH!UC.WLK>,(SP) ;Only these are non-priv'd ;022
+	BEQ	170$		;Nothing else, so skip check		;015
+160$:	TSTPRV	MOUNT,@#FIPRVM	;Privileged?				;015
+	BEQ	40$		;No, so reject				;015
+170$:	BIT	#UC.NSH,(SP)	;Asking for no sharing?
+	BEQ	180$		;No
+	BIS	#UC.PRI,(SP)	;Yes, so force to private
+180$:	CMPB	R1,@#SYSUN2	;IS THIS THE SYSTEM DISK MOUNT?
+	BNE	190$		;NOPE
+	BIC	#UC.PRI,2(SP)	;Ensure system disk is public		;027
+190$:	BIT	#UC.ORO,(SP)	;Override read only status?
+	BEQ	200$		;No, leave RO bit alone			;013
+	BIC	#UC.RO,2(SP)	;Ignore RO flag on pack label		;013
+200$:	CMPB	R1,@#SYSUN2	;System unit being mounted?		;037
+	BNE	210$		;No, skip				;026
+	CMP	UNTLVL(R1),CURREV ;Check rev level against current	;026
+	BLO	230$		;Anything older becomes read-only	;026
+210$:	TST	UNTLVL(R1)	;Old format pack?			;013
+	BNE	220$		;No, skip				;015
+	BIT	#1000,(SP)	;DSKCVT mode?				;015
+	BEQ	230$		;No, so force read-only
+220$:	CMP	UNTLVL(R1),(PC)+ ;Newer than newest we support?		;013
+CURREV:	 .BYTE	2,1		; which is 1.2				;026
+	BHI	230$		;Yes, force read-only			;013
+	BIT	#UC.RO,2(SP)	;Read-only pack?
+	BEQ	240$		;No
+230$:	BIC	#UC.RO,2(SP)	;Yes, but clear read-only flag
+	BIS	#UC.WLK,(SP)	;Yes, set up read-only bit in mount
+240$:	BIT	#UC.OVR,(SP)	;OVERRIDE ??
+	BEQ	250$		;NOPE
+	MOV	(R5)+,(R4)+	;YEP, SO SET THE CORRECT PACK
+	MOV	(R5),(R4)	;ID FOR MOUNT CHECK
+	CMP	-(R5),-(R4)	;BACK UP THE POINTERS AGAIN
+250$:	MOV	(R4)+,R0	;GET PACK ID WORD #1
+	MOV	(R4)+,R2	;GET PACK ID WORD #2
+	TST	(R4)+		;SPECIFIED LOGICAL NAME?
+	BNE	260$		;YES, SO LEAVE IT
+	MOV	R0,(R4)		;NO, SO SET THE PACK ID AS
+	MOV	R2,2(R4)	; THE LOGICAL NAME
+	CLR	6(R4)		; AND CLEAR THIRD WORD			;017
+260$:	BIC	#^C<UC.PRI!UC.WLK>,(SP) ;TRIM MODE TO ALLOWED BIT(S)
+	BIT	#UC.WLK,(SP)	;IS THIS DISK TO BE READ-ONLY?
+	BEQ	270$		;NO
+	ADD	#UC.WLO-UC.WLK,(SP) ;YES, SET STATUS BIT CORRECTLY
+270$:	BIS	(SP)+,(SP)	;NOW MERGE THE STATUS WORDS
+	CMP	R0,(R5)+	;DOES THE PACK ID AGREE?		;015
+	BNE	280$		;IF NOT THEN ERROR
+	CMP	R2,(R5)+	;CHECK REST OF ID
+	BNE	280$		;Mismatch, error			;015
+	BIT	#UC.PRI,(SP)	;Private pack?				;015
+	BNE	300$		;Yes, skip				;015
+	MOVB	@#SYSUN2,R0	;Get system unit number			;015
+	CMP	UNTLVL(R1),UNTLVL(R0) ;Consistent level in pub struct?	;015
+	BEQ	300$		;Match, continue			;015
+	CALLX	ZAPUNT		;Otherwise, illegal mixing of rev	;040
+	ERROR	BADNAM		; levels.  Dismount drive and return	;040
+				; error.				;040
+
+280$:	CALLX	ZAPUNT		;Bad pack ID.  Dismount drive and	;040
+	ERROR	WRGPAK		; return error.				;040
+
+290$:	ERROR	BDNERR		;Bad job number specified		;015
+
+GLOBAL	<FIBUF,SYSUN2,JOBMX2,JOBTBL,FIUSER,MFDPTR,UNTOPT>		;015
+
+300$:	MOVB	@#FIPUNT,R0	;GET THE UNIT INVOLVED
+	FJMP	MORMNT		; AND GO CONTINUE WITH THIS MOUNT
+
+.DSABL	LSB
+
+GLOBAL	<DEVCLU,UNTCLU,UNTERR,UNTSIZ,CLUFAC,SATEND,SATPTR,FIPUNT>	;014
+
+FQFEND
+
+FQFSRT
+
+.ENABL	LSB
+
+10$:	.BYTE	1,0		;ACCOUNT IS [0,1]
+	.RAD50	/BADB  SYS/	;FILE IS "BADB.SYS"
+
+20$:	.BYTE	1,0		;ACCOUNT IS [0,1]			;035
+	.RAD50	/SATT  SYS/	;FILE IS "SATT.SYS"
+
+MORMNT:	MOV	R0,@#FIPUNT	;RESTORE THE CORRECT UNIT
+	CMP	R3,#64.		;CHECK PACK CLUSTER AGAINST LEGAL MAX	;033
+	BHI	50$		;ERROR IF TOO BIG
+	MOVB	DEVCLU(R1),R0	;GET DEVICE CLUSTER SIZE
+	CMP	R3,R0		;IS PCS < DCS ?
+	BLO	50$		;ERROR IF SO
+	MOV	R3,-(SP)	;IS THE PCS REALLY
+	DEC	(SP)		; A POWER OF
+	BIT	R3,(SP)+	;  TWO ?
+	BNE	50$		;NOPE, ERROR
+	MOV	R3,UNTCLU(R1)	;Set PCS (and no owner yet)		;014
+	CLR	UNTERR(R1)	;  and no errors yet			;014
+	CLR	R2		;NOW CLEAR A HIGH ORDER
+	DIV	R0,R2		; AND FIND PCS/DCS (CLUSTER RATIO)
+	MOV	UNTSIZ(R1),R3	;GET UNIT'S SIZE IN DC'S
+	DEC	R3		; LESS THE BOOT BLOCK DC
+	CLR	R0		;SET TRIAL CLUSTER FACTOR OF 0
+30$:	ASR	R2		;DONE FORMING CLUSTER FACTOR?
+	BCS	40$		;YES
+	;CLC			;NO, DIVIDE SIZE
+	ROR	R3		; BY 2
+	DEC	R0		;FACTOR = FACTOR -1
+	BR	30$		; AND LOOP AGAIN
+
+40$:	MOVB	R0,CLUFAC(R1)	;SET THE CLUSTER FACTOR FOR UNIT
+	DEC	R3		;# PC'S -1 = LARGEST LEGAL PCN
+	MOV	R3,-(SP)	;SAVE LARGEST PCN FOR LATER
+	MOV	R3,SATEND(R1)	; AND SET IT FOR FIP
+	MOV	#1,SATPTR(R1)	;RESET THE S.A.T. POINTER
+	MOVPIC	#20$,R0		;POINT (PIC) TO THE S.A.T. FILE NAME	;035
+	CALLX	SDU		;FIND THAT FILE
+	BCC	60$		;FOUND SATT.SYS FILE
+50$:	CALLX	ZAPUNT		;Else, bad pack error.  Dismount unit	;040
+	ERROR	BADPAK		; and return error.			;040
+
+60$:	MOV	UAR(R5),-(SP)	;SAVE R.E. LINK
+	CALLX	RAE		;NOW READ THE A.E.
+	MOV	(SP)+,R3	;NOW GET R.E. LINK BACK
+	MOV	USIZ(R5),R5	;GET S.A.T. FILE SIZE IN BLOCKS
+	CMP	R5,#16.		;IS FILE SIZE REASONABLE?
+	BHI	50$		;No.					;040
+	BEQ	70$		;YES, AND 16. BLOCKS WILL HOLD ANYTHING
+	ASH	#12.,R5		;MAKE BLOCK SIZE INTO BIT SIZE
+	CMP	R5,(SP)		;IS S.A.T. FILE BIG ENOUGH?
+	BLOS	50$		;No.					;040
+70$:	CALLX	RDE		;NOW READ FIRST R.E.
+	MOV	UENT(R5),R2	;NOW SET THE S.A.T. START DCN
+	BEQ	50$		;Bogus, go give an error.		;040
+	CALLX	CNVDCN		;CONVERT THAT DCN TO A FBN
+	MOV	R2,SATSTL(R1)	;NOW SET THE S.A.T. START BLOCK 
+	MOV	R3,SATSTM(R1)	; (DOUBLE PRECISION)
+	CLR	SATCTL(R1)	;START WITH 0 FREE BLOCKS
+	CLR	SATCTM(R1)	; IN BOTH WORDS
+100$:	CALLX	READ		;READ A BLOCK
+	MOV	R3,-(SP)	;SAVE MSB OF THAT BLOCK #
+	MOV	#FIBUF,R5	;POINT TO BUFFER
+110$:	MOV	(R5)+,R0	;GET THE S.A.T. WORDS
+	MOV	#16.,R3		;SET THE BIT COUNTER
+120$:	ASL	R0		;SHIFT TO FIND THE BITS CLEAR
+	BCS	130$		; AND BYPASS THE BITS SET
+	CLR	-(SP)		;MAKE A 0 WORD
+	MOVB	UNTCLU(R1),(SP)	;SET CLUSTER SIZE
+	ADD	(SP)+,SATCTL(R1) ; AND ADD TO FREE COUNT
+	ADC	SATCTM(R1)	;  WITH A CARRY
+130$:	SOB	R3,120$		;LOOP THROUGH ALL BITS
+	BIT	R5,#1000-1	;AT END OF BUFFER YET?
+	BNE	110$		;IF NOT, THEN CONTINUE
+	MOV	(SP)+,R3	;RESTORE MSB OF BLOCK #
+	ADD	#1,R2		;IF SO, THEN NEXT BLOCK
+	ADC	R3		; CARRION
+	SUB	#10000,(SP)	;MORE TO DO?
+	BHIS	100$		;IF SO, THEN GET NEXT BUFFER FULL
+	CLR	UNTLIB(R1)	;SIGNAL LIBRARY UFD UNFINDABLE INITIALLY
+	MOV	@#PPNTBL,(SP)	;CLOBBER COUNTER WITH PPN OF LIBRARY
+	MOV	SP,R0		;NOW POINT TO THAT PPN
+	CALLX	SDMDCN		; AND TRY TO FIND IT
+	BCS	140$		;NOT FINDABLE
+	MOV	R2,UNTLIB(R1)	;FOUND, SET THE UFD DCN
+140$:	TST	(SP)+		;NOW POP THAT PPN
+	MOVPIC	#10$,R0		;POINT (PIC) TO THE BAD BLOCK FILE NAME
+	CALLX	SDU		;FIND THAT FILE
+	BCS	50$		;No BADB.SYS file, error.		;040
+	CALLX	RAE		;READ ACCOUNTING ENTRY
+	CMPB	UCLUS(R5),UNTCLU(R1) ;IS BADB.SYS CLUSTERED AT PCS ?
+	BNE	50$		;No, error also.			;040
+	BIT	#UC.PRI,(SP)	;Mount Private?				;019
+	BNE	150$		;Yes, no QTBs to create			;019
+	CMPB	R1,@#SYSUN2	;System disk mount?			;019
+	BEQ	150$		;Yes, same here				;019
+	CMP	UNTLVL(R1),(PC)+ ;Support extended quota data		;019
+	 .BYTE	2,1							;019
+	BLO	150$		;No, no QTBs then			;019
+	CALL	CRETQT		;Yes, do QTBs for this public unit	;019
+150$:	BIT	#UC.WLO,(SP)	;IS DISK TO BE WRITE LOCKED?		;019
+	BNE	160$		;YES, DON'T TRY TO SET THE "DIRTY" BIT	;021
+	CALLX	READPL		;NO, READ/WRITE, SO READ THE PACK LABEL
+	BIS	#UC.MNT,@#FIBUF+PSTAT ;TURN THE "DIRTY" BIT ON
+	MOV	@#DATE,@#FIBUF+MNTDAT ;Set the last mount date		;041
+	MOV	@#TIME,@#FIBUF+MNTTIM ;Set the last mount time		;041
+	MOVPIC	#170$,R0	;Get a PIC error exit			;021
+	MOV	R0,@#FIPERX	;And set it up				;021
+	CALLX	WRITE		;NOW WRITE THAT MFD 1ST BLOCK BACK OUT
+	CLR	@#FIPERX	;No more error trap			;021
+160$:	MOV	@#FIPUNT,-(SP)	;Save FIP unit number			;021
+	FJMP	SETLOG		;GO SET THE LOGICAL NAME		;021
+
+170$:	MOV	#377,@#FIBUNT	;Invalidate unit and mark buffer as clean ;021
+	JMPX	FIEXIT		;And exit, returning error to caller	;021
+
+.DSABL	LSB
+
+GLOBAL	<UNTLIB,PPNTBL,SATSTL,SATSTM,SATCTL,SATCTM,FIBUF,UNTCLU,FIPUNT>
+GLOBAL	<SYSUN2,FIPERX,FIBUNT,DATE,TIME>				;041
+
+;+									;019
+; CRETQT - Create Quota Blocks for public disk				;019
+;									;019
+;	R1 = FUN * 2							;019
+;									;019
+;	CALL	CRETQT							;019
+;									;019
+;	All registers preserved						;019
+;-									;019
+
+CRETQT:	REGSCR			;Save all register contents		;019
+	MOVB	@#SYSUN2,R4	;Get the system disk FUN * 2		;019
+	ADD	#DSKQPT,R4	;Point to the root of the QT table	;019
+	MOV	(R4),R4		; and get that first QT buffer		;019
+	BEQ	40$		;None, that was easy			;019
+	CLR	-(SP)		;Need a place to store the PPN		;019
+	MOV	SP,R0		; and point R0 to it			;019
+10$:	CALLX	MAPBUF		;Map the QT buffer			;019
+	ADD	#QTLINK,R3	;Point to the link word			;019
+	MOV	(R3)+,-(SP)	; and save it for later			;019
+	MOV	#3.,R1		;Three QTB entries to check		;019
+20$:	TST	(R3)		;Is this entry in use (QTBPPN <> 0)?	;019
+	BEQ	30$		;No, then skip this QTB entry		;019
+	MOV	(R3),(R0)	;Save the PPN				;019
+	MOV	QTBOPN(R3),R2	;Get the logged-in and open file count	;019
+	CALLM	BLDQTB,OPNAP5	;Now build a QTB entry on FIPUNT	;019
+	BCS	50$		;Create failed, go clean up (FIP mapped) ;019
+	MOV	R3,-(SP)	;Save where we are from MAPBUF		;019
+	CALLX	MAPBUF		;Need to remap the system disks QT buffer ;019
+	MOV	(SP)+,R3	;Restore our pointer into the QT buffer	;019
+30$:	ADD	#QTBSIZ,R3	;Point to the next QTB entry		;019
+	SOB	R1,20$		;Continue until all three are checked	;019
+	MOV	(SP)+,R4	;Get the saved link word		;019
+	BNE	10$		;Not null so go process it		;019
+	MAP	FIP,DATA,PIC	;Remap FIP				;019
+	TST	(SP)+		;Junk the PPN save area			;019
+40$:	RETURN			;Return to our caller			;019
+
+50$:	MOV	TOS.R1+4(SP),R1	;Get the FUN * 2 back			;019
+	TST	DSKQPT(R1)	;Did we allocate any buffers?		;019
+	BEQ	60$		;No, good simply return the error	;019
+	FCALL	RETQT		;Yes, return the allocatted buffers	;019
+60$:	JMPX	FIEXIT		;Back to FIP, returning error to the user ;019
+
+GLOBAL	<SYSUN2,DSKQPT,OPNAP5>						;019
+
+FQFEND									;012
+
+FQFSRT
+
+.SBTTL	Finish up the mount of a disk
+
+SETLOG:	MOV	(SP)+,@#FIPUNT	;Restore FIP unit number		;021
+	TSTPRV	INSTAL,@#FIPRVM	;Have privs to set logicals?		;023
+	BEQ	10$		;No, so blank it out			;023
+	REGSAV			;SAVE REGISTERS				;017
+	MOV	(R4),@#LOGICL	;MOVE NEW UNIT NAME INTO AREA		;017
+	MOV	2(R4),@#LOGICL+2 ;  FOR COMPARISON 			;017
+	MOV	6(R4),@#LOGICL+4 ;  BY SEARCH				;017
+	CLR	@#LOGICL+6	;disallow longer names for now		;038
+	MOV	#LG$SYS,R0	;set to search system list only		;038
+	MOV	#LOGICL,R5	;R5 -> NAME FOR SEARCH			;017
+	MOV	FIJOB,R3	;search now requires job ID		;038
+	CALLMI	SEARCH,EMTAP5	;LOOK FOR THE LOGICAL			;017
+	REGRES			;RESTORE REGISTERS			;017
+	MAP	FIPPOL,DATA,APR=6,PIC ;RESTORE MAPPING			;017
+	BCS	20$		;NAME NOT IN USE, SO USE IT		;017
+10$:	CLR	(R4)		;Name in use, or no privs,		;023
+	CLR	2(R4)		;     SO USE 				;017
+	CLR	6(R4)		;     BLANKS INSTEAD			;017
+20$:	MOV	R1,R3		;COPY UNIT NUMBER (TIMES 2)		;017
+	MUL	#DL$SIZ/2,R3	;INDEX INTO DISK TABLE			;017
+.ASSUME	DL$NAM	EQ	0	;NEXT THREE LINES RELY ON THIS		;017
+	MOV	(R4)+,DSKLOG(R3) ;NOW SET THE 3 PARTS			;017
+	MOV	(R4)+,DSKLOG+2(R3) ; OF THE LOGICAL NAME		;017
+	MOV	(R4)+,-(SP)	;GET MODE PLEASE
+	MOV	(R4),DSKLOG+4(R3) ; THIRD PART OF LOGICAL		;017
+	BIC	#^C<UO.WCU!UO.WCF!UO.NQT>,(SP) ;TRIM MODE BITS		;019
+.ASSUME	FQFLAG	EQ	16+2+2+2					;017
+	CMP	FQDEV-FQFLAG(R4),#"DV ;Virtual disk?			;017
+	BNE	30$		;No, skip				;015
+	BIS	#UO.NCF!UO.NCD!UO.NQT,(SP) ;Force no caching or quota checking ;019
+30$:	BIC	#^C<UO.DP!UO.TOP>,UNTOPT(R1) ;CLEAR ALL BUT DUAL PORT  ;014
+					     ; and link to the top     ;014 
+	BIS	(SP)+,UNTOPT(R1) ;SET THE UNIT OPTION(S)		;014
+	MOV	@#FIJBDA,R2	;Get caller's job data block
+	MOV	JDWORK(R2),R0	;Point to work block
+	MOV	(SP),FQFLAG(R0)	;Return the flags as set		;015
+	BPL	40$		;Disk was clean, skip			;015
+.ASSUME	UC.MNT LT 0							;015
+	SETERR	INTPAK,JDIOST(R2) ;Set error (warning) code		;015
+	TSTPRV	MOUNT,@#FIPRVM	;Privileged?				;015
+	BEQ	60$		;No, reject dirty disk			;015
+	BIC	#UC.MNT,(SP)	;Yes, so we will mount it		;015
+	MOV	(SP),FQFLAG(R0)	; and remember that in FIRQB		;015
+	BIS	#UC.PRI!UC.WLO,(SP) ;Force private and read-only	;015
+	MOVB	@#FIJOB,FQSIZM(R0) ; or rather, noshare by caller	;015
+	BIS	#UO.CLN,UNTOPT(R1) ;REMEMBER IT IS UNCLEAN		;014
+40$:	MOVB	FQSIZM(R0),UNTOWN(R1) ;Set owner if noshare		;015
+50$:	MOV	R1,R2		;SAVE UNIT NUMBER TIMES 2		;015
+	ADD	#UNTCNT,R1	;NOW POINT TO THE UNTCNT TABLE
+	MOV	(SP),(R1)	;SET STATUS (MOUNT UNIT)		;015
+	CMP	R1,@#DEVPTR-2	;IS THIS THE SYSTEM DISK MOUNT?
+	BEQ	60$		;YES, DON'T LOCK DISK
+	BIS	#UC.LCK,(R1)	;NO, LOCK DISK
+60$:	TST	(SP)+		;Clean up the stack			;015
+	RETURN			;EXIT
+
+GLOBAL	<DSKLOG,UNTOPT,UNTCNT,DEVPTR,UNTLVL,FIJBDA,FIJOB,UNTOWN,LOGICL>	;017
+
+FQFEND
+
+FQFSRT
+
+.SBTTL	Handle functions other than mount
+
+NONMNT:	MOV	(SP)+,@#FIPUNT	;Restore the Fip Unit Number		;014
+	BIT	#UC.MNT!UC.NFS,(R1) ;CHECK CURRENT STATUS
+	BMI	40$		;IT ISN'T MOUNTED
+.ASSUME	UC.MNT	EQ	100000
+	BNE	50$		;ERROR IF NON-FILE STRUCTURED
+	CMP	R5,#10		;Function legal on system disk
+	BHIS	10$		;Yes, sure is				;029
+	CMP	R1,@#DEVPTR-2	;No, is this the system disk?		;028
+	BEQ	160$		;Yes, forget it				;024
+10$:	ADD	R5,PC		;Go to the function			;029
+	 CRASH			;(0)Mount! Can't get there from here!	;029
+	 BR	70$		;(2)Dismount a disk pack
+	 BR	60$		;(4)Restrict a disk pack
+	 BR	20$		;(6)Unrestrict a disk pack		;029
+	 BR	30$		;(10)Load SATT				;029
+	 BR	UNSATX		;(12)Unload SATT			;029
+	ERROR	BADFUO		;(14)Reserved				;029
+	;ERROR	BADFUO		;(16)Status (See DRVSTS:)		;036
+
+; Unrestrict function follows
+
+20$:	TSTPRV	HWCFG,@#FIPRVM	;Privileged?				;028
+	BEQ	170$		;No, error				;015
+	BIC	#UC.LCK,(R1)	;(6)UNLOCK, CLEAR THE LOCKED BIT
+	RETURN			; AND EXIT
+
+30$:	FJMP	LODSAT		;Go off to load the SATT		;028
+
+40$:	ERROR	NOTMNT		;ERROR, NOT MOUNTED
+
+50$:	ERROR	DEVNFS		;Mounted, but non-file structured	;028
+
+60$:	TSTPRV	HWCFG,@#FIPRVM	;Privileged?				;020
+	BEQ	170$		;No, error				;015
+	BIS	#UC.LCK,(R1)	;SET THE LOCKED BIT
+	RETURN			; AND EXIT
+
+70$:	BIT	#UC.CNT,(R1)	;ANY ACTIVE USERS?
+	BNE	150$		;IF IN USE, THEN ERROR
+	SUB	#UNTCNT,R1	;GET UNIT NUMBER TIMES 2
+	TSTB	UNTOWN(R1)	;Owned?					;015
+	BEQ	80$		;No, check privs			;015
+	CMPB	UNTOWN(R1),@#FIJOB ;Yes, but by caller?			;015
+	BEQ	90$		;Yes, so it's ok			;015
+80$:	TSTPRV	MOUNT,@#FIPRVM	;Privileged to do this?			;015
+	BEQ	170$		;Error if not				;015
+90$:	CLR	FQERNO(R4)	;RETURN SINGLE ACCESS STATUS		;015
+	BIT	#UO.DP,UNTOPT(R1) ;IS IT DUAL PORTED???			;014
+	BEQ	100$		;NO, SO CONTINUE
+	DEC	FQERNO(R4)	;YES, SO RETURN FLAG
+
+;+									;034
+;	If we are dismounting a private disk, then there should not be	;034
+;	any QTBs still allocated to that unit. If this occurs, then we	;034
+;	crash the system because it's not legal to have a private disk	;034
+;	with no open files with allocated QTBs.				;034
+;									;034
+;	If we're in the process of dismounting a public disk then there	;034
+;	must always be QTBs allocated to that unit. If no QTBs exist,	;034
+;	then we will crash the system because there is at least one user;034
+;	logged in and we should have a QTB allocated for that user.	;034
+;-
+
+100$:	MOV	@#FIPUNT,-(SP)	;Save FIPUNT/FIPGEN			;034
+	FCALL	UNLSAT		;Unload the SATT if loaded		;028
+	CMP	UNTLVL(R1),(PC)+ ;Support extended quota data		;034
+	 .BYTE	2,1							;034
+	BLO	110$		;No, good no quota buffers		;034
+	BIT	#UC.PRI,UNTCNT(R1) ;Mounted Private?			;034
+	BEQ	105$		;No, Public				;034
+	TST	DSKQPT(R1)	;Private, any QTBs still allocated?	;034
+	BNE	180$		;Yes, should never happen		;034
+	BR	110$		;No					;034
+
+105$:	TST	DSKQPT(R1)	;Public, any QTBs allocated?		;034
+	BEQ	180$		;No, should never happen		;034
+	FCALL	RETQT		;Return any QT buffers owned		;034
+110$:	MOV	(SP)+,@#FIPUNT	;And restore FIPUNT/FIPGEN		;028
+	BIT	#UC.WLO,UNTCNT(R1) ;WRITE LOCKED UNIT?			;034
+	BNE	130$		;Yes, nothing more to do to this unit	;034
+	MOV	@#FIJBDA,R2	;Pick up JDB pointer for job in FIP	;028
+	TSTB	JDIOST(R2)	;Has any cleanup caused an error?	;028
+	BNE	130$		;Yes, so keep the disk dirty		;028
+	MOV	R1,-(SP)	;SAVE UNIT TIMES 2 ON THE STACK
+	MOV	SP,@#FIPESP	;Save our stack for errors		;029
+	MOVPIC	#140$,R0	;GET PIC ERROR EXIT ADDRESS
+	MOV	R0,@#FIPERX	;SET THE ERROR EXIT ADDRESS
+	CALLX	WOMSAT		;Be sure SATBUF is written out		;029
+	CALLX	READPL		;Read the pack label
+	BIC	#UC.MNT,@#FIBUF+PSTAT ;Mark the disk as clean
+	MOV	@#DATE,@#FIBUF+MNTDAT ;Set the last dismount date	;041
+	MOV	@#TIME,@#FIBUF+MNTTIM ;Set the last dismount time	;041
+	CALLX	WRITE		;Now write it out
+120$:	MOV	(SP)+,R1	;Restore unit # * 2			;029
+130$:	CLRB	UNTOWN(R1)	;Clear unit owner			;014
+	CLR	UNTOPT(R1)	; and no options			;014
+	CLR	@#FIPERX	;DISABLE THE ERROR EXIT ADDRESS
+	CALLRX	ZAPUNT		;Now exit zapping that unit		;029
+
+140$:	MOV	@#FIPESP,SP	;Error - restore the stack		;029
+	BR	120$		;And go clean up
+
+150$:	ERROR	INUSE		;BUT IT WAS IN USE
+
+160$:	ERROR	BADFUO		;SY0: non-mount requested		;024
+
+170$:	ERROR	PRVIOL		;ILLEGAL OPERATION REQUESTED
+
+180$:	CRASH			;QTB logic error			;034
+
+GLOBAL	<DEVPTR,UNTCNT,FIPRVM,FIQUE,FIPERX,FIBUF,UNTOPT,FIPUNT>		;015
+GLOBAL	<DSKQPT,FIJBDA,DATE,TIME>					;019
+
+;+
+; UNSATX - Unload the SATT (explicit user request)
+;
+;	R1 -> UNTCNT entry for disk
+;	R4 -> FIRQB
+;
+; This is the function to explicitly unload the SATT of a unit. We
+; will call UNLSAT to actually do the work for us. If there is an
+; error, we will mark the unit as dirty so that it will be forced
+; to be cleaned.
+;-
+
+UNSATX:	TSTPRV	SWCTL,@#FIPRVM	;Privileged to mess with the SATT?	;029
+	BEQ	20$		;No, not this time			;029
+	TST	SATMMU-UNTCNT(R1) ;Do we have a SATT to unload?		;029
+	BEQ	30$		;No, not this time			;029
+	SUB	#UNTCNT,R1	;Get the FIP unit # * 2			;029
+	FCALL	UNLSAT		;Unload the SATT			;029
+	MOV	@#FIJBDA,R0	;Pick up JDB pointer for job		;029
+	TSTB	JDIOST(R0)	;Error?					;029
+	BEQ	10$		;No, SATT is now unloaded		;029
+	BIS	#UO.CLN,UNTOPT(R1) ;Error, make the unit un-clean	;029
+10$:	RETURN			;All done now				;029
+
+20$:	ERROR	PRVIOL		;SWCFG privilege required		;029
+
+30$:	ERROR	NOTOPN		;SATT is not loaded			;029
+
+GLOBAL	<SATMMU,UNTCNT,UNTOPT>						;029
+
+FQFEND
+
+FQFSRT									;021
+
+.SBTTL	Return QT buffers for public disks
+
+;+									;019
+; RETQT -  Return QT buffers for Public disks				;019
+;									;019
+;	R1 = FUN * 2							;019
+;									;019
+;	CALL	RETQT							;019
+;									;019
+;	All registers preserved						;019
+;-									;019
+
+RETQT::	REGSCR			;Save all register contents		;019
+	ASR	R1		;Make it just FUN			;019
+	MOVB	R1,@#FIPUNT	; and set the FIPUNT			;019
+	ASL	R1		;Make it FUN * 2			;019
+	CLR	-(SP)		;Need a place to store the PPN		;019
+	MOV	SP,R0		; and point R0 to it			;019
+10$:	MOV	DSKQPT(R1),R4	;Get the root of the QT buffers		;019
+	BEQ	50$		;None, then we're done			;019
+	CLR	@#QTPREV	;Say no previous QT buffer		;019
+	MOV	R4,@#QTCURR	; and say this one is current		;019
+	CALLX	MAPBUF		;Map the QT buffer			;019
+	MOV	R3,R5		;Copy the QT table pointer		;019
+	ADD	#QTLINK,R5	; and point to the link word		;019
+	MOV	(R5)+,-(SP)	; and save it for later			;019
+	MOV	#3.,R3		;Three QTB entries to check		;019
+20$:	TST	(R5)		;Is there an entry (QTBPPN <> 0)?	;019
+	BEQ	30$		;No, then skip this QTB entry		;019
+	MOV	(R5),(R0)	;Save the PPN				;019
+	MOV	QTBOPN(R5),R2	;Get the logged-in and open file count	;019
+	CALLM	RETENT,OPNAP5	;Now return that QTB (FIP mapped on return) ;031
+	TST	@#QTCURR	;Did the QT table get returned?		;019
+	BEQ	40$		;Yes, then onto the next one		;019
+	MOV	R3,-(SP)	;Save R3				;031
+	CALLX	MAPBUF		;Remap the QT entry			;031
+	MOV	(SP)+,R3	;Restore R3				;031
+30$:	ADD	#QTBSIZ,R5	;No, then point to the next QTB entry	;019
+	SOB	R3,20$		;Continue until all three are checked	;019
+40$:	MOV	(SP)+,R4	;Get the saved link word		;019
+	BNE	10$		;Something there, go process it		;019
+	TST	DSKQPT(R1)	;Now are there any allocated buffers?	;019
+	BNE	60$		;Yes, something;s wrong			;019
+50$:	MAP	FIP,DATA	;Make sure FIP is mapped		;031
+	TST	(SP)+		;Junk the PPN save area			;019
+	RETURN			;Return to our caller			;019
+
+60$:	CRASH			;We have to die				;019
+
+GLOBAL	<QTPREV,QTCURR,DSKQPT,OPNAP5>					;019
+
+.SBTTL	SATT load/unload functions
+
+;+
+; LODSAT - Load the SATT of a unit into memory
+;
+;	R1 -> UNTCNT entry for disk
+;	R4 -> FIRQB
+;
+; This is the entry for the load SATT subfunction of UU.MNT.
+; We will load the requested SATT if not already loaded and return
+; the size in FIRQB+FQSIZ.
+;-
+
+LODSAT:	TSTPRV	SWCTL,@#FIPRVM	;Privileged to load the SATT?		;028
+	BEQ	40$		;No, so forget this			;028
+	BIT	#UC.WLO,(R1)	;Is disk mounted read-only?		;028
+	BNE	10$		;Yes, no point in loading SATT		;028
+	SUB	#UNTCNT,R1	;Get unit number * 2			;028
+	TST	SATMMU(R1)	;Is the SATT already loaded?		;028
+	BNE	20$		;Yes, isn't once good enough?		;028
+	MOVB	R1,R0		;Copy FIP unit number			;028
+	ASRB	R0		;Now make it times one			;028
+	MOVB	R0,@#FIPUNT	;And set it as the current FIP unit	;028
+	CMPB	R0,@#SATUNT	;Is this disk's SATT in memory?		;030
+	BNE	5$		;No, not this time			;030
+	CALLX	WOMSAT		;Yes, make sure SATT is correct on disk	;028
+	MOVB	#-1,@#SATUNT	;And invalidate SATBUF			;030
+5$:	CALL	INISAT		;Calculate sizes of data structures	;028
+	MOV	R1,FQSIZ(R4)	;And return the size to our caller	;028
+	CALLX	BUFFR2,R5,<-1,LRGPOL> ;Allocate a SATT from LRGPOL	;028
+	BCS	30$		;None, too bad				;028
+	MOV	R4,R3		;Got one, copy contorted address	;028
+	ASHC	#-7,R3		;And make into a MMU address		;028
+	MOV	R3,SATMMU(R5)	;And save that away for later		;028
+	ADD	R1,@#USETBL+UT.SAT ;And update the usage counter	;028
+	MOV	#<-1*400+RFUN>,@#FIPAR+DSQFUN ;Set up an expired read	;028
+	CALL	@(SP)+		;Set up for the I/O			;028
+	CALLX	FIPIOE,R5	;Now ask FIP to do this I/O for us	;028
+	 BR	50$		;Worked, SATT is loaded now		;028
+	CALL	RETSAT		;Go return the SATT			;028
+	MOVB	@#FIPAR+DSQERR,R0 ;Pick up error code			;028
+	JMPX	ERROR		;And get out reporting the error	;028
+
+10$:	ERROR	HNGDEV		;Tried to load the SATT of a R/O disk	;028
+
+20$:	ERROR	NOTCLS		;Tried to load the SATT more than once	;028
+
+30$:	ERROR	NOBUFS		;Sorry - no buffer space available	;028
+
+40$:	ERROR	PRVIOL		;Not privileged to load a SATT		;028
+
+50$:	RETURN			;All done now				;028
+
+GLOBAL	<FIPUNT,SATMMU,USETBL,UNTCNT,LRGPOL,FIPAR,SATUNT>		;030
+
+;+
+; UNLSAT - Unload the SATT (internal function)
+;
+;	R1 = Fip unit # * 2
+;
+;	[F]CALL	UNLSAT
+;
+; All registers are preserved.
+;
+; If there is an error, we will still return the SATT to XBUF. It
+; is our caller's responsibility to check JDIOST in the caller's
+; work block to see if we failed or not. If we failed, then the
+; dirty bit should not be cleared in the pack label.
+;-
+
+UNLSAT::REGSCR			;Save all registers			;028
+	MOVB	R1,R0		;Copy FIP unit number			;028
+	ASRB	R0		;Make it times one			;028
+	MOVB	R0,@#FIPUNT	;Now set up the unit number		;028
+	MOV	SATMMU(R1),R3	;Pick up MMU address for SATT		;028
+	BEQ	50$		;None, nothing to do			;028
+	CALL	INISAT		;Do initial setup			;028
+	MOV	#<-1*400+WFUN>,@#FIPAR+DSQFUN ;Set up an expired write	;028
+	CALL	@(SP)+		;Now finish setup (R3 already set up)	;028
+	MOV	R1,-(SP)	;Save that SATT size			;028
+	MOVPIC	#40$,R0		;Get error trap address			;028
+	MOV	R0,@#FIPERX	;Set up a private error trap		;028
+	MOV	SP,@#FIPESP	;And save SP for error traps		;028
+	MOV	@#FIPAR+DSQCNT,-(SP) ;Save the word count		;028
+	CLRB	@#FIPAR+DSQCNT	;And round down to a block multiple	;028
+	TST	@#FIPAR+DSQCNT	;Is the SATT smaller than one block?	;028
+	BEQ	10$		;Yes, so don't do the full block I/O	;028
+	CALLX	FIPIOE,R5	;Go and set up the I/O			;028
+	 BR	10$		;Worked, good				;028
+	MOVB	@#FIPAR+DSQERR,R0 ;Error, pick up the error code	;028
+	JMPX	ERROR		;And go through the error handler	;028
+
+10$:	TSTB	(SP)		;Did we transfer the whole SATT?	;028
+	BEQ	40$		;Yes, so we're done			;028
+	CALLX	WRITEC		;Get FIBUF for a scratch work area	;028
+	MOV	#377,@#FIBUNT	;Invalidate FIBUF			;028
+
+; Note: We can only hit this code when the SATT size is not a block multiple,
+;	which means that the APR6 mapping (everything but one sliver) is
+;	guaranteed to work.
+;
+;	R2 = LSB of SATT start block number
+;	R3 = MSB of SATT start block number
+;	R5 = Fip unit # * 2
+
+	MAP	SATMMU(R5),APR=6,DATA,PIC ;Go map that SATT		;028
+	MOV	(SP),R1		;Get the size of the SATT in words	;028
+	CLRB	R1		;Dump the LSB of words to do		;028
+	ASL	R1		;Get # of bytes already copied		;028
+	ADD	#140000,R1	;R1 -> First word of SATT not saved	;028
+	MOV	#FIBUF,R0	;And point to FIBUF			;028
+	CLR	R4		;Get ready to get word count to copy	;028
+	BISB	(SP),R4		;Now go get it				;028
+20$:	MOV	(R1)+,(R0)+	;Copy a word of the SATT		;028
+	SOB	R4,20$		;For the whole thing			;028
+30$:	MOV	#-1,(R0)+	;Mark the end as allocated		;028
+	CMP	R0,#FIBUF+1000	;Up to one block yet?			;028
+	BNE	30$		;No, loop until we get there		;028
+	MOVB	1(SP),R1	;Get the number of full blocks in the SATT ;028
+	ADD	R1,R2		;Get start block number LSB		;028
+	ADC	R3		;And start block number MSB		;028
+	MAP	FIPPOL		;Re-map FIP				;028
+	MOVB	@#FIPUNT,@#FIPAR+DSQUNT ;Set the FIP unit number	;028
+	CALLX	PARSEX,R5,<<-1*400+WFUN>,FIBUF> ;Go do that transfer	;028
+
+; Errors and/or success come here
+;
+
+40$:	MOV	@#FIPESP,SP	;Restore stack pointer			;028
+	CLR	@#FIPERX	;Turn off our error trap		;028
+	MOV	(SP)+,R1	;Get SATT size in bytes back		;028
+	MOV	TOS.R1(SP),R5	;Get unit # * 2 back			;028
+	BR	RETSAT		;Now exit, returning the SATT		;028
+
+50$:	RETURN			;All done... SATT not loaded		;028
+
+GLOBAL	<FIPERX,FIPESP,FIPAR,SATMMU,FIBUF,FIBUNT,FIPUNT>		;028
+
+;+
+; INISAT - Set up to load/unload the SATT
+;
+;	R1 -> FIP unit # * 2
+;
+;	CALL	INISAT
+;
+; Caller is called back as a co-routine with the following set up:
+;
+;	R1 = Size of SATT in bytes, rounded up to a sliver boundry
+;	R5 = FIP unit # * 2
+;
+;	FIPAR@DSQCNT = size of SATT in words, rounded up to a sliver boundry
+;	FIPAR@DSQUNT = passed unit number
+;	
+; Caller then sets up:
+;
+;	R3 = MMU address of SATT
+;	R5 = FIP unit # * 2
+;
+; And issues a co-routine call. We then do the following:
+;
+;	FIPAR@DSQMAL = LSB of memory address for transfer
+;	FIPAR@DSQMAM = MSB of memory address for transfer
+;
+;	R2 = LSB of block number (for FIPIOE)
+;	R3 = MSB of block number (for FIPIOE)
+;
+; And then return to our caller.
+;	
+;-
+
+INISAT:	MOVB	R1,R5		;Copy FIP unit number * 2		;028
+	MOV	SATEND(R5),R1	;Get the # of PCNs in the SATT - 1	;028
+	ADD	#17+1,R1	;Now get # of PCNs, rounded up		;032
+	BCS	5$		;Overflow, set up 10000 exactly		;032
+	ASH	#-4,R1		;Convert to a number of words		;028
+	ADD	#37,R1		;Round up to a sliver multiple		;028
+	BIC	#^C<7740>,R1	;And trim off any junk			;028
+	BNE	10$		;Not 10000 exactly, good		;028
+5$:	MOV	#10000,R1	;10000, set it up			;032
+10$:	MOV	R1,@#FIPAR+DSQCNT ;And stash the word count		;028
+	ASL	R1		;Get a byte count for the buffer routines ;028
+	MOVB	@#FIPUNT,@#FIPAR+DSQUNT ;Set the FIP unit number	;028
+	CALL	@(SP)+		;Call our caller for more setup		;028
+	CLR	R2		;Clear LSB to get 22 bit address	;028
+	ASHC	#6,R2		;Now get a 22 bit address		;028
+	MOVB	R2,@#FIPAR+DSQMAM ;Set MSB of address			;028
+	MOV	R3,@#FIPAR+DSQMAL ;Set LSB of address			;028
+	MOVB	SATSTM(R5),R3	;Get MSB of start of SATT		;028
+	MOV	SATSTL(R5),R2	;Get LSB of start of SATT		;028
+	RETURN			;And we're done				;028
+
+GLOBAL	<SATEND,FIPAR,FIPUNT>						;028
+
+;+
+; RETSAT - Return a loaded SATT to XBUF
+;
+;	R1 = Size of SATT in bytes
+;	R5 = FIP unit # * 2
+;
+;	CALL	RETSAT
+;
+;	R4 = Undefined
+;	R5 = Undefined
+;
+; This routine will update the SATT usage table entry, clear the SATMMU
+; pointer, and return the buffer to the pool. It is up to our caller
+; to do that if this is a unload function.
+;-
+
+RETSAT:	SUB	R1,@#USETBL+UT.SAT ;Update the usage table entry	;028
+	MOV	SATMMU(R5),R4	;Pick up MMU address of SATT		;028
+	CLR	SATMMU(R5)	;And flag it as no longer loaded	;028
+	MAP	R4,APR=6,DATA,PIC ;And map it				;028
+	MOV	R1,@#140000+BF.SIZ ;Set up the size for the buffer returner ;028
+	MOV	R4,R5		;Copy MMU address			;028
+	ASHC	#7,R4		;Now we have the contorted address in R4 ;028
+	BUFFER	RETURN		;Go return that XBUF buffer now		;028
+	MAP	FIPPOL		;Restore FIP pool mapping		;028
+	RETURN			;And we're done				;028
+
+GLOBAL	<USETBL,SATMMU>							;028
+
+FQFEND									;021
+
+.END

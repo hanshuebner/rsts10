@@ -1,0 +1,407 @@
+1	SUB STROMS
+	!
+	!	s u b p r o g r a m   t i t l e
+	!
+	!	subprogram : STROMS.B2S
+	!	   version : V10.1
+	!	      edit : A
+	!	 edit date : 10-MAY-91
+	!	 author(s) : DBM
+	!
+	!********************************************************************
+	!
+	!		  C O P Y R I G H T
+	!
+	!
+	!		      Copyright (C) 1989, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.
+	!
+	!
+	! This software is furnished under a license and may be used and
+	! copied  only  in accordance with the terms of such license and
+	! with the  inclusion  of  the  above  copyright  notice.   This
+	! software  or  any  other copies thereof may not be provided or
+	! otherwise made available to any other person.  No title to and
+	! ownership of the software is hereby transferred.
+	!
+	! The information in this software is subject to change  without
+	! notice  and should not be construed as a commitment by Digital
+	! Equipment Corporation.
+	!
+	! DIGITAL assumes no responsibility for the use  or  reliability
+	! of its software on equipment that is not supplied by DIGITAL.
+	!
+	!********************************************************************
+	!
+	!	m o d i f i c a t i o n   h i s t o r y   l o g
+	!
+	!
+	! VER/ED	EDIT DATE	REASON
+	!
+	! T10.0-01	11-Apr-89	(DBM) Creation
+	! V10.0-0G	01-Dec-89	(DBM) Better compression algorithm
+	! V10.0-0I	21-Jan-90	(DBM) Work/Log file split
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	p r o g r a m   d e s c r i p t i o n
+	!
+	!	STROMS.B2S handles the START/OPERATOR_SERVICES command.
+	!
+	!********************************************************************
+	!
+	!	c h a n n e l   a s s i g n m e n t s
+	!
+	!	channel #	file-spec	description
+	!	=========	=========	===========
+	!	  0		_KB:		User keyboard (BP2 default)
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	C o m p i l e   O P T I O N s
+	!
+	!********************************************************************
+
+	OPTION	TYPE = EXPLICIT
+
+	!********************************************************************
+	!
+	!	I N C L U D E   r e q u i r e d   M A P s , C O M M O N s
+	!
+	!********************************************************************
+
+	%INCLUDE "CUI:CUICMN.E2S"		! Include CUI data section
+	%INCLUDE "SYSTEM:CMNDEF.B2S"		! Include OMS common defs
+	%INCLUDE "SYSTEM:OMSKEY.B2S"		! Include CUI key defs
+
+	!********************************************************************
+	!
+	!	D E C L A R E   V A R I A B L E S
+	!
+	!********************************************************************
+	
+	EXTERNAL WORD CONSTANT			! RSTS/E Error codes:	     &
+				NOROOM,		!   ?No room for user on dev &
+				NOSUCH,		!   ?Can't find file or acc  &
+				NOTOPN,		!   ?I/O channel not open    &
+				PRVIOL,		!   ?Protection violation    &
+				EOF,		!   ?End of file on device   &
+				HNGTTY,		!   ?Keyboard wait exhausted &
+				FIEXST,		!   ?Name or acc now exists  &
+				WRGPAK,		!   ?Pack IDs don't match    &
+				NOBUFS,		!   ?No buffers		     &
+				QUOTA		!   ?Quota exceeded
+
+	DECLARE STRING CONSTANT	PRIV.TUNE = "TUNE",			     &
+				OMS = "Operator/Message Services"
+
+	! Local variables:
+	DECLARE STRING	TEMP, NOP.CMD
+	DECLARE WORD	I, NOP.FLG, OPEN.MODE, JOB.P, JOB.R
+
+	DECLARE WORD FUNCTION GET_QUAL_VAL(WORD), SET.CLR(WORD, WORD)
+
+
+	EXTERNAL WORD				! Patch points for OMSSUB     &
+				OMS$LO,		!   OMS Local Object Type     &
+				OMS$MM,		!   Message Max for declare   &
+				OMS$PD,		!   Raise privs for declare   &
+				OMS$PS		!   Raise privs for send
+
+	MAP (OMSREQ)	STRING	FILL = 14%,	! Layout parameter buffer     &
+			WORD	OMSCMD,		!   Command sent to OMS	      &
+				FILL(6),	!   Skip to error status word &
+				ERRSTS,		!   Error returned from call  &
+				ERRFLD		!   ORP field in error
+
+	EXTERNAL WORD FUNCTION		 				      &
+			PRIVED (STRING),	! Function to check for priv  &
+			MGRSND (WORD, WORD),	! Function to send to OMS     &
+			MGRRCV (STRING, WORD, WORD, STRING) ! FN to rcv OMS ack
+
+	!	P E R F O R M   C O M M A N D   P R O C E S S I N G
+
+ START_OMS:	! Start Operator Services Command
+
+	GOTO START_OMS_END						      &
+	  UNLESS PRIVED(PRIV.SWCTL)		! Get out unless priv'd user
+
+	JOB.P = GET_QUAL_VAL(PRI.Q)		! Fetch /PRIORITY value
+	JOB.R = GET_QUAL_VAL(RNB.Q)		! Fetch /RUN_BURST value
+
+						! Set up for OMSSUB calls:
+	OMS$PD = TRUE				! Raise privs for declare
+	OMS$PS = FALSE				! Drop privs for send
+
+	NOP.CMD = "6"C + "22"C + "245"C + CHR$(OMS$LO)
+
+	FQB = SYS(REGAIN.PRIVS)			! We're gonna need privs
+	I = 20%					! Try this twenty times...
+ SEND_NOP:
+	NOP.FLG = TRUE				! Signal first NOP send
+	ON ERROR GOTO NOP_ERR
+	FQB = SYS(NOP.CMD)			! Send NOP to OMS receiver
+
+ ALREADY_STARTED:
+	PRINT "?"; OMS; " already started"
+	GOTO START_OMS_END
+
+ CONT_START_1:
+	ON ERROR GOTO OPEN_ERR			! Set local error trap
+	OPEN OMS.LOC + OMS.SYS			! Try to open work file	      &
+	  FOR INPUT AS SYS.CHNL,		!   Must already exist	      &
+	  ORGANIZATION VIRTUAL,			!   Use native mode	      &
+	  MAP OMSREQ				!   Define I/O buffer
+
+	CAUSE ERROR PRVIOL IF STATUS AND 1024%	! Check for write access
+	CALL GETSYS BY REF (0%, OMSINT)		! Find and save header record
+	CAUSE ERROR WRGPAK			! Consistancy checks:	      &
+	  IF (OMS.VER <> PTCL.VER)		!   Version number check      &
+	  OR (OMS.REV <> PTCL.REV)		!   Revision level check
+
+	ON ERROR GOTO NOP_ERR			! Change error handler
+	NOP.FLG = NOT NOP.FLG			! Change the NOP flag
+	FQB = SYS(NOP.CMD)			! Try NOP once more
+	CLOSE #SYS.CHNL				! Oops. Someone else STARTed OMS
+	GOTO ALREADY_STARTED			! So get out and let OMS go
+
+ CREATE_NEW_FILE:
+	PRINT #OUT.CHNL,						      &
+	  "Initializing new work file..."	! Tell user what we're doing
+
+	ON ERROR GOTO CREATE_ERR		! Set error trap
+	OPEN OMS.LOC + OMS.SYS			! Try to open the work file   &
+	  FOR OUTPUT AS SYS.CHNL,		!   This time create it	      &
+	  ORGANIZATION VIRTUAL, MAP OMSREQ,	!   Use native mode, I/O map  &
+	  MODE OPEN.MODE, CLUSTERSIZE -16%	!   Set open mode & clustersize
+
+	OMSINT = STRING$(RECSIZ, 0%)		! Zero out the header record
+	OMS.TXT = OMS				! Store package name
+	OMS.LEN = LEN(OMS)			! ...and its length
+	OMS.FAC = "OMS   "			! Store facility/reciever name
+	OMS.VER = PTCL.VER			! Store our version #
+	OMS.REV = PTCL.REV			! Store our revision level
+	OMS.STS = ML.ALL			! Set /KEEP=ALL
+
+ KEEP_CHECK:
+	GOSUB PARSE_KEEP			! Parse /KEEP if present
+	ON ERROR GOTO SPAWN_ERR			! Set local error trap
+	FQB = FSS$(OMS.LOC + OMS.TSK, 1%)	! FSS the task file to spawn
+	FQJOB = 6%				! SYS call to FIP
+	FQFUN = 24%				! Spawn job function
+	FQFIL = WORD.TO.BYTE(128% + 64%)	! Override no logins
+	FQSIZM = 0%				! Create the job detached
+	FQSIZ = 0%				! Create in current account
+	FIRQB(15%) = JOB.P			! Priority of spawned job
+	FIRQB(16%) = JOB.R			! Run-burst of spawned job
+	FIRQB(17%) = 0%				! Use this job's maximum size
+	FIRQB(I) = 0% FOR I = 18% TO 22%	! Zero-out reserved bytes
+	FQCLUS = 31000% + PTCL.VER		! Line # 31000 + current version
+	FQNENT = 0%				! Reserved
+	FQB = SYS(FQB)				! Try to create the job
+
+	PRINT #OUT.CHNL, "Job"; FQFIL / 2% ;"created"
+	FQB = SYS(DROP.PRIVS)			! It worked.  Done with privs
+	I = 30%					! Set retry count
+	ON ERROR GOTO NOP_ERR_2			! One last error handler
+ RCVR_CHECK:
+	SLEEP 1%				! Give the new job some time
+	FQB = SYS(NOP.CMD)			! Has receiver been declared?
+
+ RCVR_FOUND:
+	CALL GETDAT BY REF (OMS.DTM BY DESC, TRUE)
+	CALL PUTSYS BY REF (0%, OMSINT)		! Store new header record
+	CLOSE #SYS.CHNL				! Close work file
+	ON ERROR GO BACK			! Pass ^C back to caller
+	JUNK = CTRLC				! Starting now
+
+	GOTO START_OMS_END			! Quit if...		      &
+	  UNLESS MGRSND(OC.NOP, 0%)		!   unable to send cmd packet
+
+	IF MGRRCV("", 90%, 15%, "acknowledgement")
+	THEN
+	  IF ERRSTS				! Got an ack, any error occur?
+	  THEN
+	    TEMP = "?Program failure in "+P.NAM	! Yes, this may be a bug      &
+	      +CR.LF+ERT$(ERRSTS)+" in OMSRCV"	!   So display error/module
+	  ELSE
+	    TEMP = OMS+" started at "+TIME$(0%)	! No, everything's alright
+	  END IF
+	  PRINT TEMP				! Tell user what's happening
+	END IF
+
+	JUNK = RCTRLC				! Done with ^C trap
+	GOTO START_OMS_END UNLESS ERRSTS = HNGTTY
+
+ GIVE_UP:
+	PRINT "?"; OMS; " not started"
+	GOTO START_OMS_END
+
+1000	!	S U B R O U T I N E S
+
+ PARSE_KEEP:					! Parse /KEEP if present
+
+	CALL FET$CQ (KEEP.Q)			! Look for /KEEP
+	RETURN UNLESS U.PRES			! Get out now unless specified
+	CALL GETDAT BY REF (OMS.ACT BY DESC, TRUE)
+
+	IF U.NO					! Yes, was it /NOKEEP?
+	THEN
+	  JUNK = SET.CLR(ML.ALL, TRUE)		! Yes, turn off everything
+	ELSE
+	  CALL FET$K				! No, find out what to keep
+	  I = TRUE				!   Assume no valid arguments
+	  WHILE U.PRES				!   Loop while keywords present
+	    SELECT U.KEY
+	      CASE MESS.K			!     /KEEP=MESSAGES?
+		JUNK = SET.CLR(ML.MSG, U.NO)	!     Yes, set keep level field
+	      CASE RQST.K			!     /KEEP=REQUESTS?
+		JUNK = SET.CLR(ML.REQ, U.NO)	!     Yes, set keep level field
+	      CASE ALL.K			!     /KEEP=ALL?
+		JUNK = SET.CLR(ML.ALL, FALSE)	!     Yes, set keep level field
+	      CASE NONE.K			!     /KEEP=NONE?
+		JUNK = SET.CLR(ML.ALL, TRUE)	!     Yes, clr keep level field
+	      CASE ELSE				!     Otherwise
+		GOTO KEEP_END			!	End of argument list
+	    END SELECT
+	    CALL FET$K				!   Fetch next argument
+	    I = FALSE				!   Signal at least one found
+	  NEXT					! Loop if another one present
+ KEEP_END:
+	  JUNK = SET.CLR(ML.ALL, FALSE) IF I	!   Set /KEEP=ALL if no args
+	END IF
+
+	RETURN					! Back to caller
+
+15000	!	F U N C T I O N S
+
+	DEF* WORD SET.CLR(WORD BIT.VAL,NO.FLAG)	! Handle /KEEP arguments
+	  IF NO.FLAG				! Was it NOarg?
+	  THEN
+	    OMS.STS = OMS.STS AND NOT BIT.VAL	! Yes, clear bit(s) in status
+	  ELSE
+	    OMS.STS = OMS.STS OR BIT.VAL	! No, set bit(s) in status
+	  END IF
+	END DEF					! All done
+
+	DEF* WORD GET_QUAL_VAL(WORD QUAL)
+
+	  GET_QUAL_VAL = 0%			! Def to our priority/run_burst
+	  CALL FET$CQ BY REF (QUAL)		! Look for the specified qual
+	  IF U.PRES				! Was it there?
+	  THEN
+	    EXIT SUB UNLESS PRIVED (PRIV.TUNE)	! Yes, user must have TUNE priv
+	    CALL FET$A BY REF			!   Fetch the argument
+	    GET_QUAL_VAL = U.LOW		!   Return the value
+	    GET_QUAL_VAL = 1%			!   Priority is a funny thing &
+	      IF (U.LOW = 0%) AND (QUAL = PRI.Q)!     so return 1 if /PRIORITY=0
+	  END IF
+
+	END DEF
+
+19000	!	E R R O R   H A N D L I N G
+ NOP_ERR:					! Error handler for initial NOPs
+	IF ERR = NOSUCH				! Expected error?
+	THEN
+	  IF NOP.FLG				! Yes, which NOP was in error?
+	  THEN
+	    RESUME CONT_START_1			!   First one
+	  ELSE
+	    RESUME KEEP_CHECK			!   Second one
+	  END IF
+	ELSE
+	  RESUME ALREADY_STARTED		! No, must already be started
+	END IF
+
+ OPEN_ERR:					! OPEN FOR INPUT error handler
+	SELECT ERR
+
+	  CASE PRVIOL				! Someone else has the file open
+	    I = I - 1%				! Decrement the retry count
+	    IF I				! Any retries left?
+	    THEN
+	      RESUME SEND_NOP			! Yes, start over at the top
+	    ELSE
+	      PRINT "?"; OMS; " work file locked by another user"
+	      RESUME START_OMS_END		! No, get out now.
+	    END IF
+
+	  CASE NOSUCH				! If the work file doesn't exist
+	    OPEN.MODE = 128%			!   Set no supersede
+	    RESUME CREATE_NEW_FILE		!   Try to create it
+
+	  CASE EOF, WRGPAK			! Corrupt/old version of file.
+	    PRINT OMS; " work file is corrupt"	!   We don't like that
+	    OPEN.MODE = 0%			!   Set supersede mode
+	    RESUME CREATE_NEW_FILE		!   Create new file
+
+	  CASE ELSE
+	    PRINT "?Error opening "; OMS; " work file"
+	    FQB = SYS(DROP.PRIVS)		! Ensure privs are dropped
+	    ON ERROR GO BACK
+
+	END SELECT
+
+ CREATE_ERR:					! File creation error handler
+	SELECT ERR
+
+	  CASE NOROOM, QUOTA			! Disk is full:
+	    PRINT "?No disk space available to create "; OMS; " work file"
+	    RESUME START_OMS_END		!   That's it.  I quit.
+
+	  CASE FIEXST				! Work file already exists:
+	    RESUME SEND_NOP			!   Start over at NOP phase
+
+	  CASE ELSE				! Unknown error:
+	    PRINT "?Error creating "; OMS; " work file"
+	    FQB = SYS(DROP.PRIVS)		! Ensure privs are dropped
+	    ON ERROR GO BACK
+
+	END SELECT
+
+ SPAWN_ERR:					! Job spawn error handler
+	FQB = SYS(DROP.PRIVS)
+	SELECT ERR				! Select the error code
+
+	  CASE NOROOM				! No job/swap slots available
+	    TEMP = "?No room for additional jobs"
+
+	  CASE NOSUCH				! Couldn't find task file
+	    TEMP = "?" + OMS + " task file is missing"
+
+	  CASE NOBUFS				! Not enough XBUF
+	    TEMP = "?Additional XBUF required"
+
+	  CASE ELSE
+	    PRINT "?Unexpected error during job spawn"
+	    FQB = SYS(DROP.PRIVS)		! Ensure privs are dropped
+	    ON ERROR GO BACK			! Return error to caller
+
+	END SELECT
+	PRINT TEMP				! Print out the error message
+	RESUME START_OMS_END			! And get out
+
+ NOP_ERR_2:					! Error handler for later NOP
+
+	IF ERR = NOSUCH				! Receiver not there yet?
+	THEN
+	  I = I - 1%				! Right, decrement retry count
+	  IF I					!   Retries left?
+	  THEN
+	    PRINT "Waiting for receiver..." UNLESS MOD(I, 15%)
+	    RESUME RCVR_CHECK			!   Yes, try again
+	  ELSE
+	    RESUME GIVE_UP			!   No, can't wait any longer
+	  END IF
+	ELSE
+	  RESUME RCVR_FOUND			! Receiver found, send final NOP
+	END IF
+
+32767	!
+ START_OMS_END:
+	FQB = SYS(DROP.PRIVS)			! Ensure privs are dropped
+	END SUB

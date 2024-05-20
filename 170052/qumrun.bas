@@ -1,0 +1,2420 @@
+2!		PROGRAM		: QUMRUN.BAS
+5!		VERSION		: V10.1
+6!		EDIT		: A
+7!		EDIT DATE	: 10-MAY-91
+8!
+10		EXTEND		! EXTEND MODE
+11	! &
+	! &
+	! &
+	!		  C O P Y R I G H T &
+  !	&
+  !	&
+  !		      Copyright (C) 1974, 1991 by &
+  !	        Digital Equipment Corporation, Maynard, Mass. &
+  !	&
+  !	&
+  !	This software is furnished under a license and may be used and &
+  !	copied  only  in accordance with the terms of such license and &
+  !	with the  inclusion  of  the  above  copyright  notice.   This &
+  !	software  or  any  other copies thereof may not be provided or &
+  !	otherwise made available to any other person.  No title to and &
+  !	ownership of the software is hereby transferred. &
+  !	&
+  !	The information in this software is subject to change  without &
+  !	notice  and should not be construed as a commitment by Digital &
+  !	Equipment Corporation. &
+  !	&
+  !	DIGITAL assumes no responsibility for the use  or  reliability &
+  !	of its software on equipment that is not supplied by DIGITAL. &
+  !	&
+  !*******************************************************************
+20	! &
+	! &
+	! &
+	!	M O D I F I C A T I O N    H I S T O R Y &
+	! &
+	! &
+
+21	! VER/ED	EDIT DATE	REASON &
+	! &
+	! V9.0-09	08-NOV-84	(PRL) Fix for multiple privs &
+	!				      Change pkg location to OPSER$: &
+	! V9.3-02	07-FEB-86	(DLS) Fix for /after entry overflow &
+	! V9.3		30-SEP-86	(REG) Fix to return deleted /after &
+	!				entries to free list in QUEUE.SYS. &
+	! V9.3		30-SEP-86	(REG) Fix to FNINSTALL.3PP to allow &
+	!				deletion of files in non-priv account &
+	! V9.3		14-OCT-86	(REG) Fix HB problem when 1st spooler &
+	!				has 5/5 messages pending (line 10240) &
+	! V10.0		05-Oct-89	Add V8 patch 14.6.1 as system flag &
+	! V10.0		05-Apr-90	Allow patch change on the fly &
+	&
+
+100	! &
+	! &
+	! &
+	!	G E N E R A L    D E S C R I P T I O N &
+	! &
+	! &
+
+300	! &
+	! &
+	! &
+	!	I / O    C H A N N E L S &
+	! &
+	! &
+
+301!	CHANNEL #		USED FOR &
+   !
+800	! &
+	! &
+	! &
+	!	F U N C T I O N / S U B R O U T I N E    D E S C . &
+	! &
+	&
+
+801!	FUNCTION/SUBROUTINE		USE &
+   !
+900	! &
+	! &
+	! &
+	!	D I M E N S I O N    S T A T E M E N T S &
+	! &
+	&
+
+910	DIM J%(64%,5%),M%(40%) &
+	\ DIM #2%,Z0%(255%,15%),Z$(255%)=512% &
+	\ DIM #3%,J$(64%,21%)=64% &
+	\ DIM #4%, C0$(27%)=16%, C0%(31%), &
+		O$(16%,2%)=4%, O%(16%,7%), O9%(17%), &
+		H$(63%)=32%, H0$(63%)=512% &
+	\ DIM #4%, F9%(511%), H%(63%,15%) &
+	\ DIM #6%, J9%(23%,7%), V%(15%,3%) &
+		! HOLD MESSAGE TABLE, JOB TABLE, SYS CALL ARRAY &
+		! #2 "QUEUE.SYS" FILE &
+		! #3 "TEMPNN.TMP" FILE &
+		! #4 "QUEUE.WRK" FILE, ONLINE SPOOLER TABLE &
+		!	(UNEVEN DIMENSIONS ON C0$, C0% FOR BLOCK ALIGN.) &
+		! 	RE-DIM. TO OVERLAY H%(,) OVER H$ OF PREVIOUS DIMENSION &
+		! #6 "OPSER1.WRK" TO ACCESS VALID OPERATOR TABLE &
+
+1000	ON ERROR GOTO 19000 &
+	\ J0$=SYS(CHR$(6%)+CHR$(9%)+CHR$(0%)) &
+	\ J%=ASCII(J0$)/2% &
+	\ J0$=RIGHT(NUM$(100%+J%),2%) &
+	\ NL$="" &
+
+1010	I$="V10.1-A" &
+	\ IF E0%=0% THEN &
+		S$=SYS(CHR$(6%)+CHR$(9%)+CHR$(0%)) &
+		\ PRINT IF CCPOS(0%) &
+		\ PRINT "QUMRUN "; I$; "   ";CVT$$(RIGHT(S$,3%),4%) &
+
+1020	IF E0% <> 2% THEN &
+		PRINT &
+		\ PRINT "?Please RUN OPSER$:QUEMAN" &
+		\ GOTO 32767 &
+
+1030	PKG.LOC$ = "OPSER$:" &
+	\  CHR0$ = CHR$(0%) &
+	\  CHR6$ = CHR$(6%) &
+	\  CHR255$ = CHR$(255%) &
+	\  CHR6.M10$ = CHR6$+CHR$(-10%) &
+	\  CRLF$ = CHR$(13%)+CHR$(10%) &
+	\ CHANGE SYS(CHR6$+CHR$(-12%)) TO M% &
+	\ Q%=M%(13%)+SWAP%(M%(14%)) &
+	\ CHANGE SYS(CHR6$+CHR$(-3%)) TO M% &
+	\ Q1%=M%(11%)+SWAP%(M%(12%)) &
+		! SAVE MONITOR LOCATIONS FOR LATER: &
+	 	! 	Q%	JOBCNT &
+		!	Q1%	JOBTBL &
+
+1035	Y7$=CHR6$+CHR$(22%)+CHR255$+CHR0$ &
+	\ Y8$=Y7$+"OPSER "+STRING$(10%,0%) &
+	\ OPEN F$ FOR INPUT AS FILE #3% &
+	\ KILL F$ &
+	\ OPEN "_NL:" AS FILE 5%, RECORDSIZE 256% &
+	\ FIELD #5%,256% AS Z1$ &
+	\ FIELD #5%,2% AS T$,1% AS F0$,1% AS S0$,2% AS M1$,1% AS C$, &
+		2% AS D$,11% AS R$ &
+		! VARIOUS OFTEN-USED STRINGS. &
+		! F$ FROM CORE COMMON; OPEN, FIELD 'TEMPNN.TMP'. &
+
+1040	OPEN PKG.LOC$+"QUEUE.SYS" FOR INPUT AS FILE 2% &
+	\ CHANGE SYS(CHR$(12%)) TO M% &
+	\ IF (STATUS AND 1024%)  THEN &
+		GOTO 1080 &
+	ELSE	PRINT "DETACHING . . ."+CHR$(12%)+CHR$(13%) &
+	\	A$=SYS(CHR6$+CHR$(7%)+CHR$(128%)) &
+	\ OPEN PKG.LOC$+"QUEUE.WRK" FOR INPUT AS FILE #4% &
+	\ OPEN PKG.LOC$+"OPSER1.WRK" FOR INPUT AS FILE #6% , MODE 8192% &
+	\ GOTO 1060 &
+		! OPEN TO SEE IF THEY ARE THERE, AND TO USE. &
+
+1060	H0%=M%(13%)+SWAP%(M%(14%)) &
+	\ C%=(M%(21%) AND 255%) &
+	\ F%=(H0%/C%)*C%-17% &
+		! GET FILE SIZE, CLUSTERSIZE, SUBSCRIPT BASE. &
+
+1070	IF Z0%(0%,4%)= -1% THEN &
+		GOTO 1090 &
+	ELSE	Z$="QUEUE FILE NOT SET PROPERLY -- NEEDS INITIALIZATION" &
+	\	GOTO 20000 &
+		! CHECK 'DIRTY' FLAG, MUST HAVE BEEN SET BY QUEMAN. &
+
+1080	PRINT "QUEMAN DOES NOT HAVE WRITE PRIVILEGES TO ITS FILES" &
+	\ PRINT "WILL SLEEP 10 SECS. AND STOP" &
+	\ SLEEP 10% &
+	\ STOP &
+	\ GOTO 1040 &
+		! GIVE SOME TIME TO CORRECT SITUATION. &
+
+1090	H%= -1% &
+		! INIT. COUNTER OF MSGS. IN HOLD-TABLE. &
+
+1140	! &
+	!	M E S S A G E    R E C E I V E / P R O C E S S     L O O P &
+	! &
+	! &
+	&
+	GOTO 32700 IF (Q0% AND 8%)  AND O%(0%,0%)=0% &
+	\ AFTR.EXP%,SLP.CNTR=0% &
+	\ GOSUB 1260 &
+	\ GOSUB 1280 IF D%<>PEEK(512%) &
+	\ H0%,H1%=-1% &
+	\ GOTO 1150 IF AFTR.EXP% &
+	\ Z7%=Z0%(1%,0%) AND 255% &
+	\ SLP.CNTR=5%+60%*((1441%-TIME(0%)/60%)-(Z0%(Z7%,4%))) &
+		IF ((Z7%<>1%) AND D%=Z0%(Z7%,3%)) &
+	\ SLP.CNTR=5%+60%*(1441%-TIME(0%)/60%) IF SLP.CNTR=0% &
+	\ SLP.CNTR=5% IF SLP.CNTR<0% &
+	\ IF SLP.CNTR>32767% THEN &
+		SLEEP -1% &
+	ELSE	SLP%=SLP.CNTR &
+	\	SLEEP SLP% EQV 32767% &
+		! THIS LINE CONTROLS ALL THE ACTION. &
+
+1150	! &
+	! &
+	!	SEARCH HOLD-MSG TABLE TO SEE IF ANY MSGS. TO DISPATCH TO &
+	!	ONLINE SPOOLERS. WHEN ALL POSSIBLE HAVE BEEN DISPATCHED, &
+	!	RECEIVE MSG AND SEARCH TO DISPATCH AGAIN IF ANY RECVD. &
+	! &
+	H0%=H0%+1% 		! H0% DETERMINES WHICH JOB TO PROCESS &
+	\ IF H0% <= H%  	! H% KEEPS TRACK OF WHERE IN H$() TO STORE &
+				! THE NEWEST WORK THAT COMES IN FOR EACH &
+				! ONLINE JOB. ONLINE JOBS ARE TRACKED BY JOB &
+				! NUMBER IN H%(n,0%) &
+	   THEN GOTO 1160 	! GO SERVICE ONLINE JOBS &
+	   ELSE GOSUB 1200 	! GO SEE IF SOMETHING TO RECEIVE &
+		\ IF H1%  THEN &
+			GOTO 1140 &
+		  ELSE	H0%,H1%=-1% 	! RESET H0% SO THAT IT WILL GO &
+					! PROCESS ITS ONLINE WORK. ITS ONLINE &
+					! JOB TABLE IS ALWAYS SQUASHED DOWN &
+					! SO THAT H$(0%) IS ACTIVE WORK, &
+					! (UNLESS IT IS IDLE WITH NO WORK) &
+					! WHEN ALL WORK IS DISPATCHED, THEN &
+					! H0% WILL BE >H%. IT WILL THEN CHECK &
+					! FOR ANY NEW MESSAGES TO RECEIVE. &
+			\ GOTO 1150 &
+
+1160	! &
+	! &
+	! 	DISPATCHING ROUTINE &
+	! &
+	J%=H%(H0%,0%) 		! PROCESS THE JOB STORED IN H%(n,0%) &
+	\ P%=H%(H0%,1%) &
+	\ GOTO 1150 IF (J%(J%,0%) AND 128%) ! IF (J%(J%,0%) AND 128%) IS &
+				! SET, THEN THIS JOB LAST GOT A PARTIAL &
+				! MESSAGE, SO GOTO 1150 AND BUMP H0% SO THAT &
+				! PERHAPS WE CAN GOSUB 1200 &
+				! CAN'T DISPATCH PARTIAL MSGS. TO SPOOLERS &
+	\ M0$=MID(H$(H0%),13%,19%) &
+	     IF H%(H0%,3%)= -1% ! H%(n,3%) IS ANOTHER PARTIAL MESSAGE FLAG &
+				! USED ALSO TO INDICATE WHETHER H$() OR H0$() &
+				! IS BEING USED FOR STORAGE OF THIS MESSAGE &
+				! 	 = -1% = H$() &
+				!	<> -1% = H0$() &
+	\ M0$=H0$(H%(H0%,2%)) IF H%(H0%,3%) <> -1% &
+	\ Z%=LEN(M0$) &
+	\ M0$=LEFT(M0$,Z%-1%) IF ASCII(RIGHT(M0$,Z%))=255% &
+	\ T%=ASCII(M0$) &
+	\ M0$=CHR$(J%)+CVT%$(P%)+M0$ &
+
+1162	M0$=LEFT(M0$,LEN(M0$)-1%) WHILE ASCII(RIGHT(M0$,LEN(M0$)))=0% &
+	\ M0$=CHR$(0%) UNLESS LEN(M0$) &
+
+1170	IF T% > 14% OR T% < 1% THEN &
+		T%=LEN(M0$) &
+	ELSE	M$=RIGHT(M0$,5%) &
+	\	VALID.OP%=(P% AND 255%)=1% &
+	\	VALID.OP%=FNV%(P%) IF P%<>CVT$%(RIGHT(M$,16%)) &
+			UNLESS VALID.OP% IF T%>5% AND T%<9% &
+		! &
+		! &
+		! DISPATCH ON 14 POSSIBLE CODES. &
+		! &
+	\	ON T% GOTO &
+			1300,	! 1 - ONLINE FROM SPOOLER (SPOOLER NOTIFYING &
+				!     QUEMAN THAT IT IS OUT THERE) &
+			1350,	! 2 - NEWJOB FROM SPOOLER (SPOOLER WANTS SOME &
+				!     WORK, IF QUMRUN HAS NOTHING FOR IT TO &
+				!     DO,IT WILL STALL THE SPOOLER BY SETTING &
+				!     (J%(n,0%) AND 1600%)) &
+			1420,	! 3 - ENDJOB FROM SPOOLER &
+			1470,	! 4 - NEXT PACKET REQUEST FROM SPOOLER &
+			1760,	! 5 - STACK THIS PACKET &
+			1890,	! 6 - QUEUE A JOB FROM QUE &
+			2050,	! 7 - KILL A JOB FROM QUE &
+			2800,	! 8 - MODIFY A JOB FROM QUE &
+			1400,	! 9 - RESTART FROM SPOOLER &
+			3100,	! 10- REQUEUE FROM SPOOLER &
+			2170,	! 11- DEFER FROM SPOOLER &
+			3050,	! 12- FORMS CHANGE REQUEST FROM SPOOLER &
+			2220,	! 13- OFFLINE FROM SPOOLER &
+			1890	! 14- ONE SHOT QUE REQUEST &
+
+1172	M0$=LEFT(M0$,3%)+CVT$$(RIGHT(M0$,4%),8%) &
+	\	T%=LEN(M0$) &
+	\	Z%=INSTR(1%,M0$," ") &
+	\	Z%=LEN(M0$)+1% UNLESS Z% &
+	\	C8$=MID(M0$,4%,Z%-4%) &
+	\	C1$=RIGHT(M0$,Z%+1%) &
+	\	P8%=0% &
+
+1174	FOR Z0%=1% UNTIL P8% <> 0%  OR Z0% > C0%(0%) &
+	\	Z9%=FNR8%(C0$(Z0%),3%) &
+	\	P8%=0% UNLESS Z9% &
+	\ NEXT Z0% &
+	\ IF P8%=0% OR P8% < LEN(C8$)  OR Z0% > C0%(0%)+1% THEN &
+		GOTO 1180 &
+
+1176	ON C0%(Z0%-1%) &
+		GOSUB 3200,3350,3350,3300,3450,4000,4000 &
+			IF (P% AND 255%)=1% &
+		! &
+		! DISPATCH ON OPSER INTERUPT COMMANDS &
+		!	1 - LAST &
+		!	2 - END &
+		!	3 - OFFLINE (GOES TO 'END' ROUTINE) &
+		!	4 - STATUS &
+		!	5 - NEXT &
+		!	6 - DISABLE &
+		!	7 - ENABLE &
+
+1180	! &
+	! &
+	! 	CONTINUATION OF WHAT IS CALLED 'CLEANUP AFTER A MESSAGE' &
+	!		(ENTRY POINT IS USUALLY AT LINE 1230) &
+	! &
+	M0$=RIGHT(M0$,T%+4%) &
+	\ IF LEN(M0$)   THEN &
+		H0$(H%(H0%,2%))=M0$+CHR255$ IF H%(H0%,3%) <> -1% &
+	\	H$(H0%)=LEFT(H$(H0%),12%)+MID(M0$,1%,19%)+ &
+				RIGHT(H$(H0%),32%) IF H%(H0%,3%)= -1% &
+	\	GOTO 1190 &
+
+1182	! &
+	! &
+	! 	TABLE SQUASHING ROUTINE &
+	! &
+	! 		DON'T FORGET THAT ANYTHING DONE TO H%(,) IS ALSO &
+	! 		DONE TO H$(), AND VICE-VERSA &
+	! &
+	H2%=H0% &
+	\ Z9%=H%(H2%,2%) &
+	\ WHILE H2% < H% &
+	\	I%=H2% &
+	\	H2%=H2%+1% &
+	\	H$(I%)=H$(H2%) &
+	\ NEXT &
+	\ H%(H%,0%)=0% 		! ZERO OUT THE JOB NUMBER SPOT &
+	\ H%=H%-1% 		! DECREMENT H$()'s POINTER &
+	\ H%(H2%,2%)=Z9% 	! SQUASH THE TABLE AND ADJUST POINTERS ON &
+				! PARTIAL MSGS. &
+
+1190	H0%=H0%-1% 		! DECREMENT THE ACTIVE JOB POINTER &
+	\ GOTO 1150 &
+
+1200	! &
+	! &
+	! 	SUBROUTINE TO RECIEVE MESSAGES AND STORE THEM &
+	! &
+	RETURN IF H% > 63% 	! DON'T LET THE SUBSCRIPT GO OUT OF RANGE &
+	\ M$=SYS(CHR6$+CHR$(22%)+CHR$(2%)+CHR$(6%)) &
+				! IF THERE IS NOTHING HERE TO RECEIVE THEN &
+				! IT TRAPS THE ERROR AND RESUMES AT 1225 &
+	\ CHANGE M$ TO M% &
+	\ RETURN IF M%(9%)+SWAP%(M%(10%)) &
+	\ H1%=0% &
+	\ J%=M%(4%)/2% 			! JOB OF SENDER &
+	! &
+	! &
+	! 	GET THE CELL NUMBER IF THIS IS A PARTIAL MESSAGE OR &
+	! 	ELSE A NEW CELL &
+	! &
+	\ PARTIAL%=J%(J%,0%) AND 128% 	! SET IF THIS IS A PARTIAL MESSAGE &
+	\ IF PARTIAL% THEN I%=J%(J%,2%) ! GET THE POINTER &
+	  ELSE	H%=H%+1% 		! GET A NEW CELL IN H$() &
+	\	H%(H%,0%)=J% 		! PUT THE JOB TRACKER IN PLACE &
+	\	H%(H%,1%) = SWAP%(M%(5%)) + M%(6%) ! GET PPN OF SENDER &
+	\	I%=H%(H%,2%) 		! NOTE THAT QUEMAN LOADS H%(n%,2%) &
+					! WITH SEQUENTIAL NUMBERS EVERYTIME &
+					! THAT QUEMAN IS RUN &
+	\	H0$(I%)=NL$ 		! CLEAN OUT HOLDING AREA &
+	\	H%(H%,3%)= -1% 		! SET PARTIAL MESSAGE FLAG &
+
+1210	! &
+	! &
+	! 	SET THE STATUS BITS AS REQUIRED AND STORE THE MSG. &
+	! &
+	IF M%(21%) <= 20% THEN I0%=FNS%(J%,191%,0%) &
+		\ OLD.H%=H% 		! SAVE THE CURRENT TABLE POINTER &
+		\ GOSUB 1223 		! CHECK FOR CORRECT TABLE POSITION &
+		\ GOSUB 1222 UNLESS PARTIAL% &
+					! RESET VALUES FOR CHANGED H% UNLESS &
+					! THIS WAS A PARTIAL MESSAGE, FOR &
+					! WHICH NO CHANGING OF H% RELATED &
+					! VARIALBLES IS REQUIRED. &
+		\ IF H%(H%,3%)=-1% THEN ! PUT TOGETHER THE FIRST PART OF THIS &
+					! MESSAGE WITH WHAT JUST CAME IN &
+			  H$(H%)=LEFT(H$(H%),12%) &
+				+MID(M$,22%,19%) &
+				+RIGHT(H$(H%),32%) &
+				\ GOTO 1220 &
+
+1212	I0%=FNS%(J%,191%,-(M%(21%)>20%)*(128%)) &
+	\ H%(H%,3%)=0% IF M%(21%) > 20% AND I%=H%(H%,2%) &
+	\ M%(21%)=19% IF M%(21%) > 20% &
+	\ H0$(I%)=LEFT(H0$(I%),LEN(H0$(I%))-1%)+ &
+		MID(M$,22%,M%(21%))+CHR255$ &
+	\ J%(J%,2%)=I% &
+
+1220	RETURN &
+
+1222	! &
+	! &
+	!	SUBROUTINE TO RESET VALUES IN CASE H% CHANGED &
+	! &
+	I%=H%(H%,2%) 			! GET THE POINTER &
+	\ H%(H%,1%)=SWAP%(M%(5%))+M%(6%)! GET PPN OF SENDER &
+	\ H0$(I%)=NL$ 			! SWEEP IT CLEAN &
+	\ H%(H%,3%)= -1% 		! SET PARTIAL MESSAGE FLAG &
+	\ RETURN 			! GO BACK AND PRETEND AS IF WE &
+					! HAD THE CORRECT STUFF ALL ALONG &
+
+1223	! &
+	! &
+	!   SUBROUTINE TO PREVENT QUMRUN FROM WRITING OVER ITS OWN WORK TABLE &
+	! &
+	! 	RETURNS H% SET TO THE CORRECT POSITION IN H$() AND H%(,) &
+	! &
+	! &
+	! &
+	! THIS SUBROUTINE BECAME NECESSARY BECAUSE IF THE SYSTEM IS BUSY &
+	! THE H% POINTER GETS MOVED OFF THE CELL POINTING TO THE FIRST PART &
+	! OF A PARTIAL MESSAGE. IT GETS CONFUSED BECAUSE NEW MESSAGES CAN &
+	! COME IN FROM OTHER SENDERS WHILE IT IS WAITING FOR THE REST OF THE &
+	! MESSAGE FROM THE PREVIOUS SENDER. SO IF H% IS SET TO 1% FOR THE &
+	! PARTIAL MESSAGE FOR JOB FOO, AND THEN ANOTHER MESSAGE COMES IN FOR &
+	! JOB FOOBAR, H% GETS BUMPED TO 2%. WHEN THE REST OF THE MESSAGE FOR &
+	! JOB FOO COMES IN, IT IS TACKED ONTO THE MESSAGE IN CELL 2 RATHER &
+	! THAN ONTO CELL 1 &
+	! &
+	! &
+	! THIS ROUTINE TAKES CARE OF THE FOLLOWING SITUATIONS: &
+	! &
+	!		(1) 1ST HALF OF A PARTIAL MESSAGES COMING IN. &
+	! NOTE THAT AT LINE 1200 THE TEST ON (J%(J%,0%) AND 128%) WILL FAIL, &
+	! CAUSING THE CODE OF THE 'ELSE' PART TO BE EXECUTED, THEN FALL INTO &
+	! THIS ROUTINE &
+	! &
+	!		(2) THE 2ND HALF OF A PARTIAL MESSAGE. &
+	! NOTE THAT AT LINE 1200 THE TEST ON (J%(J%,0%) AND 128%) WILL NOT &
+	! FAIL, THE 'IF' WILL BE EXECUTED, DROPPING INTO THIS ROUTINE TO BE &
+	! SURE THAT WE ARE POINTING TO THE FIRST HALF OF THIS MESSAGE AND NOT &
+	! AT A CURRENTLY ACTIVE TABLE ENTRY. &
+	! &
+	! 		(3) A COMPLETE MESSAGE COMING IN. WHEN THE H% POINTER &
+	! IS OFF, IT WILL THEN FIND IT A NEW CELL AND RESET H% &
+	! &
+	! &
+	! &
+	IF H%(H%,0%)=J% THEN RETURN 	! CHECK THE ONLINE JOB TABLE TO SEE &
+					! IF THE JOB IN ITS TABLE THAT WE ARE &
+					! POINTING TO IS THE SAME AS THE JOB &
+					! THAT HAS JUST COME IN ON THIS &
+					! MESSAGE. &
+	ELSE H%=H%-1% 			! TIME TO GO FISHING IN THE TABLE &
+		\ IF H%>-1% THEN 	! NO OUT OF RANGE SUBSCRIPTS ALLOWED. &
+		  GOTO 1223 		! WENT DOWN THE RIVER, NOW GO BACK UP &
+		  ELSE H%=OLD.H% 	! RESET THE FISHING STARTING POINT &
+
+1224	H%=H%+1% 			! TROLL UP THE RIVER &
+	\ IF H%(H%,0%)=J% THEN RETURN 	! GOT A FISH? &
+	  ELSE GOTO 1224 UNLESS H%=63% ! TRY AGAIN AND AGAIN UNTIL WE GET TO &
+					! THE END OF THE TABLE &
+		\ H%=0% &
+		\ H%=H%+1% UNTIL H%(H%,0%)=0%	! AT THIS STAGE IT &
+					! APPEARS THAT THERE IS NOT CURRENTLY &
+					! A FIRST PART TO THIS MESSAGE, SO WE &
+					! HAVE TO FIND AN EMPTY CELL. WE'LL &
+					! USE H%(n,0%) AS AN INDICATOR IF &
+					! H$() IS OCCUPIED. REMEMBER THAT &
+					! H$() AND H%(,) OVERLAY EACH OTHER, &
+					! SO FINDING NO JOB NUMBER IN H%(,) &
+					! SHOULD MEAN THAT H$() IS AVAILABLE. &
+					! H% HAS A NEW POSITION IN BOTH &
+					! H$() AND H%(,) &
+		\ RETURN &
+
+1225	! &
+	! &
+	!	P O L L    K E Y B O A R D    I F   A T T A C H E D &
+	! &
+	! &
+	&
+	GET #0%, RECORD 8192% IF ((PEEK(PEEK(PEEK(PEEK(520%)))+2%) AND 255%)= &
+		(PEEK(518%) AND 255%) AND &
+		(PEEK(PEEK(PEEK(PEEK(520%)))+6%) AND 8192%)=8192%) &
+	\ RETURN &
+
+1230	! &
+	! &
+	!	C L E A N    U P    A F T E R    P R O C E S S I N G &
+	!			A   M E S S A G E &
+	! &
+	H1%=0% &
+	\ GOTO 1180 &
+		! RESET THE 'NOTHING DONE FLAG. &
+
+1260	! 	CHECK TO SEE IF WE SHOULD AWAKEN ANY SLEEPING JOBS &
+	! 	BECAUSE OF AFTER SWITCHES. &
+	! &
+	Z7%=Z0%(1%,0%) AND 255% &
+	\ RETURN IF Z7%=1% &
+		OR D% < Z0%(Z7%,3%) &
+	       OR (D%=Z0%(Z7%,3%) AND (1441%-TIME(0%)/60%)>=Z0%(Z7%,4%)) &
+	\	GOSUB 1270 &
+	\	GOTO 1260 &
+
+1270	I0%=FNS%(O%(Z3%,0%),64%,0%) &
+		 IF O%(Z3%,2%)=Z0%(Z7%,1%) FOR Z3%=1% TO O%(0%,0%) &
+	\ AFTR.EXP%=-1% &
+	\ I%=Z7% &
+	\ Z0%(Z0%(I%,8%),1%)=Z0%(Z0%(I%,8%),1%) AND NOT (1024%) &
+	\ Z7%=0% &
+	\ GOTO 2330 &
+		! WAKEN ALL JOBS, RESET AFTER WAIT BIT IN JOB STATUS, &
+		! TAKE THIS AFTER OUT OF AFTER TABLE. &
+
+1280	D%=PEEK(512%) &
+	\ Z7%=1% &
+		! HOLD DATE; SET UP FOR AFTER TABLE SCAN. &
+
+1290	Z7%=Z0%(Z7%,0%) AND 255% &
+	\ RETURN IF Z7%=1% &
+	\ GOSUB 1270 IF D%>Z0%(Z7%,3%) &
+	\ GOTO 1290 &
+		! DO THE SCAN AND RETURN WHEN DONE. &
+
+1300	! &
+	! &
+	!	O N L I N E    F R O M    S P O O L E R &
+	! &
+	! &
+	&
+	GOTO 1150 IF (Q0% AND 2%) 	! SET IF SPOOLING IS DISABLED &
+	\ GOSUB 10200 &
+		! Z3% IS RETURNED SET TO TOTAL NUMBER OF ONLINE JOBS, &
+		!	IT IS UNCHANGED IF NONE ARE ONLINE &
+		! R3% IS SET TO ZERO IF THERE IS AT LEAST ONE SPOOLER ONLINE &
+		! A NULL MESSAGE IS SENT TO ALL SPOOLERS THAT ARE IN QUMRUN'S &
+		! TABLE OF SPOOLERS (by name in RAD50) ONLINE: O$(n,0%) &
+		! &
+	\ GOSUB 2280 &
+		! Z3% IS RETURNED SET TO Z% WHICH IS J%'s POSITION IN THE &
+		! TABLE OF TOTAL ONLINE JOBS: O%(0%,0%) &
+		! &
+	\ GOTO 1340 IF Z3% &
+		! NOTE THAT ON THE SECOND PASS THROUGH THIS ROUTINE FOR THE &
+		! SAME JOB (when checking to see if a job is really online) &
+		! Z3 WILL NOT BE SET BECAUSE ON THE PREVIOUS PASS J% WAS &
+		! TAKEN OUT OF THE ONLINE TABLE WHEN IT EXECUTED LINE 1340 &
+	\ GOSUB 2240 &
+		! POP M$ FROM THE TEMPORARY FILE THAT IS USED AS A STACK &
+	\ GOSUB 2380 &
+		! Z% IS SET TO THE CVT$%(M$), Z4% IS SET TO THE POSITION OF &
+		! Z% IN THE SPOOLER TYPE TABLE: Z0%(n,1%) &
+		! Z4% IS SET TO 0% IF Z% IS NOT FOUND IN Z0%(n,1%) &
+	\ GOSUB 10300 &
+		! Z% AND Z3% ARE SET TO 0 UNLESS WE HAVE A DUPLICATE RECEIVER &
+	\ GOTO 1336 IF Z3% &
+	\ GOTO 1346 IF O%(0%,0%)>=16% OR Z4%=0% &
+		! THIS IS WHERE THE TROUBLE WAS SPOTTED FOR YANKING JOBS &
+		! OFFLINE THAT ARE STILL CURRENTLY ACTIVE. &
+		! SINCE PART OF ITS ACTIVE JOB WAS OVERWRITTEN (see comments &
+		! at line 1223) IT COULD NOT FIND Z% IN Z0%(n,0%) SO Z4%=0 &
+	\ Z3%,O%(0%,0%)=O%(0%,0%)+1% &
+	\ O%(Z3%,0%)=J% &
+	\ O%(Z3%,1%)=ASCII(MID(M$,3%,1%)) &
+	\ O%(Z3%,2%)=Z4% &
+	\ O$(Z3%,0%)=LEFT(M$,2%) &
+	\ O$(Z3%,1%)=MID(M$,4%,4%) &
+	\ IF Z4%=2% THEN &
+		O$(Z3%,2%)=FNP$("NORMAL") &
+	ELSE	O$(Z3%,2%)=FNP$("??????") &
+		! SET UP LIST POINTERS. &
+
+1330	O%(Z3%,Z4%)=0% FOR Z4%=3% TO 7% &
+	\ T%=FNS%(O%(Z3%,0%),-192%,0%) &
+	\ Z$=FNU$(O$(Z3%,1%))+" ("+NUM1$(J%)+") PUT ONLINE" &
+	\ GOSUB 2410 &
+	\ Z$=C0$(0%) &
+	\ T%=1% &
+	\ GOTO 1230 &
+		! MAKE SURE JOB ISN'T STALLED, TELL OPSER, &
+		!	SET LENGTH, RETURN. &
+
+1336	GOSUB 2260 &
+		! PUSH M$ BACK ONTO STACK FOR NEXT PASS IF DUPLICATE ERROR. &
+
+1340	Z$="FOUND ON-LINE" &
+	\ GOSUB 2760 	! PULLS THE SPOOLER OFFLINE AND SQUASHES ITS TABLE &
+	\ H0%=-1% &
+	\ GOTO 1150 &
+		! RE-SCAN BEFORE IT'S PUT ON-LINE. &
+
+1346	Z$=FNU$(MID(M$,4%,4%))+" ("+NUM1$(J%)+") NOT PUT ONLINE" &
+	\ Z$=Z$+" - NO ROOM IN SPOOLER TABLE" IF Z4% &
+	\ GOSUB 2410 &
+	\ Z$=CHR$(8%)+"OFFLINE" &
+	\ Z$=SYS(Y7$+FNU$(MID(M$,4%,4%))+STRING$(10%,0%)+Z$) &
+	\ T%=1% &
+	\ GOTO 1230 &
+	&
+
+1350	! &
+	! &
+	!	N E W J O B    F R O M    S P O O L E R &
+	! &
+	! &
+	&
+	GOTO 1150 IF (J%(J%,0%) AND 1600%) OR (Q0% AND 2%) &
+		! LEAVE MESSAGE QUEUED FOR LATER IF: &
+		!	1024 &
+		!	512 &
+		!	64		SPOOLER STALLED BY QUMRUN BECAUSE IT &
+		!			HAS NO WORK FOR IT &
+		!	Q0% AND 2%	SPOOLING DISABLED. &
+	&
+
+1370	GOSUB 2280 &
+	\ T%=1% &
+	\ GOTO 1230 UNLESS Z3% &
+	\ O%(Z3%,Z%)=0% FOR Z%=3% TO 7% &
+	\ Z4%=O%(Z3%,2%) &
+	\ Z7%=Z0%(Z4%,0%) AND 255% &
+		! CLEAR OUT TABLES AND SET UP POINTERS. &
+
+1380	DFORMS% = 0% &
+	\ WHILE Z7%<>Z4% &
+	\	GOTO 1390 IF FNN% &
+	\	Z7%=Z0%(Z7%,0%) AND 255% &
+	\ NEXT &
+	\ IF DFORMS% THEN &
+		Z$ = "NO JOBS WAITING WITH FORMNAME '" + &
+		RAD$(SWAP%(CVT$%(LEFT(O$(Z3%,2%),2%)))) + &
+		RAD$(SWAP%(CVT$%(RIGHT(O$(Z3%,2%),3%)))) &
+	\	Z$=Z$+"' FOR SPOOLER 'LP" + FNU1$(O%(Z3%,1%)) + ":'" + CRLF$ &
+	\	Z$ = Z$ + "	OTHER JOB(S) WAITING." +CRLF$ &
+	\	Z$ = Z$ + "*** PLEASE INSPECT LP"+FNU1$(O%(Z3%,1%))+":" &
+	\	Z$ = Z$ + " AND/OR LP: QUEUE AND TAKE APPROPRIATE ACTION ***" &
+	\	CHANGE SYS(CHR6$+CHR$(34%)+CHR$(3%)) TO M% &
+			! LOOKUP THE FEATURE PATCH MASK WORDS &
+	\	F.P%=-1% &
+			! F.P%	DEFAULT IS ON &
+	\	F.P%=0% IF (M%(5%)+SWAP%(M%(6%))) AND 8% &
+			! TURN OFF IF FEATURE IS SET &
+	\	IF (Z4% = 2%) AND F.P% THEN &
+			GOSUB 2410 &
+
+1385	Z$=NL$ &
+	\	T%=FNS%(J%,0%,64%) &
+	\ GOTO 1150 &
+		! CHECK FOR ONE FOR US, IF NONE, STALL JOB. &
+		! IF OK BUT DIFFERENT FORMS SEND MESSAGE. &
+
+1390	O%(Z3%,3%)=Z7% &
+	\ I%,O%(Z3%,4%)=FNR%(Z7%) &
+	\ O%(Z3%,5%)=0% &
+	\ LSET Z1$=Z$(I%) &
+	\ T%=FNS%(J%,30720%,256%) &
+	\ Z0%(Z7%,1%)=(O%(Z3%,1%) AND 255%)+256% &
+	\ O%(Z3%,7%)=ASCII(F0$) &
+	\ Z$=C0$(0%) &
+	\ T%=1% &
+	\ GOTO 1230 &
+		! SET UP A JOB. &
+
+1400	! &
+	! &
+	!	R E S T A R T   F R O M    S P O O L E R &
+	! &
+	! &
+	&
+	T%=1% &
+	\ GOSUB 2280 &
+	\ GOTO 1230 IF Z3%=0% OR O%(Z3%,3%)=0% &
+	\ O%(Z3%,Z%)=0% FOR Z%=4% TO 7% &
+	\ Z4%=O%(Z3%,2%) &
+	\ Z7%=O%(Z3%,3%) &
+	\ GOTO 1390 &
+		! SET THIS JOB BACK TO THE BEGINNING. &
+
+1420	! &
+	! &
+	!	E N D J O B   F R O M    S P O O L E R &
+	! &
+	! &
+	&
+	T%=1% &
+	\ GOTO 1230 UNLESS (J%(J%,0%) AND 256%) &
+	\ GOSUB 2280 &
+	\ GOTO 1230 UNLESS Z3% &
+	\ Z7%=O%(Z3%,3%) &
+	\ LSET Z1$=Z$(O%(Z3%,4%)) &
+	\ I1%=ASCII(F0$) &
+	\ GOTO 1450 UNLESS O%(Z3%,5%)=I1%+1% &
+		! SEE IF SPOOLER HAS A JOB AND IF ALL FILES PROCESSED. &
+
+1440	Z0%=Z0%(Z7%,7%) &
+	\ FOR I%=1% TO I1% &
+	\	FIELD #5%,I%*20% AS Z$,12% AS Z$,1% AS S1$ &
+	\	Z$=FNZ3$(Z$) &
+	\	DUMMY% = FNINSTALL.3PP%(Z0%) &
+	\	KILL Z$ IF (ASCII(S1$) AND 4%) &
+
+1442	DUMMY% = FNDEINSTALL.3PP% &
+\	NEXT I% &
+		! KILL FILES IF REQUESTED. &
+		! IT IS NECESSARY TO FIRST INSTALL 3RD PARTY PRIVS SO &
+		!	V9 SYSTEM PRIVS ARE USED APPROPRIATELY &
+		! ERROR ROUTINE MODIFIED TO RESUME AT 1442 IN CASE OF &
+		!	ANY ERROR AT 1440 &
+
+1450	IF Z7%  THEN &
+		I%=Z7% &
+	\	Z7%=0% &
+	\	GOSUB 2330 &
+		! REMOVE JOB FROM QUEUE IF THERE IS A JOB. &
+
+1460	J%(J%,1%)=0% &
+	\ O%(Z3%,Z7%)=0% FOR Z7%=3% TO 7% &
+	\ T%=FNS%(J%,-30464%,0%) &
+	\ T%=1% &
+	\ Z$=Z$(0%) &
+	\ GOTO 1230 &
+		! RESET JOB. &
+
+1470	! &
+	! &
+	!	N E X T    P A C K E T    R E Q U E S T    F R O M &
+	!			S P O O L E R &
+	! &
+	&
+	T%=1% &
+	\ GOTO 1150 IF (J%(J%,0%) AND 1600%) &
+		OR ((J%(J%,0%) AND 256%)=0% AND (Q0% AND 2%)=2%) &
+		! SLIP PROCESSING OF THIS MESSAGE IF: &
+		!	1024	= &
+		!	 512	= &
+		!	  64	= SPOOLER STALLED WAITING FOR JOB &
+		!	Q0% AND 2% SPOOLING DISABLED &
+		!	256 AND 0 NO JOB SET FOR SPOOLER &
+	&
+	\ GOSUB 2280 &
+		! IS THIS JOB REALLY A SPOOLER. &
+	\ GOTO 1230 UNLESS Z3% AND (J%(J%,0%) AND 256%)=256% &
+		! CHUCK MESSAGE IF NOT A SPOOLER OR NO JOB SET UP. &
+	\ Z7%=O%(Z3%,3%) &
+		! HOLD ADDRESS OF ACTIVE JOB IF ANY OF SPOOLER. &
+
+1490	IF (J%(J%,0%) AND 2048%)=0% THEN &
+		T%=FNS%(J%,28672%,0%) &
+	\	GOSUB 1560 &
+		! IF NO PACKET IS READY, (THE PACKET READY FLAG IS RESET) THEN &
+		! RESET THE LOOK-AHEAD INHIBIT FLAGS, SINCE NO PACKET IS &
+		! BEING PROCESSED BY SPOOLER, SO THERE IS NO &
+		! INTERFERENCE WITH THE SPOOLER; &
+		! GO BUILD THE NEXT PACKET. &
+
+1500	M$=J$(J%,0%) &
+	\ GOSUB 1530 &
+	\ T%=FNS%(J%,2048%,0%) &
+	\ GOSUB 1560 IF J% &
+		! SEND THE PACKET; RESET PACKET READY BIT; TRY TO BUILD &
+		! NEXT IF STILL LEGAL. I.E. J%<>0% (THE SPOOLER COULD &
+		! BE SENT TO). &
+
+1510	T%=1% &
+	\ GOTO 1230 &
+		! SET PURGE MESSAGE FLAG TO CHUCK THIS MESSAGE AND CLEAR OUT. &
+
+1530	! &
+	! &
+	!	S E N D    A    M E S S A G E    T  O    S P O O L E R &
+	! &
+	! &
+	&
+	WHILE LEN(M$) > 19% &
+	\ Z$=SYS(Y7$+FNU$(O$(Z3%,1%))+STRING$(10%,0%)+CHR255$+LEFT(M$,19%)) &
+	\	M$=RIGHT(M$,20%) &
+	\	RESEND%=0% &
+	\ NEXT &
+	\ Z$=SYS(Y7$+FNU$(O$(Z3%,1%))+STRING$(10%,0%)+CHR$(LEN(M$)+1%)+M$) &
+	\ RESEND%=0% &
+	\ RETURN &
+		! SEND THE MESSAGE; COUNT INCLUDES THE COUNT BYTE. &
+
+1540	Z$="IS NO LONGER IN MONITOR'S RECEIVE TABLES" &
+	\ GOSUB 2760 &
+	\ K9%= -1% &
+	\ T%=0% &
+	\ RETURN &
+		! IN CASE THE ADDRESSEE WAS AWAY RECENTLY. &
+
+1550	! &
+	! &
+	!	B U I L D    A    J O B    P A C K E T &
+	! &
+	! &
+	&
+	M$=CHR$(1%)+CHR$(Z0%(Z7%,1%))+CVT%$(Z0%(Z7%,5%)) &
+		+CVT%$(Z0%(Z7%,6%))+CVT%$(Z0%(Z7%,7%))+ &
+		D$+T$+CVT%$(Z0%(Z7%,3%))+M1$+C$+ &
+		CHR$(Z0%(Z7%,8%))+CVT%$(Z0%(Z7%,2%))+ &
+		CVT%$(Z0%(Z7%,9%))+CVT%$(Z0%(Z7%,10%))+ &
+		CVT%$(Z0%(Z7%,15%))+R$ &
+	\ S0%=0% &
+	\ T%=FNS%(J%,-2048%,0%) &
+	\ RETURN &
+		! BUILD A JOB PACKET. &
+
+1560	! &
+	! &
+	!	S E T    U P   N E X T    P A C K E T &
+	! ENTER WITH: &
+	!	Z3%	= INDEX IN SPOOLER TABLE (O%(X,Y)) OF SPOOLER &
+	!	J%	= JOB # OF SPOOLER &
+	! &
+	&
+	IF O%(Z3%,5%)=0% THEN &
+		S0%=0% &
+		! IF HAV'NT SENT ANYTHING TO SPOOLER I.E. FILE PACKET INDEX=0 &
+		! &
+	\ GOSUB 1550 &
+	\ J$(J%,0%)=M$ &
+	\ S0%=28672% &
+	\ GOTO 1590 &
+		! RESET ALL LOOK AHEAD PROHIBIT FLAGS S0% &
+		! BUILD JOB PACKET IN M$ &
+		! PUT PACKET INTO SPOOLERS 'NEXT PACKET' SLOT &
+		! PREPAR FOR NEXT PACKET YET I.E. LOOK UP FIRST FILE TO SEND. &
+
+1570	IF O%(Z3%,5%)>O%(Z3%,7%) THEN &
+		J$(J%,0%)=CHR$(2%) &
+	\	S0%=0% &
+	\	GOTO 1600 &
+		! IF ALL FILE PACKETS SENT (O%(Z3%,5%))>#FILES QUEUED THEN &
+		! SET AND STUFF 'END JOB PACKET INTO 'NEXT' SLOT. &
+
+1580	! &
+	! PACKET TO BUILD IS NOT A NEWJOB OR ENDJOB &
+	! SO IF POSSIBLE LOOK UP NEXT FILE. FOR PACKET. &
+	&
+	GOSUB 1610 &
+		! CHECK DEVICE TYPE OF NEXT FILE. &
+	\ IF (S0% AND 28672%)  AND J%(J%,0%)  THEN &
+		RETURN &
+			! RETURN IF CANT DO LOOK AHEAD. &
+	ELSE	GOSUB 1630 &
+	\	GOTO 1570 IF S0%=-1% &
+		! CALL PREPAR NEXT PACKET AND CHECK FOR POSSIBLE END OR JOB &
+		! IF NO MORE WILD CARDS. &
+
+1590	IF (S0% AND 2%)=0% THEN &
+		GOSUB 1720 &
+		! IF NO WILDCARDS THEN WERE DONE WITH THIS PACKET. &
+		! INCREMENT FILE INDEX; RESET SUB-INDEX. &
+
+1600	T%=FNS%(J%,28672%,(S0% AND 28672%) OR 2048%) &
+	\ RETURN &
+		! CLEAR LOOK AHEAD PROHIBIT FLAGS AND SET ?????? FLAG &
+		! IF IT WAS SET IN DEVICE WORD. &
+		! SET STATUS BITS FOR NEW PACKET. &
+
+1610	! &
+	! &
+	! SET UP AND FSS THE FILE PACKET AT O%(Z3%,5%) OF JOB AT O%(Z3%,4%) &
+	! DEVICE LOOKAHEAD FLAG SET BY FND% &
+	&
+	LSET Z1$=Z$(O%(Z3%,4%)) &
+		! GET JOB PACKET INTO HANDY PLACE. &
+	\ FIELD #5%,O%(Z3%,5%)*20% AS Z$,15% AS Z$ &
+		! FIELD APPROPRIATE FILE PACKET. &
+	\ Z0$=FNZ3$(Z$) &
+	\ CHANGE SYS(CHR6.M10$+Z0$) TO M% &
+		! GET FILENAME READY. &
+	\ S0%=FND%(M%(29%) + SWAP%(M%(30%))) &
+
+1620	RETURN &
+	! GET DEVICE DETAILS. &
+	! 1 DEVICE WAS DISK AND WAS REALLY FOUND (AT LEAST A DEFINED LOGICAL) &
+	! 2 WILDCARDS EXIST IN THE FILENAME OR .EXT &
+
+1630	! &
+	! &
+	! &
+	! THE FOLLOWING ROUTINE LOOKS UP THE NEXT FILE. IT RETURNS THE &
+	! APPROPRIATE FILE PACKET FOR SENDING TO THE SPOOLER IN THE FIRST &
+	! MESSAGE SLOT FOR THAT SPOOLER. PACKET INCLUDES AN ERROR FLAG IF CANT &
+	! FIND THE FILE, OR DEVICE WAS NOT SPOOLABELE FROM, OR REQUESTOR DID &
+	! NOT HAVE READ ACCES TO FILE <PRO>. &
+	&
+	IF (S0% AND 3%) = 3% THEN &
+		! IF DISK AND WILD CARD APPEARED IN FILE SPEC. &
+		GOTO 1640 &
+			! ATTEMPT TO LOOK UP FILE. &
+	ELSE	GOTO 1680 &
+			! OTHERWISE JUST SET UP THE FILE PACKET. &
+
+1640	M%(0%)=30% &
+	\ M%(1%)=6% &
+	\ M%(2%)=17% &
+		! SET UP FOR DIRECTORY SEARCH. &
+
+1650	M%(3%)=O%(Z3%,6%) &
+	\ M%(4%)=SWAP%(M%(3%)) &
+	\ CHANGE M% TO Z0$ &
+	\ ON ERROR GOTO 1690 &
+	\ Z0$=SYS(Z0$) &
+	\ ON ERROR GOTO 19000 &
+	\ O%(Z3%,6%)=O%(Z3%,6%)+1% &
+
+1660	IF FNM%(Z$,Z0$)=0% THEN &
+		GOTO 1650 &
+
+1670	Z$=LEFT(Z$,4%)+MID(Z0$,7%,6%)+MID(Z0$,5%,2%)+RIGHT(Z$,13%) &
+		! DO THE SEARCH; IF NO MATCH, TRY AGAIN. &
+
+1680	J$(J%,0%)=CHR$(4%)+Z$+CHR$(0%) &
+	\ RETURN &
+		! BUILD A FILE PACKET. &
+		! UNCONDITIONALLY PASS THE "OKAY" FLAG, LET THE &
+		! SPOOL/BATCH SERVER HANDLE THE PRIV CHECKING &
+	&
+	&
+
+1690	! &
+	! &
+	! ERROR TRAP FOR DIRECTORY LOOK UP. &
+	! &
+	&
+	IF ERR<>5% THEN &
+		RESUME 1700 &
+			! IF ERROR WAS'NT 'END OF DIRECTORY' &
+			! THEN FORGET THIS FILE. &
+	ELSE	RESUME 1710 &
+		! TRAP END OF DIRECTORY. &
+
+1700	GOSUB 1710 &
+	\ RETURN &
+		! IF NOT END OF DIRECTORY, IGNORE ERROR AND END LOOKUP. &
+
+1710	ON ERROR GOTO 19000 &
+		! RESET ERROR TRAP. &
+
+1715	IF O%(Z3%,6%) THEN &
+		S0%=-1% &
+	ELSE	CHANGE M% TO Z0$ &
+	\	GOSUB 1670 &
+		! IF THIS IS NOT THE FIRST TIME WE'VE TRIED TO FIND A &
+		!  MATCH THEN &
+		!	SET THE 'NO MATCH' FLAG; &
+		!  ELSE	SET UP FOR THE 'SET UP A PACKET' ROUTINE; &
+		!	SET UP A PACKET WITH AN ERROR BYTE. &
+	&
+
+1720	! DONE WITH ALL LOOKUPS FOR A PARTICULAR FILE SPEC SO INCREMENT &
+	! PACKET POINTE AND RESET LOOK INDEX POINTER. &
+	&
+	O%(Z3%,5%)=O%(Z3%,5%)+1% &
+	\ O%(Z3%,6%)=0% &
+	\ RETURN &
+		! INCREMENT MAJOR INDEX; RESET SUB-INDEX. &
+
+1760	! &
+	! &
+	!	S T A C K    M E S S A G E    F R O M    Q U E &
+	! &
+	! &
+	&
+	T%=ASCII(M$) &
+	\ M$=MID(M$,2%,T%) &
+	\ GOSUB 2260 &
+	\ T%=T%+2% &
+	\ GOTO 1230 &
+
+1890	! &
+	! &
+	!	Q U E U E    A    J O B &
+	! &
+	! &
+	! &
+	!	J$(J%,X%) CURRENTLY LOOKS LIKE THIS" &
+	!		TOP   - JOB PACKET #1 TO QUEUE &
+	!		TOP -1- FILE PACKET # 1 FOR JOB &
+	!		. &
+	!		. &
+	!		.     - LAST FILE PACKET FOR JOB &
+	!	QUE REQUEST WILL FAIL IF: &
+	!	JOB PACKET IS INVALID &
+	!	INVALID QUE TYPE &
+	!	QUEUEING DISABLED &
+	!	NO ROOM IN QUEUE FOR MORE JOBS &
+	!	QUE UNIT NUMBER OUT OF RANGE  (0-7) OR 255 &
+	!	IF MESSAGE IS INVALID IT IS CHUCKED , NO MESSAGE IS ISSUED. &
+	&
+	ONE.SHOT%=T%=14% &
+	\ GOSUB 2240 UNLESS ONE.SHOT% &
+	\ M0$=RIGHT(M0$,5%) IF ONE.SHOT% &
+		! GET TOP MESSAGE (JOB) &
+		! UNLESS IT WAS A ONE SHOT QUE COMMAND &
+	\ GOSUB 10010 &
+		! VERIFY THAT IT IS A JOB PACKET AND APPLY DEFAULTS &
+	\ GOTO 2000 IF E% &
+	\ GOSUB 2380 &
+		! VERIFY QUEUE TYPE &
+	\ IF Z4%=0% OR (Q0% AND 1%)  THEN &
+		GOTO 2000 &
+		! EXIT WITH ERROR IF QUEUEING DISABLE OR QUE TYPE IS INVALID. &
+
+1910	I%=FNF% &
+	\ I%=0% IF I%<>0% &
+	    AND ((Z0%(I%,0%) AND 255%)=0%) &
+	    AND ((CVT$%(MID(M$,18%,2%))<>0%) OR (CVT$%(MID(M$,9%,2%))<>0%)) &
+	\ IF I%=0% THEN &
+		GOTO 2000 &
+	! CHECK FOR ROOM IN QUEUE. &
+	! SAY THERE IS NO ROOM IN THE QUEUE IF ONLY ONE ENTRY AVAILABLE AND &
+	!	THE AFTER SWITCH WAS USED &
+	! EXIT WITH ERROR IF NO ROOM. &
+
+1920	Z0%(I%,1%)=-256% OR ASCII(MID(M$,3%,1%)) &
+	\ Z0%(I%,2%)=CVT$%(MID(M$,18%,2%)) &
+	\ Z0%(I%,3%)=CVT$%(MID(M$,9%,2%)) &
+	\ Z0%(I%,4%)=ASCII(MID(M$,8%,1%)) &
+	\ Z0%(I%,5%)=CVT$%(MID(M$,4%,2%)) &
+	\ Z0%(I%,6%)=CVT$%(MID(M$,6%,2%)) &
+	\ Z0%(I%,7%)=CVT$%(MID(M$,16%,2%)) &
+	\ Z0%(I%,8%)=ASCII(MID(M$,20%,1%)) &
+	\ Z0%(I%,9%)=CVT$%(MID(M$,21%,2%)) &
+	\ Z0%(I%,10%)=CVT$%(MID(M$,23%,2%)) &
+		! SET UP JOB RECORD INFO FROM JOB PACKET. &
+	\ Z0%(I%,Z8%)=0% FOR Z8%=11% TO 14% &
+	\ Z0%(I%,15%)=Z0%(0%,8%) &
+	\ Z0%(0%,8%)=Z0%(0%,8%)+1% &
+	\ Z0%(0%,8%)=1% IF Z0%(0%,8%) < 0% &
+		! SET UP SEQUENCE # &
+	\ IF Z4% <> 2% THEN &
+		Z9$=FNP$("??????") &
+	\	Z0%(I%,9%)=CVT$%(LEFT(Z9$,2%)) &
+	\	Z0%(I%,10%)=CVT$%(RIGHT(Z9$,3%)) &
+		! IF NOT "LP" QUEUE (QUE LIST #2) SET FORM NAME TO ??????, &
+		! FOR MATCH ON ANYTHING. &
+		! SET JOB HEADER IN QUEUE LIST. &
+
+1930	GOTO 2000 IF (Z0%(I%,1%)>7% AND Z0%(I%,1%)<>255%) OR &
+			 (ASCII(MID(M$,11%,1%))>11% AND ONE.SHOT%=0%) &
+		! EXIT IF QUEUE UNIT # IS OUT OF RANGE OR &
+		!	TOO MANY FILE PACKETS. &
+	\ GOSUB 2300 &
+	\ Z$=Z$(0%) &
+	\ Z7%=I% &
+		! PUT ENTRY INTO QUEUE LIST, IN PRIORITY ORDER. &
+
+1940	Z$=CVT%$(1441%-TIME(0%)/60%)+MID(M$,11%,5%)+ &
+			CVT%$(PEEK(512%))+CHR0$ &
+	\ Z$=Z$+CHR0$ UNTIL LEN(Z$)>=20% &
+	\ Z$=LEFT(Z$,20%) &
+	\ IF ONE.SHOT% THEN &
+		M0$=M0$+CHR0$ &
+	\	Z$=Z$+MID(M0$,5%,12%)+ &
+			CHR$(ASCII(MID(M0$,4%,1%)) AND 62%)+CHR0$+CHR$(1%) &
+	\	GOTO 1960 &
+		! SET UP PREFIX PACKET FOR THE JOB'S FILE RECORD HOLDING &
+		! TIME AND DATE ON WHICH JOB WAS QUEUED. &
+		! IT ONE SHOT THEN FUDGE THE FILE PACKET AND GO PROCESS IT. &
+
+1950	WHILE (J%(J%,1%) AND 255%)>0% &
+	\ GOSUB 2240 &
+	\ M$=M$+CHR0$ UNTIL LEN(M$)>=20% &
+	\ Z$=Z$+LEFT(M$,20%) &
+	\ NEXT &
+		! GET ALL MSGS. STORED FOR THIS JOB, MAKE EACH 20 BYTES, &
+		!	AND CONCATENATE THEM. &
+
+1960	Z$=Z$+CHR0$ UNTIL LEN(Z$)>=240% &
+	\ Z$=LEFT(Z$,240%)+CHR255$ &
+	\ Z$(FNR%(Z7%))=Z$ &
+		! ENTRY NOT TO EXCEED 240 BYTES, STORE IT IN STRING STORAGE &
+		!	FOR THIS ENTRY. &
+
+1970	Z0%(Z7%,1%)=Z0%(Z7%,1%) AND 255% &
+	\ Z$=Z$(0%) &
+	\ Z$=NL$ &
+		! RESET STATUS BYTE OF JOB HEADER. &
+
+1980	Z%=FNS%(O%(I%,0%),64%,0%) &
+		IF Z4%=O%(I%,2%) FOR I%=1% TO O%(0%,0%) &
+		! RESET WAITING-FOR-JOB BIT IN JOB TABLE. &
+
+1990	IF Z0%(Z7%,3%) OR Z0%(Z7%,2%)  THEN &
+		I%=FNF% &
+	\	IF I% THEN &
+			Z0%(I%,1%)=Z4% &
+	\		Z0%(I%,3%)=Z0%(Z7%,2%) &
+	\		Z0%(I%,4%),I1%=Z0%(Z7%,3%) &
+	\		Z0%(I%,8%)=Z7% &
+	\		Z0%(Z7%,1%)=Z0%(Z7%,1%) OR (1024%) &
+	\		Z4%=1% &
+	\		GOSUB 2300 &
+		! IF AN 'AFTER' TIME WAS SPECIFIED, &
+		! QUEUE IT INTO THE 'AFTER' QUEUE, &
+		! SET AFTER-WAIT BIT IN JOB STATUS. &
+
+2000	M0$=NL$ IF ONE.SHOT% &
+	\ ONE.SHOT%=0% &
+	\ GOSUB 2150 &
+	\ E%=0% &
+	\ T%=1% &
+	\ GOTO 1230 &
+	&
+	&
+
+2050	! &
+	! &
+	!	K I L L   J O B   R E Q U E S T E D   B Y   Q U E U E R &
+	! &
+	! &
+	&
+	IF (J%(J%,1%) AND 255%)=0% OR (Q0% AND 1%) THEN &
+		GOSUB 2150 &
+	\	E%=0% &
+	\	T%=1% &
+	\	GOTO 1230 &
+
+2070	GOSUB 2240 &
+	\ GOSUB 10010 &
+	\ GOTO 2050 IF E% &
+	\ GOSUB 2380 &
+	\ IF Z4%=0% THEN &
+		GOTO 2050 &
+	ELSE	Z7%=Z4% &
+	\	IF VALID.OP%  THEN &
+			P%=CVT$%(MID(M$,16%,2%)) &
+
+2080	Z7%=Z0%(Z7%,0%) AND 255% &
+	\ IF Z7%=Z4% THEN &
+		GOTO 2050 &
+
+2090	IF FNC3%(Z%)=0% THEN &
+		GOTO 2080 &
+	ELSE	IF (S% AND 128%)  THEN &
+			IF (FNC%(MID(M$,21%,2%),Z0%(Z7%,9%)) &
+			AND FNC%(MID(M$,23%,2%),Z0%(Z7%,10%)))=0% THEN &
+				GOTO 2080 &
+		! IF JOB NAME, UNIT NUMBER, AND PPN DO NOT MATCH, THEN &
+		!	GO LOOK FOR ANOTHER JOB. &
+		! ELSE IF A SPECIFIED FORM NAME WAS SPECIFIED THEN &
+		!	FORM NAME MUST MATCH AS WELL. &
+
+2096	Z%=CVT$%(MID(M$,25%,2%)) &
+	\ IF Z% <> Z0%(Z7%,15%) THEN &
+		GOTO 2080 UNLESS Z%= -1% &
+		! SEQUEMCE NUMBER MUST MATCH ELSE TRY ANOTHER JOB. &
+
+2100	IF (Z0%(Z7%,1%) AND 256%)  THEN &
+		GOTO 2120 &
+		! IF JOB HAS BEEN 'S'ENT THEN GO 'KILL A SENT JOB' &
+
+2110	I%=Z7% &
+	\ Z7%=0% &
+	\ KILREQ%=-1% &
+	\ GOSUB 2330 &
+	\ GOTO 2080 &
+		! REMOVE JOB FROM QUEUE. &
+		! GO LOOK FOR ANOTHER MATCH. &
+
+2120	! &
+	! &
+	!	KILL A JOB WHICH HAS THE 'S'ENT STATUS. &
+	! &
+	! &
+	&
+	GOTO 2140 IF O%(Z3%,3%)=Z7% FOR Z3%=1% TO O%(0%,0%) &
+	\ GOTO 2110 &
+		! CHECK TO FIND OUT WHICH SPOOLER THIS JOB IS SENT TO. &
+		! IF CAN'T FIND IT THEN  MUST NOT HAVE REALLY BEEN SENT SO &
+		! IGNORE THE 'S'ENT STATUS' &
+
+2140	GOTO 2080 IF (Z0%(Z7%,1%) AND (2048%)) &
+		! GO LOOK FOR ANOTHER MATCHING JOB IF FOR SOME REASON &
+		! THE JOB IS ALREADY 'SK' STATUS. &
+	\ O%(Z3%,5%)=255% &
+		! SET SPOOLERS TABLE TO 'PAST EOJ' &
+	\ Z%=FNS%(O%(Z3%,0%),2048%,0%) &
+		! CLEAR 'NEXT PACKET READY TO SEND' FLAG FOR THE SPOOLER TO &
+		! FORCE A 'MAKE NEXT PACKET' CALL WHEN SPOOLER NEXT REQUESTS. &
+	\ Z0%(Z7%,1%)=Z0%(Z7%,1%) OR (2048%) &
+		! SET JOB INTO 'SK' STATE. &
+	\ Z$=Z$(0%) &
+		! GUARANTEE THAT JOB MOD INFO IS REALLY WRITTEN OUT TO DISK. &
+	\ Z9$=M$ &
+	\ M$=CHR$(3%) &
+	\ K9%=0% &
+	\ GOSUB 1530 &
+	\ M$=Z9$ &
+	\ GOTO 2080 UNLESS K9% &
+	\ K9%=0% &
+	\ GOTO 2110 &
+		! SEND A 'KILLJOB' PACKET TO SPOOLER; &
+		! IF SUCCESSFUL, THEN DONE SO GO LOOK FOR ANOTHER MATCH &
+		! IF SEND FAILED, THE SPOOLER IS NEVER GOING TO RESPOND SO &
+		! TREATE THE JOB AS IF IT HAD NEVER BEEN 'SENT TO A SPOOLER. &
+		! RESET # FILES PROCESSED TO 0 SO THEY WON'T BE DELETED IF &
+		!	SPECIFIED; SET 'KILL-UPON- COMPLETE BIT IN JOB STATUS; &
+		!	GUARANTEE WRITE; SEND 'KILLJOB' TOKEN TO THE SPOOLER. &
+
+2150	! &
+	! &
+	!	C L E A R   O U T   A N Y   M E S S A G E S   F O R   J O B &
+	! &
+	! &
+	&
+	J$(J%,I%)=NL$ FOR I%=1% TO 21% &
+	\ J%(J%,1%)=0% &
+	\ T%=1% &
+	\ RETURN &
+
+2170	! &
+	! &
+	!	D E F E R   J O B &
+	! &
+	! &
+	&
+	T%=1% &
+	\ GOSUB 2280 &
+	\ GOTO 1230 IF Z3%=0% OR O%(Z3%,3%)=0% &
+	\ I%=O%(Z3%,3%) &
+	\ Z0%(I%,1%)=Z0%(I%,1%) AND 255% &
+	\ Z7%=SWAP%(Z0%(O%(Z3%,2%),0%)) AND 255% &
+	\ GOSUB 2330 &
+	\ GOTO 1460 &
+		! SET UP AND MOVE LIST ENTRY (RESET JOB'S STATUS). &
+
+2220	! &
+	! &
+	!	O F F L I N E   F R O M   S P O O L E R &
+	! &
+	! &
+	! &
+	&
+	GOSUB 2280 &
+		! MAKE SURE IT'S A SPOOLER. &
+	\ T%=1% &
+	\ GOTO 1230 UNLESS Z3% &
+		! IF NOT THROW AWAY MESSAGE. &
+	\ Z$="REQUESTED OFF-LINE" &
+	\ GOSUB 2760 &
+		! TAKE HIM OFFLINE &
+	\ T%=1% &
+	\ GOTO 1230 &
+
+2240	! &
+	! &
+	!	P O P   A   M E S S A G E   F R O M   J O B &
+	!			D A T A   S T A C K &
+	! &
+	&
+	I%=(J%(J%,1%) AND 255%) &
+	\ M$=J$(J%,I%) &
+	\ J%(J%,1%)=(J%(J%,1%) AND NOT(255%)) OR I%-1% &
+	\ RETURN &
+
+2260	! &
+	! &
+	!	P U S H   A   M E S S A G E   O N   J O B &
+	!			D A T A   S T A C K &
+	! &
+	&
+	I%=(J%(J%,1%) AND 255%)+1% &
+	\ J$(J%,I%)=M$ &
+	\ J%(J%,1%)=(J%(J%,1%) AND NOT(255%)) OR I% &
+	\ RETURN &
+	&
+
+2280	! &
+	! &
+	!	C H E C K   T O   S E E   I F   J O B  J%   I S &
+	!		A   S P O O L E R &
+	! &
+	! &
+	&
+	Z3%,Z%=0% &
+	\ Z3%=Z% IF J%=O%(Z%,0%) FOR Z%=1% TO O%(0%,0%) &
+	\ RETURN &
+		! RETURNS Z3%= SPOOLERS ENTRY IN SPOOLER'S TABLE ELSE 0% &
+	&
+
+2300	! &
+	! &
+	!	F I N D   A   P L A C E   T O   P U T   J O B   I N   Q U E &
+	! &
+	! &
+	&
+	Z7%=Z4% &
+	\ I0%=Z0%(I%,4%) &
+		! GET LIST ADDRESS; HOLD PRIORITY. &
+
+2320	IF Z4%=1% THEN &
+		GOTO 2450 &
+	ELSE &
+		IF Z0%(Z7%,4%)<I0% THEN &
+			Z7%=SWAP%(Z0%(Z7%,0%)) AND 255% &
+		ELSE	IF(Z0%(Z7%,0%) AND 255%)<>Z4% THEN &
+				Z7%=Z0%(Z7%,0%) AND 255% &
+	\			GOTO 2320 &
+		! SCAN QUEUE UNTIL: &
+		!	 1) PRIORITY POSITION IS FOUND; OR &
+		!	 2) YOU RUN OUT OF QUEUE. &
+	&
+	&
+
+2330	! &
+	! &
+	!	M O V E   R E C O R D   F R O M   O N E   L I S T &
+	!			T O    A N O T H E R &
+	! &
+	! &
+	&
+	IF Z7%=I% THEN &
+		I0%=Z7% &
+	\	GOTO 2370 &
+		! IN CASE WE'RE TRYING TO PUT A JOB INTO IT'S CURRENT POSITION. &
+
+2340	I.SAV%=I% &
+	\ IF KILREQ%<>0% THEN I%=FNAFT%(I%) &
+		\ IF I%=0% THEN KILREQ%=0% &
+			\ I%=I.SAV% &
+
+2350	I0%=Z0%(I%,0%) &
+	\ I1%=I0% AND 255% &
+	\ I0%=SWAP%(I0%) AND 255% &
+	\ Z0%(I0%,0%)=(Z0%(I0%,0%) AND NOT(255%)) OR I1% &
+	\ Z0%(I1%,0%)=(Z0%(I1%,0%) AND 255%) OR SWAP%(I0%) &
+		! ENTRY # I% IS NOW OUT OF ORIGINAL POSITION IN LIST. &
+
+2360	I1%=Z0%(Z7%,0%) AND 255% &
+	\ Z0%(I%,0%)=SWAP%(Z7%) OR I1% &
+	\ Z0%(Z7%,0%)=(Z0%(Z7%,0%) AND NOT(255%)) OR I% &
+	\ Z0%(I1%,0%)=(Z0%(I1%,0%) AND 255%) OR SWAP%(I%) &
+		! I% IS NOW IN NEW POSITION IN NEW LIST. &
+
+2365	IF KILREQ%<>0% THEN &
+	KILREQ%=0% &
+	\ I%=I.SAV% &
+	\ GOTO 2350 &
+
+2370	Z$=Z$(0%) &
+	\ Z7%=I0% &
+	\ RETURN &
+		! RETURN LEFT PNTR(ORIGINAL I%). &
+
+2380	! &
+	! &
+	!	F I N D   Q U E U E - T Y P E   F O R   A &
+	!		J O B   P A C K E T &
+	!		(E.G.  LP:, BA:, ETC.) &
+	! &
+	&
+	Z%=CVT$%(M$) &
+	\ RETURN IF Z%=Z0%(Z4%,1%) FOR Z4%=1% TO Z0%(0%,1%) &
+	\ Z4%=0% &
+	\ RETURN &
+		! RETURN Z4%= POINTER TO QUEUE HEADER OR 0% &
+
+2410	! &
+	! &
+	!	S E N D   A   M E S S A G E    T O   O P S E R &
+	! &
+	! &
+	&
+	R1%=0% &
+		! RESET 1ST RETRY COUNTER. &
+
+2420	L$="" &
+	\ L$=Z9$ &
+	\ WHILE LEN(Z$) > 19%
+2422	Z0$=SYS(Y8$+CHR255$+LEFT(Z$,19%)) &
+	\	R1%=0% &
+	\	Z$=RIGHT(Z$,20%) &
+	\ NEXT &
+		! SEND THE MULTIPLE MSGS.; RESET RETRY CTR. IF SENT OK. &
+
+2426	R2%=0% &
+		! RESET 2ND RETRY COUNTER. &
+
+2430	Z0$=SYS(Y8$+CHR$(LEN(Z$)+1%)+Z$) &
+	\ R2%=0% &
+	\ RETURN &
+
+2440	Z9$=RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(ERR)),4%) &
+	\ Z9$=SYS(CHR6$+CHR$(-5%)+CHR0$ &
+		+"'QUEMAN' CAN'T SEND TO 'OPSER',"+Z9$ &
+		+CRLF$+"MESSAGE:"+Z$+CRLF$) &
+	\ RETURN &
+		! BROADCAST TO KB0: IF CAN'T GET TO 'OPSER'. &
+
+2450	I9%=Z0%(I%,3%) &
+
+2460	IF Z0%(Z7%,3%)=I9% AND Z0%(Z7%,4%) < I0% THEN &
+		Z7%=SWAP%(Z0%(Z7%,0%)) AND 255% &
+	\	GOTO 2330 &
+
+2470	IF Z0%(Z7%,3%) > I9% THEN &
+		Z7%=SWAP%(Z0%(Z7%,0%)) AND 255% &
+	\	GOTO 2330 &
+
+2480	IF (Z0%(Z7%,0%) AND 255%)=Z4% THEN &
+		GOTO 2330 &
+	ELSE	Z7%=Z0%(Z7%,0%) AND 255% &
+	\	GOTO 2460 &
+
+2610	Z$=NUM1$(O%(0%,0%) AND 255%)+" SPOOLER(S) ON-LINE - "+ &
+		CRLF$ &
+	\ GOTO 2650 UNLESS O%(0%,0%) &
+	\ FOR Z%=1% TO O%(0%,0%) &
+	\	Z$=Z$+"("+NUM1$(O%(Z%,0%))+") "+ &
+			FNU$(O$(Z%,1%))+" "+ &
+			O$(Z%,0%)+FNU1$(O%(Z%,1%))+": " &
+	\	Z$=Z$+"FORMS="+FNU$(O$(Z%,2%)) &
+			IF O%(Z%,2%)=2% &
+	\	Z5%=O%(Z%,3%) &
+	\	IF Z5%  THEN &
+			Z$=Z$+";" &
+	\		Z$=Z$+"	" IF O%(Z%,2%) <> 2% &
+	\		Z$=Z$+"	"+RAD$(SWAP%(Z0%(Z5%,5%)))+ &
+				RAD$(SWAP%(Z0%(Z5%,6%)))+ &
+				"["+NUM1$(Z0%(Z5%,7%) AND 255%)+","+ &
+				NUM1$(SWAP%(Z0%(Z5%,7%)) AND 255%)+"]"+ &
+				"/SE:"+NUM1$(Z0%(Z5%,15%)) &
+		! BUILD STATUS STRING FOR SPOOLERS. &
+
+2630	Z$=Z$+CRLF$ &
+	\ NEXT Z% &
+		! EACH SPOOLER ON SEPARATE LINE. &
+
+2650	Z$=Z$+"QUEUEing DISABLED"+CRLF$ IF Q0% AND 5% &
+	\ Z$=Z$+"SPOOLing DISABLED"+CRLF$ IF Q0% AND 2% &
+	\ RETURN &
+	&
+
+2670	! &
+	! &
+	!	S E T   F L A G S   I N   P A C K A G E &
+	!		S T A T U S   W O R D &
+	! &
+	!	1 BIT 	- QUEUEING ABSOLUTLY DISABLED &
+	!	2 BIT	- FURTHER SPOOLING DISABLED &
+	!	3 BIT	- FURTHER QUEUEING DISABLED &
+	&
+	Z0%(0%,3%),Q0%=Q0% OR Z% &
+	\ Z$(0%)=NL$ UNLESS C0%(Z0%-1%)=7% &
+	\ Z$=Z$(0%) &
+	\ RETURN &
+		! SET THE REQUESTED DISABLE BITS. &
+
+2760	! &
+	! &
+	!	T A K E   A   S P O O L E R   O F F L I N E &
+	! &
+	!	ENTER WITH Z3%	= SPOOLER INDEX NUMBER &
+	!	ALSO PUTS ANY JOB CURRENTLY IN PROGRESS ON HOLD &
+	! &
+	&
+	H1%=0% &
+		! RESUT MESSAGE SCAN POINTER SO ANY OUTSTANDING NEW JOB/PACKET &
+		! WILL BE CLEARED OUT NOW. &
+	\ Z$=FNU$(O$(Z3%,1%))+" ("+NUM1$(O%(Z3%,0%))+") "+Z$+ &
+		" -- TAKEN OFF-LINE" &
+	\ GOSUB 2410 &
+		! TELL OPSER WHAT IS ABOUT TO HAPPEN &
+	\ J%=FNS%(J%,-1%,0%) &
+		! RESET ALL STATUS FLAGS FOR THIS SPOOLER. &
+	\ Z7%=O%(Z3%,3%) &
+	\ Z0%(Z7%,1%)=((Z0%(Z7%,1%) AND 255%) OR (512%)) IF Z7% &
+	\ Z$=Z$(0%) &
+		! PUT ALL SENT JOBS (THIS SPOOLER) ON HOLD; WRITE OUT TO DISK. &
+	\ FOR Z1%=Z3% TO O%(0%,0%)-1% &
+	\	O%(Z1%,Z%)=O%(Z1%+1%,Z%) FOR Z%=0% TO 7% &
+	\	O$(Z1%,Z%)=O$(Z1%+1%,Z%) FOR Z%=0% TO 2% &
+	\ NEXT Z1% &
+		! SHUFFEL SPOOLER TABLE DOWN TO GET RID OF WASTED SPACE. &
+	\ Z3%=Z3%-1% &
+	\ O%(0%,0%)=O%(0%,0%)-1% &
+	\ RETURN &
+		! TAKE SPOOLER OUT. &
+		! RETURN Z3% POINTING TO NEXT SPOOLER IN LIST AND UPDATE COUNT &
+		! OF SPOOLERS IN LIST. &
+	&
+
+2800	! &
+	! &
+	!	M O D I F Y   J O B   R E Q U E S T E D    B Y   Q U E &
+	! &
+	! &
+	&
+	T%=1% &
+	\ GOSUB 2240 &
+	\ GOSUB 10010 &
+	\ IF E%=0% THEN &
+		GOSUB 2380 &
+	ELSE &
+		E%=0% &
+	\	GOTO 1230 &
+
+2820	GOTO 1230 UNLESS Z4% &
+	\ Z7%=Z0%(Z4%,0%) AND 255% &
+
+2830	IF VALID.OP%  THEN &
+		P%=CVT$%(MID(M$,16%,2%)) &
+
+2840	WHILE Z7% <> Z4% &
+	\	IF FNC3%(Z%)=0% THEN &
+			GOTO 2870 &
+
+2850	Z%=CVT$%(MID(M$,25%,2%)) &
+	\ IF Z% <> Z0%(Z7%,15%) THEN &
+		GOTO 2870 UNLESS Z%= -1% &
+
+2860	GOTO 2880 &
+
+2870	Z7%=Z0%(Z7%,0%) AND 255% &
+	\ NEXT &
+	\ GOTO 1230 &
+
+2880	IF (Z0%(Z7%,1%) AND 256%)  THEN &
+		GOTO 2870 &
+
+2890	IF (S% AND 4%) THEN &
+		Z0%(Z7%,4%)=ASCII(MID(M$,8%,1%)) &
+
+2900	IF (S% AND 8%)  THEN &
+		Z0%(Z7%,2%)=CVT$%(MID(M$,18%,2%)) &
+	\	Z0%(Z7%,3%)=CVT$%(MID(M$,9%,2%)) &
+	\	Z0%(Z7%,1%)=Z0%(Z7%,1%) OR (1024%) &
+
+2910	IF (S% AND 64%)  THEN &
+		Z0%(Z7%,8%)=ASCII(MID(M$,20%,1%)) &
+
+2920	IF (S% AND 128%)  THEN &
+		Z0%(Z7%,9%)=CVT$%(MID(M$,21%,2%)) &
+	\	Z0%(Z7%,10%)=CVT$%(MID(M$,23%,2%)) &
+
+2930	I%=FNR%(Z7%) &
+	\ LSET Z1$=Z$(I%) &
+	\ S0$=CHR$(ASCII(S0$) OR S%) &
+
+2940	IF (S% AND 16%)  THEN &
+		LSET M1$=MID(M$,13%,2%) &
+
+2950	IF (S% AND 32%)  THEN &
+		LSET C$=MID(M$,15%,1%) &
+
+2960	Z$(I%)=Z1$ &
+
+2970	IF (S% AND 1%)  THEN &
+		Z0%(Z7%,1%)=Z0%(Z7%,1%) OR (512%) &
+
+2980	IF (S% AND 2%)  THEN &
+		Z0%(Z7%,1%)=Z0%(Z7%,1%) AND NOT (512%) &
+
+2990	I%=Z7% &
+	\ IF (S% AND 4%)  THEN &
+		Z7%=0% &
+	\	GOSUB 2330 &
+	\	GOSUB 2300 &
+	\	Z7%=I% &
+		! IF PRIORITY MODIFIED, TAKE ENTRY OUT OF QUEUE LIST AND &
+		!	REENTER IT IN NEW PRIORITY ORDER. &
+
+3000	IF (S% AND 8%)  THEN &
+		Z8%=Z4% &
+	\	Z4%=1% &
+	\	Z7%=Z0%(Z4%,0%) AND 255% &
+	\	WHILE Z7% <> Z4% &
+	\		GOTO 3020 IF Z0%(Z7%,8%)=I% &
+	\		Z7%=Z0%(Z7%,0%) AND 255% &
+	\	NEXT &
+	\	I8%=I% &
+	\	I%=FNF% &
+	\	IF I%  THEN &
+			Z0%(I%,1%)=Z8% &
+	\		Z0%(I%,3%)=Z0%(I8%,2%) &
+	\		Z0%(I%,4%)=Z0%(I8%,3%) &
+	\		Z0%(I%,8%)=I8% &
+	\		GOSUB 2300 &
+	\		Z7%=I8% &
+	\		Z4%=Z8% &
+		! IF AFTER DATE/TIME MODIFIED, AND NO ENTRY IN AFTER &
+		!	LIST, CREATE ENTRY AND ENTER INTO AFTER LIST. &
+
+3010	Z$=Z$(0%) &
+	\ I8%=FNS%(O%(I%,0%),64%,0%) &
+			IF Z4%=O%(I%,2%) FOR I%=1% TO O%(0%,0%) &
+	\ GOTO 2870 IF Z%= -1% &
+	\ GOTO 1230 &
+
+3020	Z0%(Z7%,3%)=Z0%(I%,2%) &
+	\ Z0%(Z7%,4%)=Z0%(I%,3%) &
+	\ I8%=I% &
+	\ I%=Z7% &
+	\ Z7%=0% &
+	\ GOSUB 2330 &
+	\ GOSUB 2300 &
+	\ Z4%=Z8% &
+	\ Z7%=I8% &
+	\ GOTO 3010 &
+		! IF AFTER LIST ENTRY FOUND, MODIFY THE AFTER &
+		!	DATE/TIME VALUES, REMOVE FROM AFTER LIST &
+		!	AND REENTER IT WITH NEW VALUES. &
+	&
+
+3050	! &
+	! &
+	!	F O R M S   C H A N G E   R E Q U E S T E D &
+	!		   B Y   S P O O L E R &
+	! &
+	! &
+	&
+	GOTO 1150 IF Q0% AND 2% &
+	\ T%=LEN(M$)+1% &
+	\ GOSUB 2280 &
+	\ GOTO 1230 UNLESS Z3% &
+
+3070	IF O%(Z3%,2%)<>2% THEN GOTO 3075 &
+
+3071	O$(Z3%,2%)=LEFT(M$,4%) &
+	\	Z%=FNS%(J%,64%,0%) &
+	\ FOR Z%=0% TO H0%-1% &
+	\	IF ASCII(H$(Z%))=J% THEN &
+			H%(Z%,6%)=0% &
+	\		H0$(H%(Z%,2%))=CHR0$+CHR255$ &
+
+3072	NEXT Z% &
+
+3075	Z9$=M$ &
+	\ M$=CHR$(31%) &
+	\ GOSUB 1530 &
+	\ M$=Z9$ &
+	\ IF O%(Z3%,3%)=0% THEN &
+		Z$=C0$(0%) &
+	ELSE	GOTO 3150 &
+		! IF LP SPOOLER STORE FORM INFO; IF IT HAS A JOB RESTART IT. &
+
+3080	GOTO 1230 &
+
+3100	! &
+	! &
+	!	R E Q U E   E N T R Y &
+	! &
+	! &
+	&
+	T%=LEN(M$)+1% &
+	\ GOSUB 2280 &
+	\ GOTO 1230 IF Z3%=0% OR O%(Z3%,3%)=0% &
+		! SET UP TO REMOVE ENTIRE ENTRY FROM RECEIVED MESSAGE &
+		! LIST; DETERMINE IF SENDER IS A VALID SPOOLER AND THE &
+		! SPOOLER HAS AN ACTIVE JOB. &
+		! IF NOT  Z3%=0%  NOT A SPOOLER &
+		!	O%(Z3%,3%)=0% THEN IGNORE THE REQUE REQUEST. &
+		! &
+
+3120	LSET Z1$=Z$(O%(Z3%,4%)) &
+	\ M$=M$+CHR0$ UNTIL LEN(M$) >= ASCII(M$)+1% &
+		! HOLD JOB'S FILE RECORD FOR THE CURRENT JOB ON THIS &
+		! SPOOLER, AND PAD TO LENGTH. &
+
+3130	LSET R$=M$ &
+	\ Z$(O%(Z3%,4%))=Z1$ &
+		! PUT 'REQUE' INFO INTO THE BUFFER WHERE IT BELONGS AND &
+		! PUT IT BACK INTO SPOOLER'S CURRENT JOB ENTRY. &
+
+3150	Z7%=O%(Z3%,3%) &
+		! GET ADDRESS OF CURRENT JOB RECORD FOR THIS SPOOLER &
+	\ Z0%(Z7%,1%)=Z0%(Z7%,1%) AND 255% &
+		! RESET JOB STATUS TO NOT SENT. &
+	\ Z$=Z$(0%) &
+		! WRITE TO DISK. &
+	\ O%(Z3%,Z%)=0% FOR Z%=3% TO 7% &
+		! RESET SPOOLERS CURRENT JOB STATUS INFO. &
+	\ J%(J%,1%)=0% &
+		! RESET SPOOLERS 'JOB STATUS' WORD. &
+	\ Z$=C0$(0%) &
+	\ T%=FNS%(J%,-30464%,0%) &
+		! CLEAR THE FOLLOWING BITTS IN SPOOLERS 'JOB STATUS' WORD. &
+	\ T%=LEN(M$) &
+		!GET READY TO GET RID OF ENTIRE MESSAGE. &
+	\ GOTO 1230 &
+		! RESET JOB'S STATUS AND SPOOLER' INFO. &
+
+3200	! &
+	! &
+	!	' L A S T '   R E Q U E S T E D     B Y   O P S E R &
+	! &
+	! &
+	&
+	Z9$=L$ &
+	\ IF LEN(Z$)=0% THEN &
+		Z$="No previous messages from QUEMAN" &
+	ELSE	Z$="'LAST' message from 'QUEMAN' -" &
+				+CRLF$+Z9$ &
+
+3220	GOSUB 2410 &
+	\ RETURN &
+	&
+
+3300	! &
+	! &
+	!	' S T A T U S '   R E Q U E S T E D   B Y   O P S E R &
+	! &
+	! &
+	&
+	GOSUB 2610 &
+	\ GOSUB 2410 &
+
+3320	RETURN &
+	&
+
+3350	! &
+	! &
+	!		' O F F L I N E '   O R    ' E N D ' &
+	!		R E Q U E S T E D    B Y   O P S E R &
+	! &
+	! &
+	&
+	RETURN IF LEN(C1$) &
+	\ Z%=-32761% &
+	\ GOSUB 2670 &
+		!  SET DISABLE QUEING, SPOOLING, AND MESSAGES BITS. &
+
+3370	IF O%(0%,0%) AND C0%(Z0%-1%)=2%  THEN &
+		Z$="SPOOLERS STILL ONLINE - WILL CLEAR TABLE" &
+	\	GOSUB 2410 &
+		! DO NOT PRINT THIS MESSAGE IF THERE ARE NO SPOOLERS ONLINE &
+		! OR THE COMMAND WAS AN 'END" COMMAND. &
+		! THERE SHOULD NOT BE ANY SPOOLERS REMAINING ONLINE. &
+
+3380	O%(Z1%,Z2%)=0% FOR Z2%=0% TO 7% FOR Z1%=0% TO 10% &
+	\ O$(Z1%,Z2%)=NL$ FOR Z2%=0% TO 2% FOR Z1%=0% TO 10% &
+	\ Z$=CHR$(192%)+"OFF" &
+	\ GOSUB 2410 &
+	\ GOTO 32700 &
+		! CLEAR ONLINE SPOOLER TABLES; SEND 'OFFLINE' TO OPSER. &
+
+3450	! &
+	! &
+	!	' N E X T '   R E Q U E S T E D   B Y   O P S E R &
+	! &
+	! &
+	&
+	C3$=NL$ &
+	\ GOTO 3630 UNLESS LEN(C1$) &
+
+3470	C1$=CVT$$(C1$,-2%) &
+	\ C3$=C1$ &
+	\ C2$=LEFT(C1$,4%) &
+	\ S8%= -1% &
+
+3480	IF C2$="LP:=" THEN &
+		Z4%=2% &
+	ELSE	IF C2$="BA:=" THEN &
+			Z4%=3% &
+		ELSE	IF C2$="RJ:=" THEN &
+				Z4%=5% &
+			ELSE	GOTO 3640 &
+
+3490	C1$=RIGHT(C1$,5%) &
+	\ IF FNS3%(C1$)=0% THEN &
+		GOTO 3640 &
+
+3500	IF RECOUNT  THEN &
+		C1$=RIGHT(C1$,LEN(C1$)-RECOUNT +1%) &
+	\	IF "/SE:"=LEFT(C1$,4%) THEN &
+			S8%=VAL(RIGHT(C1$,5%)) &
+		ELSE	GOTO 3640 &
+
+3510	Z7%=Z0%(Z4%,0%) AND 255% &
+	\ Z6%=0% &
+
+3520	WHILE Z7% <> Z4% &
+	\	IF S8% <> -1% THEN &
+			IF S8% <> Z0%(Z7%,15%) THEN &
+				GOTO 3560 &
+
+3530	IF SWAP%(M%(5%)) <> Z0%(Z7%,7%) THEN &
+		GOTO 3560 UNLESS M%(5%)= -1% &
+
+3540	IF M%(7%)  THEN &
+		IF SWAP%(M%(7%)) <> Z0%(Z7%,5%) OR &
+			SWAP%(M%(9%)) <> Z0%(Z7%,6%) THEN &
+				GOTO 3560 &
+
+3550	GOTO 3610 IF Z6% &
+	\ GOTO 3600 IF (Z0%(Z7%,1%) AND 256%) &
+	\ Z6%=Z7% &
+
+3560	Z7%=Z0%(Z7%,0%) AND 255% &
+	\ NEXT &
+
+3580	IF Z6%=0% THEN &
+		GOTO 3620 &
+
+3590	Z0%(Z6%,4%)=(Z0%(Z6%,4%) AND -256%) OR 254% &
+	\ I%=Z6% &
+	\ Z7%=Z4% &
+	\ GOSUB 2330 &
+	\ GOTO 3660 &
+	&
+
+3600	Z$="JOB IN PROCESS" &
+	\ GOTO 3650 &
+
+3610	Z$="MULTIPLE JOB SPECIFIED" &
+	\ GOTO 3650 &
+
+3620	Z$="NO MATCH FOR JOB" &
+	\ GOTO 3650 &
+
+3630	Z$="ILLEGAL SYNTAX" &
+	\ GOTO 3650 &
+
+3640	Z$="ILLEGAL PARAMETERS " &
+
+3650	Z$="'NEXT' CMD:"+C3$+" - "+Z$ &
+	\ GOSUB 2410 &
+
+3660	RETURN &
+	&
+	&
+
+4000	! &
+	! &
+	!		' D I S A B L E '   O R   ' E N A B L E ' &
+	!		R E Q U E S T E D   B Y  O P S E R &
+	! &
+	! &
+	&
+	C8$=C1$ &
+	\ H1%,P8%,Z1%=0% &
+	\ Z1%=6% IF FNR8%("ALL",3%) &
+	\ Z1%=4% IF FNR8%("QUEUEING",3%) UNLESS Z1% &
+	\ Z1%=2% IF FNR8%("SPOOLING",3%) UNLESS Z1% &
+	\ RETURN UNLESS Z1% &
+	\ Z%=Z1% &
+	\ Z$="ENABLED" &
+	\ IF C0%(Z0%-1%)=7% THEN &
+		Z0%(0%,3%),Q0%=Q0% AND NOT Z% &
+	ELSE	GOSUB 2670 &
+	\	Z$="DISABLED" &
+	&
+
+4010	Z$(0%)=LEFT(RIGHT(C8$,P8%+1%),240%) IF Z1% AND 4% &
+	\ Z%=LEN(C8$) &
+	\ Z$(0%)="by OPERATOR."IF (Z1% AND 4%) AND Z%=P8% &
+	\ Z0%(63%,0%)=Z0%(63%,0%) &
+	\ C1$=RIGHT(C1$,P8%+1%) &
+	\ C8$="QUEUEing" IF Z1%=4% &
+	\ C8$="SPOOLing" IF Z1%=2% &
+	\ C8$="QUEUEing and SPOOLing" IF Z1%=6% &
+	\ C8$="Further "+C8$+" "+Z$+" " &
+	\ Z$=C8$ &
+	\ Z$=Z$+"by OPERATOR" UNLESS LEN(C1$) &
+	\ Z$=Z$+C1$ &
+	\ GOSUB 2410 &
+	\ AFTR.EXP%=-1% &
+	\ RETURN &
+	&
+
+10010	! &
+	! &
+	!	F O R M A T   A   J O B   P A C K E T   I N T O &
+	!		W O R K   V A R I A B L E S &
+	! &
+	! &
+	&
+	OPEN "_NL:" AS FILE 7%, RECORDSIZE 40% &
+	\ FIELD #7%, 26% AS JOBP$ &
+	\ FIELD #7%, 2% AS DEV$, 1% AS UNIT$, 4% AS JOB$, 1% AS PRI$, &
+		2% AS ATIM$, 1% AS FILCT$, 1% AS STSW$, 2% AS MOD$, &
+		1% AS TYYPE$, 2% AS PPN$, 2% AS ADAT$, 1% AS COPY$, &
+		4% AS FORM$, 2% AS SEQ$ &
+
+10030	S%=ASCII(RIGHT(M$,12%)) &
+	\ E%=0% &
+	\ LSET JOBP$=STRING$(26%,0%) &
+	\ LSET JOBP$=M$ &
+	\ IF ONE.SHOT% THEN &
+		LSET JOB$=MID(M$,9%,4%) &
+	\	LSET FILCT$=CHR$(1%) &
+	\	LSET STSW$=CHR0$ &
+	\	LSET PPN$=CVT%$(P%) &
+	\	LSET TYYPE$=CHR$(1% AND ASCII(MID(M$,4%,1%))) &
+	\	S%=0% &
+		! GRAB SWITCH WORD &
+		! CLEAR OUT ERROR FLAG &
+		! NULL OUT JOB PACKET STRING &
+		! IF THIS WAS A ONE SHOT QUE REQUEST STUFF IN THE &
+		! DEFAULT PARAMETERS. &
+
+10040	IF CVT$%(M$)=0% THEN &
+		LSET DEV$="LP" &
+
+10050	IF CVT$%(MID(M$,4%+ONE.SHOT%*-5%,2%))=0% AND &
+			CVT$%(MID(M$,6%+ONE.SHOT%*-5%,2%))=0% THEN &
+		E%=-1% IF ONE.SHOT% &
+	\	I%=J%(J%,1%) AND 255% &
+	\	Z$=J$(J%,I%) &
+	\	LSET JOB$=MID(Z$,5%,4%) &
+	\	GOTO 10070 &
+
+10060	IF LEFT(FNU$(MID(M$,4%+ONE.SHOT%*-5%,4%)),1%)=" " THEN &
+		E%= -1% &
+
+10070	IF (CVT$%(MID(M$,16%,2%))=0%) OR ONE.SHOT% THEN &
+		LSET PPN$=CVT%$(P%) &
+		ELSE	IF P% <> CVT$%(MID(M$,16%,2%)) THEN &
+			E%=-1% UNLESS VALID.OP% &
+
+10080	IF (S% AND 4%)=0% THEN &
+		LSET PRI$=CHR$(128%) &
+	ELSE	Z%=ASCII(RIGHT(M$,8%)) &
+	\	IF Z% > 128% THEN &
+			LSET PRI$=CHR$(128%) UNLESS VALID.OP% &
+
+10090	IF (S% AND 8%)=0% THEN &
+		LSET ATIM$=CVT%$(0%) &
+	\	LSET ADAT$=CVT%$(0%) &
+
+10100	IF (S% AND 16%)=0% THEN &
+		LSET MOD$=CVT%$(0%) &
+
+10110	IF (S% AND 32%)=0% THEN &
+		LSET TYYPE$=CHR0$ UNLESS ONE.SHOT% &
+	ELSE	LSET TYYPE$=CHR$(ASCII(TYYPE$) OR 128%) &
+	\	IF (S% AND 16%)  THEN &
+			IF (ASCII(TYYPE$) AND 127%)  THEN &
+				IF (CVT$%(MOD$) AND 512%)  THEN &
+					E%= -1% &
+
+10120	IF (S% AND 64%)=0% THEN &
+		LSET COPY$=CHR$(1%) &
+	ELSE	IF ASCII(RIGHT(M$,20%)) > 9% THEN &
+			LSET COPY$=CHR$(9%) &
+
+10130	IF (S% AND 128%)=0% THEN &
+		LSET FORM$=FNP$("NORMAL") &
+	ELSE	IF CVT$%(MID(M$,21%,2%))=0% &
+			AND CVT$%(MID(M$,23%,2%))=0% THEN &
+			LSET FORM$=FNP$("NORMAL") &
+		ELSE	IF LEFT(FNU$(MID(M$,21%,4%)),1%)=" " THEN &
+				E%= -1% &
+
+10140	M$=JOBP$ &
+
+10150	RETURN &
+	&
+	&
+
+10200	! &
+	! &
+	!	C H E C K    S P O O L E R S   I F   S T I L L &
+	!			R E C E I V E R S &
+	! &
+	! &
+	&
+	GOTO 10230 UNLESS O%(0%,0%) &
+	\ Z3%=1% &
+	\ R3%=0% &
+		! NO JOBS ONLINE TO TEST. &
+
+10210	Z9$=SYS(Y7$+FNU$(O$(Z3%,1%))+STRING$(10%,0%)+CHR$(2%)+CHR0$) &
+	\ R3%=0% &
+		! SEND NULL MESSAGE TO ALL SPOOLERS IN TABLE. &
+
+10220	GOTO 10230 UNLESS Z3% < O%(0%,0%) &
+	\ Z3%=Z3%+1% &
+	\ GOTO 10210 &
+		! INCREMENT & SEND IF MORE TO TEST. &
+	&
+
+10230	RETURN &
+	&
+
+10240	Z$="NO RESPONSE TO SENT MSG." &
+	\ J8%=J% &
+	\ GOSUB 2760 &
+	\ J%=J8% &
+	\ GOTO 10220 &
+		! REMOVE THE SPOOLER FROM TABLE IF NO RESPONSE FROM NULL MSG; &
+	&
+	&
+
+10300	! &
+	! &
+	!	C H E C K   F O R   D U P L I C A T E   R E C V I D &
+	!	I N    T A B L E   A S   E A C H   O N L I N E &
+	!	R E Q U E S T   C O M E S   I N &
+	! &
+	! &
+	&
+	Z3%,Z%=0% &
+	\ Z3%=Z% IF MID(M$,4%,4%)=O$(Z%,1%)+ &
+		STRING$(4%-LEN(O$(Z%,1%)),0%) FOR Z%=1% TO O%(0%,0%) &
+	\ RETURN &
+		! TEST IF MATCH IN TABLE ON SAME LOGICAL ID. &
+	&
+
+15000	DEF* FNP$(Z$)=MID(SYS(CHR6.M10$+Z$),7%,4%) &
+		! PACK FIRST 6 CHARACTERS OF SOURCE STRING INTO RAD50. &
+
+15010	DEF* FNF% &
+	\ I0%,FNF%=Z0%(0%,0%) AND 255% &
+	\  IF I0%  THEN &
+		Z0%(I0%,I1%)=0% FOR I1%=1% TO 15%
+15020	FNEND &
+		! RETURN THE FIRST FREE ENTRY NUMBER, IF THERE IS ONE, &
+		! AFTER FIRST CLEARING IT. &
+		! THIS DOES NOT REMOVE THE ENTRY FROM THE FREE LIST. &
+
+15030	DEF* FNR%(I%) &
+	\ I%=I%-Z0%(0%,1%) &
+	\ IF I% > F% THEN &
+		F%=F%+C% WHILE I% > F% &
+	\	Z$(F%)=NL$ &
+		! FIND THE RECORD NUMBER OF THE FILE RECORD GIVEN THE &
+		! SUBSCRIPT OF THE JOB RECORD; EXPAND THE FILE AS NECESSARY. &
+
+15032	FNR%=I% &
+	\ FNEND &
+		! CALCULATE STRING ENTRY FOR JOB ENTRY; IF STRING ENTRY IS &
+		! BEYOND FILE LENGTH, EXTEND THE FILE BY CLUSTERS UNTIL IN &
+		! RANGE; ACCESS THE LAST ENTRY IN THE LAST CLUSTER. &
+	&
+	&
+
+15040	DEF* FNC%(Z$,Z%) &
+		! COMPARE SOURCE STRING TO 3 BYTE STRING REPRESENTED BY &
+		! SECOND ARG CONVERTED FROM RAD50. RETURN -1% IFEACH BYTE &
+		! IN SOURCE IS EQUAL TO CORESPONDING IN OTHER OR EITHER &
+		! IS "?". &
+	\ CHANGE RAD$(SWAP%(CVT$%(Z$))) TO A6% &
+	\ CHANGE RAD$(SWAP%(Z%)) TO A7% &
+	\ FNC%=0% &
+	\ GOTO 15050 IF A6%(Z%)<>A7%(Z%) AND A6%(Z%)<>63% &
+		FOR Z%=0% TO A6%(0%) &
+	\ FNC%=-1%
+15050	FNEND &
+
+15060	DEF* FNC1%(Z$,Z%)=(ASCII(Z$)=Z% OR ASCII(Z$)=255%) &
+		! COMPARE ONE BYTE FOR EQUAL. RETURNS -1 IF TRUE &
+		! OR FIRST BYTE OF SOURCE IS 255 I.E. "?" &
+
+15070	DEF* FNN% &
+		! FIND NEXT JOB MATCHING CHARACTERISTICS OF SPOOLER. &
+		! RETURNS -1 IF JOB CAN BE SENT 0 OTHERWISE. &
+		! IF OK EXCEPT FOR FORMNAME THEN DFORMS=SUBSCRIPT &
+	\ DFORMS1%=((SWAP%(Z0%(Z7%,1%)) AND 255%)=0%) AND &
+	FNC1%(CHR$(Z0%(Z7%,1%)),O%(Z3%,1%)) AND &
+		((PEEK(512%)>Z0%(Z7%,2%)) OR &
+		(Z0%(Z7%,3%)=0%) OR &
+		(PEEK(512%)=Z0%(Z7%,2%) AND &
+			 (1440%-TIME(0%)/60%)<Z0%(Z7%,3%))) &
+	\	DFORMS2%=(FNC%(LEFT(O$(Z3%,2%),2%),Z0%(Z7%,9%)) AND &
+			FNC%(RIGHT(O$(Z3%,2%),3%),Z0%(Z7%,10%))) &
+	\	DFORMS% = Z7% IF DFORMS1% AND NOT DFORMS2% &
+			UNLESS DFORMS% &
+	\	FNN% = DFORMS1% AND DFORMS2% &
+	\ FNEND &
+		! DECIDE IF JOB IS OK. &
+	&
+
+15080	DEF* FNS%(J%,X%,Y%) &
+		! SET/RESET STATUS BITS ON A JOBS MESSAGE TABLE ENTRY &
+	\ J%(J%,0%)=((J%(J%,0%) AND NOT(X%)) OR Y%) &
+	\ FNEND &
+		! RESET BITS FROM X%; SET BITS FROM Y% IN JOB STATUS WORD. &
+
+15090	DEF* FNM%(Z$,Z0$)=FNC2%(Z$,Z0$) AND &
+	FNC1%(MID(Z$,11%,1%),ASCII(MID(Z0$,5%,1%))) AND &
+	FNC1%(MID(Z$,12%,1%),ASCII(MID(Z0$,6%,1%))) &
+	&
+
+15100	DEF* FNC2%(Z$,Z0$)=FNC%(MID(Z$,5%,2%),CVT$%(MID(Z0$,7%,2%))) AND &
+	FNC%(MID(Z$,7%,2%),CVT$%(MID(Z0$,9%,2%))) AND &
+	FNC%(MID(Z$,9%,2%),CVT$%(MID(Z0$,11%,2%))) &
+
+15230	DEF* FND%(M%)= &
+	-2%*((M% AND 102%) <> 0%) OR &
+		((((M% AND 4096%) <> 0%) AND (M%>0%) &
+		AND ((STATUS AND 255%)=0%))*-1%) &
+		! LET'S FIND OUT WHAT WILDCARDS/DEVICE. &
+
+15240	DEF* FNZ3$(Z$)=FNU$(LEFT(Z$,4%))+":"+FNU$(MID(Z$,5%,4%))+"."+ &
+	FNU$(MID(Z$,9%,2%))+"["+NUM1$(ASCII(MID(Z$,12%,1%)))+","+ &
+	NUM1$(ASCII(MID(Z$,11%,1%)))+"]" &
+		! UNPACK RAD50 FILE NAME. &
+
+15250	DEF* FNU1$(Z%) &
+	\ FNU1$=NUM1$(Z%) UNLESS Z%=255% &
+	\ FNU1$="*" IF Z%=255% &
+	\ FNEND &
+		! FUNCTION TO RETURN UNIT NUMBER. &
+
+15260	DEF* FNU$(Z$)=RAD$(SWAP%(CVT$%(Z$)))+ &
+		RAD$(SWAP%(CVT$%(RIGHT(Z$,3%)))) &
+
+15270	DEF* FNE$(I%,J%)=CVT$$(SYS(CHR6$+CHR$(I%)+CHR$(J%)),128%) &
+
+15300	DEF* FNC3%(Z%)=(FNC%(MID(M$,4%,2%),Z0%(Z7%,5%)) &
+	AND FNC%(MID(M$,6%,2%),Z0%(Z7%,6%)) &
+	AND FNC1%(MID(M$,3%,1%),Z0%(Z7%,1%) AND 255%) &
+	AND FNC1%(CHR$(P%),Z0%(Z7%,7%) AND 255%) &
+	AND FNC1%(CHR$(SWAP%(P%)),SWAP%(Z0%(Z7%,7%)) AND 255%)) &
+
+15330	DEF* FNS3%(Z$) &
+	\ FNS3%=0% &
+
+15340	CHANGE SYS(CHR6$+CHR$(-23%)+Z$) TO M% &
+	\ M%(Z%)=M%(Z%)+SWAP%(M%(Z%+1%)) FOR Z%=5% TO 29% STEP 2% &
+
+15350	GOTO 15390 IF (M%(29%) AND 5128%) &
+
+15360	IF (M%(29%) AND 1%)  THEN &
+		IF (M%(29%) AND 6%)  THEN &
+			GOTO 15390 &
+
+15370	IF (M%(29%) AND 128%)=0% THEN &
+		M%(5%)= -1% &
+
+15380	FNS3%= -1% &
+
+15390	FNEND &
+
+15400	DEF* FNV%(Z%) &
+	\ FNV%=0% &
+	\ CLOSE #6% &
+	\ OPEN PKG.LOC$+"OPSER1.WRK" FOR INPUT AS FILE #6%, MODE 8192% &
+
+15410	FOR Z1%=0% TO 15% &
+	\ IF V%(Z1%,0%)=0% THEN &
+		GOTO 15450 &
+
+15420	IF V%(Z1%,1%)=SWAP%(Z%) THEN &
+		GOTO 15440 &
+	ELSE	IF (V%(Z1%,1%) AND 255%) <> 255% THEN &
+			IF (V%(Z1%,1%) AND 255%) <> SWAP%(Z%) AND 255% THEN &
+				GOTO 15450 &
+
+15430	IF (V%(Z1%,1%) AND -256%) <> -256% THEN &
+		IF (V%(Z1%,1%) AND -256%) <> (SWAP%(Z%) AND -256%) THEN &
+			 GOTO 15450 &
+
+15440	FNV%= -1% &
+	\ GOTO 15460 &
+
+15450	NEXT Z1% &
+
+15460	FNEND &
+	&
+	&
+
+15500	DEF* FNR8%(S8$,L8%) &
+	\ FNR8%=0% &
+	! FUNCTION:	KEYWORD MATCHING ROUTINE. MATCHES A STRING IN &
+	!		THE COMMAND STRING C8$ STARTING AT POSITION P8%+1% &
+	!		TO THE DUMMY STRING S8$. A MATCH IS MADE WHEN THE &
+	!		MINIMUM NUMBER OF CHARACTERS ARE MATCHED. THIS &
+	!		MINIMUM NUMBER IS HELD IN THE DUMMY VARIABLE &
+	!		L8%. &
+	! PARAMETERS:	S8$	STRING TO MATCH TO. &
+	!		L8%	MINIMUM LENGTH OF MATCH. &
+	! GLOBAL &
+	! VARIABLES &
+	! AFFECTED:	P8%	POSITION POINTER POINTS TO THE LAST CHAR- &
+	!			ACTER MATCHED SUCCESSFULLY. &
+	! LOCAL &
+	! VARIABLES &
+	! USED:		Z%	TEMPORARY CHARACTER POINTER. &
+	!		Z$	CHARACTER MATCHING VARIABLE FOR PROCESS- &
+	!			ING BEYOND THE MINIMUM LENGTH. &
+	! RETURNS:	THE NUMBER OF CHARACTERS SUCCESSFULLY MATCHED. &
+	! ERRORS:	NONE EXPECTED. &
+
+15510	Z%=ASCII(RIGHT(C8$,P8%+1%)) &
+	\ IF Z%=32% OR Z%=9% THEN &
+		P8%=P8%+1% &
+	\	GOTO 15510 &
+		! SKIP PAST BLANKS AND TABS. &
+
+15520	IF MID(S8$,1%,L8%)=MID(C8$,P8%+1%,L8%) THEN &
+		Z%=L8% &
+	ELSE	GOTO 15550 &
+		! SEARCH FOR MINIMUM MATCH. &
+
+15530	Z$=MID(C8$,P8%+Z%+1%,1%) &
+	\ IF Z$<>MID(S8$,Z%+1%,1%) THEN &
+		GOTO 15540 &
+	  ELSE	Z%=Z%+1% IF LEN(Z$) &
+	\	GOTO 15530 IF LEN(Z$) &
+		! SEARCH FOR MORE MATCHING CHARACTERS. &
+
+15540	P8%=P8%+Z% &
+	\ FNR8%=Z% &
+		! RETURN WITH P8% POINTING TO THE LAST SUCCESSFULLY &
+		! MATCHED CHARACTER. FUNCTION WILL RETURN AS THE NUMBER &
+		! OF CHARACTERS MATCHED. &
+
+15550	FNEND &
+	&
+	&
+	&
+
+15600	DEF* FNAFT%(QREC%) &
+	\ FNAFT%=0% &
+	\ AREC%=1% &
+
+15610	WHILE (Z0%(AREC%,0%) AND 255%) <> 1% &
+
+15620	AREC% = (Z0%(AREC%,0%) AND 255%) &
+	\ IF Z0%(AREC%,8%)=QREC% &
+		THEN FNAFT%=AREC% &
+		\ GOTO 15699 &
+
+15630	NEXT &
+
+15699	FNEND &
+	! SEE IF THERE IS AN AFTER ENTRY THAT POINTS TO OUR QUEUE ENTRY. &
+	! IF SO, RETURN ITS RECORD NUMBER IN FNAFT% SO WE CAN DELETE IT, &
+	! ELSE RETURN 0% &
+	&
+	&
+
+16000	DEF* FNINSTALL.3PP%(Z0%) &
+	\ ON ERROR GOTO 16090 &
+	\ FNINSTALL.3PP% = 0% &
+		! INSTALL THIRD PARTY PRIV CHECKING ON ACCOUNT Z0% &
+		! NOTE:	(Z0% AND 255%) RETURNS THE PROJECT NUMBER &
+		!	(SWAP%(Z0%) AND 255%) RETURNS PROGRAMMER NUMBER &
+
+16010	MASK$ = MID(SYS(CHR6$+CHR$(-25%)+CHR$(-1%)+CHR$(2%) &
+		+CVT%$(Z0%)),9%,8%) &
+		! GET THE OWNER PRIV MASK FROM DISK &
+		! IF ERROR, THEN USE MASK OF NULLS (NO PRIVS) &
+
+16020	DUMMY$ = SYS(CHR6$+CHR$(31%)+STRING$(2%,0%)+CVT%$(Z0%)+MASK$) &
+		! NOW, INSTALL THIRD PARTY PRIVS W/ACCT AND THE MASK &
+
+16030	GOTO 16099 &
+		! WE'RE DONE; RETURN TO CALLER &
+
+16090	IF	ERL = 16010% &
+	THEN	MASK$ = STRING$(8%,0%) &
+		\ RESUME 16020 &
+		! IF WE HAD ERROR LOOKING UP THE PRIV MASK, USE NULL MASK &
+
+16092	IF	ERR = 32% AND ERL = 16020% &
+	THEN	SLEEP 2% &
+		\ RESUME 16020 &
+		! IF WE'RE HAVING PROBLEMS GETTING A BUFFER, &
+		! THEN SLEEP FOR A WHILE AND RETRY THE OPERATION &
+
+16094	ON ERROR GOTO 0 &
+		! IN CASE SOMETHING STRANGE HAPPENED ... &
+
+16099	ON ERROR GOTO 19000 &
+	\ FNEND &
+		! END OF FNINSTALL.3PP% &
+
+16100	DEF* FNDEINSTALL.3PP% &
+	\ FNDEINSTALL.3PP% = 0% &
+	\ DUMMY$ = SYS(CHR6$+CHR$(31%)) &
+	\ FNEND &
+		! DEINSTALL THIRD PARTY PRIV CHECKING &
+	&
+
+18000	RETURN &
+		! RETURN FOR ERROR ROUTINES. &
+
+19000	!	E R R O R   H A N D L E R &
+	! &
+	! &
+	Z$ = "" &
+
+19005	IF ERL=1200% THEN &
+		M$=SYS(CHR6$+CHR$(22%)+CHR$(1%)+CHR$(0%)+"QUEMAN"+ &
+			STRING$(10%,0%)+CHR$(3%)+CHR$(0%)+CHR$(0%)+ &
+			CHR$(60%)) IF ERR=18% &
+	\	RESUME 1225 &
+		! POSSIBLE RECEIVE ERROR. &
+
+19010	RESUME 18000 IF ERL=1225 &
+		! IN CASE ATTACHED. &
+
+19020	IF ERL=1530% THEN &
+		RESUME 1540 IF ERR=5% &
+	\	SLEEP 5% &
+	\	RESUME 1530 IF ERR=32% &
+	\	RESEND%=RESEND%+1% &
+	\	RESUME 1530 IF RESEND%<12% IF ERR=4% &
+	\	RESEND%=0% &
+	\	Z$="IS FAILING TO RECEIVE MESSAGES" &
+	\	GOSUB 2760 &
+	\	K9%=-1% &
+	\	T%=0% &
+	\	RESUME 18000 &
+		! IN CASE THE SPOOLER HAS DISAPPEARED. ERR=5 &
+		! IN CASE THERE REALLY ARE NO SMALL BUFFERS. ERR=32 &
+		! JUST IN CASE THE ADDRESSEE IS SLOW TO ACCEPT. ERR=4 &
+		! CANCEL HIS MEMBERSHIP AFTER 12 TRIES. &
+
+19060	IF ERR=5% AND (ERL=1040% OR ERL=1035%) THEN &
+		Z$="?All queue files not present" &
+		\ RESUME 20000 &
+		! TEST FOR PRESENCE OF QUEUE.SYS, QUEUE.WRK, AND TEMP FILE. &
+		! SHUT DOWN QUEMAN IF FILES NOT PRESENT. &
+
+19080	IF ERL = 1440% THEN &
+		RESUME 1442 &
+		! TRAP ERROR WHEN DELETING FILES. &
+		! IF WE HAVE ANY PROBLEM DELETING FILE, JUST SKIP IT &
+		! NOTE:	SINCE UU.3PP IS IN EFFECT AT THE TIME OF THIS KILL, &
+		!	IT IS POSSIBLE TO GET "?Protection violation" ERRORS &
+
+19090	IF ERR=28% THEN &
+		Z$="?CTRL/C detected" &
+		\ RESUME 20000 &
+		! ^C IS AN IMPOSSIBLE PROBLEM. &
+
+19100	IF ERL=3500% AND ERR=52% THEN &
+		RESUME 3640 &
+		! TRAP /SE:NNN ERROR FOR 'NEXT' CMD. &
+
+19110	IF ERL=15340% AND ERR=2% THEN &
+		RESUME 15390 &
+		! TRAP FSS ERROR FOR 'NEXT' CMD. &
+
+19120	IF (ERL = 2422% OR ERL= 2430%) AND ERR = 5% THEN &
+		Z9$=SYS(CHR6$+CHR$(-5%)+CHR0$ &
+			+"'OPSER' NOT FOUND - QUEMAN SHUTTING DOWN") &
+	\	Q0%=-1% &
+	\	GOTO 32700 &
+		! TRAP AND TERMINATE IF 'OPSER' DISAPPEARS. &
+	&
+
+19130	IF ERL = 10210% AND ERR=5% THEN &
+		RESUME 10240 &
+		! TRAP IF ANY ONLINE TABLES ENTRIES NOT THERE. &
+
+19140	IF ERL = 10210% THEN &
+		SLEEP 5% &
+	\	RESUME 10210 IF ERR=32% &
+	\	R3%=R3%+1% &
+	\	RESUME 10240 IF R3%>12% &
+	\	RESUME 10210 &
+		! GIVE TIME TO RECEIVE. &
+
+19150	IF ERL = 2422% THEN &
+		SLEEP 5% &
+	\	RESUME 2422 IF ERR=32% &
+	\	R1%=R1%+1% &
+	\	RESUME 2440 IF R1%>12% &
+	\	RESUME 2422 &
+		! SLEEP IF RETRY CTR < 12 & TRY AGAIN OR REPORT ERROR. &
+
+19160	IF ERL = 2430% THEN &
+		SLEEP 5% &
+	\	RESUME 2430 IF ERR=32% &
+	\	R2%=R2%+1% &
+	\	RESUME 2440 IF R2%>12% &
+	\	RESUME 2430 &
+		! SAME FOR OTHER SEND SYS CALL. &
+
+19170	IF ERL=15400% AND ERR=5% THEN &
+		Z$="?OPSER1.WRK file does not exist" &
+	\	RESUME 20000 &
+		! ABORT IF OPSER WORK FILE HAS VANISHED. &
+
+19180	IF ERL=1610% THEN &
+		S0%=0% &
+	\	RESUME 1620 &
+		! TRAP FSS ERROR ON FILE NAMES FROM FILE PACKETS. &
+
+19190	IF ERL=1346% THEN &
+		T%=1% &
+	\	RESUME 1230 &
+		! TRAP SEND ERRORS FOR ON-LINE REJECT. &
+
+19999	Z$=CVT$$(RIGHT(FNE$(9%,ERR),3%),4%)+" at line "+NUM1$(ERL) &
+	\ RESUME 20000 &
+
+20000	!	P R O G R A M   F A I L U R E &
+	! &
+	! &
+	PRINT "??Program failure in QUMRUN" &
+	\ PRINT Z$ &
+	\ M$=SYS(CHR$(6%)+CHR$(22%)+CHR$(0%)) &
+	\ GOTO 32700 &
+		! UNEXPECTED ERROR. &
+		! REMOVE RECEIVER AND GO DIE. &
+	&
+
+31000	F$=SYS(CHR$(7%)) &
+	\ E0%=2% &
+	\ GOTO 1000 &
+
+32700	Z0%(0%,3%)=3% &
+	\ Z0%(0%,I%)=0% FOR I%=4% TO 5% &
+	\ Z$=Z$(0%) &
+	\ CLOSE I% FOR I%=1% TO 12% &
+	\ Z$=SYS(CHR6$+CHR$(-13%)+CHR255$+CHR255$+CHR$(-8%)) &
+	\ IF Q0%=0% THEN &
+		Z$=FNE$(18%,0%) &
+	\	Z$="QUEMAN SHUTTING DOWN" &
+	\	GOSUB 2410 &
+
+32710	M%(I%)=0% FOR I%=0% TO 30% &
+	\ M%(0%)=30% &
+	\ M%(1%)=6% &
+	\ M%(2%)=8% &
+	\ M%(28%)=255% &
+	\ CHANGE M% TO M$ &
+	\ M$=SYS(M$) &
+	\ STOP &
+		! IF CLOSED OUT BY SHUTUP, KILL YOURSELF (QUIETLY). &
+
+32767	END

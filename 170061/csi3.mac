@@ -1,0 +1,187 @@
+	IDENT	0001,.CSI3,<EXTEND WILDCARD LOGIC>
+	.LIST	MC
+	.SBTTL	Parse Wild Character Filespecification
+;
+; COPYRIGHT (c)	1981 BY DIGITAL EQUIPMENT CORPORATION.
+; ALL RIGHTS RESERVED.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED
+; OR COPIED ONLY IN ACCORDANCE WITH THE TERMS OF SUCH LICENSE.
+;
+;
+; CSI3 is the wild character .PARSE routine. The FCS 
+; Parse subroutine will reject filenames which contain % and
+; embedded *.  Therefore, CSI3 scans the filespecification 
+; for these wild characters, replacing any field(s) which 
+; contains any wild characters with a '*'.  For example,
+; if the original filespecification was J*C.M%A, CSI3 would
+; create a temporary filespec of '*.*' to pass to the FCS
+; Parse subroutine.  Also, like PARSE, CSI3 will build a
+; wildcharacter 'N.STAT' field, referenced as N.WLST, by 
+; extending the dataset descriptor by 1 additional word (See 
+; PIPMAC.MAC).  Note that CSI3 will over-write the filename
+; address and size fields in the original dataset descriptor.
+; Therefore before calling CSI3, these fields should be
+; saved; they can be restored after calling PARSE.
+;
+;	INPUTS:
+;
+;		R2 = Address of dataset descriptor
+;
+;
+;	OUTPUTS:
+;
+;		A new filespecification is built (if required)
+;		and the filename pointer and size in the 
+;		input dataset descriptor are modified to point
+;		to this temporary filespecification
+;
+;	ALL REGISTERS ARE PRESERVED
+;
+;
+;	MODIFIED BY:
+;
+;
+	FLDSOF
+
+	PURE.I
+
+.CSI3::
+	CALL	$SAVAL		; Save all registers
+
+	CLR	R0		; Initialize wildcard status word
+
+	MOV	N.FNMD+2(R2),R3	; Get address of filespec string
+	MOV	N.FNMD(R2),R2	; Get size of string
+	MOV	#WLDNM,R5	; Address of built filespec
+	CLR	-(SP)		; No previous field seDOTating character
+	MOV	R3,-(SP)	; Save address of filespec string
+	MOV	R2,-(SP)	; Save size of string
+
+	CMPB	#'",(R3)	; Quoted file name ?
+	BNE	SCAN		; If ne, no - scan spec for */%
+	BIS	#NB.ANS,R0	; Set ansi file name seen
+	BR	OUT		; And exit
+
+SCAN:	TST	4(SP)		; Need to remember previous field char ?
+	BEQ	5$		; If eq, no
+	MOVB	4(SP),(R5)+	; Insert field char ( . OR ; )
+	CLR	4(SP)		; And forget about it
+
+
+5$:	MOV	2(SP),R3	; Get address of next field to check
+	MOV	(SP),R2		; Get size of remaining string
+	BLE	OUT		; Nothing remaining
+	CLR	R1		; Initialize no wild chars seen
+
+
+10$:	MOVB	(R3)+,R4	; Get next character in filespc
+	CMPB	#'.,R4		; Dot ?
+	BEQ	.DOT		; Yes, process filename
+	CMPB	#';,R4		; Semicolon ?
+	BEQ	SEMI		; If eq, yes
+	CMPB	#'*,R4		; Wild character ?
+	BEQ	15$		; If eq, remember wildcharacter seen
+	CMPB	#'%,R4		; Wild character ?
+	BNE	20$		; If ne, continue scan
+15$:	INC	R1		; Remember wild character seen
+20$:	SOB	R2,10$		; Look at next character
+
+; If here, then no more characters in filespecification string. The
+; string we just finished looking at is either a filename or type 
+; or version number (depending on what we have already seen)
+
+	INC	R3		; Position ptr past 'field'
+	BIT	#NB.NAM!NB.DOT!NB.SMI,R0 ; Already seen filename ?
+	BEQ	FNAME		; If eq, no - we just passed it
+	BIT	#NB.SMI,R0	; Already seen filetype ?
+	BEQ	FTYPE		; If eq, no - we just passed it
+
+; The field we just looked at was the version number 
+
+VERSN:	MOV	2(SP),R3	; Get starting address of this field
+10$:	MOVB	(R3)+,(R5)+	; Copy version number
+	SOB	(SP),10$		; As is
+	BR	OUT
+
+
+
+
+
+; A '.' has been found - We have the filename in front
+
+.DOT:	BIT	#NB.SMI,R0	; Is dot part of version number ?
+	BEQ	10$		; If eq, no 
+	INC	R3		; Skip past field
+	BR	VERSN		; And treat previous field as version
+10$:	BIT	#NB.DOT,R0	; Have we already seen a DOT ?
+	BNE	ERROR		; If yes - let parse see this
+	BIS	#NB.DOT,R0	; Remember dot has been seen
+	MOVB	R4,4(SP)	; And here it is for later
+
+FNAME:
+	MOV	#9.,$TEMP	; Size restriction for this field
+	MOV	#NB.NAM,$TEMP+2 ; Status setting to say we've found field
+	MOV	#NB.SNM,$TEMP+4 ; Status indicating wild char in name
+	BR	FIELD		; 
+
+
+; Found a semicolon - The previous field is a filename if no
+; filename has been seen else its a filetype.
+
+SEMI:	BIT	#NB.SMI,R0	; Have we seen a semi before
+	BNE	ERROR		; If so, let parse have this one
+	BIS	#NB.SMI!NB.VER,R0 ; Remember Semi has been seen
+	MOV	R4,4(SP)	; And move it later
+	BIT	#NB.DOT!NB.NAM,R0 ; Have we seen a filename ?
+	BEQ	FNAME		; No - this must be it
+
+; We have a filetype string
+
+FTYPE:	MOV	#3.,$TEMP	; Max size of field
+	MOV	#NB.TYP,$TEMP+2 ; Status if find correct field
+	MOV	#NB.STP,$TEMP+4 ; Status indicating wild char in type
+	BR	FIELD		; Scrutinize field
+
+
+FIELD:	MOV	R3,R4		; Calculate size of field we
+	SUB	2(SP),R4	; just found -
+	DEC	R4		; size of field
+	BEQ	40$		; If eq, null filename or filetype
+	CMP	$TEMP,R4	; Filename or type too large ?
+	BLT	ERROR		; If so, let parse take care of it
+	BIS	$TEMP+2,R0	; We've found a filename/filetype
+	CMP	R1,#1		; Any wild card characters seen ?
+	BMI	10$		; If mi, none seen
+	BNE	20$		; More than 1 wildcard character seen
+	CMPB	#'*,@2(SP)	; Just 1 seen - is it a "*"
+	BNE	20$		; If ne, - must be a %
+	CMP	#1,R4		; And is field one character long
+	BNE	20$		; If ne, isn't *. - treat as funny field
+
+10$:	SUB	R4,(SP)		; Calculate size of remaining string
+	MOV	2(SP),R1	; Get address of beginning of field
+	MOV	R3,2(SP)	; And update addr to pt to next field
+15$:	MOVB	(R1)+,(R5)+	; Move filename field
+	SOB	R4,15$		; Into funny area
+	BR	ENDFD		; Process next field
+
+20$:	BIS	$TEMP+4,R0	; We have funny wildcharacter filename
+	MOVB	#'*,(R5)+	; Replace filename with '*'
+40$:	MOV	R3,2(SP)	; Update pointer to point to end of field
+	SUB	R4,(SP)		; And Calculate size of remaining string
+ENDFD:	DEC	(SP)		; Adjust remaining size by field sep length
+	BR	SCAN		; Scan for next field/EOL
+
+ERROR:	CLR	R0		; Let Parse see the same error we did
+OUT:	ADD	#6,SP		; Get rid of temporary data
+	MOV	6(SP),R2	; Get input dataset descriptor
+	MOV	R0,N.WLST(R2)	; Set status of wild character search
+	BIT	#NB.STP!NB.SNM,R0 ; Did we see any wild characters ?
+	BEQ	EXIT		; If eq, no
+	MOV	#WLDNM,N.FNMD+2(R2) ; Address of newly built filespec
+	SUB	#WLDNM,R5	; Calculate size
+	MOV	R5,N.FNMD(R2)	; And set in dataset
+EXIT:	RETURN			; Return to caller
+	.END
+

@@ -1,0 +1,176 @@
+.INCLUDE	%CMN:COMMON%
+.LIBRARY	%SYSTEM:PBSMAC.MLB%
+TITLE	UNFSS,<UN .FSS ROUTINES>,0A,10-MAY-91,RTW/PRL
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR UNFSS
+
+;+
+;
+;   001	PRL  12-Feb-84	Update to return _SY: if no device name
+;			General cleanup
+;   002	KCG  05-Jun-85	Update to not return '.' with non file struct devices
+;-
+
+.SBTTL	MACRO CALLS
+
+.MCALL	PUSH,POP,BITDEF
+
+BITDEF
+
+.SBTTL	DECLARE PROGRAM PSECT
+
+	.PSECT	PBSLIB,RO,CON
+
+.SBTTL	UNFSS ROUTINE
+
+;+
+; UNFSS:
+;
+;	Translates binary data from an "FSS" FIRQB and XRB to a printable file
+;	name string.
+;
+; INPUT:
+;
+;	FIRQB + XRB containing data after .FSS
+;
+;	R4 =  Amount of space left in buffer
+;	R5 -> Output buffer
+;
+; CALL:
+;
+;	JSR	PC,UNFSS
+;
+; BACK:
+;
+;	R5 -> Output buffer
+;	R4 =  Amount of space left in buffer
+;
+;-
+
+	.ENABL	LSB
+
+UNFSS::	PUSH	<R0,R1,R2,R3>
+	MOV	#FIRQB+FQDEV,R1		;point to dev field
+	MOV	(R1),R0			;any device?
+	BNE	10$			;yes, continue
+	MOV	#"SY,R0			;no, use 'SY'
+	BR	20$			;and go copy it
+
+10$:	CMPB	#'A,(R1)		;is it rad50?
+	BHI	30$			;yes, go convert it
+	CMPB	#'Z,(R1)		;no, rad50 this way?
+	BLO	30$			;yes, go convert it
+	CMPB	#'A,1(R1)		;no, rad50 this time?
+	BHI	30$			;yes, go convert it
+	CMPB	#'Z,1(R1)		;no, rad50 now?
+	BLO	30$			;yes, go convert it
+					;no, dev is in ascii
+20$:	MOV	R0,R3			;save chars in r3
+	MOVB	#'_,R0			;set up preceding underscore
+	CALL	110$			;store the char
+	BCS	80$			;no room, so exit
+	MOV	R3,R0			;restore chars from r3
+	CALL	110$			;store the 1st char
+	BCS	80$			;no room, so exit
+	SWAB	R0			;turn the chars around
+	CALL	110$			;store the 2nd char
+	BCS	80$			;no room, so exit
+	MOV	2(R1),R3		;get unit number and flag
+	BIT	#^C<377>,R3		;is unit real?
+	BEQ	40$			;no, so skip
+	BIC	#^C<377>,R3		;yes, get rid of flag
+	CALLX	BIN2D			;output the unit number
+	BR	40$			;and skip to the ':'
+
+30$:	CALLX	R502A			;convert first 3 bytes
+	MOV	2(R1),R0		;get second 3 bytes
+	CALLX	R502A			;convert it too
+	CALL	90$			;strip any spaces
+40$:	MOVB	#':,R0			;load the ":"
+	CALL	110$			;and output it
+	BCS	80$			;no room, so exit
+	MOV	#FIRQB+FQPPN,R1		;point to PPN field
+	TST	(R1)			;any ppn?
+	BEQ	60$			;no, so skip over it
+	MOVB	#'[,R0			;load the "["
+	CALL	110$			;output it
+	BCS	80$			;no room, so exit
+	CLR	R3			;clear work reg
+	BISB	1(R1),R3		;get proj no.
+	CALLX	BIN2D			;make it ascii
+	MOVB	#',,R0			;load the ","
+	CALL	110$			;output it
+	BCS	80$			;no room, so exit
+	CLR	R3			;clear work reg
+	BISB	(R1),R3			;get prog #
+	CALLX	BIN2D			;make it ascii
+50$:	CALL	90$			;strip any trailing sp's
+	MOVB	#'],R0			;load the "]"
+	CALL	110$			;output it
+	BCS	80$			;no room, so exit
+60$:	BIT	#BIT8!BIT11,@#XRB+XRMOD	;Was device NFS or maintains horz pos?
+	BNE	70$			;yes, it is either KB or LP
+	MOV	#FIRQB+FQNAM1,R1	;point to filename
+	MOV	(R1)+,R0		;get filename part 1
+	CALLX	R502A			;make it ascii
+	MOV	(R1)+,R0		;get filename part 2
+	CALLX	R502A			;make it ascii
+	CALL	90$			;strip trailing sp's
+	MOVB	#'.,R0			;load the "."
+	CALL	110$			;output it
+	BCS	80$			;no room, so exit
+	MOV	(R1)+,R0		;get the filetyp
+	CALLX	R502A			;make it ascii
+	CALL	90$			;strip trailing sp's
+70$:	CLC				;clear carry for success
+80$:	POP	<R3,R2,R1,R0>		;restore regs
+	RETURN				;exit
+
+;+
+; routine to trim trailing blanks
+; from string in R5
+;-
+
+90$:	CMPB	#' ,-1(R5)		;was last character a blank?
+	BNE	100$			;no, so exit
+	DEC	R5			;yes, decr pointer
+	INC	R4			;and incr free space
+	BR	90$			;repeat
+
+100$:	RETURN				;exit
+
+;+
+; store R0 character in buffer
+; carry = 0 if room, = 1 if no room
+;- 
+
+110$:	TST	R4			;any room left?
+	BEQ	120$			;no, so fail
+	MOVB	R0,(R5)+		;buffer the character
+	DEC	R4			;decr the free counter
+	TST	(PC)+			;clear carry for success
+120$:	SEC				;set carry for error
+	RETURN				;exit
+
+	.DSABL	LSB
+
+	.END

@@ -1,0 +1,258 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /FCS:QIOMAC/
+TITLE	FASTMP,<Fast Map Call (RSX) Routine>,0K,04-JUN-92,WRM/FEK
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit histort for FASTMP.MAC
+
+;+
+;			[RSTS/E V9.4]
+;  000  WRM   2-APR-87  Creation - copied from the ether
+;  001  WRM  24-APR-87  Bug fix to apr calculation
+;  002  WRM  09-MAR-88	Add APR protection mask
+;
+;			[RSTS/E V10.1]
+;  003	FEK  21-May-92	Don't leave trash in the APRMSK high byte
+;-
+
+;	FIRST A MACRO TO DO THE DEFINING
+
+.MACRO	DEFIN$	SYM,VAL
+.EQUATE	SYM,<VAL>
+.ENDM	DEFIN$
+
+;	NOW INVOKE THE DEFINITIONS...
+
+	QIOSY$
+	DEFORG	FASTMP
+
+.sbttl	Fastmap function
+
+	TMPORG	GRDDSP
+
+	.WORD	FMAP
+
+	UNORG
+
+
+
+	;CODE PROCESS EXCEPTION
+	;if  machine has no I/D space and D-space requested then
+	;force D into I-space (done after much discussion).
+	;
+	;
+	;	Arrival via an IOT call
+	;
+	;SP -->	R0	User's Registers	
+	;	R1
+	;	R2
+	;	R3
+	;	R4
+	;	R5
+	;	PC	after IOT instruction
+	;	PS	OF CALLER
+	;
+	;REGISTERS
+	;	R0	APR*8. + I/D bit + length command bit
+	;	R1	requested window offset/100(8)
+	;	R2	requested window length/100(8) or 0 to compute
+	;
+
+	MWN.FP=400	;local flag to follow protection in APRMSK	;002
+	WDB.FL=100	;local flag used in APR #, must be> 10		;002
+
+FMAP::	NOP			;FOR NOW ONLY!
+	MAP	FIPPOL		;Map the WDB's
+	BIT	#77607,R0	;test for errant bits
+	BNE	30$		;We caught a terrorist...
+	BIC	#100000,R0	;knock off the flag leaves just APR*8.
+	BEQ	30$		;if 0 its APR0 in I space (illegal)
+	CMP	#100,R0		;test for APR0 D space?
+	BEQ	30$		;yes - illegal also
+	MOV	JOBWDB,R3	;point to first WDB entry, is it there?
+	BEQ	30$		;no- it appears his life is a little OOO.
+	ASH	#-3,R0		;normalize APR # to WDB format
+	MOV	#WS$UIS,R4	;set status bit for user I space
+	BIT	#XC$IDS,X.CON	;is I & D space availible?
+	BEQ	10$		;no - leave as I space regardless
+	BIT	#10,R0		;test the requested I/D bit (shifted) for I
+	BEQ	10$		;yes  leave as I in status
+	MOV	#WS$UDS,R4	;advance status to D space
+10$:	BIC	#10,R0		;make a pure APR # for checking
+	.ASSUME	W$NAPR	EQ	0	;assuming JOBWDB -->W$NAPR
+	BIC	#MWN.FP,APRMSK	;besure case flag clear initially	;002
+	MOVB	BITBYT(R0),R5	;bit rep of apr base #			;002
+20$:	CMPB	R0,(R3)		;does APR# = requested APR base
+	BNE	60$		;no not a match
+	BIT	R4,(R3)		;do space bits match?
+	BEQ	60$		;no - not a match
+	TST	(R3)		;we've matched but is it mapped??
+	BMI	70$		;yes 
+	.ASSUME	WS$MAP	EQ	100000
+	BR	60$		;continue hunt to end of list		;002
+
+30$:				;Error - he screwed up some how, kick him out
+	MOV	#IE.ITS,TOS.R0(SP)	;Mark returning R0 as an error
+40$:	CLRB	APRMSK+1	;Don't leave our trash around		;003
+	JMP	RTI3		;exit back to the user
+	.ASSUME	TOS.R0	EQ	0
+
+	FM.LNK=W.LINK-W.WIN1	;offset to WDB link ptr from 1st WDB entry
+
+50$:	MOV	FM.LNK(R3),R3	;get link to next WDB entry
+	BEQ	30$		;0 means end of list and not found -error
+	BR	20$		;else begin at first entry type again
+
+	WDBSIZ=W.WIN2-W.WIN1	;
+	.ASSUME	WDBSIZ	EQ	10.	;offers some protection...
+60$:	CMPB	R0,WDBSIZ(R3)	;does APR# = Requested 
+	BNE	50$		;no on to next blk
+	BIT	R4,WDBSIZ(R3)	;Check  2nd WDB in blk for spaces =
+	BEQ	50$		;no not same go to next blk
+	TST	WDBSIZ(R3)	;ok, but is it mapped?
+	BPL	50$		;no, continue hunt to end of list	;002
+	BIS	#WDB.FL,R0	;set flag in known 0 bit temporarily	;002
+	ADD	#WDBSIZ,R3	;true up the pointer and add flag	;002
+70$:	BIT	R5,APRMSK	;is this APR protected?			;002
+	BEQ	76$		;no, save a lot of time			;002
+	BIT	#WS$UDS,R4	;are we mapping I or D?			;002
+	BEQ	75$		;I case					;002
+	BIT	#WS$UIS,(R3)	;D case, but is it I&D lib?		;002
+	BEQ	76$		;no, D only, if its right-its right	;002
+	BITB	R5,APRMSK	;yes, but is D APR protected?		;002
+	BEQ	76$		;no, normal course			;002
+	BIT	#WDB.FL,R0	;yes, so recall where we came from	;002
+	BEQ	60$		;came from 1st test so cont look @ 2nd	;002
+	BIC	#WDB.FL,R0	;came from 2nd, kill flag		;002
+	SUB	#WDBSIZ,R3	;point back to first sub block		;002
+	BR	50$		;cont hunt for D lib cause of protect	;002
+
+75$:	BITB	R5,APRMSK	;I request,but is D apr protected?	;002
+	BEQ	76$		;no, normal update of D apr to be done	;002
+	BIS	#MWN.FP,APRMSK	;yes, set inhibit flag			;002
+76$:	BIC	#WDB.FL,R0	;even up the flag			;002
+	MOV	W$NLIB(R3),R4	;get pointer to attch lib ptr
+	CMP	R4,#RIDMIN	;is this a special region?
+	BHIS	30$		;yes - illegal for now
+	MOV	(R4),R4		;get pointer to actual LIB blk
+	BIC	#37,R4		;Clear status bits hidden here
+	MOVB	R.KSIZ(R4),R4	;get lib size/2000(8) words =/K(10) words
+	BIC	#177400,R4	;that old sign extend again!
+	ASH	#5,R4		;now size/100(8) bytes
+	SUB	R1,R4		;R4=size-offset requested=remaining/100
+	BMI	30$		;offset>size - another wise guy
+	TST	(SP)		;test lenght request flag (saved)
+	.ASSUME TOS.R0	EQ	0
+	BMI	120$		;requested or compute for him
+80$:	MOV	W$NSIZ(R3),R2	;current size defaulted too
+90$:	;begin common thread
+	CMP	R4,R2		;is remaining<requested?
+	BMI	30$		;yes- no good.
+	MOV	R1,W$NOFF(R3)	;set offset in WDB entry from call
+	ASH	#6,R2		;convert lenght into bytes from /100
+	;??? return in R2 bytes or /100 spec unclear
+	MOV	W$NSIZ(R3),R4	;Save previous byte count for APR clear
+	MOV	R2,W$NBYT(R3)	;set in new lenght in WDB
+	ASH	#-6,R2		;reset to bytes/100
+	MOV	R2,TOS.R2(SP)	;return computed length to user
+	BIT	#WS$UIS,(R3)	 ;Is this APR in I-space
+	BEQ	100$		;no skip to D-space
+	PUSH	<R3,R1,R2,R0,R4> ;save copy of parameters
+	MOV	#UISDR0,R5	;Point to user I-space PDR
+	MOV	#JCMDE,R4	;point to user-I space in MDE table
+	JSR	PC,MDEAPR	;actually change registers
+	POP	<R4,R0,R2,R1,R3> ;Retrive copy of parameters
+100$:	BIT	#WS$UDS,(R3)	;is this APR in D-space?
+	BEQ	110$		;no -skip function
+	BIT	#MWN.FP,APRMSK	;Skip D update on split I&D		;002
+	BNE	110$		;yes					;002
+	PUSH	<R4>		;old byte count must be at top of stack
+	MOV	#<JCMDE+<8.*MDSIZE>>,R4 ;pt to user D-space in MDE tble
+	.ASSUME	MOUSRD	EQ	<MOUSRI+<8.*MDSIZE>>
+	MOV	#UDSDR0,R5	;point to user - D space PDR
+	JSR	PC,MDEAPR	;do it for D-space
+	POP	<R4>		;stack balancing
+110$:	MOV	#IS.SUC,(SP)	;mark returning R4 as success.
+	BR	40$		;and go return to user
+
+120$:	TST	R2		;test len request,do we compute it
+	BEQ	130$		;yes if 0
+	CMP	W$NSIZ(R3),R2	;his data is he trying to sneak to big?
+	BMI	30$		;yes - oh no you don't buddy
+	BR	90$		;goto common thread
+
+130$:	CMP	R4,W$NSIZ(R3)	;which is smaller, remaining or nsize?
+	BPL	80$		;use nsiz - Remaining>=nsize
+	MOV	R4,R2		;use remaining - Remaining<nsize
+	BR	90$		;meet the mainline again
+
+	regsav			;just to get values
+	GLOBAL	<RTI3,DPAR6,ZERO,X.CON,XC$IDS,JCMDE,JOBJC6,JOBJCR>
+	GLOBAL	<BITBYT,APRMSK>
+
+MDEAPR:	PUSH	R0		;save for multiply
+	ASL	R0		;APR*2 to match hardware
+	ADD	R0,R5		;R5->APR(PDR) base in hardware
+	ADD	(SP),R0		;now R0=APR*2+APR=APR*3
+	ASL	R0		;R0=APR*6 (match MDE table)
+	ADD	R4,R0		;R0->MDE+SPACE+APR*MDSIZE
+	.ASSUME	MDSIZE	EQ	6
+	MOV	4(SP),R4	;MAX mapped size to compute # of APR's
+	ADD	#177,R4		;rounding factor for < than full page
+	ASH	#-7,R4		;NSIZ/(200)=# of APR's allocated
+	PAROFF=UISAR0-UISDR0	;Offset to PAR from PDR in hardware
+	PUSH	@DPAR6		;save wdb mapping
+	MOV	JOBJC6,@DPAR6	;map the JCR region
+	ADD	JOBJCR,R0	;offset to base of this job
+	MOV	(R5),R3		;save cur access code for 1st PDR
+	BIC	#^C<17>,R3	;clear all but access & expansion bits
+	PUSH	(R0)		;Save 1st ptr to mcsb from MDE
+	DEC	R2		;offset to match APR hardware (177=8kb siz)
+140$:	MOV	(SP),(R0)	;Set up i th MDE ptr to mcsb before using
+	MOV	@(R0)+,PAROFF(R5) ;R0->phy.add put in loc PAR ( PDR+40
+	MOV	R1,(R0)+	;put offset in MDE table
+	ADD	R1,PAROFF(R5)	;adjust PAR phy.add + offset
+	MOV	R3,(R0)		;preset with access code
+	MOVB	#177,1(R0)	;presume we're a full page or more
+	BIT	#177600,R2	;are we really full page or more?
+	BNE	145$		;yes - guessed right again!
+	MOVB	R2,1(R0)	;short pg length in hi byte in MDE
+145$:	SUB	#200,R2		;reduce length by page value
+	ADD	#200,R1		;increase offset by page length
+150$:	MOV	(R0)+,(R5)+	;MDE-PDR copied to hardware APR-PDR
+	DEC	R4		;count down APR's to do
+	BEQ	160$		;done if 0 count
+	TST	R2		;is length>0 (more active pages)
+	BGT	140$		;yes-
+	MOV	#ZERO,(R0)+	;set MDE base ptr->zero content cell
+	CLR	(R0)+		;0 to MDE offset
+	CLR	(R0)		;0 to MDE-PDR disables APR (no inc)
+	BR	150$		;output MDE to APR-PDR & increment
+
+160$:	TST	(SP)+		;clear 1st MDE mcsb ptr from stack
+	POP	@DPAR6		;restore WDB mapping
+	POP	R0		;restore APR
+	RTS	PC		;return to fastmap thread
+
+.END
+
+

@@ -1,0 +1,1531 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.INCLUDE	/CUI:CUIPFX.MAC/
+TITLE	CUILEX,<CUI Lexical Primitives>,0K,21-JUL-92,CEK/JFM/SDL/BTB/DLS
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR CUILEX
+;+
+;
+;  001	CEK  16-APR-82	Added edit history
+;  002	CEK  16-APR-82	Removed @# notation
+;  003	CEK  16-APR-82	Use addresses instead of offsets for impure area
+;  004	CEK  30-APR-82	Turned patterns into normal subroutines.
+;  005	CEK  30-APR-82	Merged PPARSE.MAC with this module.
+;  006	CEK  30-APR-82	Changed name from PARLIB to CUILEX.
+;  007	CEK  15-JUL-82	Changed P.FOOs to LX.FOOs.
+;  008	CEK  15-JUL-82	Added LX.FND and LX.SKP. Modified routines to use them.
+;  009	CEK  15-JUL-82	Removed LX.LETT, LX.DIG, LX.EXEP
+;  010	CEK  28-Sep-82	Added U$CVTTIME conversion routine
+;  011	JFM  06-Jan-83	Fixed INT bug - would not accept an int >= 32769
+;  012	JFM  21-Feb-83	Made LX.LEN and LX.STR global symbols.
+;  013	JFM  10-May-83	Changed comments.
+;  014  SDL  08-Aug-83  Make the routine LX$TST global
+;  015	JFM  23-Sep-83	Added relative date and time parse,  needs some work.
+;  016  JFM  25-Oct-83  Added the 'locate a string' routine LX.LOC
+;  017  SDL  26-Oct-83  Removed unnecessary LX.??? global references
+;  018  SDL  04-Nov-83  Make LX$ADV a global routine
+;  019	JFM  01-Dec-83  Added LX.SGN signed integer.
+;  020	JFM  05-Mar-84	Added integer pattern matchers.  Alphabetized routines
+;  021	JFM  08-May-84	Fixed relative dates and times
+;  022	JFM  08-Feb-85	Removed U$CVTTIME (nobody uses it), made ADDDAY global
+;
+;			[RSTS/E V9.7]
+;  023	JFM  16-Sep-88	Moved all text into one common location.
+;			Changed LX.BLA and LX.EOS so they can be called via
+;			CALL instead of the costly CALB.  Unglobalized stuff.
+;
+;			[RSTS/E V10.0]
+;  024	BTB  04-Jun-90	12:00 PM is noon, not midnight
+;
+;			[RSTS/E V10.1]
+;  025	DLS  01-Jul-91	Allow year to be 1970 to 2035 (70-90 , 00-35)
+;  026	JFM  10-Jul-92	Allow year to be 1970 to 2035 in relative dates
+;-
+
+	.PSECT	CUILEX,RO,REL,LCL,CON
+	DEFORG	CUILEX
+
+.SBTTL	Text
+
+	TMPORG	U$TEXT							;023
+T.SPA:	.ASCIZ <SPACE><TAB>	;Spaces and tabs			;023
+T.MIN:				;Minus sign				;023
+T.HYP:	.ASCIZ "-"		;Hyphen (synonym)			;023
+T.DOT:	.ASCIZ "."		;Dot (period)				;023
+T.1DQ:	.ASCIZ '"'		;A double quote character		;023
+T.2DQ:	.ASCIZ '""'		;Two double quote characters		;023
+T.PLU:	.ASCIZ	"+"		;Plus sign				;023
+T.DIG:	.ASCIZ	"9"		;Digit					;023
+T.AN:	.ASCIZ "A9$_"		;Alpha-numeric				;023
+T.SLA:	.ASCIZ "/"		;Slash					;023
+T.COL:	.ASCIZ ":"		;Colon					;023
+T.SIGN:	.ASCIZ "+-"		;Plus or minus sign			;023
+	UNORG								;023
+
+.SBTTL	Variables
+
+	TMPORG	IMPURE	
+
+WINDOW:	.BLKB			;Current input char.
+	.EVEN
+LX.STR::.BLKW			;Address of input string.
+LX.LEN::.BLKW			;Address of length of input string.
+LX.POS::.BLKW			;Current scan position (1 to (LX.LEN+1)).
+LX.ERP::.BLKW			;Position of syntax error.
+LX.PMAT::.BLKW			;Position of syntax element just matched.
+LX.NMAT::.BLKW			;Number of chars in the syntax element just
+				;matched.
+$HOUR:				;Hour of day.
+$MONTH:	.BLKW			;Month of year. (Shared location.)
+$MINUTE:.BLKW			;Minute of hour.
+$YEAR:	.BLKW			;Year.
+$DATE:	.BLKW			;Date of month.
+$NOW:	.BLKW			;Current time, in minutes til midnight format.
+$NUM::	.BLKW			;Number (+/-) relative DAYS, MINUTES, or HOURS 
+	UNORG
+
+.SBTTL	LX.BLA--parse a gap (spaces and/or tabs)
+;+
+; LX.BLA--parse a gap, i.e. a string of one or more spaces
+; and/or tabs.
+;
+; INPUTS:
+;	LX.STR ->	first char of string
+;	LX.LEN =	string length
+;	LX.POS =	current scan position (1 to (LX.LEN+1))
+;
+; CALL	LX.BLA								;023
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+; C=1	if	error
+;	R0	=	U.ICHR  (?Invalid character)
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+
+.ENABL	LSB
+
+LX.BLA::CALB	LX.SKP <#T.SPA>		;Skip spaces and tabs		;023
+	RETURN				;Return with status		;023
+
+.DSABL	LSB
+
+.SBTTL	LX.DATE--parse a date specification
+;+
+; LX.DATE--parse a date specification, of the form
+; 	dd-mmm-yy | yy.mm.dd | TOD-AY | TOM-ORROW | YE-STERDAY
+; For example,
+;	23-MAR-79 or 79.3.23
+; An alphabetic month can be spelled out fully.
+; A valid year is an integer in the range 1970-2035, or 70-99, 00-35	;026
+;
+; If a legal date isn't found, the error U.IDAT is returned, with LX.ERP
+; pointing at the beginning of the proposed date string.
+;
+; INPUTS:
+;	LX.STR ->	first char of string
+;	LX.LEN ->	string length
+;	LX.POS	=	current scan position (1 to (LX.LEN+1))
+;
+; CALB LX.DATE	<location for date>
+;
+; OUTPUTS:
+; C=0	if	success
+;	R0	=	0
+;	date	->	the date in RSTS one-word format
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+; C=1	if	error
+;	R0	=	U.IDAT (Invalid date) 
+;	LX.ERP	=	position of first character of date 
+;	LX.POS		unchanged
+;
+; SIDE EFFECTS:
+;	XRB is clobbered.
+;-
+
+MON.K:	.WORD	U$JAN,U$FEB,U$MAR,U$APR,U$MAY,U$JUN
+	.WORD	U$JUL,U$AUG,U$SEP,U$OCT,U$NOV,U$DEC,0
+
+; Number of days in the n(th) month.  (Requires a correction for leap year.)
+
+MON.LEN:.WORD	31.,28.,31.,30.,31.,30.,31.,31.,30.,31.,30.,31.
+
+; Don't change the order of the following day keywords.
+
+DAY.K:	.WORD	U$YEST,U$TOD,U$TOMO,0
+
+GLOBAL	<U$JAN,U$FEB,U$MAR,U$APR,U$MAY,U$JUN>
+GLOBAL	<U$JUL,U$AUG,U$SEP,U$OCT,U$NOV,U$DEC>
+GLOBAL	<U$YEST,U$TOD,U$TOMO>
+
+.ENABL	LSB
+
+LX.DATE::SUBR	<DATE>
+	CALL	LX.SUP		;Get set up.
+	.ASSERT	(R5) LE #ARGMAX, BYTE
+				;Check arg count.
+	CALLX	CLRXRB		;Zero XRB.
+	SYS	.DATE		;Get current date.
+	CALLX	U$CHKE		;Abort if error. (Shouldn't happen.)
+	MOV	XRB+0,R3	;Get years since 1970 * 1000 + day of year.
+	MOV	R3,@DATE(R5)	;Save it into user's date word.
+	CLR	R2		;Clear MSB for DIV.
+	DIV	#1000.,R2	;Now R2 = years since 1970.
+	ADD	#70.,R2		;Get years since 1900.
+	MOV	R2,$YEAR	;Save current year as default.
+
+; First look for alphabetic format (dd-mmm-yy).
+
+	CALB	LX.INT <#$DATE>;Look for dd.
+	BCS	35$		;Not an integer; go see about date keyword.
+	CALB	LX.EXAC <#T.HYP>;Look for hyphen.			;023
+	BCS	20$		;No hyphen.  Go see about numeric format.
+
+; The date is in alphabetic format;  we've seen "dd-".
+
+	MOV	#MON.K,R3	;Point at table of month names.
+	CLR	$MONTH		;Zero month counter.
+10$:	TST	(R3)		;Have we reached end of months yet?
+	BZE	60$		;Yes. Quit.
+	INC	$MONTH		;No. Increment month counter.
+	CALB	LX.KEY <(R3)+>	;Try to match keyword.
+	BCS	10$		;Didn't match. Loop onward.
+	.ASSERT	$MONTH LE #12.	;Matched. Numeric month doesn't 
+				;exceed 12.
+
+; We've seen "dd-mmm".  Now look for optional "-yy".
+
+	CALB	LX.EXAC <#T.HYP>;Look for optional hyphen.		;023
+	BCS	30$		;Not present.  That's OK; go convert.
+	CALB	LX.INT <#$YEAR>	;Look for "yy".
+	BCS	60$		;Didn't find it.  Error; quit.
+	BR	30$		;Found it.  Go convert.
+
+; Try it as a numeric date.   We've seen "yy", though we misinterpreted it
+; as "dd".
+
+20$:	MOV	$DATE,$YEAR	;That number we saw was really a year.
+	CALB	LX.EXAC <#T.DOT>;Look for a dot.			;023
+	BCS	60$		;Not there; quit.
+	CALB	LX.INT <#$MONTH>;Look for mm.
+	BCS	60$		;Not there; quit.
+	CALB	LX.EXAC <#T.DOT>;Look for a dot.			;023
+	BCS	60$		;Not there; quit.
+	CALB	LX.INT <#$DATE> ;Look for "dd".
+	BCS	60$		;Not there; quit.
+
+30$:	CLR	R0		;Preset no error.
+	CALL	CVTDATE		;Convert date to internal format, and
+				;check for errors.
+	BCC	70$		;Looks good.  Exit.
+	BR	60$		;Looks bad; quit.
+
+; See if date is "TODAY" or "TOMORROW" or "YESTERDAY".
+
+35$:	MOV	#DAY.K,R3	;Point at table of day keywords.
+	MOV	#-2,R2		;Start with relative date=-2.
+40$:	TST	(R3)		;Have we reached end of keywords yet?
+	BZE	60$		;Yes. fail.
+	INC	R2		;Increment relative date.
+	CALB	LX.KEY <(R3)+>	;Try to match keyword.
+	BCS	40$		;Didn't match.  Loop onward.
+	CALB	ADDDAY <DATE(R5),R2>
+				;Add relative date into date word.
+	BCC	70$		;No error. Exit.
+
+; Bad date.
+
+60$:	MOV	#U.IDAT,R0	;?Invalid date.
+	MOV	R4,LX.ERP	;Position of date is where error occurred.
+
+70$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.IDAT>
+
+;INPUT:
+; R1	->	place to put date word
+; INTERNAL VARIABLES:
+; R5	=	years since 1970.
+; R2	=	month counter
+; R3	->	entry in MON.LEN table
+; R0	=	date of year
+; R4	=	date of month
+
+CVTDATE:SAVREG			;Save registers.
+	MOV	$YEAR,R5	;Get specified year.
+	MOV	$MONTH,R2	;Get numeric month.
+	MOV	#MON.LEN,R3	;Point at lengths of months.
+	CLR	R0		;Zero running total.
+	BIT	#3,R5		;Is it a leap year?
+	IFZE			;If so then
+	CMP	R2,#2		;  Is the month after February?
+	IFGT			;  If so then
+	INC	R0		;    Allow for Feb 29th.
+	ENDIF
+	ENDIF
+	DEC	R2		;Compute how many months preceed given month.
+	IFNZ			;
+10$:	ADD	(R3)+,R0	;Total up how many days preceed given month.
+	SOB	R2,10$
+	ENDIF			;Now R3 -> number of days in given month.
+				;R0 = number of days preceeding month.  
+	MOV	$DATE,R4	;Get day of month.
+	BLE	30$		;If it's negative or zero, fail.
+	BIT	#3,R5		;Is it a leap year?
+	IFZE			;If so then
+	CMP	$MONTH,#2	;Is it February?
+	IFEQ			;  If so then
+	CMP	R4,#29.		;    Is date within range?	
+	BLE	20$		;    Yes. We're OK.
+	BR	30$		;    No. Quit.
+	ENDIF			;
+	ENDIF
+	CMP	R4,(R3)		;Is date within range?
+	BGT	30$		;No. Quit.
+20$:	ADD	R4,R0		;Compute day of year.
+	SUB	#70.,R5		;Year less than 70?			;025
+	BLT	23$		;Yes, check to see if it was 00-35	;025
+	CMP	R5,#30.		;No, Was year between 70-99?		;025
+	BLT	25$		;Yes, go do the multiply		;025
+	SUB	#2000.,R5	;No, maybe it's between 1970 and 2035	;025
+23$:	ADD	#100.,R5	;Try to make it positive, Is it?	;025
+	BLT	30$		;No, set error 				;025
+	CMP	R5,#65.		;Can't go any higher than 65?		;025
+	BGT	30$		;They tried, so error and exit		;025
+25$:	MUL	#1000.,R5	;Years since 1970 * 1000		;025
+	ADD	R5,R0		;Compute date word.
+	MOV	R0,(R1)		;Give it to user.
+	TST	(PC)+		;Skip the SEC, and clear carry.
+30$:	SEC			;Flag error.
+	RETURN
+
+
+.SBTTL	LX.DQUOT--parse a quoted string
+;+
+; LX.DQUOT--parse a double-quoted string
+;
+; A double-quoted string is a string of any characters enclosed in double
+; quotes ("...").  A pair of adjacent double quotes ("") does not terminate the
+; quoted string.  Usually this notation represents the double-quote character.
+;
+; INPUTS:
+;	LX.STR ->	first char of string
+;	LX.LEN ->	string length
+;	LX.POS =	current scan position (1 to (LX.LEN+1))
+;
+; CALB	LX.DQUOT
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+; C=1	if	error
+;	R0	=	SASYNE (?Syntax error) or
+;		=	U.NOCQ (?Missing closing quote).
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+
+.ENABL	LSB
+
+LX.DQUOT::SUBR
+	CALL	LX.SUP		;Get set up.
+	.ASSERT	(R5) EQ #ARGMAX, BYTE
+				;Check arg count.
+	CALB	LX.EXAC <#T.1DQ>;Look for a double quote.		;023
+	BCS	20$		;Not there; quit.
+
+; Match zero or more occurrences of either a pair of double quotes, or
+; any other character except a closing quote or EOS.
+
+10$:	CALB	LX.FND <#T.1DQ>	;Scan until a double quote.		;023
+				;No error is possible.
+	CALB	LX.EXAC <#T.2DQ>;Look for a pair of double quotes (which ;023
+				; could be embedded in the string).
+	BCC	10$		;Found it; loop on.
+	CALB	LX.EXAC <#T.1DQ>;That didn't match, so this better be 	;023
+				; the closing quote character.
+	BCC	20$		;It is.  We're in luck.  Exit.
+	MOV	#U.NOCQ,R0	;It isn't.  Flag error: ?Missing closing quote.
+	MOV	R4,LX.ERP	;Position of opening quote is error position.
+20$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.NOCQ>
+
+.SBTTL	LX.EOS--parse end-of-string
+;+
+; LX.EOS--parse end-of-string.
+;
+; INPUTS:
+;	LX.STR ->	first char of string
+;	LX.LEN ->	string length
+;	LX.POS =	current scan position (1 to (LX.LEN+1))
+;
+; CALL	LX.EOS								;023
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	unchanged
+; C=1	if	error
+;	R0	=	U.ICHR (?Invalid character)
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+
+.ENABL	LSB
+
+LX.EOS::CLR	R0		;Assume no error			;023
+	CMP	LX.POS,@LX.LEN	;Are we at end-of-string?
+	IFLOS			;If not then
+	MOV	LX.POS,LX.ERP	;  Set error position			;023
+	MOV	#U.ICHR,R0	;  Flag ?Invalid character.
+	ENDIF			;Endif
+
+	TST	R0		;Error?					;023
+	BEQ	10$		;No, return with C bit clear		;023
+	SEC			;Indicate failure			;023
+10$:	RETURN			;Return with status			;023
+
+.DSABL	LSB
+GLOBAL	<U.ICHR>
+
+.SBTTL	LX.EXAC--parse an exactly specified string
+;+
+; LX.EXAC -- parse an exactly specified string
+;
+; INPUTS:
+;	LX.STR ->	first char of input string
+;	LX.LEN ->	string length
+;	target	->	first char of target string
+;	LX.POS =	current scan position (1 to (LX.LEN+1))
+;
+; CALB	LX.EXAC	<address of target string>
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+; C=1	if	error
+;	R0	=	SASYNE (?Syntax error)
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+
+; INTERNAL VARIABLES:
+;	R1	->	char of target string to match next
+
+.ENABL	LSB
+
+LX.EXAC::SUBR	<TARGET>,CHECK
+	CALL	LX.SUP		;Get set up.
+	MOV	TARGET(R5),R1	;Address of target string.
+10$:	TSTB	(R1)		;Have we reached end of target string?
+	BEQ	30$		;Yes.  Exit with success.
+	CMPB	(R1)+,WINDOW	;No.  Does target match input up to this
+				;point?
+	BNE	20$		;If not then
+				;  Go reject match.
+				;Else
+	CALL	LX$ADV		;  Advance to next char.
+	BR	10$
+
+; Match failed.
+
+20$:	MOV	#SASYNE,R0	;Flag ?Syntax error.
+30$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<SASYNE>
+
+.SBTTL	LX.FND--find a character belonging to given set
+;+
+; LX.FND--find a character belonging to given set
+;
+; LX.FND scans zero or more characters NOT belonging to the given
+; character set.  It stops at end-of-string.
+; LX.FND never returns an error.
+;
+; INPUTS:
+; 	LX.STR	->	first char of string
+; 	LX.LEN	=	string length
+; 	chrset	->	ASCIZ string of character set to find
+;			"9" means any digit, "A" means any letter
+; 	LX.POS	=	current scan position (1 to (LX.LEN+1))
+;
+; CALB	LX.FND	<chrset>
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+;-
+
+.ENABL	LSB
+
+LX.FND::SUBR	<CHRSET>
+	CALL	LX.SUP		;Get set up.
+10$:	TSTB	WINDOW		;Are we at end-of-string?
+	BZE	20$		;Yes. Return.
+	CALB	LX$TST <CHRSET(R5)>
+				;No. Does next char belong to the set?
+	BCC	20$		;Yes. Return.
+	CALL	LX$ADV		;No. Advance to next char position.
+	BR	10$		;Loop onward.
+
+20$:	CLR	R0
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	LX.S8 -- parse a signed 8-bit integer
+.SBTTL	LX.S16 -- parse a signed 16-bit integer
+.SBTTL	LX.S32 -- parse a signed 32-bit integer
+;+
+; LX.S8 -- parse a signed 8-bit integer
+; LX.S16 -- parse a signed 16-bit integer
+; LX.S32 -- parse a signed 32-bit integer
+;
+; If VALUE is not specified, then U.LOW(cmn) is assumed.  Only one leading 
+; sign is allowed, okay?
+;
+; INPUTS:
+;	LX.STR ->	first char of string
+;	LX.LEN =	string length
+;	LX.POS =	current scan position (1 to (LX.LEN+1))
+;	value	->	where to put value of integer
+;			(optional argument)
+;
+; CALB	LX.S8	[<value>]
+; CALB	LX.S16	[<value>]
+; CALB	LX.S32	[<value>]
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+;	value	->	binary value of integer. (8, 16, 32-bits)
+; C=1	if	error
+;	R0	=	BDNERR (?Illegal number)
+;		=	U.OUTR (?Number not in range !AC to !AC)
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+.ENABL	LSB
+
+LX.S8::	MOV	#1,R2		;Eight bit integer
+	BR	JOIN1		;Damned local symbol block
+
+LX.S16::MOV	#-1,R2		;16-bit integer
+	BR	JOIN1		;Damned local symbol block
+
+LX.S32::CLR	R2		;32-bit integer
+JOIN1:	SUBR	<VALUE>
+	.ASSERT (R5) LE #ARGMAX, BYTE ;Check arg count
+	;CALL	LX.SUP		;Get set up.  //Don't want LX.SUP this time//
+	MOV	R2,R4		;Use R4 for our routine flag
+	CALB	LX$SGN		;Parse characters in a signed integer
+	BCS	50$		;None found.  ?Illegal number
+	CALL	LX$VAL		;Set up R1 to point to correct value holder
+	BIS	#100000,R2	;Signed integer assumed (if no sign specified)
+	TST	R4		;What kind of integer do we want?
+	BLT	20$		;16-bit
+	BEQ	30$		;32-bit
+	CALLX	$XDTBB		;8-bit 
+	BR	35$		;Check for error
+
+20$:	CALLX	$XDTB		;Convert to 16-bit integer
+	BR	35$		;Check for error
+
+30$:	CALLX	$XDT2B		;Convert to 32-bit integer
+35$:	BCC 	40$		;No error occured
+	MOV	#U.OUTR,R0	;?Number out of range
+	BR	50$		;Quit
+
+40$:	CLR	R0		;Indicate no error
+50$:	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<BDNERR,U.OUTR>
+
+.SBTTL	LX.U8 -- parse an unsigned 8-bit integer
+.SBTTL	LX.U16 -- parse an unsigned 16-bit integer
+.SBTTL	LX.U32 -- parse an unsigned 32-bit integer
+;+
+; LX.U8 -- parse an unsigned 8-bit integer
+; LX.U16 -- parse an unsigned 16-bit integer
+; LX.U32 -- parse an unsigned 32-bit integer
+;
+; If VALUE is not specified, then U.LOW(cmn) is assumed.  Leading plus sign
+; is tolerated, okay?
+;
+; INPUTS:
+;	LX.STR ->	first char of string
+;	LX.LEN =	string length
+;	LX.POS =	current scan position (1 to (LX.LEN+1))
+;	value	->	where to put value of integer
+;			(optional argument)
+;
+; CALB	LX.U8	[<value>]
+; CALB	LX.U16	[<value>]
+; CALB	LX.U32	[<value>]
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+;	value	->	binary value of integer. (8, 16, 32-bits)
+; C=1	if	error
+;	R0	=	BDNERR (?Illegal number)
+;		=	U.OUTR (?Number not in range !AC to !AC)
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+.ENABL	LSB
+
+LX.U8::	MOV	#1,R2		;Eight bit integer
+	BR	JOIN2		;Join common code
+
+LX.INT::
+LX.U16::MOV	#-1,R2		;16-bit integer
+	BR	JOIN2		;Join common code
+
+LX.U32::CLR	R2		;32-bit integer
+JOIN2:	SUBR	<VALUE>
+	.ASSERT (R5) LE #ARGMAX, BYTE ;Check arg count
+	;CALL	LX.SUP		;Get set up.  //Don't want LX.SUP this time//
+	MOV	R2,R4		;Use R4 for our routine flag
+	CALB	LX$UNS		;Parse characters in an unsigned integer
+	BCS	50$		;None found.  ?Illegal number
+	CALL	LX$VAL		;Set up R1 to point to correct value holder
+	TST	R4		;What kind of integer do we want?
+	BLT	20$		;16-bit
+	BEQ	30$		;32-bit
+	CALLX	$XDTBB		;8-bit 
+	BR	35$		;
+
+20$:	CALLX	$XDTB		;Convert to 16-bit integer
+	BR	35$		;
+
+30$:	CALLX	$XDT2B		;Convert to 32-bit integer
+35$:	BCC 	40$		;No error occured
+	MOV	#U.OUTR,R0	;?Number out of range
+	BR	50$		;Quit
+
+40$:	CLR	R0		;Indicate no error
+50$:	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<BDNERR,U.OUTR>
+
+.SBTTL LX$SGN -- Parse integers in a signed number
+.SBTTL LX$UNS -- Parse integers in a unsigned number
+
+.ENABL	LSB
+
+LX$SGN:	SUBR
+	CLR	R2		;Indicate sign is allowed
+	CALL	LX.SUP		;Get set up
+	CALB	LX.EXAC <#T.PLU>;Match a plus sign			;023
+	BCS	10$		;We didn't
+	BR	20$		;Continue
+
+LX$UNS:	SUBR
+	MOV	#-1,R2		;Indicate sign is not allowed
+	CALL	LX.SUP		;Get set up
+10$:	CALB	LX.EXAC	<#T.MIN>;Match minus sign			;023
+	BCC	20$		;We saw a minus sign
+	INC	R2		;Didn't find one.  Indicate so.
+20$:	CALB	LX.SKP	<#T.DIG>;Match digits				;023
+	BCC	30$		;Found some digits.
+	MOV	#BDNERR,R0	;?Illegal number
+	BR	40$		;Quit
+
+30$:	TST	R2		;Minus sign found on unsigned integer?
+	BGE	40$		;No, that's good
+	MOV	#U.OUTR,R0	;?Number out of range (NOTE: -0 will error)
+	MOV	R4,LX.POS	;Restore original scan position and window 
+	CALL	LX$MOVW		; character (user may wish to ignore error)
+40$:	RETURN			;Finished
+
+.DSABL	LSB
+
+.SBTTL LX$VAL -- Set up value parameters for integer conversion calls
+.ENABL	LSB
+
+LX$VAL:	TSTB	(R5)		;Was a value supplied?
+	BNE	40$		;Yes
+	MOV	CMNADR,R1	;Point at 
+	ADD	#U.LOW,R1	; U.LOW
+	CLR	(R1)		;Clear out R1
+	CLR	2(R1)		; and the word following it.
+	BR	50$		;Done
+
+40$:	MOV	VALUE(R5),R1	;R1 -> place to put number
+50$:	MOV	LX.PMAT,R0	;R0 =  position in input string
+	ADD	LX.STR,R0	;LX.STR points to 1st character in input string
+	DEC	R0		;R0 -> integer in input string
+	MOV	LX.NMAT,R2	;R2 =  number of characters in number
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<CMNADR>
+
+.SBTTL	LX.LOC--locate a string
+;+
+; LX.LOC -- Locate a string
+;
+; LX.LOC scans zero or more characters until it locates a string
+; in a given set.  It gives an error if it cannot come up with a match.  
+;
+; INPUTS:
+; 	LX.STR	->	first char of string
+; 	LX.LEN	=	string length
+; 	target	->	first character of ASCIZ string to locate. 
+; 	LX.POS	=	current scan position (1 to (LX.LEN+1))
+;
+; CALB	LX.LOC	<address of target string>
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of string matched by this pattern
+;	LX.NMAT	=	number of chars skipped by this pattern before locating
+;			string.  This counts the character pointed to by the
+;			original scan position, but not the character matched.
+;
+;			Eg.  	A="FOO"+1, if the original scan position was 
+;				the first quote, and you wanted to locate the 
+;				next quote you would get LX.NMAT=3.  And the 
+;				LX.POS would be 8 (the "+").
+;			
+; C=1	if	error
+;	R0	= -1   	Indicates failure.
+;	LX.ERP	= 0 	The location of the string failed, but no particular 
+;			character or position was at fault.
+;	LX.POS		unchanged
+;
+; Note:  The routine LX.SUP cannot be called from within this routine to do
+;        the normal setup because it messes up the LX.PMAT, LX.NMAT and LX.POS
+;	 variables.
+;
+;-
+
+.ENABL	LSB
+
+LX.LOC::SUBR	<TARGET>
+	MOV	LX.POS,R4	;Save original scan position.
+	CLR	R1		;Count of characters matched.
+	CALL	LX$MOVW		;Move character window to correct position
+10$:	TSTB	WINDOW		;Are we at end-of-string?
+	BZE	20$		;Yes. Return with error.
+	CALB	LX.EXAC <TARGET(R5)>
+				;No. Are we looking at the string ?
+	BCC	30$		;Yes. Return.
+	INC	R1		;Another character looked at and passed up.
+	CALL	LX$ADV		;No. Advance to next char position.
+	BR	10$		;Loop onward.
+
+20$:	MOV	#-1,R0		;Not found.
+	CLR	LX.ERP		;No error position.
+	MOV	R4,LX.POS	;Restore original scan position.
+	SEC			;Indicate no error.
+	BR	40$		;Quit
+
+30$:	MOV	R1,LX.NMAT	;Set up number of characters looked at.
+40$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	LX.KEY--parse a specified keyword
+;+
+; LX.KEY--parse a specified keyword.
+;
+; INPUTS:
+;	LX.STR ->	first char of string
+;	LX.LEN =	string length
+;	target	->	first char of null-terminated target keyword
+;	LX.POS =	current scan position (1 to (LX.LEN+1))
+;
+; CALB	LX.KEY	<address of target string>
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+; C=1	if	error
+;	R0	=	U.IKEY (?Invalid keyword) or
+;		=	U.SHOR (?Ambiguous keyword) or
+;		=	U.KYND (?Keyword required)
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+
+; INTERNAL VARIABLES --
+;   R1 -> target char we're trying to match
+;   R2 = zero if we haven't seen an abbrev point yet, non-zero if we have
+;   R3 = target char we're trying to match
+
+.ENABL	LSB
+
+
+LX.KEY::SUBR	<TARGET>, CHECK
+	CALL	LX.SUP		;Get set up.
+	MOV	TARGET(R5),R1	;Get address of target keyword.
+	CALB	LX$TST	<#T.AN>	;Do we have at least one alphanumeric?	;023
+	BCC	5$		;Yes
+	MOV	#U.KYND,R0	;No, ?Keyword required.
+	BR	60$		;  Quit.
+
+; Loop until input doesn't match target string.
+
+5$:	CLR	R2		;No abbreviation point yet.
+10$:	MOVB	(R1)+,R3	;Get next target character.
+	IFNZ			;If we haven't reached end of target string 
+	CMPB	R3,#'-		;  Abbreviation point in target string?
+	IFEQ			;  If so then
+	INC	R2		;    Notice it.
+	BR	10$		;    Go get next target char.
+
+	ENDIF			;  Endif
+	CMPB	R3,#SPACE	;  Space in target string?
+	BEQ	23$		;  Yes.  Must have reached end part of keyword.
+	CMPB	R3,#'/		;  No.  How about a slash?
+	BEQ	25$		;  Yes.  Again, reached end of part. Keep it up
+	CMPB	WINDOW,R3	;  No.  Is target char same as corresponding 
+				;  char of input string?  
+	IFEQ			;  If same then
+	CALL	LX$ADV		;    Advance to next input char.
+	BR	10$		;    Go get next target char.
+
+	ENDIF			;  Else chars are different.
+	CMPB	R3,#'_		;  Is target char underscore?
+	BEQ	10$		;  Yes. Ignore it, and go on to next target
+				;  char.
+				;  No.  We've got a real discrepancy.
+	ENDIF			;Else we've reached end of target string.
+	CALB	LX$TST <#T.AN>	;Is input character alphanumeric?	;023
+	BCC	50$		;Yes, say ?Invalid keyword.
+
+; We've reached a nonalphanumeric input char.  Alphanumeric substring in input
+; matches keyword, or at least matches beginning of keyword.
+
+	TST	R2		;Did we reach abbreviation point?	
+	BNZ	20$		;Yes.  Success so far.
+	TSTB	R3		;No. Did we reach null terminator of target?
+	BZE	40$		;Yes.  Return with success.
+	MOV	#U.SHOR,R0	;No.  ?Ambiguous keyword
+	MOV	NXTKEY,LX.ERP	;Set up error position (0 if no next keyword)
+	BR	60$		;Quit.
+
+20$:	TSTB	R3		;Did we reach the end of our taget string?
+	BEQ	40$		;Yes.  Quit.
+	CMPB	R3,#'/		;Is there a slash in our keyword?
+	BEQ	25$		;Yes.  Go advance WINDOW.
+	CMPB	R3,#SPACE	;Is there a space in our keyword?
+	BEQ	23$		;Yes.  Look for a space in WINDOW.
+	MOVB	(R1)+,R3	;Get next character.
+	BEQ	40$		;If it is null, we are done.
+	BR	20$		;Check all cahracters in our KEYWORD.
+
+23$:	CLR	R2		;Clear abbreviation point flag.
+	CALL	LX.BLA		;Skip gap.				;023
+	BCC	35$		;Found one, keep going
+				;Oh-oh, we were looking for a space, so this
+				;is not our keyword.  
+	MOV	#U.KYND,R0	;?Keyword required
+	MOV	LX.POS,LX.ERP	;Set current position to scan position
+	BR	60$		;Quit
+
+25$:	CLR	R2		;Clear abbreviation point flag.
+	CALL	LX.BLA		;Skip optional gap.			;023
+	CALB	LX.EXAC	<#T.SLA>;Try to match a slash.  		;023
+	IFCS			;If we didn't find one then
+	MOV	LX.POS,SLAPOS	;  Remember position of where slash should have
+	BR	50$		;  been and quit
+	ENDIF			;Endif
+
+	CALL	LX.BLA		;We found one.  Skip optional blanks.	;023
+	CLR	R0		;We don't care if that failed. (no blanks)
+35$:	MOV	LX.POS,NXTKEY	;Remember position of next keyword
+	BR	10$		;Keep trying to match this multi-word keyword.
+
+40$:	CLR	R0		;Indicate no error. (also clears C-bit)
+	BR	60$		;Return.
+
+50$:	MOV	#U.IKEY,R0	;Error.  ?Invalid keyword.
+60$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.IKEY,U.KYND,U.SHOR,NXTKEY,SLAPOS>
+
+.SBTTL	LX.MEM--parse any char in given list
+;+
+; LX.MEM--parse a single char that is a member of a given
+; list of chars.
+;
+; INPUTS:
+; 	LX.STR ->	first char of string
+; 	LX.LEN =	string length
+; 	target	->	ASCIZ string of chars to look for.
+;			"9" matches any digit; "A" matches any letter
+; 	LX.POS =	current scan position (1 to (LX.LEN+1))
+;
+; CALB	LX.MEM	<address of target string>
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+; C=1	if	error
+;	R0	=	U.ICHR (?Invalid character)
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+
+.ENABL	LSB
+
+LX.MEM::SUBR	<TARGET>,CHECK
+	CALL	LX.SUP		;Get set up.
+	CALB	LX$TST <TARGET(R5)>
+				;Is the character present?
+	IFCC			;If so then
+	CALL	LX$ADV		;  Advance to next character.
+	ENDIF			;Else return with ?Invalid character.
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	LX.SKP--skip characters belonging to given set
+;+
+; LX.SKP--skip characters belonging to given set
+;
+; INPUTS:
+; 	LX.STR	->	first char of string
+; 	LX.LEN	=	string length
+; 	chrset	->	ASCIZ string of character set to skip
+;			"9" means any digit, "A" means any letter
+; 	LX.POS	=	current scan position (1 to (LX.LEN+1))
+;
+; CALB	LX.SKP	<chrset>
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+; C=1	if	error
+;	R0	=	U.ICHR (?Invalid character)
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+
+.ENABL	LSB
+
+LX.SKP::SUBR	<CHRSET>
+	CALL	LX.SUP		;Get set up.
+	CALB	LX$TST <CHRSET(R5)>
+				;Does next char belong to the set?
+	BCS	20$		;No. Return with error.
+10$:	CALL	LX$ADV		;Yes. Advance to next scan position.
+	CALB	LX$TST <CHRSET(R5)>
+				;Does next char belong?
+	BCC	10$		;Yes. Advance to next.
+	CLR	R0		;No, but we matched at least one char,
+				;so flag no error.
+20$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	LX.TIME--parse date-and-time specification
+;+
+; LX.TIME--parse date-and-time specification.
+;
+; Both date and time are optional, but one or the other must be given.
+; If both are given, a colon separates them.
+;
+; Date has the format described under LX.DATE.  Time has the format
+;
+;	hh[:mm][AM | PM | M] 
+;
+; The minute is optional.  If an hour is specified but not a minute, 
+; :00 is assumed.
+;
+; With 24-hour time, anything from 00:00 to 24:00 is accepted. 
+; 24:01 is not accepted, however.
+;
+; With AM/PM time, anything from 12:01AM to 11:59AM
+; is accepted.  12:00M (noon) is accepted. Anything from 12:01PM to
+; 11:59PM is accepted.  12:00PM is equivalent to 00:00. 12:00AM is equivalent
+; to 00:00.
+;
+; INPUTS:
+;	time	->	2-word block in which to store date and time
+;	LX.STR ->	first char of string
+;	LX.LEN ->	string length
+;	LX.POS =	current scan position (1 to (LX.LEN+1))
+;
+; CALB	LX.TIME	<time>
+;
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+;	time	->	2-word block. The first word contains the date,
+;			in RSTS format (years since 1970 * 1000 + day of
+;			year), or 0 if no date was given.
+;			The second word contains the time of day, in 
+;			RSTS format (minutes until midnight), or 0 if no
+;			time was given.
+; C=1	if	error
+;	R0	=	U.ITIM (Invalid time) 
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+
+; R3	=	hours before midnight
+
+.ENABL	LSB
+
+LX.TIME::SUBR	<TIME>,CHECK
+	CALL	LX.SUP		;Get set up.
+	MOV	TIME(R5),R1	;Point at caller's time block.
+	CALLX	CLRXRB		;Zero XRB.
+	SYS	.DATE		;Get today's date.
+	.ASSERT	FIRQB EQ #0, BYTE;No error can occur.
+	MOV	XRB+0,(R1)	;Default date is today's.
+	MOV	XRB+2,$NOW	;Default time is current time.
+	CLR	2(R1)		;Note that if no time is mentioned in routine,
+				;either in absolute or relative time field, 
+				;then zero should be returned in time filed.
+
+	CALB	LX.DATE <R1>	;Look for a date.
+	IFCC			;If we found a date then
+	CALB	LX.EXAC <#T.COL>;  Look for an optional colon.		;023
+	BCS	15$		;  Not found, look for delta time
+	ENDIF			;Endif
+	CALB	MATTIME 	;Look for a time.  Put time in 2(R1).
+
+15$:	CALB	LX$TST  <#T.SIGN>;Match plus or minus sign		;023
+	BCS	120$		;No match, not relative date/time
+	CALB	LX.S16  <#$NUM>	;Look for a signed integer 
+	BCS	125$		;No match, not relative date/time
+	MOV	$NUM,R3		;Set up signed integer
+	CALB	LX.KEY  <#U$HOU>;Signed integer followed by "H-OURS"?
+	BCS	102$		;No match, try next keyword
+	TST	R3		;R3 = #hours
+	SXT	R2		;
+	DIV	#24.,R2		;Convert hours to days (R2=#days , R3=#hours)
+	MUL	#60.,R3		;Convert hours to minutes (R2=#days , R3=#min)
+	BR	104$		;Do conversion
+		
+102$:	CALB	LX.KEY  <#U$MIN>;Signed integer followed by "M-INUTES"?
+	BCS	108$		;Nope
+	TST	R3		;R3 = #minutes
+	SXT	R2		;
+	DIV	#<60.*24.>,R2	;Convert minutes to days (R2=#days , R3=#mins)
+104$:	TST	2(R1)		;Time been specified yet?
+	IFZE			;If not then
+	MOV	$NOW,2(R1)	;  Use current time
+	ENDIF			;Endif
+	SUB	R3,2(R1)	;Calculate time
+	IFLE			;If result is negative or zero
+	ADD	#<60.*24.>,2(R1);  Add on 24 hours worth of minutes.
+	INC	R2		;  We have overflowed to next day.
+	ELSE			;Else
+	CMP	2(R1),#<60.*24.>;  Have we underflowed?
+	IFGT			;  If so then
+	SUB	#<60.*24.>,2(R1);    Subtract 24 hours worth of minutes.
+	DEC	R2		;    We have underflowed to previous day.
+	ENDIF			;  Endif
+	ENDIF			;Endif
+	MOV	R2,R3		;R3 = #days
+	BR	110$		;Do date caluculation
+
+108$:	CALB	LX.KEY  <#U$DAY>;Signed integer followed by "D-AYS"?
+	BCS	125$		;No match, No more keywords to find, error.
+110$:	CALB	ADDDAY <R1,R3>	;Add appropriate number of days
+	BCS	125$		;Date not in range 1970-2035		;026
+	BR	15$		;Try more
+
+120$:	CLR	R0		;No error so far
+	CMP	R4,LX.POS	;Have we gone anywhere?
+	BNE	130$		;Yes, then no error 
+125$:	MOV	#U.ITIM,R0	;No, ?Invalid time
+130$:	RETURN			;Return from wherest thou came.
+
+GLOBAL	<U.ITIM,U$DAY,U$MIN,U$HOU>
+
+.DSABL	LSB
+
+.SBTTL	MATTIME - match a time specification
+;+
+; INPUT:
+;	R1	->	date-time block (second word of block is
+;			time word, and is pre-zeroed)
+;
+; CALB MATTIME 
+;
+; OUTPUTS:
+; C=0	if	success
+;	R0	=	0
+;	LX.POS	=	new scan position (1 to (LX.LEN+1))
+;	LX.PMAT	=	position of substring matched by this pattern
+;	LX.NMAT	=	number of chars matched by this pattern 
+;			Second word of time block contains time of day, in 
+;			RSTS format (minutes until midnight).
+;
+; C=1	if	error
+;	R0	=	U.ITIM (Invalid time) 
+;	LX.ERP	=	position of error
+;	LX.POS		unchanged
+;-
+
+.ENABL	LSB
+
+AM$K:	.ASCIZ	"A-M"
+PM$K:	.ASCIZ	"P-M"
+M$K:	.ASCIZ	"M"
+	.EVEN
+
+AMPM.K:	.WORD	AM$K,DO.AM
+	.WORD	PM$K,DO.PM
+	.WORD	M$K,DO.M
+	.WORD	0
+
+MATTIME:SUBR	
+	CALL	LX.SUP		;Get set up.
+	CALB	LX.INT <#$HOUR>	;Look for an integer, and store value 
+				;in $HOUR.
+	BCS	40$		;Not found; quit.
+	CLR	$MINUTE		;Default minute is :00.
+	CALB	LX.EXAC,<#T.COL>;Look for an optional colon.		;023
+	IFCC			;If we found it then
+	CALB	LX.INT <#$MINUTE>; Look for integer, and store value 
+				;  in $MINUTE.
+	BCS	40$		;  Not found. Quit.
+
+	ENDIF
+
+; Look for optional suffix.
+
+	MOV	#AMPM.K,R2	;Point at table of suffixes.
+15$:	CLR	R0		;Set no error.
+	TST	(R2)		;Have we reached end of suffixes yet?
+	BZE	DO.NUL		;Yes. Null suffix.
+	CALB	LX.KEY <(R2)+>	;Try to match keyword.
+	IFCC			;If it matches then then
+	JMP	@(R2)		;  Dispatch do DO.AM, DO.PM, or DO.M.
+
+	ENDIF			;Else
+	TST	(R2)+		;  Skip dispatch address.	
+	BR	15$		;  Loop onward.
+
+; Handle AM case.
+
+DO.AM:	MOV	$HOUR,R3	;Is hour outside of range 1 to 12?
+	BZE	30$		;Yes, zero. Quit.
+	CMP	R3,#12.
+	BGT	30$		;Yes, greater than 12. Quit.
+	IFLT			;If hour is in range 1 to 11 then
+	NEG	R3		;  Compute hours before midnight.
+	ADD	#24.,R3		;  24 - current hour.
+	ELSE			;Else 12:nn AM.
+	MOV	#24.,R3		;  24 hours before midnight.
+				;  (12:00 AM is accepted as equivalent to 
+				;  0:00.)
+	ENDIF
+	BR	20$
+
+; Handle PM case.
+
+DO.PM:	MOV	$HOUR,R3	;Is hour outside of range 1 to 12?
+	BZE	30$		;Yes, zero.  Quit.
+	CMP	R3,#12.
+	BGT	30$		;Yes, greater than 12: quit.
+	IFLT			;If hour is in range 1 to 11 then
+	NEG	R3		;  Compute hours before midnight.
+	ADD	#24.-12.,R3	;  24 - current hour + 12
+	ENDIF			;If hour=12, we're all set (12:00PM = noon) ;024
+	BR	20$
+
+; Handle M (noon) suffix.
+
+DO.M:	CMP	$HOUR,#12.	;Is hour 12?
+	BNE	30$		;No. Quit.
+	TST	$MINUTE		;Is it 12:00 M?
+	BNZ	30$		;No.  Quit.
+	MOV	#12.,R3		;12 hours before midnight.
+	BR	20$
+
+; Handle no suffix (24-hour time).
+
+DO.NUL:	MOV	$HOUR,R3	;Get hour of day.
+	CMP	R3,#24.		;Is hour outside of range 0 to 24?
+	BHI	30$		;Yes. Fail.
+	IFEQ			;If hour is 24 then
+	TST	$MINUTE		;  Must be 24:00.
+	BNZ	30$		;  No. Quit.
+	MOV	#24.,R3		;  24 hours before midnight OF NEXT DAY.
+	CALB	ADDDAY <R1,#1.>	;  Add one to date field.
+	BCS	35$		;  Overflow. Quit.
+	ELSE			;Else
+	NEG	R3		;  Compute hours before midnight.
+	ADD	#24.,R3		;  24 - current hour.
+	ENDIF
+	.BR	20$
+	
+20$:				;Now R3 = number of hours before midnight.
+	MUL	#60.,R3		;Get (hours before midnight) * 60.
+	SUB	$MINUTE,R3	;Make it minutes before midnight.
+	CMP	$MINUTE,#59.	;Is minute in range 0 to 59?
+	BHI	30$		;No. Quit.
+	MOV	R3,2(R1)	;Save result into user's date-time block.
+	BR	40$
+
+30$:	MOV	#U.ITIM,R0	;Flag invalid time.
+35$:	MOV	R4,LX.ERP	;Position of time is position of error.
+40$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.ITIM>
+
+.SBTTL	ADDDAY -- Do date arithmetic
+;+
+; ADDDAY -- Do date arithmetic.
+;
+; INPUTS:
+;	absdate	->	word containing absolute date, in RSTS format:
+;			(years since 1970 * 1000) + day of year
+; 	reldate =	number of days (positive or negative) to add
+;			to absdate
+;
+; CALB	 ADDDAY	<absdate,reldate>
+;
+; OUTPUTS:
+; C=0 if success
+;	R0	=	0
+;	absdate	->	modified date
+;
+; C=1 if error
+;	R0	=	U.IDAT (?Invalid date) because resulting 
+;			date not in range 1-JAN-1970 to 31-DEC-2035.	;026
+;-
+
+.ENABL	LSB
+
+ADDDAY::SUBR	<ABSDATE,RELDATE>
+	MOV	@ABSDATE(R5),R3	;Get absolute date.
+	CLR	R2		;Clear MSB for divide.
+	DIV	#1000.,R2	;Now R2 = years since 1970.
+				;R3 = day of year
+	ADD	#70.,R2		;Make R2 = years since 1900, so test for
+				;leap year is easier.
+	.ASSERT	R3 GE #1	;Day is in range ...
+	.ASSERT	R3 LE #366.	;1 to 366 (because of leap years).
+	ADD	RELDATE(R5),R3	;Modify the day of year.
+	IFLE			;If day of year <= 0 then
+10$:	ADD	#365.,R3	;  Compute day of previous year.
+	DEC	R2		;  Roll back to previous year.
+	CMP	R2,#70.		;  Did we roll back too far?
+	BLT	30$		;  Yes. Quit.
+	BIT	#3.,R2		;  Is it a leap year?
+	IFZE			;  If so then
+	INC	R3		;    Adjust day of year.
+	ENDIF
+	TST	R3		;  Day of year still <= 0?
+	BLE	10$		;  Yes.  Keep going.
+	ELSE			;Else
+20$:	MOV	#365.,R1	;  Get number of days in this year.
+	BIT	#3.,R2		;  Is it a leap year?
+	IFZE			;  If so then
+	INC	R1		;    Adjust for that.
+	ENDIF
+	CMP	R3,R1		;  Did we pass end of year?
+	BLE	25$		;  No. Leave loop.
+	SUB	R1,R3		;  Yes. Compute day of next year.
+	INC	R2		;  Roll over to next year.
+	CMP	R2,#135.	;  Did we go past 2035? (ie. 1900+135)	;026
+	BGT	30$		;  Yes. Quit.
+	BR	20$		;  No. See if we're still past end of year.
+
+	ENDIF
+
+; Now R3 = day of year, R2 = years since 1900.
+
+25$:	MOV	R2,R1		;Put year in an odd register.
+	SUB	#70.,R1		;Get years since 1970.
+	MUL	#1000.,R1	;Get (years since 1970) * 1000.
+	ADD	R3,R1		;Compute date word.
+	MOV	R1,@ABSDATE(R5)	;Give result to caller.  (Whew!)
+	BR	40$
+
+30$:	MOV	#U.IDAT,R0	;Say ?Invalid date.
+40$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.IDAT>
+
+.SBTTL	LX.INI--Initialize for parse.
+;+
+; LX.INI--Initialize for parse.
+;
+; CALB	LX.INI	<address of input string,
+;		address of word containing length of input string>
+;
+; OUTPUTS:
+;	Variables are initialized for parse.
+;
+;	All registers preserved.
+;
+; You can append text to the input string while the parse
+; is in progress.  You need not call LX.INI again.  Simply put the 
+; new length of the input string into the length word whose addresss
+; is the second argument of LX.INI.
+;-
+
+.ENABL	LSB
+
+LX.INI::SUBR	<STR,LEN>
+	MOV	STR(R5),LX.STR	;Make string accessible ...
+	MOV	LEN(R5),LX.LEN	;to subroutines.
+	CLR	LX.ERP		;No error so far.
+	MOV	#1,LX.POS	;Initial scan position is 1.
+	CLR	LX.PMAT		;No syntax element has
+	CLR	LX.NMAT		;been matched.
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	LX.SUP--Parsing setup coroutine
+;+
+; LX.SUP--parsing setup coroutine
+;
+; INPUTS ON FIRST ENTRY:
+;
+;	LX.POS	=	current scan position
+;
+; CALL	LX.SUP
+;
+; OUTPUTS ON FIRST RETURN:
+;
+;	LX.POS		saved on stack.
+;	R4	=	current scan position
+;	WINDOW	 	contains next character to parse.
+;	LX.ERP	=	0
+;	R0	=	0
+;
+; INPUTS ON SECOND ENTRY:
+;
+;	R0<>0 if error:
+;		LX.ERP	=	position of error or  
+;			=	0 if subroutine does not specify where the 
+;				error occurred.
+;	R0=0 if success:
+;		LX.POS		updated to new scan position
+;
+; RETURN
+;
+; OUTPUTS ON SECOND RETURN (TO CALLER'S CALLER):
+;
+;	C=1 if error:
+;		LX.POS	restored to starting value
+;		LX.ERP	=	same as LX.POS unless subroutine provided
+;				a different (non-zero) value
+;		R0	=	error code returned by subroutine
+;	C=0 if success:
+;		R0	=	0
+;		LX.POS	=	new value as returned by subroutine
+;		LX.PMAT	=	position of syntax element matched by 
+;				this subroutine (ie starting value of LX.POS)
+;		LX.NMAT	=	number of characters in syntax element
+;				matched by this subroutine (ie change in 
+;				value of LX.POS)
+;	R1,R2,R3,R4,R5	restored in either case
+;-
+
+.ENABL	LSB
+
+LX.SUP::
+	PUSH	(SP)		;Copy our return address.
+	MOV	LX.POS,R4	;Get current scan position.
+	MOV	R4,2(SP)	;Save current scan position.
+	CALL	LX$MOVW		;Move character window to correct position.
+	CLR	LX.ERP		;Don't yet know position of error.
+	CALL	@(SP)+		;Call our caller.
+
+; Back from our caller.  R0<>0 if error.  SP -> saved scan position.
+
+	TST	R0		;Did an error occur?
+	IFZE			;If not then
+	MOV	(SP),LX.PMAT	;  Note position of item we just matched.
+	MOV	LX.POS,LX.NMAT	;  Figure out
+	SUB	(SP)+,LX.NMAT	;  length of item we just matched.
+	CLR	LX.ERP		;  No error position.
+	ELSE			;Else an error occurred.
+	TST	LX.ERP		;  Did subroutine note the error's position?
+	IFZE			;  If not then
+	MOV	(SP),LX.ERP	;    Position we started from is error's
+				;    position.
+	ENDIF
+	POP	LX.POS		;  Back up to where we started.
+	ENDIF
+	RETURN			;Return to caller's caller.
+
+.DSABL	LSB
+
+.SBTTL	LX$TST--Test if character belongs to a given set.
+;+
+; LX$TST--Test if character belongs to a given set.
+;
+; INPUTS:
+;	WINDOW =	character to test (assumed upper case)
+;	set	->	ASCIZ string of characters to test for
+;			9 matches any digit, A matches any letter
+;
+; CALB	LX$TST <chrset>
+;
+; OUTPUTS:
+; C=0 if success.
+;	R0	=	0
+; C=1 if failure (no match).
+;	R0	=	U.ICHR (?Invalid character)
+;-
+
+.ENABL	LSB
+
+LX$TST::SUBR	<CHRSET>	;					;SDL014
+	MOVB	WINDOW,R1
+	MOV	CHRSET(R5),R2
+10$:	MOVB	(R2)+,R3	;Get next prototype character in set.
+	BZE	35$		;Out of prototypes. Go flag error.
+	CMPB	R3,#'9		;Is the prototype a "9"?
+	BNE	15$		;No.
+	CMPB	R1,#'0		;Yes. Does the window contain a digit?
+	BLO	10$		;No. Go try next prototype.
+	CMPB	R1,#'9		;Maybe. 
+	BLOS	40$		;Yes. Return with success.
+	BR	10$		;No. Go try next prototype.
+
+15$:	CMPB	R3,#'A		;Is the prototype an "A"?
+	BNE	20$		;No.
+	CMPB	R1,#'A		;Yes. Does the window contain a letter?
+	BLO	10$		;No. Go try next prototype.
+	CMPB	R1,#'Z		;Maybe.
+	BLOS	40$		;Yes. Return with success.
+	BR	10$		;No. Go try next prototype.
+
+20$:	CMPB	R1,R3		;An exact match?
+	BEQ	40$		;Yes. Return with success.
+	BR	10$		;No. Go try next prototype.
+
+35$:	MOV	#U.ICHR,R0	;Flag ?Invalid character.
+40$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.ICHR>
+
+.SBTTL LX$ADV--Advance window to next position
+;+
+; LX$ADV--Advance window to next position.
+;
+; INPUTS:
+;	LX.STR	->	first char of string
+;	LX.LEN	->	string length (unsigned)
+;	LX.POS	=	current scan position (1 to (LX.LEN+1), unsigned)
+;
+; CALL	LX$ADV
+;
+; OUTPUTS:
+;	LX.POS	incremented.  If already at EOS, LX.POS preserved.
+;	WINDOW = new next char to scan
+;	Registers preserved.
+;-
+
+.ENABL	LSB
+
+LX$ADV:	CMP	LX.POS,@LX.LEN	;Already at EOS?			;023
+	IFLOS			;If not then
+	INC	LX.POS		;  Advance scan position.
+	ENDIF
+	.BR	LX$MOVW		;Move window to new position, and return.
+
+.DSABL	LSB
+
+.SBTTL	LX$MOVW--Move window to specified position
+;+
+; LX$MOVW--Move window to specified position.
+;
+; INPUTS:
+;	LX.STR	->	first char of string
+;	LX.LEN	->	string length (unsigned)
+;	LX.POS	=	desired scan position (unsigned, 1 to (LX.LEN+1))
+;
+; CALL:
+;	CALL	LX$MOVW
+;
+; OUTPUTS:
+;	WINDOW	=	new next char to scan, converted to upper case.
+;	All registers preserved.
+;-
+
+.ENABL	LSB
+
+LX$MOVW:PUSH	<R1>		;Save a register.
+	CLRB	R1		;Guess that we're at end-of-string.
+				;0 signals that.
+	CMP	LX.POS,@LX.LEN	;At end-of-string?
+	IFLOS			;If not then
+	MOV	LX.STR,R1	;  Address of string
+	ADD	LX.POS,R1	;  plus char position 
+				;  minus one
+				;  gives address of next char to scan.
+	MOVB	-(R1),R1	;  Get character.
+	CMPB	R1,#<'A+^O40>	;  Is character a lowercase letter?
+	IFGE			;  If
+	CMPB	R1,#<'Z+^O40>	;  so
+	IFLE			;  then
+	BICB	#^O40,R1	;    Convert it to uppercase.
+	ENDIF
+	ENDIF
+	ENDIF			;Else we're at end-of-string.
+	MOVB	R1,WINDOW	;Put next character into window.
+	POP	<R1>
+	RETURN
+
+.DSABL	LSB
+.END

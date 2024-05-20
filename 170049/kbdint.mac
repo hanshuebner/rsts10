@@ -1,0 +1,429 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+TITLE	KBDINT,<Terminal driver root>,0B,25-JUN-91,KPH/DSD/DRP/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	KBDINT EDIT HISTORY
+
+;+
+;			[RSTS/E V9.6]
+;  000  KPH  10-Jul-87	Creation - extract from TTDINT.MAC
+;  001	DSD  02-Feb-88	Add TTAUXB for NODVR support
+;			Change terminal driver APR mapping to KBDCTL
+;  002	DRP  18-Feb-88	Add cell to hold base KB # for dynamic keyboards
+;  003	DRP  08-Mar-88	Add autobaud queue
+;
+;			[RSTS/E V9.7]
+;  004	DRP  27-Sep-88	Change interrupt vector computation for single
+;			line interfaces from octal to decimal.
+;  005	FEK  07-Dec-88	Add Answerback message pointer
+;  006	KPH  17-Dec-88	Command file processing performance improvements
+;  007	DRP  02-Dec-88	Define APT APR 5 mapping cell APTAP5.
+;			Added the routine SETCCB
+;
+;			[RSTS/E V10.0]
+;  008	JFM  21-Dec-89	Added two words to KBDDSP dispatch table for recall
+;  009	JFM  02-Jan-90	Removed CHKTYP
+;
+;			[RSTS/E V10.1]
+;  010	JFM  24-Jun-91	Changed name of routine from RECCC to RECSTR
+;-
+
+.SBTTL	Declare our .PSECTs
+
+	DEFORG	KBDVR
+
+	.LIBRARY	/CMN:NETDEF.SML/				;007
+	.MCALL	$CCB							;007
+	$CCB		;Define CCB offsets				;007
+
+
+.SBTTL	LOCAL EQUATES THAT ARE GLOBALIZED
+
+; DEFINE DEFAULT BUFFER SIZE
+
+BUF.KB	==	128.
+		;DEFAULT TO 128 BYTE BUFFER
+
+; DEFINE LINE WIDTH (MAXIMUM HORIZONTAL POSITION)
+
+SIZ.KB	==	0
+		;DEPENDS ON DEVICE - USE DDHORC FROM DDB
+
+; DEFINE FLAGS FOR KEYBOARD DEVICES
+
+FLG.KB	==	FLGKB!FLGFRC!FLGMOD!FLGPOS!DDNFS!TTYHND
+		;KEYBOARD OR TERMINAL TYPE OF DEVICE (OR FILE)
+		;BYTE ORIENTED (PARTIAL BUFFER MAY BE 'FORCED' OUT)
+		;ACCEPTS MODIFIERS ON READ/WRITE REQUESTS
+		;HANDLER KNOWS/COMPUTES HORIZONTAL POSITION
+		;NON-FILE STRUCTURED
+		;TERMINAL HANDLER
+
+               
+.SBTTL	INTERRUPT SERVICE ENTRY ROUTINE VECTORS SETUP
+
+	ORG	KBDINT
+
+$DLKINT::
+
+$$$$$0	=	32./16.		;Support 32 single line interfaces	;004
+
+.REPT	$$$$$0
+	CALL	INTKBS,R5						
+	  .WORD	DLPAP5							
+	  .WORD	0							
+
+	CALL	INTKBS,R5						
+	  .WORD	DLPAP5							
+	  .WORD	0							
+
+.ENDR
+
+$DJKINT::CALL	INTKBS,R5						
+	 .WORD	DJPAP5							
+	 .WORD	0
+
+	CALL	INTKBS,R5						
+	 .WORD  DJPAP5							
+	 .WORD	0
+
+$DHKINT::CALL	INTKBS,R5						
+	 .WORD	DHPAP5							
+	 .WORD	0
+
+	CALL	INTKBS,R5						
+	 .WORD	DHPAP5							
+	 .WORD	0
+
+$DMKINT::CALL	INTKBS,R5						
+	 .WORD	DHPAP5							
+	 .WORD	0
+
+$DZKINT::CALL	INTKBS,R5						
+	 .WORD	DZPAP5							
+	 .WORD	0
+
+	CALL	INTKBS,R5						
+	 .WORD	DZPAP5							
+    	 .WORD	0
+
+$VHKINT::CALL	INTKBS,R5						
+	 .WORD	VHPAP5							
+	 .WORD	0							
+								
+	CALL	INTKBS,R5						
+	 .WORD	VHPAP5							
+	 .WORD	0							
+
+.SBTTL	Monitor -> KBDVR dispatch table
+
+	ORG	KBDTBL
+
+$KBDDSP	==	.	;**MERGE** Alternate for 'KBDDSP'
+
+TTEMT:	.WORD	0		; 0 - Process simple terminal EMT
+KBRSET::.WORD	0		; 2 - Reset terminal (called by ICFP detach)
+DETJOB::.WORD	0		; 4 - "Detach" a job
+ENDKEY::.WORD	0		; 6 - End a terminal
+CREJOB::.WORD	0		;10 - Create a new job
+CLRTER::.WORD	0		;12 - Clear out a terminal
+CLRTIN::.WORD	0		;14 - Clear terminal input and delimiters
+CLRTTI::.WORD	0		;16 - Clear input preserving delimiters
+CLRDLM::.WORD	0		;20 - Clear private delimiter mask
+	.WORD	0		;22 - unused				;009
+CHRLOG::.WORD	0		;24 - Write character to log and other things
+RECALL::.WORD	0		;26 - Recall a command			;008
+RECSTR::.WORD	0		;30 - Ensure recall ptrs at start of cmd ;010
+
+.SBTTL	Monitor -> Autobaud dispatch table
+
+$AUTDSP::		;**Merge** Alternate for 'AUTDSP'
+
+AUTTMR::.WORD	0		; Autobaud once-a-second service
+AUTOBD::.WORD	0		; Autobaud character handler
+
+.SBTTL	Monitor -> KIN dispatch table
+
+$KINDSP::		;**Merge** Alternate for 'KINDSP'
+
+KINICH::.WORD	0		; Input character handler
+
+.SBTTL	TERMINAL EMT DISPATCHER
+
+	ORG	KBDISP
+
+	EMTENT	.TTAPE		;SET TAPE MODE
+
+	EMTENT	.TTECH		;ENABLE ECHO, CANCEL TAPE MODE
+
+	EMTENT	.TTNCH		;DISABLE ECHO
+
+	EMTENT	.TTDDT		;PRESET DDT-SUBMODE
+
+	EMTENT	.TTRST		;CANCEL CONTROL/O
+
+	MAP	KBDAP5,APR=5,CODE ;Map the terminal driver		
+	JMP	@TTEMT		;And process this simple EMT		
+
+.SBTTL	Define multiplexor base unit tables
+
+	ORG	KBDTBL
+
+DJKBN::	.WORD	0		;DJ11 base keyboard number table filled in
+DHKBN::	.WORD	0		;DH11 base keyboard number table filled in
+DZKBN::	.WORD	0		;DZ11 base keyboard number table filled in
+VHKBN::	.WORD	0		;DHU11/DHV11 base KB table filled in
+CSR.BB::.WORD	0		;DM11BB CSR table filled in
+
+.SBTTL	Define DDB extension pointers
+
+	ORG	KBDTBL
+
+TTFMSB::.WORD	0		;DDB offset for FMS support
+TTAUXB::.WORD	0		;DDB offset for auxiliary driver support ;001
+KBDDBX::.WORD	0		;Size of DDB extension, in words
+
+.SBTTL	KEYBOARD DRIVER DIRTY AREA
+
+	TMPORG	KBDCTL
+
+; JOB COUNTERS 0<=JOBCNT<=MAXJOB<=MAXCNT<=LMTCNT<=JOBMAX
+
+JOBCNT::.BYTE	0		;NUMBER OF ACTIVE JOBS
+MAXJOB::.BYTE	1		;MAX NUMBER OF JOBS CURRENTLY ALLOWED
+$$JOBM	==	.	;**INIT** MAXIMUMS FILLED IN
+MAXCNT::.WORD	0		;MAX # JOBS WE CAN SWAP
+LMTCNT::.WORD	0		;MAX # JOBS THIS UPTIME
+
+DYNKBN::.WORD	0	;**INIT** Base KB # * 2 for dynamic keyboards	;002
+
+TTYHCT::.WORD	0		;# OF UNHANGS PERFORMED
+TTUSRM::.WORD	0		;Saved user buffer mapping		
+
+FMSHED::.WORD	0		;HEAD OF FMS QUEUE
+FMSTAL::.WORD	FMSHED		;TAIL OF FMS QUEUE
+
+ANSMSG::.WORD	0		;Pointer to system Answerback message	;005
+
+AUTLST::.WORD	0		;Autobaud queue				;003
+
+.SBTTL	Terminal driver APR values                 
+
+	ORG	KBDCTL							;001
+
+PRTAP5::			;Port driver APR values filled in
+KLPAP5::.WORD	0		;Console port driver APR5 filled in
+	.WORD	-1		;Reserved - DC11
+DLPAP5::.WORD	0		;DL11 port driver APR5 filled in
+DEPAP5::.WORD	0		;DE11 port driver APR5 filled in
+PKDAP5::.WORD	0		;Pseudo keyboard APR5 filled in
+DJPAP5::.WORD	0		;DJ11 APR5 filled in
+DHPAP5::.WORD	0		;DH11 APR5 filled in
+DZPAP5::.WORD	0		;DZ11 APR5 filled in
+VHPAP5::.WORD	0		;DHV/DHU APR5 filled in
+LATAP5::.WORD	0		;LAT APR5 filled in
+.ASSUME	.-PRTAP5	EQ	TTINTM	;Interface code missing
+
+	ORG	KBDTBL							;001
+
+FMSAP5::.WORD	0		;FMS phase APR5 value jammed here
+APTAP5::.WORD	0		;APT phase APR5 value jammed here	;007
+KBDAP5::.WORD	0		;KBDVR APR5 value merged here
+KINAP5::.WORD	0		;Input processing APR5 value merged here
+TERAP6::.WORD	0		;Terminal driver class handling jammed here
+
+.SBTTL	Miscellaneous read-only data
+
+ENTODT::.WORD	'P-100		;ODT ENTRY IS CONTROL/P
+
+KBFDDB::			;Fake terminal DDB to indicate guarded mode
+	.BYTE	IDX.KB,0	;DRIVER INDEX / STATUS
+	.BYTE	0,0		;NO OWNING JOB / UNIT 0
+	.WORD	0		;NO TIME OF OWNERSHIP
+	.WORD	0		;NO ASSIGNMENT FLAG OR INIT COUNT
+
+KBFDD2::			;Fake terminal DDB for simple detached jobs
+	.BYTE	IDX.KB,0	;DRIVER INDEX / STATUS
+	.BYTE	0,0		;NO OWNING JOB / UNIT 0
+	.WORD	0		;NO TIME OF OWNERSHIP
+	.WORD	0		;NO ASSIGNMENT FLAG OR INIT COUNT
+
+XOFFCH::.BYTE	'S-100		;XOFF character
+XONCH::	.BYTE	'Q-100		;XON character
+
+.SBTTL	CONTROL TABLE FOR ERROR LOGGING
+
+	TMPORG	KBDCTL
+
+KBETBL::.BYTE	ERC$KB,0	;ERROR CODE, JOB NUMBER TIMES 2
+	.BYTE	4,2		;4 WORDS, FIELD 2
+	.WORD	KBEFL2		;--> FIELD 2 INFORMATION
+KBESZ2::.BYTE	0		;DDB size filled in
+	.BYTE	2		;Field 2
+KBEDDB::.WORD	0		;DDB ADDRESS
+	.BYTE	1,3		;1 WORD, FIELD 3
+	.WORD	KBEREG		;--> CSR ADDRESS
+KBEDSC::.BYTE	1,3		;1 WORD, FIELD 3
+	.WORD	0		;--> DM11BB CSR ADDRESS
+	.BYTE	1,4		;1 WORD, FIELD 4
+KBEREG::.WORD	0		;CSR ADDRESS
+	.BYTE	1,4		;1 WORD, FIELD 4
+	.WORD	KBETMP		;STORE LOCATION
+KBESCN::.BYTE	1,4		;1 WORD, FIELD 4
+KBESC4::.WORD	0		;CSR + 4 ADDRESS
+KBEDMB::.BYTE	2,4		;2 WORDS, FIELD 4
+	.WORD	0		;DM11BB ADDRESS
+	.BYTE	0,-4		;0 WORDS, FIELD 4 CALL
+	.WORD	KBEDMD		;RE-SCAN THE DM11BB
+	.WORD	-1		;TERMINATOR
+
+KBEFL2:	.WORD	0		;NOT A TIMEOUT (0)
+	.ASCII	"KB"		;DEVICE NAME
+KBEUNT::.BYTE	0,-1		; AND UNIT
+KBESIZ::.WORD	0		;DDB size filled in
+
+KBETMP::.WORD	0		;TEMP STORAGE LOCATION
+
+	ORG	KBDISP
+
+KBEDMD:	MOV	#100!40,(R4)	;;;RE-ENABLE IE AND SCAN ON DM11BB
+	RETURN			;;; THEN BACK...
+
+.SBTTL	Map terminal driver for interrupt service
+
+	ORG	KBDISP							
+
+;+
+; INTKBS - Set up terminal driver for interrupt service
+;
+;	CALL	INTKBS,R5
+;	 .WORD	KISAR5 pointer
+;	 .WORD	ADDRESS
+;-
+
+INTKBS::MOV	@#PS,-(SP)	;;First thing to do is save PSW		
+	MOV	R3,-(SP)	;;Now save R3				
+	MOV	R2,-(SP)	;;Now save R2				
+	MOV	R1,-(SP)	;;And R1				
+	MOV	R0,-(SP)	;;And R0				
+	MOV	4*2(SP),R0	;;Get the saved PSW			
+	MOV	R4,4*2(SP)	;;And save the interrupted R4		
+	BIC	#^C<17>,R0	;;Save only condition codes		
+	ASL	R0		;;Double that to get controller index number 
+	MAP	PUSH,APR=5,CODE,DATA ;;Save caller's APR5		
+	MAP	PUSH,APR=6,CODE,DATA ;;Save caller's APR6		
+	MAP	@(R5)+,APR=5,CODE,DATA ;;Map the port driver		
+	MAP	TERAP6,APR=6,CODE,DATA ;;And the class driver		
+	MOV	R5,LSTINT	;;Save the XXDINT pointer for crash dumps 
+	CALL	@(R5)+		;;Call the interrupt service routine	
+	MAP	POP,APR=6,CODE,DATA ;;Restore caller's APR6		
+	MAP	POP,APR=5,CODE,DATA ;;Restore caller's APR5		
+	JMPX	RESRT4		;;Now exit from this interrupt		
+
+GLOBAL	<LSTINT>
+
+.SBTTL	TTGICF	Get command file character dispatch routine
+
+;+
+; TTGICF - Get command file character dispatch routine
+;
+; This routine is used to map the command file code for TERICF, and fetch
+; a character from a command file. This routine is used instead of CALLMI
+; for performance reasons; it saves 17 instructions per character read.
+;-
+
+TTGICF::MAP	EM2AP5,APR=5,CODE,DATA ;Map the command file code	;006
+	CALL	@GETICF		;Get the character			;006
+	MAP	KBDAP5,APR=5,CODE,DATA ;Map the terminal driver		;006
+	RETURN			;And we're done				;006
+
+GLOBAL	<EM2AP5,GETICF>							;006
+
+.SBTTL	Set Up Secondary Buffer Descriptor (CC.SEC) for Transmission
+
+;+									;007
+; SETCCB - Set Up Secondary Buffer Descriptor (CC.SEC) of CCB
+;
+;	Inputs:
+;		R4 -> CCB
+;		      CC.BUF	(Buffer Descriptor) Set up by the caller
+;			BF.MMU	MMU address of data buffer
+;			BF.VIR	Virtual address of buffer header
+;
+;		      Buffer header set up by caller
+;			BF.OFF	Offset to first byte of data
+;			BF.CNT	Number of bytes of data
+;
+;	Calling Format:
+;		CALL	SNDCCB
+;
+;	Outputs:
+;		      CC.SEC	(Secondary Descriptor) contains
+;			BF.VIR	APR6 virtual address of 1st data byte
+;			MS.SIZ	Number of bytes of data
+;-									;007
+
+SETCCB::MAP	CC.BUF+BF.MMU(R4),APR=6,DATA ;Map the buffer		;007
+	MOV	R0,-(SP)	;Save a register			;007
+	MOV	CC.BUF+BF.VIR(R4),R0 ;Get buffer header virtual address	;007
+	MOV	BF.CNT(R0),CC.SEC+MS.SIZ(R4) ;Set up data count		;007
+	ADD	BF.OFF(R0),R0	;Point to first data byte		;007
+	MOV	R0,CC.SEC+BF.VIR(R4) ;Set virtual address of data	;007
+	MOV	(SP)+,R0	;Restore register			;007
+	MAP	TERAP6,APR=6,DATA ;Remap the driver again		;007
+	RETURN			; and exit				;007
+									;007
+GLOBAL	<TERAP6>							;007
+
+.SBTTL	Fetch a Byte From The Auxiliary Driver's Data Buffer
+
+;+									;007
+; FETCH1 - Fetch a byte from the data buffer pointed to by CC.SEC
+;
+;	Inputs:
+;		R4 -> CCB
+;		      CC.BUF	(Buffer Descriptor) Set up by the caller
+;			BF.MMU	MMU address of data buffer
+;			BF.VIR	Virtual address of buffer header
+;
+;		      CC.SEC	(Secondary Descriptor) contains
+;			BF.VIR	APR6 virtual address of 1st data byte
+;			MS.SIZ	Number of bytes of data
+;
+;		Priority is PR5
+;
+;
+;	Calling Format:
+;		CALL	FETCH1
+;
+;	Outputs:
+;		R2 =  Character to be transmitted
+;-									;007
+
+FETCH1::MAP	CC.BUF+BF.MMU(R4),APR=6,DATA ;;Map the data buffer	;007
+	MOVB	@CC.SEC+BF.VIR(R4),R2 ;;Get a byte			;007
+	INC	CC.SEC+BF.VIR(R4) ;;Advance the -> by one		;007
+	MAP	TERAP6,APR=6,DATA ;;Remap the driver again		;007
+	RETURN			;;Return to our caller			;007
+.END
+

@@ -1,0 +1,33 @@
+$JOB/CCL/NOLIMIT/ERROR:FATAL/PRI:-16 [170,42]
+$!
+$!	SYMPAT.CTL --	Generate the permanent symbol
+$!			table for INIT's patch module.
+$!
+$!	NOTE:	If the system-wide logical LSD: is present, it will
+$!		override the assignment of NL: as the listing device.
+$!
+$ASSIGN LSD: NL
+$ASSIGN NL: LSD
+$DEASSIGN NL
+$ASSIGN D: SY
+$ASSIGN D: DK
+$SWITCH RT11
+$SIZE 28
+$R SY:PIP
+DK:SYMPAT.LST,DK:SYMPAT.SYM/DELETE:NOWARN
+$EOD
+$R SY:MACRO
+,DK:SYMPAT=#COMMON,#KERNEL,#FLDEF,INIDFN,_TT:
+.END
+$EOD
+.END
+$EOD
+$MUNG SY:SYMBOL
+DK:SYMPAT.LST
+DK:SYMPAT.SYM
+$R SY:PIP
+DK:SYMPAT.LST/DE/LOG
+$MUNG SY:SYMPAT
+$R SY:PIP
+DK:SYMPAT.SYM/DE/LOG
+$EOJ

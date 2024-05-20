@@ -1,0 +1,64 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element RSXPAR.RST
+;  *3    18-AUG-1986 11:26:44 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:49:51 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    10-APR-1986 23:54:39 SYSTEM "Load MACRO-11 V5.3 sources"
+;  DEC/CMS REPLACEMENT HISTORY, Element RSXPAR.RST
+.NLIST
+.SBTTL;
+.SBTTL;                       COPYRIGHT (c)  1983, 1986
+.SBTTL;             DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+.SBTTL;
+.SBTTL; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+.SBTTL; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+.SBTTL; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+.SBTTL; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+.SBTTL; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+.SBTTL; TRANSFERRED.
+.SBTTL;
+.SBTTL; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+.SBTTL; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+.SBTTL; CORPORATION.
+.SBTTL;
+.SBTTL; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS
+.SBTTL; SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.
+.SBTTL;
+.SBTTL
+.SBTTL
+.SBTTL	MACRO-11 Configuration prefix file	"RSXPAR.RST"
+.SBTTL
+
+;+
+; "RSXPAR.RST" -- Generate RSX-11 full macro assembler for RSTS/E
+;-
+	.LIBRARY /RSTMAC/	;Use RSTMAC.MLB not system RSXMAC.MLB
+
+.SBTTL	Symbolic configuration definitions
+ 
+
+R$RSTS  = 1		;Assemble for RSTS/E
+PDPV45  = 0		;Say 45 since we always have EIS
+RSX11M	= 0		;Invoke RSX-11 assembly
+ILVL	= 3		;Three levels of command file indirection
+INCLVL	= 5		;Allow five levels of .INCLUDE support.
+NU$SEC	= 8.		;Number of entries in in-core PSECT table
+
+W$$EK	= 0		;.WEAK directive is supported.
+XEDPIC	= 0		;No .ENABL/.DSABL PIC (OLD OLD option!)
+YHEX	= 0		;.RADIX/.ENABLE HEX support
+
+; Temporary LOCAL symbol definitions due to lack of logical name support
+
+FL.AEX=0	;Temp since it's not in SYSLIB and not supported!
+F.FLG=0		;Temp since it's not in SYSLIB and not supported!
+
+;+
+; Macro definition for 'PURE' P-SECT declarations
+;-
+
+.MACRO	PURE	NAME	A1,A2,A3,A4,A5,A6
+	.PSECT	NAME	RO A1 A2 A3 A4 A5 A6
+.ENDM	PURE
+
+.LIST
+
+

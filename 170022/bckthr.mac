@@ -1,0 +1,474 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	BCKTHR,<BACKUP record attribute threads>,0A,13-MAY-91,KPH/ACG/BGN
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BCKTHR
+
+;+
+;
+;  000  KPH  01-Dec-83  Creation for Version 9.0 RSTS/E
+;  001	KPH  10-Jan-84  Merge ACG's $MULQ routine
+;  002	KPH  17-Apr-85	Support multi-volume recursive calls
+;  003  BGN  03-MAY-89  Bug fixes to support /NOHEADER
+;  004  REG  29-May-90	Large block sizes
+;
+;			[RSTS V10.1]
+;  005  REG  07-Feb-91	Free up one APR
+;-
+
+.SBTTL	Call all needed MACROs
+
+.MCALL	SUBR,CALBX,.ASCIC
+
+.SBTTL	Define our local data
+
+	.PSECT	RWDATA,RW,D,LCL,REL,CON
+
+PUSHST:				;Start of push-down area		;002
+RECPTR:	.BLKW			;Address of next free byte in record
+RECSIZ:	.BLKW			;Bytes remaining in current record
+RECUSE:	.BLKW			;Number of bytes used in record
+RECTYP:	.BLKW			;Record type we're writing
+THRISP:	.BLKW			;Initial SP for record restarts
+RECSR4:	.BLKW			;Pointer to start of threads for record type
+MINREC:	.BLKW			;Minimum record size to allocate from pool
+PUSHEN:				;End of push-down area			;002
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+CLUMIN:	.QUAD	600000000	;Tenths of microseconds in a minute
+MODNAM:	.ASCIC	<"BCKTHR">	;Module name
+
+.EVEN	;Cowgirls get the blues
+
+DIFMSB	=	891.		;MSB of minutes between Nov 17, 1858 and
+				;    January 1, 1970
+
+DIFLSB	=	51264.		;LSB of minutes between Nov 17, 1858 and
+				;    January 1, 1970
+
+.SBTTL	Initialize context
+
+;+
+; THRINI - Initialize context
+;
+;	R4 -> Thread list
+;
+;	CALL	THRINI
+;
+; All the threads get executed.
+;
+; It is possible for us to be re-entered to write a backup and volume
+; summary. To support this, we save our context area on any initial
+; entry, and restore it on exit. This way, any interrupted process
+; is guaranteed to have it's context protected.
+;-
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+THRINI::SAVREG			;Save all registers
+	MOV	#PUSHST,R0	;Point to start of push-down list	;002
+10$:	MOV	(R0)+,-(SP)	;Save a word from the push-down list	;002
+	CMP	R0,#PUSHEN	;More to do?				;002
+	BNE	10$		;Yes, go do it				;002
+	CLR	RECPTR		;Assure that we don't have a current record
+	MOV	SP,THRISP	;Save initial SP for re-starts
+	JMP	@(R4)+		;Now go for it
+
+.REM	*
+
+Notes on the threads below:
+
+What follows is a group of threaded routines. Each routine is called
+with R4 pointing to an argument list. These routine must exit with
+a JMP @(R4)+ instruction. All other registers are available to the
+threaded routine.
+
+*
+
+.SBTTL	Set record type
+
+;+
+; SETREC - Set record type
+;
+;	R4 -> Thread list
+;		.WORD	TYPE		(Attribute type)
+;-
+
+SETREC::TST	RECPTR		;Do we have a current record?
+	BEQ	10$		;No, not this time
+	CALBX	RELREC,#RECUSE	;Yes, so release it
+	CRASH	R0		;And die on errors
+5$:	CLR	RECPTR		;Indicate no current record
+
+10$:	MOV	(R4)+,RECTYP	;Set the type
+	MOV	#2,MINREC	;And set minimum record size for header
+	MOV	R4,RECSR4	;And save the initial R4
+	JMP	@(R4)+		;And we're done
+
+.SBTTL	Copy a counted ASCII string
+
+;+
+; CPYASC - Copy a counted ASCII string
+;
+;	R4 -> Thread list
+;		.WORD	SOURCE		(Address of source string)
+;		.WORD	ATRTYP		(Attribute type)
+;
+;-
+
+CPYASC::MOV	(R4)+,R1	;R1 -> .ASCIC string
+	MOVB	(R1)+,R2	;R2 = Length of string
+	BNE	5$		;There is a length, that's good
+	TST	(R4)+		;Advance past unused attribute code
+	BR	20$		;And we're done
+
+5$:	CALL	BLDATR		;Build an attribute
+10$:	MOVB	(R1)+,(R3)+	;Copy a byte
+	SOB	R2,10$		;For the whole thing
+20$:	JMP	@(R4)+		;Now off to the next thread
+
+.SBTTL	Copy from an indirect address with indirect count
+
+;+
+; CPIAIL - Copy indirect address and indirect length
+;
+;	R4 -> Thread list
+;		.WORD	CNTADR		(Address of count)
+;		.WORD	ATRTYP		(Attribute type)
+;		.WORD	SRCADR		(-> Address to copy from)
+;-
+
+.ENABL	LSB
+
+CPIAIL::MOV	@(R4)+,R2	;Pick up count
+	CALL	BLDATR		;Build the attribute
+	MOV	@(R4)+,R1	;R1 -> Source area
+	TST	R2		;Zero length attribute?			;003
+	BEQ	20$		;Yes, nothing to copy			;003
+	BR	10$		;Now join up with CPYADR
+
+
+.SBTTL	Copy from an address
+
+;+
+; CPYADR - Copy from an address
+;
+;	R4 -> Thread list
+;		.WORD	COUNT		(Count to copy)
+;		.WORD	ATRTYP		(Attribute type)
+;		.WORD	SOURCE		(Address to copy from)
+;-
+
+CPYADR::MOV	(R4)+,R2	;Pick up count
+	CALL	BLDATR		;And build the attribute
+	TST	R2		;Zero length attribute?			;003
+	BEQ	20$		;Yes, nothing to copy			;003
+	MOV	(R4)+,R1	;Now R1 -> Source area
+10$:	MOVB	(R1)+,(R3)+	;Copy a byte
+	SOB	R2,10$		;For the whole thing
+20$:	JMP	@(R4)+		;Now we're done
+
+.DSABL	LSB
+
+.SBTTL	Copy immediate (in-line)
+
+;+
+; CPYIMM - Copy immediate (in-line arguments)
+;
+;	R4 -> Thread list
+;		.WORD	COUNT		(Byte count of arguments)
+;		.WORD	ATRTYP		(Type of attribute)
+;			( Attributes follow )
+;-
+
+CPYIMM::MOV	(R4)+,R2	;Pick up count
+	CALL	BLDATR		;And build the attribute
+10$:	MOVB	(R4)+,(R3)+	;Copy a byte
+	SOB	R2,10$		;For the whole thing
+	INC	R4		;Round up in case we're on a odd boundry
+	BIC	#1,R4		;And round down in case we're not
+	JMP	@(R4)+		;Now we're done
+
+.SBTTL	Build a date attribute
+
+;+
+; CPYDAT - Copy a date and time
+;
+;	R4 -> Argument list
+;		.WORD	ATRTYP		(Attribute type)
+;		.WORD	DATADR		(Address of RSTS/E style date)
+;		.WORD	TIMADR		(Address of RSTS/E style time)
+;
+; This routine takes the date and time specified, and writes it
+; as a quad-word date.
+;
+; Note that the code below is written with the assumption that the
+; only dates to deal with are in the range of Jan 1970 to Dec 2035.
+;-
+
+CPYDAT::MOV	#8.,R2		;Count of dates is always 8 bytes
+	CALL	BLDATR		;Now build the attribute
+	MOV	R3,R5		;Stash the address for the attribute safely
+	MOV	@(R4)+,R3	;Pick up RSTS/E style date
+ 	CLR	R2		;And clear MSB for divide
+	DIV	#1000.,R2	;Now R2 = years since 1970, R3 = day of year
+	MOV	R2,R1		;Save years since 1970
+
+; Now we will add the number of leap days to the day within the year
+
+	INC	R2		;R2 has years since 1969 (leap year + 1)
+	ASR	R2		;Divide by two
+	ASR	R2		;Now divide by four, giving # of leap years
+	ADD	R2,R3		;Now we have days biased for leap years
+
+; Now we will convert the year number to days since 1970 (note that this
+; calculation does not have to bother with leap years since we already
+; did that above to the day within year.
+
+	MUL	#365.,R1	;Now R1 has years * 365 since 1970
+	ADD	R3,R1		;Now R1 has days since 1970 (accurate)
+
+; Now we have days since 1970, we'll get minutes (including the time
+; specified by the user).
+;
+; Note: The number of minutes to Dec, 2035 fits in 31 bits.
+
+	MOV	#1440.,R2	;R2 = Minutes in a day
+	MOV	R1,R0		;Get the days since 1970 into an even register
+	MUL	R2,R0		;Now <R0, R1> has minutes since 1970
+	SUB	@(R4)+,R2	;R2 = Minutes after midnight
+	ADD	R2,R1		;Now add into minutes since 1970
+	ADC	R0		; Double precision
+
+; Now we have minutes since 1970, we'll get the number of minutes since
+; Nov 17, 1858.
+;
+; The number of minutes between Nov 17, 1858 and Dec 31, 2035 fits
+; into 32 bits (it happens to be 92, 702, 880 decimal).
+
+	ADD	#DIFLSB,R1	;Add in LSB of minutes since base date
+	ADC	R0		;Double precision
+	ADD	#DIFMSB,R0	;Now add in MSB
+
+	SUB	#8.,SP		;Make room for the product
+	MOV	SP,R2		;R2 -> Product area
+	CLR	-(SP)		;Clear MSB of high long word of multiplicand
+	CLR	-(SP)		; And LSB of high long word of multiplicand
+	MOV	R0,-(SP)	;  Set up MSB of low long word of multiplicand
+	MOV	R1,-(SP)	;   Set up LSB of low long word of multiplicand
+	MOV	SP,R1		;R1 -> Multiplicand (minutes since base date)
+	MOV	#CLUMIN,R0	;R0 -> Multiplier (clunks per minute)
+	CALL	$MULQ		;Now do the multiply
+	MOV	R2,SP		;Reset stack space from multiplicand
+
+; Now we write this in the record
+
+	MOV	#8.,R1		;R1 = Number of bytes to copy
+10$:	MOVB	(R2)+,(R5)+	;Copy a byte
+	SOB	R1,10$		;For the whole thing
+	MOV	R2,SP		;Return the stack space
+	JMP	@(R4)+		;And we're done
+
+.SBTTL	Copy a PPN into a UIC field
+
+;+
+; CPYUIC - Copy a PPN into a UIC field
+;
+;	R4 -> Argument list
+;		.WORD	ATTR		(Attribute type code)
+;		.WORD	PPNADR		(Address of PPN)
+;-
+
+CPYUIC::MOV	#4,R2		;UIC field is four bytes long
+	CALL	BLDATR		;Now build the attribute
+	MOV	(R4)+,R1	;R1 -> PPN
+	MOVB	(R1)+,(R3)+	;Write LSB of UIC low word
+	CLRB	(R3)+		;Clear MSB of UIC low word
+	MOVB	(R1)+,(R3)+	;Write LSB of UIC high word
+	CLRB	(R3)+		;And clear MSB of UIC high word
+	JMP	@(R4)+		;Now go off to next thread
+
+.SBTTL	Build an attribute header
+
+;+
+; BLDATR - Build an attribute header
+;
+;	R2 = Count of bytes in attribute
+;	R4 -> Attribute type
+;
+;	CALL	BLDATR
+;
+;	R0 = Undefined
+;	R3 -> Attribute area (not necessarily an even value!)
+;	R4 = R4 + 2
+;-
+
+BLDATR:	MOV	R2,-(SP)	;Save count requested
+	ADD	#4,R2		;Increase attribute count by header area
+	MOV	RECPTR,R3	;R3 -> Where we can place next record
+	BEQ	3$		;No current record, so get one
+	MOV	R3,-(SP)	;Save virtual address			;004
+	ADD	R2,R3		;Add in the record size			;004
+	SUB	GDBVA,R3	;Take away the base of our APR		;005
+101$:	CMP	R3,#8192.	;Are we going to be out of our APR?	;004
+	BLO	1$		;No					;004
+	MOV	(SP)+,R3	;Restore reg				;004
+	BR	2$		;Yes, go get more room			;004
+
+1$:	MOV	(SP)+,R3	;Restore reg				;004
+	CMP	R2,RECSIZ	;Is there enough room for this attribute?
+	BLOS	10$		;Yes, so go write it
+
+; At this point we don't have enough room for this attribute, so we
+; will have to re-start the entire process, adding to the minimum
+; size that can be allocated.
+;
+; Note that we just "forget" that we have a current record. As a result,
+; the next call to GETREC will mark our current record as null and
+; try again.
+;
+;	R2 = Size user wants + size of attribute header
+
+2$:									;004
+	MOV	THRISP,SP	;Get back initial thread SP
+	MOV	RECSR4,R4	;Get back saved R4 for this record type
+	CLR	RECPTR		;Forget that we have a record
+	MOV	RECUSE,MINREC	;And preset minimum size to what we've used
+	ADD	R2,MINREC	;But add in some for this attribute
+	JMP	@(R4)+		;And start the thread list again
+
+; Come here if we need to allocate a record. This will happen once
+; during a record type, but can happen multiple times if we need
+; to do record restarts.
+
+3$:	ADD	R2,MINREC	;Increase minimum record size requirement
+	ADD	#2,R2		;And add in overhead of structure level
+	CALBX	GETREC,<#RECPTR,#MINREC,#RECSIZ> ;Go get the record
+	CRASH	R0		;And die on errors
+
+	ADD	#BRHSIZ,RECPTR	;Update record pointer past record header
+	MOV	RECPTR,R3	;R3 -> Record data area of new record
+	MOV	RECTYP,<BRH$RT-BRHSIZ>(R3) ;Save record type
+	MOV	#STRLVL,(R3)+	;Save the structure level
+	CLR	RECUSE		;Initialize count of bytes used
+
+; Now we have a record
+;
+;	R2 = Size of attribute + overhead
+;	R3 -> Where to place attribute (not necessarily an even value)	
+;	R4 -> Attribute type
+;	(SP) = Count requested by user
+
+10$:	MOVB	(SP),(R3)+	;Save data size LSB
+	MOVB	1(SP),(R3)+	;And MSB
+	MOVB	(R4)+,(R3)+	;And attribute type LSB
+	MOVB	(R4)+,(R3)+	;And attribute type MSB
+	SUB	R2,RECSIZ	;Indicate size remaining is smaller
+	ADD	R2,RECPTR	;Update pointer to next free area
+	ADD	R2,RECUSE	;And update size used
+	MOV	(SP)+,R2	;Restore caller's byte count
+	RETURN			;And now we're done
+
+GLOBAL	<GDBVA>								;005
+
+.SBTTL	Exit back to user's code
+
+;+
+; THREXI - Exit back to user's code
+;
+;	SP -> Push-down list, register save return, R0 - R5, Caller's address
+;-
+
+THREXI::TST	RECPTR		;Do we have a current record?
+	BEQ	10$		;No, not this time
+	CALBX	RELREC,<#RECUSE> ;Close out the current record	
+	BCC	10$		;Yes, that's good
+	BPT			;Die on errors
+10$:	MOV	#PUSHEN,R0	;Point to end of push-down list		;002
+20$:	MOV	(SP)+,-(R0)	;Restore a word from the list		;002
+	CMP	R0,#PUSHST	;Are we done yet			;002
+	BNE	20$		;No, more to do				;002
+	RETURN			;All done here!
+
+;+
+;
+; *** - $MULQ	QUAD MULTIPLY ROUTINE
+;
+; THIS ROUTINE DOES A 64 BIT MULTIPLY OPERATION (ALL OPERANDS ARE
+; 64 BITS IN LENGTH). NUMBERS ARE STORED WITH INCREASING
+; SIGNIFICANCE IN INCREASING ADDRESSED BYTES.
+;
+; INPUTS:
+;
+;	R0 = ADDRESS OF MULTIPLIER
+;	R1 = ADDRESS OF MULTIPLICAND
+;	R2 = ADDRESS OF PRODUCT
+;
+; OUTPUTS:
+;
+;	PRODUCT STORED IN SPECIFIED ADDRESS
+;
+;-
+
+$MULQ:	CALLX	$SAVAL
+	MOV	#64.,-(SP)	; SET UP ITERATION COUNT
+	MOV	R2,R4		; POINT TO PRODUCT
+	CLR	(R4)+		; ZERO THE PRODUCT
+	CLR	(R4)+
+	CLR	(R4)+
+	CLR	(R4)+
+	ADD	#8.,R0		; POINT TO HIGH ORDER OF MULTIPLIER
+ 
+10$:	CLR	R5		; INITIALIZE MASK
+	TST	-(R0)		; MOVE TO NEXT LOWER WORD OF MULTIPLIER
+	SEC
+20$:	ROR	R5		; SHIFT TO NEXT LOWER BIT
+	BCS	10$		; MOVE TO NEXT WORD IF NECESSARY
+ 
+	MOV	R2,R4		; POINT TO PRODUCT
+	ROL	(R4)+		; SHIFT IT LEFT ONE PLACE
+	ROL	(R4)+
+	ROL	(R4)+
+	ROL	(R4)+
+	BIT	R5,(R0)		; SEE IF BIT OF MULTIPLIER IS ON
+	BEQ	30$		; BRANCH IF NOT - NO ADD
+	MOV	R1,R3		; POINT TO MULTIPLICAND
+	MOV	R2,R4		; POINT TO PRODUCT
+	ADD	(R3)+,(R4)+	; ADD MULTIPLICAND INTO PRODUCT
+	ADC	(R4)+
+	ADC	(R4)+
+	ADC	(R4)
+	CMP	-(R4),-(R4)
+	ADD	(R3)+,(R4)+
+	ADC	(R4)
+	ADC	2(R4)
+	ADD	(R3)+,(R4)+
+	ADC	(R4)
+	ADD	(R3)+,(R4)+
+30$:	CLC			; CLEAR CARRY FOR ABOVE ROTATE
+	DEC	(SP)		; BUMP STEP COUNT
+	BNE	20$		; AND LOOP
+ 
+	TST	(SP)+		; CLEAN THE STACK
+	RETURN
+
+.END

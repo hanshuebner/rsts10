@@ -1,0 +1,1620 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	BCKRMS,<Backup record/block handling>,0J,27-MAR-92,KPH/SHL/FRL/BGN/REG
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BCKRMS
+
+;+
+;  000  KPH  01-Dec-83	Creation for RSTS V9.0
+;  001	KPH  01-Nov-84	Fix small buffer deadlock
+;  002	KPH  13-Dec-84	Bugfixes in 001
+;  003	KPH  03-Jan-85	Do XOR groups 16 bytes at a time
+;  004	KPH  18-Jan-85	Update HGHBLK on multi-volume tape processing
+;  005	KPH  18-Mar-85	Add entry point to do unconditional tape startup
+;  006  KPH  19-Apr-85	Be sure ASTs are disabled when touching ASYBID
+; 
+;			[RSTS V9.1]
+;  007  KPH  19-Aug-85	Bugfix in save set size setup
+;
+;			[RSTS V9.2]
+;  008  KPH  25-Oct-85	Fix EOV tape race condition
+;  009  FRL  19-Dec-85	Make sure pending messages get printed at vol change
+;  010  FRL  16-Jan-86  Fix infinite sleep problem
+;
+;			[RSTS V9.3]
+;  011  KPH  20-Jan-86	Add CRC-32 calculation
+;  012  KPH  02-Jun-86	Recalculate CRC-32 on disk volume switch
+;  013  FRL  25-Jul-86	Add .NAME (Also in RSTRMS)
+;
+;			[RSTS V9.4]
+;  014  KPH  11-May-87	Don't write volume summary on subsequent volumes
+;
+;			[RSTS V9.7]
+;  015  BGN  14-May-89	Remove the call to INIBUF
+;  016  BGN  25-May-89	Put the call back in.
+;
+;			[RSTS V10.0]
+;  017  REG  03-Apr-90	Add big blocks
+;  018  REG  24-Apr-90	Add check for /IN_LABEL=
+;  019  REG  13-Aug-90	Write a final XOR block at end of saveset
+;  020  REG  14-Aug-90  Fix 0-length file sleep problem
+;  021  REG  16-Aug-90	Save R0 around CALBX's
+;  022  REG  23-Aug-90	Sync final XOR for streamers
+;
+;			[RSTS V10.1]
+;  023  REG  07-Jan-91	Free up one APR
+;  024	DRP  26-Mar-92	Fix hangs in a sleep state on the last
+;			volume problem.
+
+.SBTTL	Notes on these routines
+
+.REM	*
+
+We are responsible for record allocation. We are used during BACKUPs
+to write the various types of records necessary to perform a BACKUP.
+
+Our data is local, but it must be retained across calls. This means
+that we can not be overlaid against anything that will be called
+while we own a block (after BCKREC and before BCKREC returns).
+
+*
+
+.SBTTL	Call all needed MACROs
+
+.MCALL	SUBR,CALBX,CALB,.ASCIC,ENAR$S,DSAR$S,WSIG$S,$CUI
+
+$CUI	MSG
+
+.SBTTL	Define our local data
+
+	.PSECT	RWDATA,RW,D,LCL,REL,CON
+
+BYTBLK:	.BLKW			; Number of bytes left in current block
+XORCNT:	.BLKW			; Number of blocks left in XOR group
+BCKFLG:	.BLKW			; Current flags
+TAPQUE:	.BLKW			; Buffer ID of head of tape I/O queue
+TAPTAL:	.BLKW			; Buffer ID of tail of tape I/O queue
+ACTQUE:	.BLKW			; Action routine queue head
+ACTTAL:	.BLKW			; Action routine queue tail
+ERRQUE:	.BLKW			; I/O buffer error queue head
+ERRTAL:	.BLKW			; I/O buffer error queue tail
+CURDBK:	.BLKW			; Current disk block number LSB
+	.BLKW			; Current disk block number MSB		;017
+BSZBLK:	.BLKW			; Block size for disk in blocks
+HGHBLK:	.BLKW			; Block number of highest successful I/O LSB
+	.BLKW			; Block number of highest successful I/O MSB
+PIOCNT::.BLKW			; Pending I/O count			;020
+PERCNT:	.BLKW			; Pending error count			;017
+REQQUE:	.BLKW			; Multi-volume I/O requeue queue
+HGHDBK:	.BLKW			; Highest successful disk block number LSB
+	.BLKW			; Highest successful disk block number MSB
+PTPCNT:	.BLKW			; Pending eligable tape records		;017
+BUFQUE:	.BLKW			; Queue for buffer-stalled requests	;001
+BUFTAL:	.BLKW			; Tail pointer for buffer-stalled requests ;001
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+MODNAM:	.ASCIC	<"BCKRMS">	; Module name for program failures
+
+.EVEN	;I waste a byte on occasion
+
+.SBTTL	Define our private definitions
+
+.BSECT	,NOCREF
+
+BF.PMV:	.BLKB	.		;Multi-volume requeue is pending
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+BF.WRT:	.BLKB	.		;We can send tape records now
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+	.BLKB	.		; Reserved for future use
+BF.MVL:	.BLKB	.		;Set when doing multi-volume requeues
+
+.SBTTL	Come here to do a BACKUP
+
+;+
+; BCKREC - Write a BACKUP
+;
+; This routine is called to initialize our context. We are called before
+; any other routines
+;
+;	CALLX	BCKREC
+;
+; All registers are preserved.
+;-
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+BCKREC::NOP			;Debug					;017
+	SAVREG			;Save all registers
+	CALLX	CLRFQB		;Clear out the FIRQB			;013
+	MOV	#^RBAC,FIRQB+FQNAM1	;Change name 			;013
+	MOV	#^RKUP,FIRQB+FQNAM1+2	;  to BACKUP			;013
+	.NAME								;013
+	CLR	BYTBLK		;Be sure we don't have a current record
+	CLR	BCKFLG		;Clear out our flags
+	MOV	#-1,R1		;Get a handy constant
+	MOV	R1,TAPQUE	;Indicate nothing is in tape queue
+	MOV	R1,ERRQUE	;Indicate nothing is in error queue
+	MOV	R1,REQQUE	;And nothing is in requeue queue
+	MOV	R1,BUFQUE	;And nothing is in the buffer queue
+	CLR	PIOCNT		;Set no pending I/O requests		;017
+	CLR	PERCNT		;Set no pending errors			;017
+	MOV	#ACTQUE,ACTTAL	;Set the tail of the action routine list
+	CLR	ACTQUE		;And indicate we have no action routines
+	MOV	#1,CURDBK	;Set current block to be 1
+	CLR	CURDBK+2	;Double precision			;017
+	CLR	HGHBLK		;Set highest block number to be zero
+	CLR	HGHBLK+2	;Double precision
+	CLR	HGHDBK		;Set highest disk block number to be zero
+	CLR	HGHDBK+2	;Double precision			;017
+	CLR	PTPCNT		;No pending tape I/O			;017
+	CALLX	INIBUF		;Set up the I/O buffers			;017
+	MOV	BLKSIZ,R4	;Pick up block size in bytes
+	ASH	#-9.,R4		;Now convert it to blocks
+	BIC	#177600,R4	;Clear the sign extend			;017
+	MOV	R4,BSZBLK	;And save it
+	CALLX	INVCHK		;Check for /IN_LABEL			;018
+	CALLX	MOUNT		;Go get the first volume mounted
+	CALLX	BCKBSM		;Write the summary attributes		;014
+	CALLX	BCKVSM		;And the volume attributes		;014
+	CALLX	BCKFIL		;Write the files
+	CALL	FLUSH		;Flush the current record
+	DSAR$S			;Make sure ASTs are disabled		;024
+	CALL	TAPEST		;;Make sure streamers get started	;024
+	ENAR$S			;;Enable ASTs				;024
+	CALL	WAITIO		;Wait for all I/O to finish		;022
+	CMP	GX1BID,#-1	;Do we have an XOR block?		;023
+	BEQ	10$		;No, so don't try to write it		;019
+	CALBX	MAPBUF,<#GX1BID,#XORAVL,#GXBVA> ;Restore XOR map	;023
+	MOV	GXBVA,R3	;And pointer to the XOR block		;023
+	CLRB	HB$PRC(R3)	;Say no more XOR's to do		;019
+	BIS	#HBF$RB,(R3)	;Say block is ready to queue		;019
+.ASSUME	HB$FLG	EQ	0
+	MOVB	#1,XORCNT	;Set up to send an XOR block		;019
+	CALL	FINXOR		;Queue this XOR block			;019
+	DSAR$S			;Disable ASTs				;023
+	CALL	TAPEST		;;Make sure streamer tape is started	;022
+	ENAR$S			;;Enable ASTs				;023
+	CALL	WAITIO		;Make sure all the I/O finishes
+	CMP	GX1BID,#-1	;Do we have an XOR block?		;023
+	BEQ	10$		;No, so don't return it
+	CALBX	RETBUF,#GX1BID	;Return the XOR block			;023
+	MOV	#-1,GX1BID	;And indicate we don't have one		;023
+10$:	MOV	HGHDBK,SAVSZL	;Set highest block number LSB		;007
+	MOVB	HGHDBK+2,SAVSZM	;And highest block number MSB		;007
+	ADD	BSZBLK,SAVSZL	;Update block number for "next block"	;007
+	ADCB	SAVSZM		;Double precision			;007
+	CALLRX	DISMNT		;Now exit dismounting this save set
+
+GLOBAL	<BLKSIZ,SAVSZL,SAVSZM>						;007
+
+.SBTTL	Wait for I/O to be complete
+
+;+
+; WAITIO - Wait for I/O to be complete
+;
+;	CALL	WAITIO
+;
+; Returns when all I/O is complete. All registers are preserved.
+;-
+
+WAITIO:	CALL	CHKACT		;Check for action routines
+	DSAR$S			;Protect piocnt test			;023
+	CALL	TAPEGO		;;Make sure tape requests are going
+	TST	PIOCNT		;;Any outstanding I/O?			;017
+	BEQ	10$		;;No, all done
+	MOV	#-1,@#XRB	;;Yes, so wait for an AST to come around
+	.SLEEP			;;And sleep until it does
+	MOV	#WAITIO,-(SP)	;;Be sure to return here again
+
+10$:	ENAR$S			;;Go and enable ASTs
+	JMP	CHKACT		;Exit checking action routines
+
+GLOBAL	<BUFUSE>
+
+.SBTTL	Get a record buffer
+
+;+
+; GETREC - Get a record buffer
+;
+;	R5 -> Argument list
+;		.WORD	3
+;		.WORD	BUFADR		(Address to return virtual address)
+;		.WORD	BFRCNT		(Address of bytes needed)
+;		.WORD	BUFRSZ		(Address to return bytes allocated)
+;
+;	CALLX	GETREC
+;
+;	R0 = Returned error code
+;
+; This routine allocates a record. If there is no room in the current
+; block for the record, this routine will pad the record with a null
+; record header, send the record to be written, allocate a new block,
+; write the block header, and allocate the block from the new header.
+;
+; The address returned is the address of the record header, not the
+; record data area. This is because it will be necessary for the caller
+; to fill in flags in the record header. The record header is zeroed,
+; but the data area is not.
+;
+; This routine will wait for free buffers by doing a wait for
+; significant event. Asynchronous completion routines will free up
+; buffers for us to use.
+;
+; Note:  This routine can be entered with BYTES = 0.  For example,
+;	 the GETDYN: routine in BCKFIL does that to cause a new
+;	 block to be initialized after a call to FLUSH:.
+;-
+
+GETREC::SUBR	<BUFADR,BFRCNT,BUFRSZ> ;Set up arguments
+	CALL	CHKACT		;Check for action routines
+	MOV	@BFRCNT(R5),R1	;R1 = Bytes requested by user
+	MOV	CURREC,R2	;R2 -> Next free byte in block
+	MOV	BYTBLK,R3	;Pick up bytes remaining in current block
+	BEQ	10$		;None, need to allocate a new one
+	SUB	#BRHSIZ,R3	;Forget about room for the record header
+	CMP	R1,R3		;Is there enough room for this record?
+	BHI	8$		;No					;017
+
+	; Remap if we need to						;017
+	MOV	R0,-(SP)	;Save a reg				;017
+	MOV	R2,R0		;R0 -> next free byte in block		;017
+	SUB	GDBVA,R0	;R0 = #bytes away from base address	;023
+	ADD	#BRHSIZ,R0	;+ room for record header		;017
+	ADD	@BFRCNT(R5),R0	;+ room for requested byte count	;017
+	CMP	R0,#8192.	;Are we out of our current map?	;017
+	BLO	5$		;No, don't remap			;017
+	CALL	REMAP		;Yes, remap				;017
+5$:	MOV	(SP)+,R0	;Restore it				;017
+	BR	30$		;And join up				;017
+
+; Not enough room in current record; write a null record header and queue
+; it to be sent.
+
+8$:	MOV	R3,(R2)+	;Set up the byte count with what's remaining
+.ASSUME	BRH$RS	EQ	0
+	CLR	(R2)		;And indicate type is null record
+.ASSUME	BRT$NL	EQ	0
+.ASSUME	BRH$RT	EQ	2
+	CLR	BYTBLK		;Ensure that we have no current record context
+	CALL	SNDBLK		;Now go and send the record
+
+; Allocate a new block for the current block
+
+10$:	CALBX	GETBUF,<#GD1BID,#DTAAVL,#GDBVA> ;Get a buffer for a block;023
+	BCC	20$		;It worked, what a relief
+	CALL	CHKACT		;Check for action routines
+	DSAR$S			;Protect the compare			;023
+	CALL	TAPEGO		;;Check for tape startups
+	CMP	BUFCNT,BUFUSE	;;Are there any free buffers?		;023
+	BNE	15$		;;Yes, there sure are
+	MOV	#-1,@#XRB	;;No, so set up a long conditional sleep
+	.SLEEP			;;Now do it
+15$:	ENAR$S			;;Let 'em go now			;023
+	BR	10$		;Now try again
+
+; Note: The multi-volume handling code in CHKACT assumes that if GD1BID
+; has a value other than -1, then the block header is valid. Since
+; this is not the case until we call BLDBHD, do not call CHKACT until
+; calling BLDBHD below.
+
+20$:	;CMESSAGE <#GD1,GD1BID> 					;023
+	MOV	GD1BID,GD2BID	;Save the block ID to map big blocks	;023
+	MOV	GDBVA,R2	;R2 -> Buffer header
+	CLR	(R2)		;Clear flags
+.ASSUME	HB$FLG	EQ	0
+	ADD	#HB$PRC,R2	;R2 -> Header @ HB$PRC
+	CLRB	(R2)+		;Clear pending record count
+	CLR	(R2)+		;Clear action routine head
+.ASSUME	HB$EBA	EQ	HB$PRC+1
+	CLR	(R2)		;And action routine tail
+.ASSUME	HB$EBT	EQ	HB$EBA+2
+	ADD	#HBSIZE-HB$EBT,R2 ;R2 -> Now point to block header
+	MOV	BLKSIZ,BYTBLK	;Indicate entire record is free
+	SUB	#BBHSIZ,BYTBLK	;But the block header is written (it will be!)
+	CALL	BLDBHD		;Now build the block header
+	MOV	R2,CURREC	;And set the pointer to the current record
+
+; All paths join now...
+;
+;	R2 -> Where to place record header
+;	BYTBLK = Bytes free
+;	CURREC -> Where to place record header
+;
+; All we have to do now is zero the record header and return the
+; address to the user.
+
+30$:	MOV	R2,@BUFADR(R5)	;Return the record address to the user
+	MOV	BYTBLK,@BUFRSZ(R5) ;and the record size
+	SUB	#BRHSIZ,@BUFRSZ(R5) ;But don't include the record header
+	MOV	#BRHSIZ/2,R3	;R3 = Count of words in record header
+40$:	CLR	(R2)+		;Clear out a word
+	SOB	R3,40$		;And loop for the whole thing
+	RETURN			;And we're done!
+
+GLOBAL	<BBHDAT,BLKSIZ,NOBUFS,BUFCNT,BUFUSE>
+
+
+;+
+; RELREC - Release a record
+;
+;	R5 -> Argument list
+;		.WORD	1		(Number of arguments)
+;		.WORD	BYTCNT		(Address of byte count written)
+;
+;	CALLX	RELREC
+;
+;	R0 = Returned error code
+;	CURREC -> next record
+;	BYTBLK = Bytes now remaining in record
+;
+; This routine releases a record. It fills in the byte count field associated
+; with the current record [BRH$RS], and establishes the new current record
+; (if there is room in the record for another record). If there is no room
+; left in the block, we will send the block to be transmitted.
+;
+; Record lengths must be a multiple of 16. bytes. This routine will pad
+; a record with zeroes to achieve this requirement.
+;-
+
+RELREC::SUBR	BYTCNT		;Set up the parameter
+	CALL	CHKACT		;Check for action routines
+	MOV	@BYTCNT(R5),R1	;R1 = Count written in current record
+	MOV	CURREC,R3	;R3 -> Current record
+	MOV	R1,R2		;Copy byte count of record
+	ADD	#BRHSIZ,R2	;Add in size of header
+	ADD	R3,R2		;Now R2 -> Free space at end of record
+
+	; Round up							;017
+	BIT	#17,R1		;Are we at a 16. byte boundry?		;017
+	BEQ	5$		;Yes, that's good			;017
+	BIC	#17,R1		;Get rid of the lower 4 bits		;017
+	ADD	#20,R1		;Bump 'em up to next 16. boundary	;017
+5$:	MOV	R1,(R3)		;Plug in the size of the curr record	;017
+	.ASSUME	BRH$RS	EQ	0
+	ADD	#BRHSIZ,R1	;Now R1=size of record (with header)	;017
+	SUB	R1,BYTBLK	;Indicate fewer bytes free now		;017
+	SUB	@BYTCNT(R5),R1	;Figure how much we added		;017
+	SUB	#BRHSIZ,R1	;Minus the header size			;017
+
+	; Remap if we need to						;017
+	MOV	R0,-(SP)	;Save a reg				;017
+	MOV	R2,R0		;R0 -> free space at end of record	;017
+	SUB	GDBVA,R0	;R0 = #bytes away from base address	;017
+	ADD	R1,R0		;+ room for rounding up to 16.b bound	;017
+	ADD	#4.,R0		;+ room for a null record if needed	;017
+	CMP	R0,#8192.	;Are we out of our current map?	;017
+	BLO	8$		;No, don't remap			;017
+	CALL	REMAP		;Yes, remap				;017
+8$:	MOV	(SP)+,R0	;Restore it				;017
+
+	; Zero out the end of the last record				;017
+	TST	R1		;Any to do?				;017
+	BEQ	20$		;No, so don't do any			;017
+10$:	CLRB	(R2)+		;Clear out a byte			;017
+	SOB	R1,10$		;To new end of record			;017
+
+20$:	TST	BYTBLK		;Are we out of room yet?		;017
+	BEQ	35$		;We're out of room in this block
+	CMP	BYTBLK,#BRHSIZ	;Do we have room for more than a buffer header?
+	BHI	40$		;Yes, that's good
+30$:	CLR	(R2)+		;Set up byte count of zero
+.ASSUME	BRH$RS	EQ	0
+	CLR	(R2)		;With a null record type
+.ASSUME	BRT$NL	EQ	0
+.ASSUME	BRH$RT	EQ	2
+
+35$:	CLR	BYTBLK		;Be sure that we don't have a current record
+	BR	SNDBLK		;We're done with this record
+
+40$:	MOV	R2,CURREC	;Update pointer to current record
+	RETURN			;And now we're done
+
+
+.SBTTL  Remap the current block						;017
+
+;+
+; REMAP - Remap the current block
+;
+;		R2 -> free space at end of current record
+;		R0 is free to use as scratch register
+;
+;	CALL	REMAP
+;
+;		R2 -> free space at end of current record
+;		We are mapped at new record or close to it
+
+REMAP:	MOV	R2,R0		;Copy our current pointer		;017
+	BIC	#77,R0		;Round down to 32 word boundary		;017
+	SUB	R0,R2		;Make an offset into new map		;017
+	SUB	GDBVA,R0	;Take away the base address		;023
+	ASH	#-6,R0		;Make it into slivers			;017
+	BIC	#176000,R0	;Clear the sign extend			;017
+	ADD	R0,GD2BID	;Store it somewhere handy		;023
+	CALBX	MAPBUF,<#GD2BID,#DTAAVL,#GDBVA> ;Remap			;023
+	ADD	GDBVA,R2	;Add in new base			;023
+	MOV	R2,CURREC	;And update current record pointer	;017
+	RETURN
+
+
+.SBTTL	Flush the current block
+
+;+
+; FLUSH - Flush the current block
+;
+;	CALL	FLUSH
+;
+;	R2 = Undefined
+;	R3 = Undefined
+;
+; Current block is dumped.
+;-
+
+FLUSH::	MOV	BYTBLK,R3	;R3 = Bytes remaining in current block
+	BEQ	10$		;None, that's easy
+	MOV	CURREC,R2	;R2 -> Next record in block
+	SUB	#BRHSIZ,R3	;Forget about room for the record header
+	MOV	R3,(R2)+	;Set up the byte count with what's remaining
+.ASSUME	BRH$RS	EQ	0
+	CLR	(R2)		;And indicate type is null record
+.ASSUME	BRT$NL	EQ	0
+.ASSUME	BRH$RT	EQ	2
+	CLR	BYTBLK		;Be sure we have no current record context
+	CALLR	SNDBLK		;Now go and send the record
+10$:	RETURN			;All done now
+
+.SBTTL	Build a block header
+
+;+
+; BLDBHD - Build a block header
+;
+; This routine is used to build a block header
+;
+;	R2 -> Block header
+;	BBHDAT -> Data area to set up
+;
+;	CALL	BLDBHD
+;
+;	R0 = 0
+;	R2 -> Past block header
+;	R1, R3 - R5 = Undefined
+;
+;	BBHDAT+BBH$NO is incremented (before block is written)
+;-
+
+BLDBHD:	ADD	#1,BBHDAT+BBH$NO ;Update block sequence number
+	ADC	BBHDAT+BBH$NO+2	;Double precision
+
+	MOV	#BBHSIZ,R1	;R1 = Size of buffer in bytes
+	MOV	#BBHDAT,R4	;R4 -> Record header data area
+	CLR	BBHDAT+BBH$CS	;Clear out the CRC for initial computation
+	CLR	R0		;Clear CRC accumulation register
+10$:	MOVB	(R4),(R2)+	;Copy a byte into the user's buffer
+	MOVB	(R4)+,R3	;Get character
+	XOR	R0,R3		;XOR old CRC and new character
+	BIC	#177400,R3	;Clear high byte
+	ASL	R3		;Make index into table
+	MOV	CRCTBL(R3),R3	;Get modifier word from table
+	CLRB	R0		;Clear low byte of old CRC
+	SWAB	R0		;Move high byte to low
+	XOR	R3,R0		;XOR modifier and old CRC
+	SOB	R1,10$		;Decrement counter and loop if <> 0
+
+	MOV	R0,-2(R2)	;Write the CRC to the buffer
+	CLR	R0		;Be sure we don't return an error to the user
+	RETURN			;And now we're done
+
+GLOBAL	<BBHDAT,CRCTBL>
+
+;+
+; SNDBLK - Send a block to the output device
+;
+; This routine prepares a block to be written to the save set.
+; In addition, it prepares XOR blocks to be written to the save
+; set, and associates data blocks with XOR blocks.
+;
+;	GDBVA = Current block virtual address
+;	GD1BID = Block ID of current block	
+;
+;	CALL	SNDBLK
+;
+; And it happens...
+;-
+.ENABL LSB								;019
+
+SNDBLK:	SAVREG			;Save all registers
+
+; The first thing to do is check for action routines and error completions.
+; We check this first, since there may be end-of-volume errors to
+; handle.
+
+	CALL	CHKACT		;Check for action routines
+
+; Next thing to do is get an XOR block and set it up. 
+; If we are doing multi-volume handling, we don't need to set up the
+; XOR block since we will turn the first block to complete into
+; an XOR block.
+
+	TST	BCKFLG		;Are we doing multi-volume handling?
+.ASSUME	BF.MVL	EQ	100000
+	BMI	30$		;Yes, so don't get an XOR block now
+
+; Note: The call to CHKACT below may cause us to execute mutli-volume
+; handling code. If this happens, it is possible that we can wind up
+; with an XOR block even though the call to GETBUF below failed. That
+; is why we check to see if we now have an XOR block after waiting
+; for a significant event.
+
+10$:	DSAR$S			;Protect the compare			;023
+	CMP	GX1BID,#-1	;;Do we have an XOR block?
+	BNE	30$		;;Yes, we sure do
+	CALBX	GETBUF,<#GX1BID,#XORAVL,#GXBVA> ;;Get an XOR buffer	;023
+	BCC	20$		;;We got one, good
+	ENAR$S			;;Let 'em go				;023
+	CALL	CHKACT		;Check for action routines
+	DSAR$S			;Protect the compare			;023
+	CALL	TAPEGO		;;Check for starting up tape
+	CMP	BUFCNT,BUFUSE	;;Are there any free buffers?		;023
+	BNE	10$		;;Yes, sure are				;023
+	CMP	GX1BID,#-1	;;Did we get an XOR block for Christmas?;023
+	BNE	30$		;;Yes, we did				;023
+	MOV	#-1,@#XRB	;;No, so set up a long conditional sleep
+	.SLEEP			;;Now do it
+	ENAR$S			;;Let 'em go				;023
+	BR	10$		;Now try again
+
+20$:	;CMESSAGE <#GX1,GX1BID> 					;023
+	MOV	GXBVA,R3	;;R3 -> Buffer header for XOR block	;023
+	CLR	(R3)		;;Clear out flags
+.ASSUME	HB$FLG	EQ	0
+	ADD	#HB$PRC,R3	;;R3 -> Header @ HB$PRC
+	MOVB	$GRPSZ,(R3)+	;;Set pending XORs to be done
+	CLR	(R3)+		;;Clear action routine head
+.ASSUME	HB$EBA	EQ	HB$PRC+1
+	CLR	(R3)		;;And action routine tail
+.ASSUME	HB$EBT	EQ	HB$EBA+2
+	MOVB	$GRPSZ,XORCNT	;;Now initialize the XOR counter
+
+30$:	ENAR$S			;;Let 'em go				;023
+	CALBX	MAPBUF,<#GD1BID,#DTAAVL,#GDBVA> ;Re-map the data buffer
+	;CMESSAGE <#MD1,GD1BID> 					;023
+	MOV	GDBVA,R3	;R3 = Block's current address
+	MOV	GX1BID,HB$XOR(R3) ;Set the XOR block for completion
+	MOV	GD1BID,R4	;R4 = Block ID of the block
+
+; Now we'll dump this block and send it off to be written
+
+	MOV	#-1,GD1BID	;Indicate we don't have a current BLOCK
+	CALL	SETWRT		;Prepare this block to be written
+
+; If we are writing the special volume summary at the beginning of
+; the volume, we will wait until I/O is complete, at which point
+; the record we sent will be turned into an XOR block. The reason
+; that we turn the data block into an XOR block is that we can
+; only guarantee that we have one free block when doing the multi-volume
+; handling.
+
+	TST	BCKFLG		;Are we doing multi-volume handling?
+.ASSUME	BF.MVL	EQ	100000
+	BPL	60$		;No, not this time
+40$:	DSAR$S			;Protect piocnt test			;023
+	CALL	TAPEGO		;;Get the tape processing going
+	TST	PIOCNT		;;Has the I/O completed yet?		;017
+	BEQ	50$		;;Yes, it sure has
+	MOV	#-1,@#XRB	;;No, so set up for a long conditional sleep
+	.SLEEP			;;Go and wait for that completion
+	ENAR$S			;;Let 'em go				;023
+	BR	40$		;And try again
+
+50$:	ENAR$S			;Let 'em go				;023
+	CALL	CHKACT		;Check for action routines
+	CALBX	MAPBUF,<#GX1BID,#XORAVL,#GXBVA> ;Map the XOR buffer	;023
+	MOV	GXBVA,R2	;R2 -> XOR buffer			;023
+	CLR	(R2)		;Clear out flags
+.ASSUME	HB$FLG	EQ	0
+	ADD	#HB$PRC,R2	;R2 -> Header @ HB$PRC
+	MOVB	$GRPSZ,(R2)	;Set pending XORs to be done
+	DECB	(R2)+		;And indicate we've already done one
+	CLR	(R2)+		;Clear action routine head
+.ASSUME	HB$EBA	EQ	HB$PRC+1
+	CLR	(R2)		;And action routine tail
+.ASSUME	HB$EBT	EQ	HB$EBA+2
+
+; The next thing to do is see if we need to write the XOR block
+
+FINXOR:									;019
+60$:	TSTB	$GRPSZ		;Are we doing XORs?
+	BEQ	70$		;No, not this time
+	DECB	XORCNT		;Yes, so say one more has been done
+	BNE	70$		;More to do in group, don't queue this now
+	CALBX	MAPBUF,<#GX1BID,#XORAVL,#GXBVA> ;Map the XOR buffer	;023
+	;CMESSAGE <#MX1,GX1BID> 					;023
+	INC	BBHDAT+BBH$AP	;Set up application code for XOR block
+	MOV	GXBVA,R2	;R2 -> XOR block header			;023
+	ADD	#HBSIZE,R2	;R2 -> Actual header data
+	CALL	BLDBHD		;Build the block header
+	DEC	BBHDAT+BBH$AP	;Now restore application code to data
+	MOV	GX1BID,R4	;R4 = Block ID of the XOR block		;023
+	MOV	GXBVA,R3	;R3 -> XOR block			;023
+	MOV	#-1,HB$XOR(R3)	;Don't set an XOR block pointer for XOR blocks!
+	MOV	#-1,GX1BID	;Indicate we don't have an XOR block now;023
+	BR	SETWRT		;Go and send this block now
+
+70$:	RETURN			;All done now
+
+.DSABL LSB								;019
+GLOBAL	<BBHDAT,$GRPSZ,BLKSIZ,BUFCNT,BUFUSE>
+
+.SBTTL	Set up a block to be written
+
+;+
+; SETWRT - Set up a block to be written
+;
+;	R3 -> Buffer header of block to write
+;	R4 = Buffer ID of block to write
+;
+;	CALL	SETWRT
+;
+;	All registers are random.
+;
+; If this is a tape backup, the block is queued to the tape queue.
+; If this is a disk backup, the block number is written in the header.
+;
+; The block is then passed off to QWRITE to be written to the output
+; device.
+;-
+
+SETWRT:	INC	PIOCNT		;Say one more pending I/O request	;017
+	DSAR$S			; Protect the TAPQUE and the BIS	;023
+	TSTB	$SAVFLG		;;Is this a disk backup?
+.ASSUME	DSKHND	EQ	0
+	BNE	10$		;;No, so use the tape queue mechanism
+	MOVB	CURDBK+2,HB$VBN+2(R3) ;;Set the MSB of the block number
+	MOV	CURDBK,HB$VBN(R3) ;;And the LSB of the block number
+	ADD	BSZBLK,CURDBK	;;Update current block number
+	ADC	CURDBK+2	;;Double precision
+	BR	40$		;;Now join up
+
+10$:	CMP	TAPQUE,#-1	;;Anything in tape queue?
+	BNE	20$		;;Yes, there sure is
+	MOV	R4,TAPQUE	;;No, so set this as the head of the queue
+	BR	30$		;;And join up
+
+20$:	CALBX	MAPBUF,<#TAPTAL,#DTAAVL,#GDBVA> ;;Map the last buffer
+	MOV	GDBVA,R5	;;R3 -> Last block in chain
+	MOV	R4,HB$NXT(R5)	;;Link this block to the chain
+	MOV	R4,-(SP)	;;Put the ID in a convenient place	;023
+	MOV	SP,R3		;;Point R3 at it			;023
+	CALBX	MAPBUF,<R3,#DTAAVL,#GDBVA> ;;Map the current buffer	;023
+	TST	(SP)+		;;Put it back where we found it		;023
+	MOV	GDBVA,R3	;;Pull out the address			;023
+
+30$:	MOV	R4,TAPTAL	;;Set this as the tail
+	MOV	#-1,HB$NXT(R3)	;;And set no link to next
+
+40$:	BIS	#HBF$RB,(R3)	;;Flag that this block is queueable
+.ASSUME	HB$FLG	EQ	0
+	CALL	QWRITE		;;Go and queue this block
+	ENAR$S 			;;Enable ASTs now
+	RETURN			;And we're done
+
+GLOBAL	<$SAVFLG>
+
+.SBTTL	Queue a block for writing
+
+;+
+; QWRITE - Queue a block for writing
+;
+;	R4 = Buffer ID of current buffer
+;	BLKSIZ = Size for transfer
+;
+;	CALL	QWRITE
+;
+;	All registers are random
+;
+;
+; We are called here to attempt to write a block to the output device.
+; We will only write the block if pending I/O is zero. If this is tape,
+; we will also only write the block if it is the head of the tape queue.
+;
+; Before we queue the I/O, we will perform the XOR for this block.
+; We use XORAPR to map the buffer. Since this routine can be executed
+; from AST level, we will have to disable ASTs while we are mapping XORAPR.
+;
+; Note: If this routine is called at user level, ASTs must be disabled.
+;-
+
+QWRITE::MOV	R4,QD1BID	;;Save the ID				;023
+	CALBX	MAPBUF,<#QD1BID,#DTAAVL,#QDBVA> ;;Map the data		;023
+	MOV	QDBVA,R3	;;R3 -> data block			;023
+	;CMESSAGE <#QWR,QD1BID,(R3)> 					;023
+	TSTB	(R3)		;;Is this block all set up yet?
+.ASSUME	HBF$RB	EQ	200
+.ASSUME	HB$FLG	EQ	0
+	BMI	1$		;;Yes, keep going			;017
+	JMP	130$		;;No, so don't send it yet		;023
+1$:									;017
+	TSTB	HB$PRC(R3)	;;I/O complete for this block?
+	BEQ	2$		;;Yes keep going			;017
+	JMP	130$		;;no, so don't do this yet...		;023
+
+; The I/O is all complete, see about doing the CRC-32 calculation
+
+2$:									;017
+	MOV	R4,-(SP)	;;Save block ID of current block	;011
+	BIT	#BH$NOC,BBH$FL+HBSIZE(R3) ;;Requested CRC-32?		;011
+	BNE	5$		;;No, off to check the XOR		;011
+	BIT	#HBF$CR,(R3)	;;Yes, but have we done it already?	;011
+.ASSUME	HB$FLG	EQ	0
+	BNE	5$		;;Yes, so don't do it again		;011
+	BIS	#HBF$CR,(R3)	;;No, but set the flag now		;011
+.ASSUME	HB$FLG	EQ	0
+	MOV	BBH$CS+HBSIZE(R3),-(SP) ;;Save block header CRC		;011
+	CLR	BBH$CS+HBSIZE(R3) ;;And clear it like VMS does		;011
+	CLR	BBH$CR+HBSIZE(R3) ;;Clear block CRC LSB			;011
+	CLR	BBH$CR+2+HBSIZE(R3) ;;Clear block CRC MSB		;011
+	MOV	R3,R4		;;Copy pointer to buffer		;011
+	ADD	#HBSIZE,R4	;;And point to the data itself		;011
+	CALLX	CRC32		;;Calculate the CRC			;011
+	MOV	R1,BBH$CR+HBSIZE(R3) ;;Set up LSB of CRC		;011
+	MOV	R0,BBH$CR+2+HBSIZE(R3) ;;Set up MSB of CRC		;011
+	MOV	(SP)+,BBH$CS+HBSIZE(R3) ;;And restore block header CRC	;011
+
+5$:	TSTB	$GRPSZ		;;Are we doing XOR processing?		;011
+	BNE	6$		;;Yes, keep going			;017
+	JMP	40$		;;No, that's easy			;017
+6$:									;017
+	MOV	HB$XOR(R3),QX1BID ;;Set the address of the XOR block	;023
+	CMP	QX1BID,#-1	;;Should we really XOR this block?	;023
+	BNE	7$		;;Yes, keep going			;017
+	JMP	40$		;;No, not this time			;017
+
+; Block needs to be XORed, so do it now
+
+7$:	MOV	R3,-(SP)	;;Save the address of current block
+	MOV	#-1,HB$XOR(R3)	;;Clear the XOR pointer for next time
+	CALBX	MAPBUF,<#QX1BID,#XORAVL,#QXBVA> ;;Map this buffer	;023
+	MOV	QXBVA,R2	;;R2 -> XOR block
+	ADD	#HBSIZE+BBHSIZ,R2 ;;R2 -> Data portion of XOR block
+	ADD	#HBSIZE+BBHSIZ,R3 ;;R3 -> Current block at start of data
+	MOV	BLKSIZ,R1	;;R1 = Blocksize for data records
+	MOV	QD1BID,QD2BID	;;Copy the data block ID		;023
+	MOV	QX1BID,QX2BID	;;Copy the XOR block ID			;023
+	CLR	R0		;;Init bytes remaining in block		;023
+	CMP	R1,#8192.-HBSIZE ;;BLOCKSIZE > 8Kb-buffer header?	;017
+	BLOS	8$		;;No, proceed				;017
+	MOV	R1,R0		;;Yes, copy blocksize			;017
+	MOV	#8192.-HBSIZE,R1 ;;Set byte count			;017
+	SUB	R1,R0		;;Subtract an APR's worth of byte count	;017
+	ASH	#-4,R0		;;Divide by 16				;017
+	BIC	#170000,R0	;;Clear out any sign extend		;017
+8$:	SUB	#BBHSIZ,R1	;;Subtract area that doesn't get XORed
+	ASH	#-4,R1		;;Now get # of bytes to do / 16		;003
+	BIC	#170000,R1	;;Clear out any sign extend		;017
+	CMPB	HB$PRC-HBSIZE-BBHSIZ(R2),$GRPSZ ;;Is this the first XOR?
+	BNE	20$		;;No, so do it as an XOR
+				;;**CIS** The move below deserves CIS
+10$:
+.REPT	8.								;003
+	MOV	(R3)+,(R2)+	;;Copy a word
+.ENDR									;003
+	SOB	R1,10$		;;For all the words
+	TST	R0		;;Any byte count remaining?		;017
+	BEQ	30$		;;No, done with block			;017
+	CALL	150$		;;Remap the buffers			;017
+	BR	10$		;;And transfer another load		;017
+
+20$:
+.REPT	8.								;003
+	MOV	(R3)+,R5	;;Pick up word to XOR
+	XOR	R5,(R2)+	;;Now XOR it into the group
+.ENDR									;003
+	SOB	R1,20$		;;And loop for the whole block
+	TST	R0		;;Any byte count remaining?		;017
+	BEQ	30$		;;No, done with block			;017
+	CALL	150$		;;Yes, remap				;017
+	BR	20$		;;And transfer the next load		;017
+
+30$:	CALBX	MAPBUF,<#QD1BID,#DTAAVL,#QDBVA> ;;Restore data map	;023
+	CALBX	MAPBUF,<#QX1BID,#XORAVL,#QXBVA> ;;Restore XOR map	;023
+	MOV	QX1BID,R4	;;Pick up block ID of XOR block		;023
+	MOV	QXBVA,R3	;;And pointer to the XOR block		;023
+	DECB	HB$PRC(R3)	;;Say one less XOR to do
+	CALL	QWRITE		;;Queue this XOR block
+	MOV	(SP)+,R3	;;Restore the buffer virtual address
+40$:	MOV	(SP)+,R4	;;Restore block ID of buffer		;011
+	MOV	R4,QD1BID	;;Set up to map				;023
+	CALBX	MAPBUF,<#QD1BID,#DTAAVL,#QDBVA> ;;Restore data map	;023
+	MOV	QDBVA,R3	;;Set up the address			;023
+	TSTB	$SAVFLG		;;Is this a tape Backup?
+.ASSUME	DSKHND	EQ	0
+	BEQ	80$		;;No, it is disk this time
+	BIT	#HBF$TC,(R3)	;;Have we counted this block yet?
+.ASSUME	HB$FLG	EQ	0
+	BNE	50$		;;Yes, so only once
+	BIS	#HBF$TC,(R3)	;;We've counted it now
+.ASSUME	HB$FLG	EQ	0
+	INC	PTPCNT		;;No, so count this as eligible I/O	;017
+
+50$:	TSTB	BCKFLG		;;Are we allowed to send tape records yet?
+.ASSUME	BF.WRT	EQ	200
+	BPL	60$		;;No, so don't send this block yet
+	CMP	R4,TAPQUE	;;Is this at the head of the tape queue?
+	BEQ	70$		;;Yes, so we can do this now
+60$:	BR	130$		;;We can't do this block now
+
+70$:	MOV	HB$NXT(R3),TAPQUE ;;Dequeue block from tape queue
+
+80$:	MOV	#-1,HB$NXT(R3)	;;Be sure we have no link to next	;001
+	CMP	BUFQUE,#-1	;;Are requests buffer-stalled?		;001
+	BNE	102$		;;Yes, don't send this now then		;001
+	CALLX	CLRFQX		;;Clear out the XRB and FIRQB
+	MOV	#XRB,R1		;;R1 -> XRB
+	MOV	BLKSIZ,(R1)	;;Set up block size
+	MOV	(R1)+,(R1)+	;;In both places
+	MOV	R3,(R1)		;;Set up virtual address of block
+	ADD	#HBSIZE,(R1)+	;;And offset past the header
+	MOVB	#SAVFIL,(R1)+	;;Set up output file
+	TSTB	$SAVFLG		;;Is this a tape backup?
+.ASSUME	DSKHND	EQ	0
+	BNE	90$		;;Yes, so don't set block numbers
+	MOVB	HB$VBN+2(R3),(R1)+ ;;Set MSB of block number
+	MOV	HB$VBN(R3),(R1) ;;And LSB of block number
+90$:	MOV	#WRTCMP,@#FIRQB+FQFIL ;;Set the completion routine address
+	MOV	R4,@#FIRQB+FQPPN ;;And the block ID of the buffer
+	.WRITA			;;Queue the block for writing
+	MOVB	@#FIRQB,R1	;;Did it work?
+	BEQ	120$		;;Yes, that's good
+	CMPB	R1,#NOBUFS	;;Out of buffer space?
+	BEQ	100$		;;Yes, so we'll have to wait a bit
+	CMPB	R1,#INUSE	;;Too much I/O outstanding?
+	BNE	110$		;;No, must be something else
+100$:	MOV	R4,BUFQUE	;;Make this the head of the buffer queue ;001
+	BR	104$		;;And join up				;001
+
+102$:	CALBX	MAPBUF,<#BUFTAL,#DTAAVL,#CSBVA> ;;Map the last buffer	;023
+	MOV	CSBVA,R5	;;R5 -> Last block in chain		;023
+	MOV	R4,HB$NXT(R5)	;;Link this block to the chain		;001
+
+104$:	MOV	R4,BUFTAL	;;Set this as the tail			;001
+	BR	130$		;;And get out				;001
+
+110$:	CRASH	R1		;;Die on other errors
+
+; We have successfully queued the I/O request. If this is a tape backup,
+; we will check on queueing the next block. If this is a disk backup,
+; we are done.
+
+120$:	;CMESSAGE <#WRA,R4,110(R3)> 					;023
+	TSTB	$SAVFLG		;;Is this a tape backup?
+.ASSUME	DSKHND	EQ	0
+	BEQ	130$		;;No, it is disk
+	CMP	TAPQUE,#-1	;;Anything in tape queue?
+	BEQ	130$		;;No, not this time, nothing to do
+	CALBX	MAPBUF,<#TAPQUE,#DTAAVL,#CSBVA> ;;Map the buffer	;023
+	MOV	TAPQUE,R4	;;Pick up the block ID of the block
+	JMP	QWRITE		;;Now try sending this block
+
+130$:	RETURN			;All done now...
+
+;GLOBAL	<WRA,WRC,RDA,RDC,QWR,ASY,GX1,MX1,GD1,MD1> 			;023
+
+; Remap the buffers							;017
+
+150$:	CMP	R0,#512.	;;Is byte count >= 512?			;017
+	BLO	160$		;;No					;017
+	SUB	#512.,R0	;;Yes, subtract another APR's worth	;017
+	MOV	#512.,R1	;;Set up one APR's byte count		;017
+	BR	170$		;;Go do the remapping			;017
+
+160$:	MOV	R0,R1		;;Use remaining byte count		;017
+	CLR	R0		;;Clear out the residual count		;017
+170$:	ADD	#128.,QD2BID	;;Increment data address by 128 slivers	;023
+	ADD	#128.,QX2BID	;;Increment XOR address by 128 slivers	;023
+	MOV	R0,-(SP)	;;Save the count			;021
+	CALBX	MAPBUF,<#QD2BID,#DTAAVL,#QDBVA> ;;Remap dta buf up 8Kb	;023
+	MOV	QDBVA,R3	;;R3 -> virtual addr in data block	;023
+	CALBX	MAPBUF,<#QX2BID,#XORAVL,#QXBVA> ;;Remap XOR buf up 8Kb	;023
+	MOV	QXBVA,R2	;;R2 -> virtual addr in XOR block	;023
+	MOV	(SP)+,R0	;;Restore the count			;021
+	RETURN			;;Now go do some more transfers		;017
+
+GLOBAL	<BLKSIZ,NOBUFS,INUSE,$GRPSZ,$SAVFLG>				;023
+
+.SBTTL	Handle I/O completions for save set writes
+
+;+
+; WRTCMP - Handle I/O completions for save set writes
+;
+; We are called when the .WRITA completes in QWRITE.
+;
+; If the I/O completes without error, we will return the buffer
+; to the pool. Any action routines will be queued to the action
+; routine completion queue.
+;
+; If the I/O completes with error, we will queue the block to the
+; error queue. Action routines will remain on the HB$EBA queue in
+; the I/O buffer. For every request queued to the error queue,
+; we will increment the count of pending errors.
+;-
+
+WRTCMP:	CALLX	ASYSAV,R5	;;Save the world...
+	DEC	PIOCNT		;;Say one less pending I/O request	;017
+	BNE	10$		;;We still have more, don't stall tape
+..NSTL	==	.-2	;**PATCH** Make BR to disable tape stalls
+	BIC	#BF.WRT,BCKFLG	;;Disallow tape I/O
+	CLR	PTPCNT		;;And reset the pending tape count	;017
+10$:	MOV	@#FIRQB+FQPPN,CS1BID ;;Set the block ID of the completed block;023
+	MOVB	@#FIRQB,R1	;;R1 = Returned error code
+	CALBX	MAPBUF,<#CS1BID,#DTAAVL,#CSBVA> ;;Map this buffer	;023
+	MOV	CSBVA,R2	;;R2 -> Block that just completed	;023
+	MOVB	R1,HB$ERR(R2)	;;Post the error for the block
+	BNE	80$		;;We got one, oh well...
+	MOV	HB$EBA(R2),@ACTTAL ;;Queue our action routines to the tail
+	BEQ	20$		;;None... don't set a new tail pointer
+	MOV	HB$EBT(R2),ACTTAL ;;We have some, set the tail pointer
+
+20$:	CMP	HBSIZE+BBH$NO+2(R2),HGHBLK+2 ;;Block number MSB same as highest?
+	BNE	30$		;;No, so don't check LSB
+	CMP	HBSIZE+BBH$NO(R2),HGHBLK ;;LSB higher than highest LSB?
+30$:	BLO	40$		;;No, so don't set highest block
+	MOV	HBSIZE+BBH$NO+2(R2),HGHBLK+2 ;;Set high block MSB
+	MOV	HBSIZE+BBH$NO(R2),HGHBLK ;;And high block LSB
+
+40$:	TSTB	$SAVFLG		;;Is this a disk backup?
+.ASSUME	DSKHND	EQ	0
+	BNE	60$		;;No, not this time 
+	CMPB	HB$VBN+2(R2),HGHDBK+2 ;;Block number MSB same as highest?
+	BNE	50$		;;No, so don't check LSB
+	CMP	HB$VBN(R2),HGHDBK ;;LSB higher than highest LSB?
+50$:	BLO	60$		;;No, so don't set the higest block
+	MOVB	HB$VBN+2(R2),HGHDBK+2 ;;Update highest block number MSB
+	MOV	HB$VBN(R2),HGHDBK ;;And highest block number LSB
+
+60$:	TST	BCKFLG		;;Are we doing the multi-volume handling
+.ASSUME	BF.MVL	EQ	100000
+	BPL	70$		;;No, not this time, just return the block
+	MOV	CS1BID,GX1BID	;;This block is now an XOR block	;023
+	BR	110$		;;Now get out...
+
+70$:	;CMESSAGE <#WRC,CS1BID,110(R2)> 				;023
+	CALBX	RETBUF,#CS1BID	;;Return the buffer that just completed	;023
+	BR	110$		;;And get out...
+
+80$:	MOV	#-1,HB$NXT(R2)	;;Assure no link to next error block
+	CMP	ERRQUE,#-1	;;Anything in error queue?
+	BNE	90$		;;Yes, there sure is
+	MOV	CS1BID,ERRQUE	;;No, so set this as the head of the queue;023
+	BR	100$		;;And join up
+
+90$:	CALBX	MAPBUF,<#ERRTAL,#DTAAVL,#CSBVA> ;;Map the tail block	;023
+	MOV	CSBVA,R2	;;R2 -> Tail block in queue		;023
+	MOV	CS1BID,HB$NXT(R2) ;;Link this to the tail		;023
+100$:	MOV	CS1BID,ERRTAL	;;Now set the tail pointer		;023
+	INC	PERCNT		;;Indicate one more pending error	;017
+110$:	RETURN			;;All done now...
+
+GLOBAL	<$SAVFLG>							;023
+
+.SBTTL	Check for action routines and error completions
+
+;+
+; CHKACT - Check for action routines and error completions
+;
+; This routine is used to check for any action routines and error
+; completions. Come here at USER LEVEL ONLY! Call this routine
+; any time before waiting for resources. Call this routine any time
+; before allocating a new block.
+;
+; Do not come here with ASTs disabled... We enable them during
+; our operation (to wait for I/O to complete). Consider yourself
+; warned.
+;-
+
+CHKACT::CALLX	NSYSAV,R5	;Save context				;023
+10$:	DSAR$S			;;Disable ASTs
+	MOV	ACTQUE,R5	;;R5 -> First action routine
+	BEQ	30$		;;None, that's easy
+	MOV	(R5)+,ACTQUE	;;Save link to next action routine block
+	BNE	20$		;;We got one, don't change tail pointer
+	MOV	#ACTQUE,ACTTAL	;;Set the new action routine tail
+20$:	ENAR$S			;;Enable ASTs now
+	CALL	@(R5)+		;And enter this action routine
+	BR	10$		;Now loop for the next one
+
+; Upon entry to action routine:
+;
+;	R5 -> Action control block
+;
+; Action routine is free to modify any registers.
+; It is the responsibility of the action routine to return the action
+; control block to the pool, if the action routine block was dynamically
+; allocated.
+
+; Next thing to do is check the buffer stall queue
+
+30$:	CMP	BUFQUE,#-1	;;Anything in the buffer stall queue?	;001
+	BEQ	35$		;;No, not this time			;001
+	TSTB	$SAVFLG		;;Is this a tape backup?		;001
+.ASSUME	DSKHND	EQ	0
+	BEQ	31$		;;No, not this time			;001
+
+; Handle the buffer stall queue for tape backups
+;
+; Since this is tape, we will place all the buffers in the tape queue
+; after the last block in the buffer queue, and make the buffer queue
+; be the tape queue. QWRITE will queue as much of the tape queue as
+; it can, and place the first block that can't be sent back into the
+; buffer stall queue. At this point, we will enable ASTs, hopefully
+; freeing up buffers, and then try this process again.
+
+	CALBX	MAPBUF,<#BUFTAL,#DTAAVL,#ADBVA> ;;Tape, map our tail	;023
+	MOV	ADBVA,R3	;;And point to it			;023
+	MOV	TAPQUE,HB$NXT(R3) ;;Now link tape queue to buffer queue	;001
+	MOV	BUFQUE,TAPQUE	;;And make the buffer queue be tape queue ;001
+	MOV	#-1,BUFQUE	;;And forget the buffer queue		;001
+	MOV	TAPQUE,R4	;;R4 has block ID			;001
+	CALL	QWRITE		;;Now queue this block			;001
+	ENAR$S			;;Enable ASTs				;001
+	BR	10$		;And check again...			;001
+
+; Handle the buffer stall queue for disk backups
+;
+; Since this is disk, we will have to requeue every block in the buffer
+; stall queue using QWRITE. QWRITE may place blocks back in the buffer
+; queue, which we will pick up after we've finished trying to send
+; everything out. We will enable ASTs across each block to give our
+; completion routines a chance to execute.
+
+31$:	MOV	BUFQUE,R3	;;Save the root block in the buffer queue ;001
+	MOV	#-1,BUFQUE	;;And forget the buffer queue		;001
+32$:	MOV	R3,-(SP)	;;Save the block ID to map		;001
+	MOV	SP,R3		;;R3 -> Block ID to map			;001
+	CALBX	MAPBUF,<R3,#DTAAVL,#ADBVA> ;;Map the block to write	;023
+	MOV	ADBVA,R3	;;R3 -> Block				;023
+	MOV	(SP),R4		;;R4 = block ID of buffer		;002
+	MOV	HB$NXT(R3),(SP)	;;Save link to next buffer		;001
+	CALL	QWRITE		;;Queue the block for writing		;001
+	ENAR$S			;;Enable ASTs to allow completions	;001
+	MOV	(SP)+,R3	;Pick up next block number		;001
+	CMP	R3,#-1		;Any more to do?			;001
+	BEQ	10$		;No, so check things again		;001
+	DSAR$S			;Disable ASTs again			;001
+	BR	32$		;;And queue the block			;001
+
+; Next thing to do is check the first thing in the error queue
+
+35$:	TST	PERCNT		;;Anything in error queue?		;017
+	BNE	40$		;;Yes, there sure is
+	JMP	270$		;;No, not this time
+
+40$:	DEC	PERCNT		;;Say one less pending error		;017
+	CALBX	MAPBUF,<#ERRQUE,#DTAAVL,#ADBVA> ;;Map the root block	;023
+	MOV	ERRQUE,AD1BID	;;Stash the block ID of this block	;023
+	MOV	ADBVA,R5	;;R5 -> Error block			;023
+	MOVB	HB$ERR(R5),R1	;;R1 = error code from block
+	CMPB	R1,#NOROOM	;;Did we run out of room?
+	BEQ	50$		;;Yes, off to the multi-volume handler
+	JMP	220$		;;No, not this time
+
+; This is where we handle multi-volume stuff
+;
+; If there is pending I/O, we will enable ASTs and wait for it to complete.
+; We are not able to handle volume switching until all of our outstanding
+; I/O has been taken care of.
+;
+; We are able to perform all of our volume switching work with ASTs enabled
+; since there is no chance of any save set I/O completing (since PIOCNT
+; will be zero).
+
+50$:	ENAR$S			;;Enable ASTs
+	DSAR$S			;Disable ASTs
+	CALL	TAPEGO		;;Be sure that tape is going		;008
+	TST	PIOCNT		;;Do we have pending I/O to do?		;017
+	BEQ	70$		;;No all done
+	MOV	#-1,@#XRB	;;Set up for a long conditional sleep
+	.SLEEP			;;Now wait for that I/O
+	BR	50$		;;And loop				;006
+
+; All I/O is complete now. We will have to re-map the first block in
+; the error queue, since it may have been changed while we were
+; waiting for I/O completions.
+
+70$:	BIS	#BF.PMV,BCKFLG	;;Set up to do multi-volume processing	;006
+	CALBX	MAPBUF,<#ERRQUE,#DTAAVL,#ADBVA> ;;Map the root block	;023
+	MOV	ERRQUE,AD1BID	;;Stash the block ID of this block	;023
+	MOV	ADBVA,R5	;;R5 -> Error block			;023
+
+; If this is a tape backup, the block that completed with an error
+; is actually successful, so we'll remove that from the error queue,
+; and handle it as a successful block. We will then take the rest
+; of the error queue, and move it to the requeue queue. This will work
+; since all the write requests to tape will have been queued to the
+; end of the error queue, sorted by the correct order for the tape.
+
+	TSTB	$SAVFLG		;;Is this a tape backup?
+.ASSUME	DSKHND	EQ	0
+	BEQ	110$		;;No, this is disk
+	MOV	HB$EBA(R5),@ACTTAL ;;Queue our action routines to the tail
+	BEQ	80$		;;None... don't set a new tail pointer
+	MOV	HB$EBT(R5),ACTTAL ;;We have some, set the tail pointer
+80$:	MOV	HB$NXT(R5),REQQUE ;;Now set up the re-queue queue
+	MOV	#-1,ERRQUE	;;Dump the rest of the error queue
+	CLR	PERCNT		;;And clear the error count		;017
+	MOV	HBSIZE+BBH$NO+2(R5),HGHBLK+2 ;;Set high block MSB	;004
+	MOV	HBSIZE+BBH$NO(R5),HGHBLK ;;And high block LSB		;004
+	CALBX	RETBUF,#AD1BID	;;Return the buffer that just completed	;023
+	CALL	ACKERR		;;Acknowledge the error
+90$:	CALLX	CLRXRB		;;Clear out the XRB
+	MOV	#11,@#XRB	;;Function is set up for end of volume
+	MOV	#SAVFIL+<MTAHND*400>,@#XRB+XRCI ;;On the save set channel
+	.SPEC			;;Now go for it
+	CMPB	@#FIRQB,#NOBUFS	;;Did we run out of buffers?
+	BNE	100$		;;No, not this time
+	WSIG$S			;;Yes, so wait a while
+	BR	90$		;;And loop
+
+100$:	CRASH			;;Die on any other errors
+	JMP	270$		;;And get out checking queues		;006
+
+; If this is a disk backup, we will check the header block number
+; to see if it is larger or smaller than the highest successful block.
+; If it is smaller, we will requeue the I/O to be written to this
+; volume. If it is larger, and the block is a data block, we will
+; place the block in the re-write queue. As soon as all I/O is complete,
+; we will check the re-write queue again.
+
+110$:	MOV	HB$NXT(R5),ERRQUE ;;Dequeue this from the error queue
+	CMP	HBSIZE+BBH$NO+2(R5),HGHBLK+2 ;;MSB the same as highest block?
+	BNE	120$		;;No, so don't check LSB
+	CMP	HBSIZE+BBH$NO(R5),HGHBLK ;;Check LSB against highest block
+120$:	BHI	140$		;;After highest block, don't requeue it
+130$:	MOV	AD1BID,R4	;;And pick up the block ID		;023
+	INC	PIOCNT		;;Say one more I/O request		;017
+	CALL	QWRITE		;;Requeue this I/O operation
+	JMP	270$		;;And exit checking for more errors...
+
+; When we get here, we queue this block to the requeue queue. We will
+; queue the block so that the list of blocks to be requeued is sorted
+; by block number, dumping XOR blocks as we go along.
+
+140$:	CMP	HBSIZE+BBH$AP(R5),#1 ;;Is this a data block?
+	BEQ	150$		;;Yes, so keep it
+	CALBX	RETBUF,#AD1BID	;;No, return it to the pool		;023
+	JMP	270$		;;And get out, checking for other blocks ;006
+
+; This is a data block, go requeue it properly
+
+150$:	MOV	#-1,HB$NXT(R5)	;;Guess at no link to next
+	CMP	REQQUE,#-1	;;Anything in requeue queue?
+	BNE	160$		;;Yes, there sure is
+	MOV	AD1BID,REQQUE	;;No, so set this block as the first in queue;023
+	JMP	270$		;;And get out, checking for other blocks
+
+160$:	MOV	AD1BID,R1	;;Stash block ID of new block to queue	;023
+	MOV	HBSIZE+BBH$NO(R5),R2 ;;R2 = LSB of block number
+	MOV	HBSIZE+BBH$NO+2(R5),R3 ;;R3 = MSB of block number
+	MOV	REQQUE,AD1BID	;;Now set up the block ID to map	;023
+
+170$:	CALBX	MAPBUF,<#AD1BID,#DTAAVL,#ADBVA> ;;Map the next block	;023
+	MOV	ADBVA,R5	;;R5 -> Block in requeue queue		;023
+	CMP	R3,HBSIZE+BBH$NO+2(R5) ;;MSB of block number match?
+	BNE	180$		;;No, so don't check LSB
+	CMP	R2,HBSIZE+BBH$NO(R5) ;;Is this where we insert the block?
+180$:	BLO	190$		;;We need to insert the block here
+	MOV	AD1BID,R4	;;Save the previous link pointer	;023
+	MOV	HB$NXT(R5),AD1BID ;;Set up to get the next block	;023
+	CMP	#-1,AD1BID	;;Anything more in chain?		;023
+	BNE	170$		;;Yes, so go for it
+	MOV	R1,HB$NXT(R5)	;;Nothing more in chain, queue this to the tail
+	JMP	270$		;;And check for more to do
+
+; First link the previous block to the new block
+
+190$:	MOV	AD1BID,R2	;;Save the block ID of the current block;023
+	CMP	R2,REQQUE	;;Is this the first block?
+	BNE	200$		;;No, so set up the previous block
+	MOV	R1,REQQUE	;;Yes, so this new block is now first
+	BR	210$		;;Now join up...
+
+200$:	MOV	R4,AD1BID	;;Set up to map the previous block	;023
+	CALBX	MAPBUF,<#AD1BID,#DTAAVL,#ADBVA> ;;Map the previous block;023
+	MOV	ADBVA,R5	;;R5 -> Previous block			;023
+	MOV	R1,HB$NXT(R5)	;;Set the new link to next
+
+; Now link the new block to where the previous block pointed
+
+210$:	MOV	R1,AD1BID	;;Set up to map the new block		;023
+	CALBX	MAPBUF,<#AD1BID,#DTAAVL,#ADBVA> ;;Map the new block	;023
+	MOV	ADBVA,R5	;;R5 -> New block			;023
+	MOV	R2,HB$NXT(R5)	;;Set up the link to next for new block
+	BR	270$		;;And check for more to do
+
+; This is where we handle unexpected errors
+
+220$:	CMESSAGE #ERRWSS	;;Tell them error writing to save set
+	CMESSAGE R1		;;Tell them what happened
+	MOV	HB$EBA(R5),@ACTTAL ;;Queue our action routines to the tail
+	BEQ	230$		;;None... don't set a new tail pointer
+	MOV	HB$EBT(R5),ACTTAL ;;We have some, set the tail pointer
+230$:	MOV	HB$NXT(R5),ERRQUE ;;Dequeue the block from the chain
+	TST	BCKFLG		;;Are we doing multi-volume handling?
+.ASSUME	BF.MVL	EQ	100000
+	BPL	240$		;;No, not this time
+	MOV	AD1BID,GX1BID	;;Yes, so make this an XOR block	;023
+	BR	250$		;;And join up
+
+240$:	CALBX	RETBUF,#AD1BID	;;Return the buffer that just completed	;023
+
+250$:	TSTB	$SAVFLG		;;Is this a disk backup?
+.ASSUME	DSKHND	EQ	0
+	BEQ	270$		;;Yes, so we don't have to requeue anything
+
+; This is a tape backup, first thing to do is acknowledge the error
+
+	CALL	ACKERR		;;Acknowledge the tape error
+
+; Next thing to do is queue the remaining tape blocks to the head of
+; the tape queue. This is done since all errors after the failing one
+; (the one at the head of ERRQUE) will have been aborted automatically.
+
+	MOV	PERCNT,R2	;;Pick up number of entries in error queue;017
+	BEQ	270$		;;We don't have any
+	MOV	PIOCNT,R3	;;Pick up pending I/O count		;017
+	ADD	R2,R3		;;R3 will have new pending I/O count
+	MOV	R3,PIOCNT	;;Set the new pending I/O count		;017
+	CLR	PERCNT		;;And forget about pending errors
+	MOV	PTPCNT,R3	;;Pick up pending tape count		;001
+	ADD	R2,R3		;;R3 has new pending tape count		;001
+	MOV	R3,PTPCNT	;;Set the new pending tape count	;017
+	CALBX	MAPBUF,<#ERRTAL,#DTAAVL,#ADBVA> ;;Map the error queue tail;023
+	MOV	ADBVA,R5	;;R5 -> Tail block			;023
+	MOV	TAPQUE,HB$NXT(R5) ;;Link this last block to the tape queue
+	CMP	TAPQUE,#-1	;;Was there anything in the tape queue?
+	BNE	260$		;;Yes, sure was...
+	MOV	ERRTAL,TAPTAL	;;No, so set the tail pointer properly
+
+; Now that we have queued the error queue to the head of the tape queue,
+; we will call QWRITE to start up the requests.
+;
+; We only need to queue the first block, since the tape handler will
+; automatically queue all of the blocks in the tape queue that are
+; ready for writing.
+
+260$:	MOV	ERRQUE,R4	;;R4 = Block ID of block to re-send
+	MOV	R4,TAPQUE	;;And make it the head of the tape queue
+	MOV	#-1,ERRQUE	;;Dump the error queue root
+	CALL	QWRITE		;;Now re-queue this block (others will follow)
+
+; This is the exit from the action/error queue handler. We will enable
+; ASTs, and the re-check our queues to see if something needs to be
+; processed. This is done since error handling may queue action routines,
+; and because ASTs are enabled at some points during our processing.
+
+270$:	ENAR$S			;;Enable ASTs now
+	TST	ACTQUE		;Anything get queued to action queue recently? ;006
+	BEQ	290$		;No, so don't check it out
+	JMP	10$		;Yes, go check it out...
+
+290$:	TST	PERCNT		;Anything get queued to error queue?	;017
+	BEQ	300$		;No, so don't check it out
+	JMP	30$		;Yes, go check it out...	
+
+300$:	BIT	#BF.PMV,BCKFLG	;Is it time to do multi-volume processing?
+	BNE	310$		;Yes, so go check it out
+	JMP	410$		;No, not this time
+
+310$:	DSAR$S			;Disable ASTs
+	TST	PIOCNT		;;Do we have any pending I/O?		;017
+	BEQ	320$		;;No, not this time
+	MOV	#-1,@#XRB	;;Yes, so set up for a long conditional sleep
+	.SLEEP			;;Go and wait for that I/O...
+	BR	270$		;;And check queues
+
+; We get here when we have no more pending I/O, no more action routines
+; to process, nothing in the error queue, and something in the requeue
+; queue. This happens when we are ready to switch volumes.
+
+; The first thing to do is free up the present XOR block. We do this
+; so that we are sure to have a free block to do our multi-volume
+; handing. Note that if this is a tape BACKUP, we've freed up the
+; last successful write block, and if this is a disk BACKUP, we've
+; freed up any XOR blocks that were waiting to be queued. This means
+; that in all cases, we will have at least one block free.
+
+320$:	ENAR$S			;;Enable ASTs
+	BIC	#BF.PMV,BCKFLG	;Multi-volume handling is no longer pending
+	CMP	GX1BID,#-1	;Do we have an XOR block?		;023
+	BEQ	330$		;No, so don't return it
+	CALBX	RETBUF,#GX1BID	;Return the XOR block to get an extra buffer;023
+	MOV	#-1,GX1BID	;And indicate we don't have an XOR block;023
+
+; The next thing to do is write the "last-block" flag if this
+; is a disk backup.
+
+330$:	TSTB	$SAVFLG		;Is this a disk backup?
+.ASSUME	DSKHND	EQ	0
+	BNE	370$		;No, not this time, we've set the EOV flag
+	DSAR$S			;Disable ASTs				;006
+	CALBX	GETBUF,<#AD1BID,#DTAAVL,#ADBVA> ;;Get a buffer to set EOV flag;023
+	CRASH	R0		;;Die on errors... we better have a buffer now!
+	MOV	#XRB,R1		;;R1 -> XRB
+	MOV	ADBVA,R2	;;R2 -> I/O buffer			;023
+	MOV	BLKSIZ,(R1)+	;;Set up the block size for I/O
+	CLR	(R1)+		;;And clear XRBC
+	MOV	R2,(R1)+	;;Set the address of our buffer
+	MOVB	#SAVFIL,(R1)+	;;Set up the channel number
+	MOVB	HGHDBK+2,(R1)+	;;And highest disk block number MSB
+	MOV	HGHDBK,(R1)+	;;Set highest disk block number LSB
+	CLR	(R1)+		;;Clear one unused word
+	CLR	(R1)		;;Now clear another one
+	.READ			;;Go and re-read this block
+	MOVB	@#FIRQB,R3	;;Pick up returned error code
+	BNE	350$		;;Error, oh well
+
+340$:	BIS	#100000,BBH$VL(R2) ;;Set our kludgey flag...
+	MOV	R2,R4		;;Copy the block header pointer		;012
+	CALL	RECRCX		;;And recalculate the CRC
+	BIT	#BH$NOC,BBH$FL(R4) ;;Requested CRC-32?			;012
+	BNE	345$		;;No, not this time			;012
+	MOV	BBH$CS(R4),-(SP) ;;Save block header CRC		;012
+	CLR	BBH$CS(R4)	;;And clear it like VMS does		;012
+	CALLX	CRC32		;;Calculate the CRC			;012
+	MOV	ADBVA,R2	;;Get back header address		;023
+	MOV	R1,BBH$CR(R2)	;;Set up LSB of CRC			;012
+	MOV	R0,BBH$CR+2(R2) ;;Set up MSB of CRC			;012
+	MOV	(SP)+,BBH$CS(R2) ;;And set the block header CRC		;012
+345$:	MOV	#XRB,R1		;;Point to start of XRB
+	MOV	BLKSIZ,(R1)	;;Set the block size
+	MOV	(R1)+,(R1)+	;;In both places
+	MOV	ADBVA,(R1)+	;;Set the address			;023
+	MOVB	#SAVFIL,(R1)+	;;Set the save set channel number
+	MOVB	HGHDBK+2,(R1)+	;;And the MSB of the block number
+	MOV	HGHDBK,(R1)+	;;Set the LSB of the block number
+	CLR	(R1)+		;;Clear out one unused word
+	CLR	(R1)		;;And another one
+	.WRITE			;;And write the block back out
+	MOVB	@#FIRQB,R3	;;Pick up returned error code
+	BEQ	360$		;;None, that's good
+350$:	CMESSAGE #ERSEOV	;;Tell them error setting EOV flag
+	CMESSAGE R3		;;And be specific
+
+360$:	CALBX	RETBUF,#AD1BID	;;Now return our block			;023
+	ENAR$S			;;Now enable ASTs again			;006
+
+; The next thing to do is get the next volume mounted
+
+370$:	MOV	HGHDBK,SAVSZL	;Set up LSB of saveset size		;007
+	MOVB	HGHDBK+2,SAVSZM	;Set up MSB of saveset size		;007
+	ADD	BSZBLK,SAVSZL	;Get the "next" block number		;007
+	ADCB	SAVSZM		;And carry				;007
+	CALLX	DISMNT		;Go and dismount this save set
+	INC	BBHDAT+BBH$VL	;Set up for the next volume
+	CALLX	MOUNT		;Now get the next volume
+
+; Now we will set the current block number to be the highest block
+; number that succeeded for the last volume.
+
+	MOV	HGHBLK,BBHDAT+BBH$NO ;Set highest block LSB
+	MOV	HGHBLK+2,BBHDAT+BBH$NO+2 ;Now set highest block MSB
+
+; Now we will reset the current disk block number
+
+	MOV	#1,CURDBK	;Set current disk block number
+	CLRB	CURDBK+2	;Double precision
+	CLR	HGHDBK		;Clear LSB of highest successful disk block
+	CLRB	HGHDBK+2	;Double precsion
+
+; Now we will save the present record context
+
+	DSAR$S			;Disable AST's				;017
+	CMP	#-1,GD1BID	;;Do we have a block?			;023
+	BEQ	375$		;;No, never mind trying to map it	;017
+	CALBX	MAPBUF,<#GD1BID,#DTAAVL,#GDBVA> ;;Map GD1BID to set GDBVA;023
+375$:									;017
+	MOV	BYTBLK,-(SP)	;;Save bytes remaining for current block
+	MOV	GD1BID,-(SP)	;;Save block ID of current block	;023
+	MOV	CURREC,-(SP)	;;Save current record pointer
+	SUB	GDBVA,(SP)	;;And make it an offset into block	;023
+	MOV	REQQUE,-(SP)	;;Save the initial record to requeue
+	MOV	#-1,REQQUE	;;And dump the requeue queue
+	BIS	#BF.MVL,BCKFLG	;;Indicate we are doing a multi-volume requeue
+	CLR	BYTBLK		;;We don't have a current record now
+	MOVB	$GRPSZ,XORCNT	;;Reset the XOR counter
+	ENAR$S			;;Enable AST's				;017
+	CALLX	BCKBSM		;Write a backup summary			;014
+	CALL	FLUSH		;And write it out right away
+	BIC	#BF.MVL,BCKFLG	;Turn off special handling now
+
+; Now we've written the backup summary. Now we will write out the
+; records which need to be requeued.
+
+380$:	DSAR$S			;Disable AST's				;017
+	MOV	(SP)+,GD1BID	;;Set this as the new current block	;023
+	CMP	#-1,GD1BID	;;Are we done?				;023
+	BEQ	400$		;;Yes, so get ready to restore the world
+	CALBX	MAPBUF,<#GD1BID,#DTAAVL,#GDBVA> ;;Map the block to send	;023
+	MOV	GD1BID,GD2BID	;;Save the block ID for BCKFIL		;023
+	MOV	GDBVA,R2	;;R2 -> Buffer to requeue		;023
+	MOV	HB$NXT(R2),-(SP) ;;Now save the new block to queue
+	CMPB	HBSIZE+BBH$AP(R2),#2 ;;Is this an old XOR block?
+	BNE	390$		;;No, not this time
+	CALBX	RETBUF,#GD1BID	;;Yes, so dump this			;023
+	ENAR$S			;;Enable AST's				;017
+	BR	380$		;And try again
+
+390$:	CLR	(R2)		;;Clear out flags
+.ASSUME	HB$FLG	EQ	0
+	CLRB	HB$PRC(R2)	;;Indicate all I/O is complete		;009
+	ADD	#HBSIZE,R2	;;R2 -> Header to calculate CRC for	;009
+	CALL	RECCRC		;;Recalculate the CRC
+	CALL	SNDBLK		;;Now send this block again...
+	ENAR$S			;;Enable AST's				;017
+	BR	380$		;And loop for all the blocks
+
+; We have requeued all the I/O now. We will now restore the current
+; record context and recalculate the block header CRC for the block.
+
+400$:	DSAR$S			;Disable AST's				;017
+	MOV	(SP)+,CURREC	;;Restore current record offset
+	MOV	(SP)+,GD1BID	;;Restore block ID of current record	;023
+	MOV	(SP)+,BYTBLK	;;Now restore bytes remaining in block
+	CMP	#-1,GD1BID	;;Did we have a current record?		;023
+	BEQ	410$		;;No, so don't try to remap it
+	CALBX	MAPBUF,<#GD1BID,#DTAAVL,#GDBVA> ;;Re-map the data block	;023
+	MOV	GD1BID,GD2BID	;;Save the block ID for BCKFIL		;023
+	ADD	GDBVA,CURREC	;;And correct the current record pointer;023
+	MOV	GDBVA,R2	;;R2 -> Current block			;023
+	ADD	#HBSIZE,R2	;;Now point to the block header
+	BR	RECCRC		;;And exit recalculating CRC
+	
+410$:	ENAR$S			;;Enable AST's				;017
+	RETURN			;Return
+
+GLOBAL	<NOROOM,ERRWSS,$SAVFLG,BBHDAT,ERSEOV,SAVSZL,SAVSZM>		;023
+
+.SBTTL	Recalculate CRC
+
+;+
+; RECCRC - Recalculate the CRC for a block, setting new volume and sequence
+; RECRCX - Recalculate the CRC for a block, don't touch header
+;
+;
+;	R2 -> Block header for block to recalculate
+;
+;	CALL	RECCRC
+;
+;	R0 = Undefined
+;	R1 = Undefined
+;	R2 = R2 + BBHSIZ
+;	R3 = Undefined
+;
+;  For RECCRC only:
+;
+;	BBHDAT+BBH$NO is incremented.
+;	The fields BBH$NO and BBH$VL are rewritten into the block header.
+;-
+
+RECCRC:	ADD	#1,BBHDAT+BBH$NO ;Update block sequence number
+	ADC	BBHDAT+BBH$NO+2	; Double precision
+	MOV	BBHDAT+BBH$NO,BBH$NO(R2) ;Correct block number LSB
+	MOV	BBHDAT+BBH$NO+2,BBH$NO+2(R2) ;Now do the MSB
+	MOV	BBHDAT+BBH$VL,BBH$VL(R2) ;Correct the volume number
+RECRCX:	CLR	BBH$CS(R2)	;Clear header CRC for initial computation
+	CLR	BBH$CR(R2)	;Clear block CRC as well		;011
+	CLR	BBH$CR+2(R2)	;Both LSB and MSB			;011
+	MOV	#BBHSIZ,R1	;R1 = Size of buffer in bytes
+	CLR	R0		; Clear CRC accumulation register
+10$:	MOVB	(R2)+,R3	; Get character
+	XOR	R0,R3		; XOR old CRC and new character
+	BIC	#177400,R3	; Clear high byte
+	ASL	R3		; Make index into table
+	MOV	CRCTBL(R3),R3	; Get modifier word from table
+	CLRB	R0		; Clear low byte of old CRC
+	SWAB	R0		; Move high byte to low
+	XOR	R3,R0		; XOR modifier and old CRC
+	SOB	R1,10$		; Decrement counter and loop if <> 0
+	MOV	R0,-2(R2)	;Write the CRC to the buffer
+	RETURN			;And now we're done
+
+.SBTTL	Acknowledge receipt of tape erorrs
+
+;+
+; ACKERR - Acknowledge receipt of tape errors
+;
+;	CALL	ACKERR
+;
+; Error is acknowledged.
+;-
+
+ACKERR:	CALLX	CLRXRB		;Tape backup, clear out the XRB
+	MOV	#12,@#XRB	;Function is error acknowledge
+	MOV	#SAVFIL+<MTAHND*400>,@#XRB+XRCI ;On the save set channel
+	.SPEC			;Now go for it
+	CMPB	@#FIRQB,#NOBUFS	;Did we run out of buffers?
+	BNE	10$		;No, not this time
+	WSIG$S			;Yes, so wait a while
+	BR	ACKERR		;And loop
+
+10$:	CRASH			;Die on unexpected errors
+	RETURN			;And now we're done
+
+.SBTTL	Check for starting up tape requests
+
+;+
+; TAPEGO - Check for starting up tape requests
+; TAPEST - Start up tape requests unconditionally
+;
+;	CALL	TAPEGO
+;	CALL	TAPEST
+;
+; All registers are preserved.
+;
+; Come here to start up tape I/O requests. When we are out of buffers,
+; we will start sending what is presently in the tape queue. We do
+; this so that we can buffer as many tape requests ahead of time as
+; possible. This will help us to maintain streaming on asynchronous
+; tape devices.
+;
+; The TAPEST entry point is used when we are out of dynamic buffer
+; space. Starting I/O requests will free up dynamic buffers since
+; most dynamic buffers are held up in the action routine queue.
+;
+; ASTs should be disabled when calling here.
+;-
+
+.ENABL	LSB
+
+TAPEGO:	CMP	PIOCNT,PTPCNT	;Has all our I/O completed?		;017
+	BNE	10$		;No, so nothing to do
+TAPEST::TSTB	$SAVFLG		;Are we doing this to disk?		;005
+.ASSUME	DSKHND	EQ	0
+	BEQ	10$		;Yes, so nothing to do
+	TSTB	BCKFLG		;Have we already started up the tape?
+.ASSUME	BF.WRT	EQ	200
+	BMI	10$		;Yes, so nothing to do
+	CALLX	NSYSAV,R5	;Save context				;023
+	BIS	#BF.WRT,BCKFLG	;We can send tape requests now
+	MOV	TAPQUE,R4	;;R4 has address of first block in tape queue
+	CMP	R4,#-1		;;Is there anything in the tape queue?
+	BEQ	10$		;;No, so nothing to do
+	CALL	QWRITE		;;Now get that I/O going
+10$:	RETURN			;Return
+
+.DSABL	LSB
+
+GLOBAL	<$SAVFLG,XORAVL,DTAAVL>						;023
+GLOBAL	<GD1BID,GD2BID,QD1BID,QD2BID,CS1BID,AD1BID>			;023
+GLOBAL	<GX1BID,QX1BID,QX2BID>						;023
+GLOBAL	<GDBVA,QDBVA,GXBVA,QXBVA,QXBVA,CSBVA,ADBVA>			;023
+GLOBAL	<CURREC>							;023
+
+.END

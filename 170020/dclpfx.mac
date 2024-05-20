@@ -1,0 +1,483 @@
+TITLE	DCLPFX,<DCL Prefix File>,0A,10-MAY-91,CEK/JFM/SDL/GMB/BTK/BTB
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DCLPFX
+;+
+;
+;  001	CEK  16-APR-82	Added edit history
+;  002	CEK  16-APR-82	Removed extra TITLE statement 
+;  003	CEK  24-APR-82	Added parser error codes
+;  004	CEK  24-May-82	Moved CUI stuff into CUIROT.MAC
+;  005	CEK  24-May-82	Changed name from DCLHED to DCLPFX
+;  006	JFM  14-Apr-83	Changed file descriptor block to support logicals.
+;  007	JFM  18-Apr-83	Added SRT.TG and MRG.TG
+;  008	JFM  09-May-83	Added OUT.TG
+;  009  SDL  05-Aug-83  Added flags for symbol table handling
+;  010  SDL  17-Nov-83  Added a flag for symbol table handling
+;  011	JFM  08-Mar-84	Added ATCMD bit flag for @ command
+;  012  SDL  23-Mar-84  Added ALLTBL bit flag for searching all symbol tables
+;  013	JFM  11-Apr-84	Enabled .LIST of this prefix file.
+;  014	SDL  11-Apr-84  Added flags for ICF handling
+;  015	SDL  28-Sep-84	Added format of open data files stack and various bits
+;  016 	SDL  01-Oct-84	Added bit definitions for SRHFLG cell
+;  017	JFM  14-Dec-84	Added bits for EXPFLG, used in evaluatin expressions
+;  018  GMB  06-Mar-86  Removed SYMFLG
+;  019  GMB  03-Dec-86	Added FIRQB offsets RMSEBM, RMSEBL, RMSEOF
+;
+;			[RSTS/E V9.7]
+;  020	JFM  16-Sep-88	Fixed typo
+;  021	BTK  18-Dec-88	Removed SRHFLG (only 1 bit was used; it had 3 values)
+;
+;			[RSTS/E V10.0]
+;  022  BTB  24-Oct-89  Added all-purpose qualifier tag
+;  023  BTB  13-Nov-89	Added NOPROM flag to ICFFLG
+;  024  BTB  07-Feb-90	Added GOACT flag to ICFFLG
+;  025	JFM  08-Aug-90	Added TIMSTP flag to ICFFLG
+;-
+
+	.IIF	NDF	L$$IST,	.DSABL	CRF
+	.MCALL	SYMMAC,.ASSERT,SAVREG
+	.MCALL	IFMAC,.BSECT,CALB,CALBX,SUBR
+	.MCALL	.ASCIC,$CUI,REPAINT,CMESSAGE
+	.LIST	MEB
+	.ENABL	LC
+
+	IFMAC			;Define IF-ELSE-ENDIF macros.
+	$CUI	COMMON		;Include Common User Interface
+
+.SBTTL	Constants
+
+YES	=:	-1
+NO	=:	0
+COMMA	=:	54
+SPACE	=:	40
+TAB	=:	11
+CR	=:	15
+LF	=:	12
+SEMICOL	=:	73
+
+ICFSTL	=:	13.		;Length of the ICF stack in bytes (maximum of
+				;... 13. possible command procedures, 1 byte
+				;... each for its PFB channel # (*2)
+
+; Severity values and their meanings in the LSEVLV and ERRFLG cells:
+
+SUCCESS=1			;Success
+WARNING=0			;Warning
+ERROR=	2			;Error
+SEVERR= 4			;Severe error
+
+;DCL Entry type codes
+
+KBM.TY	=: 0			;   KBM
+CCL.TY	=: 1			;   CCL
+CHA.TY	=: 2			;   Chain
+NOR.TY	=: 3			;   No READ required
+
+
+.SBTTL	Tags
+;+
+; These tags are odd.  Keyword codes are even.  This avoids duplication.
+;-
+
+	.DSECT
+	.BLKB
+PARM1:	.BLKB	2		; All purpose parameter tag
+PARM2:	.BLKB	2		; Another all purpose parameter tag
+PARM3:	.BLKB	2		; Another all purpose parameter tag
+JB.TG:	.BLKB	2		; Job-spec tag
+DK.TG:	.BLKB	2		; Disk qualifier tag
+TP.TG:	.BLKB	2		; Tape qualifier tag
+RSX.TG:	.BLKB	2		; RSX Language qualifier (eg /F77)
+RT.TG:	.BLKB	2		; RT11 Language qualifier (eg /FOR)
+TER.TG:	.BLKB	2		; Terminal type (eg /VT100)
+SRT.TG:	.BLKB	2		; SORT command tag
+MRG.TG:	.BLKB	2		; MERGE command tag
+OUT.TG:	.BLKB	2		; Output qualifier tag.
+QUL.TG:	.BLKB	2		; All-purpose qualifier tag.		;022
+	UNORG
+
+.SBTTL	Define layout of file descriptor block.
+
+	.DSECT
+FLLOG:	.BLKB	10.		;Logical device: 10 ASCII bytes (9 for logical
+				;  name, and one for ":")
+FLNAM1:	.BLKW	2		;Filename: 2 words of RAD50.
+FLEXT:	.BLKW			;Extension, or -1 for default
+				;handling of extensions on .RUN.
+FLNENT:	.BLKW			;Entry parameter of CUSP.  Sign bit set if 
+				;privilege is to be retained.
+FLCLEN:	.BLKW			;Maximum length of command line accepted by
+				;CUSP.  Size of core common (127) in most 
+				;cases, but 80 for some CUSPs.
+FLCKEY:				;Command keyword for CUSP, as ASCIZ string.
+	UNORG
+
+.SBTTL	Format of Open Data Files Stack 
+;+
+;
+;gmb // This is not a stack!  Fix the comments //
+;
+; The following represents the format of the stack contained in the global
+; context area for keeping information pertinent to files or devices that
+; are opened by a user via the OPEN command.  This data is needed on any
+; subsequent READ, WRITE and CLOSE commands that he later issues.  It should
+; be noted that an entry is not kept on the stack for channel 0 (the user's 
+; keyboard) since there is no information that needs to be saved.  It would
+; be a waste of valuable global symbol space to include such an entry.
+;
+;
+;		      FILSTK
+;	     :----------------------:
+;      	     : 8 wds of information : File entry for channel 1 
+;	     :       (FENTLN)       :  (user specified channel 1)
+;	     :----------------------:
+;            :	  		    : File entry for channel 2
+;	     :                      :
+;	     :----------------------:
+;            :	  		    :                channel 3
+;	     :                      :
+;            :----------------------:
+;            :	  		    :                channel 4
+;	     :                      :
+;            :----------------------:
+;			.
+;                       .
+;			.
+;
+;	     :----------------------:
+;     	     :	  		    :                channel 13.
+;	     :                      :
+;            :----------------------:
+;
+;-
+
+; The format of each file entry in the stack is as follows:
+
+	.EVEN
+.DSECT
+FILPFB:	.BLKB			;PFB channel # (*2)
+FILIOB:	.BLKB			;IOB channel # (*2)
+FILBYT:	.BLKW			;Current record pointer (byte offset of the
+				; next available character position)
+FILRSZ:	.BLKW			;Record size
+FILRFM:	.BLKB			;Record format flags
+FILVBH:	.BLKB			;Current VBN, high order 
+				; (high order byte of the block number)
+FILVBL:	.BLKW			;Current VBN, low order
+				; (block number of last block accessed)
+FILEBL: .BLKW			;File size LSB
+FILEOF:	.BLKW			;End of file byte number
+FILEBM:	.BLKB			;File size MSB
+
+FILFLG:	.BLKB			;Flags for this open file
+				; (bit definitions are below)		;020
+	.EVEN
+FENTLN:				;Length of entry in bytes
+
+FILENT	=: 13.			;# data file entries in the stack (maximum #
+				; of files that can be opened via OPEN command)
+FILSTL	=: FILENT*FENTLN	;Byte length of the stack for open data files
+
+.SBTTL	FIRQB Offsets for File Attributes
+
+	.DSECT
+	.BLKB	16
+RMSEBM:	.BLKB			;End of file data block number (MSB)
+	.BLKB
+RMSEBL:	.BLKW			;End of file data block number (LSB)
+RMSEOF:	.BLKW			;End of file data byte number
+
+
+.SBTTL	Command types
+;+
+; These are the legal values for the CMDTYP variable.
+;-
+
+	.DSECT
+SMLTYP:				;Smallest CMDTYP code.  Used for range checking
+INLTYP:	.BLKW			;An "inline" command.  We execute the command
+				;... inline, by issuing SYS calls or whatnot.
+				.ASSUME INLTYP EQ 0
+RUNTYP:	.BLKW			;A RUN command.  We run a program at line 0,
+				;passing no information in core common
+CUSPTYP:.BLKW			;A "CUSP" type of command.  We run a
+				;CUSP, passing information to it in core
+				;common.  The entry point may be non-zero.
+CCLTYP:	.BLKW			;A CCL prefix command.  We issue .CCL directive
+UNKTYP:	.BLKW			;An unrecognized command.  We try it as a CCL.
+BIGTYP:				;Largest CMDTYP code.  Used for range checking.
+	UNORG
+
+
+.SBTTL	FSS Bit flags
+
+; Bits of flag word 2 returned by .FSS
+; //Should put these in $COMMON.MAC//
+
+	.BSECT
+F2NAM:	.BLKB	.		;There is a filename.
+F2NAMS:	.BLKB	.		;The filename is a star ("*").
+F2NAMQ:	.BLKB	.		;The filename contains at least one "?".
+F2EXT:	.BLKB	.		;There is a filetype.
+F2EXT1:	.BLKB	.		;There is a non-null filetype.
+F2EXTS:	.BLKB	.		;The filetype is a star ("*").
+F2EXTQ:	.BLKB	.		;The filetype contains at least one "?".
+F2PPN:	.BLKB	.		;There is a PPN.
+F2PRJW:	.BLKB	.		;The project number is wild (*).
+F2PRGW:	.BLKB	.		;The programmer number is wild (*).
+F2PRT:	.BLKB	.		;There is a protection code in <>.
+F2UPRT:	.BLKB	.		;There is no protection code in the filespec,
+				;the user assignable protection code was used.
+F2DEV:	.BLKB	.		;There is a device name.
+F2DEV1:	.BLKB	.		;There is a non-null device name.
+F2DEVL:	.BLKB	.		;The device name is a logical name.
+F2DEVI:	.BLKB	.		;The device name is currently invalid.
+	UNORG
+
+.SBTTL	Symbol structure offsets
+
+; This section defines the structures for entries in the symbol table
+; along with some other miscellaneous context area offsets.
+
+; Define offsets for list table in context area
+
+	.DSECT		;List table offsets
+GSBSSZ	=: 1			;Number of lists for GOSUB/RETURN stack
+STSSSZ	=: 1			;Number of lists for Reserved symbols
+SYMSSZ	=: 32.			;Number of lists for normal symbols
+LBLSSZ	=: 16.			;Number of lists for labels
+TRPSSZ	=: 1			;Number of lists for trap commands
+
+.ASSUME STSSSZ EQ GSBSSZ
+GSBSEC:				;GOSUB/RETURN stack
+STSSEC:	.BLKW	STSSSZ		;Reserved ($) symbol list
+SYMSEC:	.BLKW	SYMSSZ		;Normal string and numeric symbol lists
+GLISNM	=: ./2			;Length of global symbol list table
+				;... in words
+LBLSEC:	.BLKW	LBLSSZ		;Label lists
+TRPSEC:	.BLKW	TRPSSZ		;Trap commands list
+LLISNM	=: ./2			;Length of local symbol list table
+				;... in words
+
+; Define symbol entry header.  This is the same for all entries.
+
+	.DSECT		;Entry header
+E.NENT:	.BLKW			;Pointer to next entry
+E.SLNK:	.BLKW			;Sort link
+E.UNUS:	.BLKW			;An unused word reserved for expansion
+E.TYPE:	.BLKB			;Entry type
+E.HDLN:				;Length of header
+
+; Define string symbol entry
+
+	.DSECT		;String symbol entry
+	.BLKB	E.HDLN		;Entry header
+				.ASSUME E.HDLN&1 EQ 1
+E.ABLN:	.BLKB			;Name abbrev length
+S.VALP:	.BLKW			;Value pointer
+S.NAME:	.BLKB			;Name length
+       ;.BLKB	nn		;Name (variable length)
+STRSIZ:				;Minimum string symbol entry size
+STRTYP	=: 2
+
+; Define string symbol value
+
+	.DSECT		;String value structure
+S.UNUS:	.BLKB	2		;Two bytes reserved for expansion
+S.ALSZ:	.BLKB			;Allocation size
+S.SLEN:	.BLKB			;String length
+S.SVAL:				;String content (variable length)
+
+; Define numeric symbol entry
+
+	.DSECT		;Numeric symbol entry
+	.BLKB	E.HDLN		;Entry header
+				.ASSUME E.HDLN&1 EQ 1
+E.ABLN:	.BLKB			;Name abbrev length
+N.NMBR:	.BLKW	2		;Numeric value
+N.NAME:	.BLKB			;Name length
+;	.BLKB	nn		;Name (variable length)
+NUMSIZ:				;Minimum numeric symbol entry size
+NUMTYP	=: 4
+
+; Define label entry
+
+	.DSECT		;Label entry
+	.BLKB	E.HDLN		;Entry header
+				.ASSUME E.HDLN&1 EQ 1
+L.LBLK:	.BLKB			;Block number
+L.LVLN	=:	8.		;Size of label value
+L.LVAL:	.BLKW	L.LVLN/2	;Label value
+L.UNUS:	.BLKW			;A word reserved for expansion
+L.NAME:	.BLKB			;Name length
+;	.BLKB	nn		;Name (variable length)
+LBLSIZ:				;Minimum label entry size
+LBLTYP	=: 0
+
+; Define trap command entry
+
+	.DSECT		;Trap command entry
+	.BLKB	E.HDLN		;Entry header
+				.ASSUME E.HDLN&1 EQ 1
+T.UNUS:	.BLKB			;A byte reserved for expansion
+T.CMND:	.BLKB			;Command length
+;	.BLKB	nn		;Command (variable length)
+TRPSIZ:				;Minimum trap command entry size
+ERRTYP	=: -2
+CCTYP	=: -4
+
+; Define GOSUB/RETURN stack entry
+
+	.DSECT		;GOSUB/RETURN stack entry
+	.BLKB	E.HDLN		;Entry header
+				.ASSUME E.HDLN&1 EQ 1
+G.UNUS:	.BLKB			;A byte reserved for expansion
+G.ICFL	=:	8.		;Size of ICF position data
+G.ICFP:	.BLKW	G.ICFL/2	;ICF position data
+GSBSIZ:				;stack entry size
+GSBTYP	=: -6
+
+	UNORG
+
+.SBTTL	Indirect Command File Bit flags
+;+
+; The following bit flag definitions are used to keep data about the ICF.
+;
+; In all the cases below, the bit being CLEAR means the [NOT] case.
+; If the bit is SET, then the positive case applies.
+;
+; NOTE:  DEBUG, WATCH and NOP live in WATFLG, a byte.  Therefore they 
+; 	 cannot be put above the eighth bit value.  If and when ICFFLG 
+;	 gets too crowded these should me moved to their own .BSECT.
+;-
+
+; Bit flags for ICFFLG 
+
+	.BSECT
+DEBUG:	.BLKB	.		;Debug mode is [not] in effect
+	.BLKB	.		;Do [not] display command //Removed// 
+PUNCT:	.BLKB	.		;/PUNCTUATION was [not] specified on INQUIRE 
+WATCH:	.BLKB	.		;Do [not] watch translation of DCL commands
+NOP:	.BLKB	.		;Do [not] dispatch to CUSP
+STSUPD:	.BLKB	.		;Do [not] update $STATUS and $SEVERITY symbols
+SEVCHK:	.BLKB	.		;Do [not] check severity level after command
+ICFACT:	.BLKB	.		;An ICF is [not] active
+	.BLKB	.		;Verify is [not] in effect //Removed// 
+	.BLKB	.		;reserved
+	.BLKB	.		;reserved
+	.BLKB	.		;reserved
+TIMSTP:	.BLKB	.		;Time stamps are enabled		;025
+GOACT:	.BLKB	.		;set if GOSUB or GOTO active		;024
+NOPROM:	.BLKB	.		;If set, supress the next prompt	;023
+LOGACT:	.BLKB	.		;A logfile is [not] active
+	UNORG
+
+.SBTTL  Various Bit definitions, for UPDFLG, FILFLG, and EXPFLG
+
+; The following describe bits used in conjunction with the symbol table 
+; in the cell UPDFLG:
+	.BSECT			;
+UPDGCX:	.BLKB	.		;Global context area was changed
+UPDGST:	.BLKB	.		;Global symbol table was changed
+UPDLCX:	.BLKB	.		;Local context area was changed
+UPDLST:	.BLKB	.		;Local symbol table was changed
+	UNORG
+
+; The following describe bits used in conjunction with the open data files
+; stack in the cell FILFLG:
+	.BSECT			;
+READFN:	.BLKB	.		;Indicates how the file is OPENed 
+				; 0 --> write or append
+				; 1 --> read
+DSKFIL:	.BLKB	.		;The open file/device is [not] disk
+	UNORG
+
+; Bit definitions for expression handler in EXPFLG
+
+	.BSECT			
+EXPOPR:	.BLKB	.		;Expression operator - up to individual routine
+EXP1ST:	.BLKB	.		;First argument string (0=NO, 1=YES)
+EXP2ST:	.BLKB	.		;Second argument string (0=NO, 1=YES) 
+	UNORG
+
+	.BSECT
+CCHIT:	.BLKB	.		;A CTRL/C was hit sometime during the last
+				;command or for as long as the ON CONTROL_C
+				;command unnesting is executed.  This flag
+				;is set by P..CC and is cleared as soon as a
+				;non-EXIT command is issued on the part of
+				;the ON CONTROL_C unnesting.
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+LASTCC:	.BLKB	.		;A CTRL/C was hit during the last command
+				;that was executed.  This flag is set by
+				;P..CC and is cleared after it is looked at.
+	UNORG
+
+;Flag bits for PUTFIL flag.  
+
+	.BSECT
+FDEFTYP:.BLKB	.		;A default filetype is supplied
+F.NOTYP:.BLKB	.		;Insert no file type with the file spec
+F.RSX:	.BLKB	.		;Full expansion, including PPNs, ":" means _SY:
+F.RT11:	.BLKB	.		;Full expansion, excluding PPNs, uses _SY: for
+				;public structure since RT11 defaults to DK:
+F.OURD: .BLKB	.		;Place filespec in our directory, regardless
+F.DEV:	.BLKB	.		;Include an explcit device even if none is 
+				;specified.  "_SY:" is used instead of ":"
+F.FULL	=	F.RSX!F.DEV	;Full filespec, includes everything.
+	UNORG
+
+
+.SBTTL	Disk file modes (as defined in FLDEF.MAC) for CRTFQ and OPNFQ:
+
+	.BSECT
+	.BLKB	.		;
+OP$APP:	.BLKB	.		;Open for append
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+OP$TEN:	.BLKB	.		;Create a tentative file
+	.BLKB	.		;
+OP$NOS:	.BLKB	.		;No supersede on create
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+OP$RO:	.BLKB	.		;Read-only
+	.BLKB	.		;
+OP$MOD:	.BLKB	.		;Mode is real
+	.EVEN
+	UNORG
+
+.SBTTL	PSECTs
+	.PSECT	IMPURE,RW,D,GBL,ABS,CON	;Impure data area.
+	.PSECT	GCA,RW,D,GBL,ABS,CON	;Global context area & beginning of stb
+	.PSECT	TEXT,RO,CON,REL,LCL	;Core-resident text.
+
+	.IIF	NDF	L$$IST,	.ENABL	CRF
+

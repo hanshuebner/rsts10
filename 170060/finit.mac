@@ -1,0 +1,162 @@
+	$BEGIN	FINIT,<30.4>,<INITIALIZE THE FILE STORAGE REGION>,R$$SUP,<FINIT,FINTSL>
+;
+; THIS  SOFTWARE  IS FURNISHED UNDER A LICENSE AND MAY
+; BE USED OR COPIED ONLY IN ACCORDANCE WITH THE  TERMS
+; OF SUCH LICENSE.
+;
+; COPYRIGHT (c) 1985, 1987, 1991 BY DIGITAL EQUIPMENT CORPORATION.
+; ALL RIGHTS RESERVED.
+;
+;
+; PETER H. LIPMAN 17-AUG-73
+;
+; PREVIOUSLY MODIFIED BY
+;
+;	ANDREW C. GOLDSTEIN
+;	S. RUZICH
+;
+;
+; MODIFIED BY:
+;
+;	M. S. HARVEY		9-DEC-1983
+;		MSH222 -- ADD SUPPORT FOR COMBINED FORM OF CREATE/ENTER FILE
+;			  FUNCTION. THIS IS ONLY IMPLEMENTED (SO FAR) FOR VMS.
+;
+;	T. Schoeller	29-MAY-85	Create the default UIC string in the
+;					FSR2 region.  TMS016 Ident 30.1.
+;
+;	P. K. M. Weiss 	7-May 87	30.2
+;		PKW126 	- Use FEAT$ instead of Gtsk system type to determine
+;			  whether remote logical names are being used
+;	P. K. M. Weiss 	9-Jun 87	30.3
+;		PKW129  - Eliminate 2 extraneous lines
+;
+; Modified for RSTS/E V10.1 by:
+;
+;	S. E. LeVan	20-May-91	30.4
+;		SEL001  - Merge RSTS-specific code into RSX V4.3 module.
+;
+	.MCALL	FSROF$
+	FSROF$	DEF$L		;DEFINE FSR OFFSETS LOCALLY
+
+
+;+
+;
+; SUBROUTINE TO INITIALIZE SOME FILE SYSTEM TABLES, SPECIFICALLY
+; THE ALLOCATION CONTROL BLOCK FOR THE FILE STORAGE REGION.
+; AND THE DEFAULT DIRECTORY STRING IS CREATED FROM THE TASKS PPN.
+; CALLING SEQUENCE
+;	JSR PC,.FINIT
+; INPUTS:
+;	NONE
+; OUTPUTS:
+;	C=0 ALWAYS SUCCESSFUL
+;	ALL REGISTERS PRESERVED
+;
+;-
+	.ENABL	LSB
+.FINIT::.SAVR1			;SAVE REGISTERS R1-R5
+	MOV	@#.FSRPT,R1	;ADDRESS OF ALLOCATION CONTROL BLOCK FOR
+	BEQ	30$		;IF NOT INITED, DO NOTHING. OPEN WILL NO
+..FINI::MOV	A.BFSR(R1),R2	;R2=ADDRESS OF FSR
+	MOV	R2,(R1)		;SET 1ST WORD OF ACB
+	CLR	(R2)		;ZERO FIRST WORD OF FSR
+	MOV	A.EFSR(R1),R3	;R3=LAST ADDR IN FSR
+	SUB	R2,R3		;R3=LAST-FIRST
+	INC	R3		;R3=LENGTH OF FSR
+	MOV	R3,2(R2)	;STORE AS 2ND WORD OF FSR
+; NOW INITIALIZE THE DEFAULT DIRECTORY STRING FROM THE TASK'S PPN
+	ASSUME	A.IOST,A.DPB+24. ;NEED 32. BYTES OF SCRATCH STORE
+	ASSUME	A.DFDR,A.IOST+4
+;
+; USE 16 WORDS TO READ TASK PARAMETERS. 12 WORDS IN THE DPB AREA
+; 2 WORDS FROM SCRATCH I/O STATUS BLOCK, AND 2 WORDS FROM THE
+; DEFAULT DIRECTORY DESCRIPTOR, INITIALIZED AFTER THE GTSK$S CALL
+;
+	MOV	#200*400+200,A.DFUI(R1) ;FCS IS INITIALIZED
+	MOV	R1,R2
+	ADD	#A.DPB,R2	;ADDRESS TO READ TASK PARAMETER (16W)
+	GTSK$S	R2
+	BCS	5$
+	MOV	G.TSPC(R2),A.DFUI(R1) ;SET DEFAULT UIC
+5$:	
+	.IF DF V$$ACP		;IF WE COULD BE USING THE VMS ACP
+
+	CLR	A.FLAG(R1) 	;CLEAR FLAG WORD
+	MOV	(PC)+,(R2) 	;CREATE DPB FOR FEAT$ DIRECTIVE - R2 IS A.DPB
+	.BYTE	177.,2		;DIC, DPB SIZE FOR FEAT$
+	MOV	#FE$RLG,2(R2)	;WE WANT TO CHECK FOR REMOTE LOGICALS
+	DIR$	R2		;EXECUTE THE FEAT DIRECTIVE	
+	CMP	@#$DSW,#IS.SET	;DO WE HAVE REMOTE LOGICALS?
+	BNE	20$		;NOPE, RSX ONLY SYSTEM
+	BIS	#AF.RLG,A.FLAG(R1) ;MARK THAT WE ARE USING REMOTE LOGICALS
+
+	.ENDC	;V$$ACP
+
+20$:
+	.IF	EQ,R$RSTS	; SEL001 - non-RSTS code follows
+	MOV	R1,R2		; Get address of impure area
+	ADD	#A.DFDR,R2	; Then default directory string desc
+	MOV	R2,-(SP)	; Save pointer to default string desc
+	MOV	R2,R4		; Copy pointer to default desc
+
+	.IF	NE,R$$NAM
+
+; Issue a GDIR$ to get the task default directory string into the
+; FSR extension area.
+
+	ADD	#A.EXDS-A.DFDR,R4 ; Compute address of string
+	MOV	R4,2(R2)	; Fill in string desc with address
+	MOV	R2,R3		; Point to DPB scratch area
+	ADD	#A.DPB-A.DFDR,R3 ;
+	MOV	R3,-(SP)	; Set address of DPB for DIR$
+	MOV	(PC)+,(R3)+	; Fill in DIC and DPB length
+	.BYTE	207.,6.		; For GDIR$
+	MOV	#4,(R3)+	; And the GDIR$ subfunction code
+	CLR	(R3)+		; Reserved for future use (MBZ)
+	MOV	R4,(R3)+	; Address of output area
+	MOV	#S.EXDS,(R3)+	; Size of output area
+	MOV	R2,(R3)		; Return string length into string desc
+	DIR$			; Get default directory string if possible
+	BCS	10$		; If CS then not specified or supported
+	CMP	#"[],(R4)	; Is it forced /NONAME mode?
+	BEQ	10$		; If EQ yes
+	CMP	#"<>,(R4)	; Second chance?
+	BNE	40$		; If NE no
+
+	.IFF
+
+	CMP	(R4)+,(R4)+	; Compute address of string
+	MOV	R4,2(R2)	; Set address in string desc
+
+	.ENDC
+
+10$:	MOV	A.DFUI-A.DFDR(R2),R3 ; Task UIC to R3
+	MOV	R4,R2		; Point to output area
+	CLR	R4		; No leading zeroes, comma separator
+	CALL	.PPASC		; Use UIC as name of directory
+	MOV	(SP),R4		; Restore register
+	SUB	2(R4),R2	; Compute length of string
+	MOV	R2,(R4)		; Fill it in string desc
+40$:	MOV	(SP)+,R2	; Clean stack
+	.IFF 	;R$RSTS		; SEL001 - RSTS code follows
+	MOV	#-1,A.DFDR(R1)	;DIRECTORY STRING NOT INITIALIZED
+	.ENDC	;R$RSTS
+	CLR	A.DFDR+D.DFDV(R1) ;NO DEVICE INITIALIZED EITHER
+
+	.IF	GT,R$$SUP
+	MSDS$S	#100000		;DETERMINE USER/SUPER MODE
+	BCS	30$		;CS - DIRECTIVE NOT KNOWN - USER MODE
+	TSTB	@#$DSW		;CC - M-PLUS SYSTEM - MAPPED USER OR SUP
+	BMI	30$		;MI - USER MODE - RETURN
+	INC	A.MODE(R1)	;ELSE THIS CODE IS IN SUPERVISOR MODE
+	.ENDC	;R$$SUP
+
+30$:	RETURN			;
+	.DSABL	LSB
+;
+;
+	$END	FINIT
+;
+;
+	.END

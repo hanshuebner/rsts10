@@ -1,0 +1,1391 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.INCLUDE	/CUI:CUIPFX.MAC/
+TITLE	CUIPRT,<CUI String Printer>,0K,02-JUN-92,CEK/JFM/KPH/GMB/BGN
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR CUIPRT
+;+
+;
+;  001	CEK  16-APR-82	Added edit history
+;  002	CEK  16-APR-82	Removed @# notation
+;  003	CEK  16-APR-82	Fixed looping problem when system disk hangs
+;  004	CEK  30-APR-82	Changed ORG statements
+;  005	CEK  30-APR-82	Changed name from DCLOUT to CUIPRT
+;  006	CEK  30-MAY-82	Added !AZ directive
+;  007	CEK  06-OCT-82	Added SYS macro for running under RT11
+;  008	CEK  28-OCT-82	Print message number if text offline.
+;  009	CEK  18-Nov-82	Incorporated DEFPKG and DEFMSG macros.
+;  010	JFM  12-May-83	Changed order of internal variables in FA
+;  011	JFM  22-Sep-83	Made RADTBL global for DCLRTS, delimiter for DEFMSG 
+;			changed to # so quotes can be used in DEFMSG's
+;  012  KPH  10-Nov-83	Added .SAVE and .RESTORE assembler directives
+;			to MACROs that modify PSECTion context.
+;  013	JFM  08-Mar-84	Added message facility routines REPAINT and CMESSAGE
+;  014	JFM  11-Apr-84	REPAINT will allow zero arguments(arrow position)
+;  015	JFM  21-Nov-84	Fixed prompt bug so prompts can be any characters
+;  016	JFM  20-Dec-84	Continue only displayed when necessary
+;  017  GMB  15-Sep-85	Changed message symbol format
+;			Added support for message files
+;  018  BGN  24-Aug-87  Fix bug in prompt output: make sure we use transparent
+;			controls mode when doing a flush.
+;
+;			[RSTS/E V9.7]
+;  019	JFM  20-Sep-88	Unglobalized local routines and variables.  Commented
+;			out the unused U.MSGI routine.
+;
+;			[RSTS/E V10.1]
+;  020	JFM  2-Jun-1992	Saved/restored PRTMOD around call to U$MARGIN in U.MSG.
+;			This means multiple $FAPs with no delimiter will be 
+;			printed in the same mode.
+;-
+
+	.MCALL	.ASCIC,$FAP	;Pull macros out of CUIMLB.
+	.PSECT	CUIPRT,RO,REL,LCL,CON
+	DEFORG	CUIPRT
+
+.SBTTL	Constants
+
+TER.BSIZ =:	132.+2.		;Size of terminal buffer, in bytes.
+				;This size allows room for a long line on
+				;a VT100, with a <CR><LF>.
+CR	=:	15
+LF	=:	12
+
+MSGCHN	=:	12.*2		;Channel (12) to use for message files	;019
+
+RECLEN	=:	64.		;Record length of message file (must be
+				;... a power of 2. In this case 64 = 2^6.
+RECLOG	=:	6.		;Log base 2 of record length.
+
+.SBTTL	 Message Symbols
+;+
+; A message symbol is either
+;	(1) a monitor message code, in the range 0-255 (decimal),
+; or	(2) a bit mapped value of the form:
+;
+;		 15 14   10 9    0
+;		+--+-------+------+
+;		|  |package|number|
+;		+--+-------+------+
+;
+;	Bit 15 is reserved.
+;	Bits 14-10 provide for 64 packages (0-63).
+;		Package 0 is reserved for monitor error messages.
+;		Package 1 is always used for in memory error messages.
+;		Packages 2-63 are always used for error message files.
+;			These files are named SY:[0,1]PKG(001-062).MSG
+;
+; See CUIGDE.DOC for more information.
+;-
+
+; Masks for fields of a message bit map
+
+PKGMASK	=:	^C<^B0111111000000000>	;Bits 9-14
+MSGMASK	=:	^C<^B0000000111111111> 	;Bits 0-8
+
+.SBTTL	Message table macros
+.MACRO	DEFPKG	PKGNUM
+.IIF	NDF	PKGNUM, .ERROR ; NO PACKAGE NUMBER ALLOWED FOR IN MEMORY MSGS
+	.SAVE
+	.PSECT	PKGSYM,RO,REL,LCL,CON
+U$MEMPKG::			;Pointer to beginning of PSECT
+	.RESTORE
+$$$NUM	=	0
+	.ENDM	DEFPKG
+
+.MACRO	DEFMSG	MSGSYM,MSGTEX
+	.DSABL	CRF
+	.SAVE								;012
+	.PSECT	U$TEXT,RO,REL,LCL,CON
+$$$TXT	=	.
+	 .ASCIC	<MSGTEX>
+	.PSECT	PKGSYM,RO,REL,LCL,CON
+	.WORD	$$$TXT
+	.RESTORE							;012
+	.ENABL	CRF
+MSGSYM	==:	512.+$$$NUM
+	.DSABL	CRF
+$$$NUM	=	$$$NUM+1
+	.ENABL	CRF
+	.ENDM	DEFMSG
+
+.SBTTL	Variables
+	TMPORG	IMPURE
+USRBUF:	.BLKB			;Are we putting text into a user-supplied
+				;buffer?  YES (-1) if so; NO (0) if
+				;we're putting text into terminal buffer.
+				;(These values correspond to the $FAO and
+				;$FAP entry points, respectively.)
+	.EVEN
+USRNEX:	.BLKW			;Address of next free slot in user buffer.
+USRFREE:.BLKW			;Number of free bytes left in user buffer.
+TERNEX:	.BLKW			;Address of next free slot in terminal
+				;buffer.
+TERFREE:.BLKW			;Number of free bytes left in terminal
+				;buffer.  When this value drops to zero,
+				;we flush the buffer.
+TERBUF:	.BLKB	TER.BSIZ	;Terminal buffer.
+PRTMOD::.BLKW			;CUI print modifier
+				;	<0 --> Don't print anything.
+				;              Stays in effect until PRTMOD
+				;	       becomes >=0 (U.DIA clears it at
+				;	       beginning of every cmd line).
+				;	 0 --> Use default (cui+error).
+				;	>0 --> Use PRTMOD as XRMOD. This
+				;	       is a one-shot. PRTMOD is reset
+				;	       to zero after the print.
+U$MSGBUF:.BLKW			;Pointer to message file disk buffer
+	.EVEN
+	UNORG
+
+.SBTTL	Default message text
+
+	TMPORG	U$TEXT
+U$ERLUP:.ASCIC	<"?Error number !UW.  (Message text is not available)"<CR><LF>>
+	UNORG
+
+.SBTTL	CMESSAGE -- CUI message facility
+;+
+; //CMESSAGE is named "CMESSAGE" only to distinguish it from the other 
+; various forms of MESSAGE facility forms existing out there in the world.//
+;
+; USAGE:
+;	$MESSAGE MSGSYM			 (threaded call)
+;	CMESSAGE #MSGSYM [<PLUGIN...>]   (non-threaded call)
+;	
+;	CALB	U.MSG <MSGSYM[,PLUGIN,...]>
+;
+; DESCRIPTION:
+;
+; CMESSAGE prints an error message on the users terminal.  The  message is 
+; indented by the numebr of spaces specified to U.INI, the initialization code.
+; The default for the indent length is 2, which same DCLs indent length. 
+;
+; CUI will not QUIT afterwards, so if you would like to print out multiple 
+; messages, then by all means do so.  This is only for messages defined by
+; the DEFMSG macro, however.  CUI will look at the  severity level and precede
+; the message by a "%" for warning (M.WARN), and "?" for error (M.ERR).  M.INF
+; will not cause any prefix character to be printed out.
+;
+; INPUTS:
+;	MSGSYM	=	the message symbol
+;	PLUGIN ... =	optional arguments to be plugged into the message by 
+;			$FAP.
+;
+; OUTPUTS:
+;	Message is printed on channel 0.
+;
+; SIDE EFFECTS:
+;	FIRQB and XRB are clobbered.
+;	Arg block is munged.
+;-
+.ENABL	LSB
+
+.MACRO	$MESSAGE MSGSYM
+	.IIF	B	<MSGSYM> .ERROR ; Message symbol required
+	.WORD	U$MSG,MSGSYM
+	.GLOBL	U$MSG
+	.ENDM	$MESSAGE
+	
+
+.MACRO	CMESSAGE MSGSYM,PLUGINS
+	.IF	B	<PLUGINS>
+	CALBX	U.MSG	<MSGSYM>
+	.IFF
+	CALBX	U.MSG	<MSGSYM,PLUGINS>
+	.ENDC
+	.ENDM	CMESSAGE
+
+; INTERNAL VARIABLES:
+;	R4	=	msg number 
+
+U$MSG::	CALBX	U.MSG   <MSGSYM>
+	RETURN
+
+U.MSG::	SUBR	<MSGSYM,PLUGINS>
+	.ASSERT	(R5) GE #1, BYTE;We need at least one arg.
+
+	MOV	MSGSYM(R5),R4	;Get message symbol.
+	CALL	U.MSGL		;Look up the message text
+	IFCS			;If the lookup failed (disk hung?)
+	MOV	#U$ERLUP,R3	;  Point to "?Error number nn.
+				;    (Message text is not available)".
+	MOVB	(R3)+,R2	;  Get the message length
+	TST	-(R5)		;  Backup R5 so we will point to message symbol
+	ENDIF			;Endif
+;
+; Print the error message
+;
+	CMPB	(R3),#'?	;Is this an error message?
+	IFEQ			;If so then
+	CALL	U$TTRST		;  Cancel ^O.  (Restart output.)
+	ENDIF			;Endif
+	MOV	PRTMOD,-(SP)	;Save modifier around U$MARGIN call	;020
+	CALL	U$MARGIN	;Bring cursor to left margin.
+	MOV	(SP)+,PRTMOD	;Restore print modifier 		;020
+	CMP	(R5)+,(R5)+	;Point R5 at first plugin
+
+; R2 =  maximum length of the control string
+; R3 -> "message control string"
+; R5 -> first plugin
+
+	CLRB	USRBUF		;Do NOT put this into a buffer
+	CALL	FAF		;Print out the string.
+	$FAP	""<CR><LF>	;Print a line terminator.
+	CLR	R0		;No error.
+10$:	RETURN
+
+.DSABL	LSB
+.WEAK	U$MEMPKG
+
+.SBTTL	U.MSGI - Initialize the message facility
+
+;+
+; U.MSGI - Initialize the message facility
+;
+; INPUTS:
+;	BUFFER	->	Pointer to the buffer we will use for disk
+;			message files.
+;
+;			BUFFER can be zero (0) to indicate that no buffer
+;			will be needed (all messages will be in memory or
+;			will be monitor messages).
+;
+; CALL:
+;	CALBX	U.MSGI	<BUFFER>
+;
+; OUTPUTS:
+;	None
+;
+; SIDE EFFECTS:
+;	Our internal buffer pointer U$MSGBUF is pointing to the
+;	users buffer if specified.
+;-
+
+.ENABL	LSB
+
+;// For the moment this code is not used. Instead a buffer (LINBUF) in CUI is
+;// always used.  When these routines (CUIPRT) are separated into their own
+;// package useable outside of CUI it will be time to call this routine in
+;// the CUI init routine.
+;// Code to support this routine has been written below but commented out
+;// with ;;gmb so that LINBUF will be used instead.
+
+;U.MSGI::SUBR	<BUFFER>						;019
+;	MOV	BUFFER(R5),U$MSGBUF					;019
+;	RETURN								;019
+
+.DSABL	LSB
+
+.SBTTL	U.MSGL - Look up a message
+
+;+
+; U.MSGL - Look up a message
+;
+; INPUTS:
+;	R4	=	message symbol
+;
+; CALL:
+;	CALL	U.MSGL
+;
+; OUTPUTS:
+;    If C=0 then
+;	R2	= 	maximum length of the control string
+;	R3	->	"message control string"
+;	R4	= 	message symbol (unchanged)
+;
+;    If C=1 then
+;	R4	= 	message symbol (unchanged)
+;
+; SIDE EFFECTS:
+;-
+
+.ENABL	LSB
+
+U.MSGL:
+;
+; Maybe its a monitor message...
+;
+	CMP	R4,#256.	;Is it a monitor message?
+	IFLO			;If so then
+	CALLX	CLRFQB		;  Get text of error message.
+	MOVB	#UU.ERR,FIRQB+FQFUN
+	MOVB	R4,FIRQB+FQERNO
+	SYS	.UUO
+	TSTB	FIRQB		;  Did that fail?  (Disk hung?)
+	BNE	20$		;  Yes, return failure
+	MOV	#FIRQB+4,R3	;  Point at message.  
+	MOV	#28.,R2		;  Set the maximum length to 28.
+	BR	10$		;  Go print the message
+	ENDIF			;Endif
+;
+; Maybe the message is in memory...
+;
+	CMP	R4,#1024.	;Is the message in package 1 (i.e. in memory)
+	IFLT			;If so then
+	BIC	#MSGMASK,R4	;  Remove all but the message number
+	ASL	R4		;  Make it a word offset
+	MOV	U$MEMPKG(R4),R3	;  Get pointer to text
+	CLR	R2		;  Get the length of 
+	BISB	(R3)+,R2	;  ... the message into R2
+	BR	10$		;  Go print the message
+	ENDIF			;Endif
+;
+; Guess the message must be on disk...
+;
+;;gmb	TST	U$MSGBUF	;Do we have a buffer for the READ?
+;;gmb	BEQ	20$		;No, return with failure
+
+	MOV	R4,R3		;Get message symbol
+	BIC	#PKGMASK,R3	;Isolate the package number
+	SWAB	R3		;Shift right 9 bits
+	ASR	R3		;... to get number in range 2-63
+	DEC	R3		;Make it be in range 1-62.
+	CLR	R2		;Divide package number by 10. to
+	DIV	#10.,R2		;... get 10's digit in R2 and 1's digit in R3
+	ADD	#<^R000>,R3	;Compute RAD50 "00n" (1's digit)
+	MOV	R3,-(SP)	;Save it away
+	MOV	R2,R3		;Prepare to compute RAD50 10's digit
+	MUL	#50,R3		;Do it
+	ADD	R3,(SP)		;Add in 10's digit.
+	
+	CALLX	CLRFQB		;Clear the FIRQB in preparation for OPEN
+	MOVB	#MSGCHN,FIRQB+FQFIL	;Open the file on channel MSGCHN
+	MOV	#<0*400>+1,FIRQB+FQPPN	;[0,1]
+	MOV	#^RPKG,FIRQB+FQNAM1	;     PKG
+	MOV	(SP)+,FIRQB+FQNAM1+2	;        0nn
+	MOV	#^RMSG,FIRQB+FQEXT	;           .MSG
+	MOVB	#OPNFQ,FIRQB+FQFUN	;Set the fip function to "OPEN a file"
+	CALFIP			;Open the file
+	TSTB	FIRQB+0		;Was there an error on the OPEN?
+	BNE	20$		;Yes, return with failure
+
+	CALLX	CLRXRB		;Clear the XRB in preparation for READ
+	MOV	#512.,XRB+XRLEN		;Buffer length is 512.
+	MOV	#LINBUF,XRB+XRLOC	;Point to message buffer
+;;gmb	MOV	U$MSGBUF,XRB+XRLOC	;Point to message buffer
+	MOVB	#MSGCHN,XRB+XRCI	;Read on channel MSGCHN
+	MOV	R4,R2		;Copy the message symbol
+	BIC	#MSGMASK,R2	;Get the message number
+	MOV	R2,R3		;Save the message number
+	ASH	#-3,R2		;Divide by 8
+	CMPB	(R2)+,(R2)+	;Convert this to an origin 2 block number
+	MOV	R2,XRB+XRBLK	;Set the block number
+	.READ			;Do the READ
+	MOVB	FIRQB,-(SP)	;Save the error code (if any)
+
+	CALLX	CLRFQB		;Clear the FIRQB for the CLOSE
+       ;MOVB	#CLSFQ,FIRQB+FQFUN	;Set FIP function to "CLOSE file"
+	MOV	#MSGCHN,FIRQB+FQFIL	;Set the channel number to close
+	CALFIP			;Do the close (and ignore any errors).
+
+	TSTB	(SP)+		;Was there an error on the read?
+	BNE	20$		;Yep, return with failure
+
+	BIC	#^C<7>,R3	;Isolate low 3 bits (message# mod 8)
+	ASH	#RECLOG,R3	;Multiply by record length to get offset in
+				;... buffer (shift left LOG2(RECLEN)).
+	ADD	#LINBUF,R3	;Compute pointer to message in buffer
+;;gmb	ADD	U$MSGBUF,R3	;Compute pointer to message in buffer
+	MOV	#RECLEN,R2	;Set maximum length of this message to
+				;... the record length.
+10$:	TST	(PC)+		;Return with success (carry clear)
+20$:	SEC			;Return with failure (carry set)
+	RETURN
+
+	GLOBAL	<LINBUF>
+.DSABL	LSB
+
+.SBTTL	REPAINT - Repaint the command line (and print arrows)
+;+
+; DESCRIPTION:
+;
+;	Can repaint the command line on the terminal, and places 
+;	zero, one or two arrows under the command.  If there are two 
+;	arrows, they do not have to be in increasing order.  They (it)
+; 	should point to whatever is wrong with the command.
+;	It would not make any sense to use this without it being followed
+;	by a CMESSAGE.
+;
+;	You can get positions of qualifiers (arguments) by calling FETCQ
+;	(FETKA or FETA for arguments).  The location of the qualifier is
+;	"LX.POS".  So for example you don't want /ALL to appear in the SHOW
+;	QUEUE command if the user specifies a jobname.  First parse the
+;	parameter ($PARM).  If present, FETCQ ALL.Q and if that is present:
+;
+;		$FETCQ	ALL.Q
+;		$IF	PRESENT
+;		$REPAINT LX.POS
+;		$MESSAGE ALL.E 
+;		$RETURN
+;		$ENDDO
+;		$ENDIF
+;
+;	If you want two arrows printed, in MACRO, with the error message 
+;	"?Qualifier conflicts with parameter", just do the following:
+;
+;		CALBX	FET$P <PARM1>	;Fetch parameter
+;		BCS	10$		;Not there
+;		MOV	LX.POS,POS1	;Store position of paramter
+;		CALBX	FET$CQ <ALL.Q>	;Fetch /ALL
+;		BCS	20$		;Not there
+;		REPAINT POS1,LX.POS 	;Repaint the line
+;		CMESSAGE U.CNFE		;?Qualifier conflicts with parameter
+;		BR	END		
+;	10$:	;Don't have a parameter
+;	20$:	;Don't have /ALL
+;
+; FORMAT:
+;	$REPAINT [POINTER1][,POINTER2]			;THREADED CALL
+;	REPAINT	<pointer1,pointer2>			;MACRO 
+;	CALBX	REPAINT <pointer1,pointer2>		;MACRO CALL
+;	CALL	REPAINT BY REF (pointer1,pointer2)	;BP2 CALL
+;
+; where:
+;	cmdloc	  =	The address of the command.  Default is Core Common.
+;	POINTERn  =	The number of spaces into the command the arrow
+;			should be located.  
+;
+; OUTPUTS:
+;	Command is repainted on Channel 0
+;
+; SIDE EFFECTS:
+;	FIRQB and XRB are clobbered
+;+
+.ENABL	LSB
+
+.MACRO	$REPAINT ARROW1=0,ARROW2=0
+	.WORD	$REPAINT,ARROW1,ARROW2
+	.GLOBL	$REPAINT
+	.ENDM 	$REPAINT
+
+.MACRO	REPAINT	ARROW1=#0,ARROW2=#0
+	CALBX	REPAINT <ARROW1,ARROW2>
+	.ENDM	REPAINT
+
+$REPAINT::PUSH	<R1,R2>		;Save registers
+	CLR	R1		;Assume no arrows
+	CLR	R2		;Assume no arrows
+	TST	(R3)		;Any arrows?
+	IFNE			;If so then
+	MOV	@(R3),R1	;  Get first arrow position
+	ENDIF			;Endif
+	TST	2(R3)		;Another arrow?
+	IFNE			;If so then
+	MOV	@2(R3),R2	;  Get second arrow position
+	ENDIF			;Endif
+	CMP	(R3)+,(R3)+	;Bump past inline arguments
+	CALB	REPAINT	<R1,R2>	;Repaint line, possibly no arrows
+	POP	<R2,R1>		;Restore registers
+	RETURN			;Return
+
+REPAINT::SUBR	<ARROW1,ARROW2>
+	CALL	U$MARGIN	;Go to left margin
+	$FAP	"!~E!AD"<CR><LF>, <CMDLEN,#CMDBUF>
+				;Print the command string as an error message
+	CMP	(R5),#1		;Is there at least 1 arg?
+	BLT	20$		;No.  That means no arrows
+	MOV	ARROW1(R5),R4	;Save position of one arrow
+	CLR	R3		;Guess that there is only one arrow
+	CMP	(R5),#2		;Are there two args?
+	BNE	10$		;We were right
+	MOV	ARROW2(R5),R3	;Save position of other arrow
+	CMP	R3,R4		;Are they in correct order?
+	BLT	10$		;Yes.
+	MOV	R3,R2		;No.  Swap 'em
+	MOV	R4,R3		; R3 = position of first arrow or 0 if none
+	MOV	R2,R4		; R4 = position of second arrow or 0 if none
+10$:	TST	R4		;Is second arrow at least positive?
+	BLE	20$		;No, that means two zero arrows.
+	MOV	R3,R1		;Position of first arrow
+	BLE	12$		;Don't print this arrow
+	DEC	R1		;Leave room to put the arrow
+	CALL	30$		;Print spaces before arrow.
+	SUB	R3,R4		;Get difference between two arrows
+	BLT	15$		;Difference was negative, no second arrow
+	$FAP	"^"		;Print first arrow, done CR LF yet
+12$:	MOV	R4,R1		;R1 = number of spaces
+	BLE	20$		;No second arrow
+	DEC	R1		;Make room for second arrow
+	CALL	30$		;Print spaces between the two arrows
+15$:	$FAP	"!~E^"<CR><LF>	;Print the arrow as an error message
+20$:	RETURN			;Finished	
+
+;+
+; R1 = number of spaces to print on the terminal
+;-
+
+30$:	TST	R1		;Any spaces before arrow?
+	BEQ	40$		;No.
+35$:	$FAP	""<SPACE>	;Print the required number 
+	SOB	R1,35$		; of spaces
+40$:	RETURN			;Done
+
+.DSABL	LSB			
+GLOBAL	<CMNADR,CMDBUF,CMDLEN>
+
+.SBTTL	U$PMT--Print a prompt string.
+;+
+; U$PMT--Print a prompt string
+;
+; INPUTS:
+;	string	->	counted ASCII string to print (first byte is
+;			exclusive byte count)
+;
+; CALB	U$PMT	<string>
+;
+; EFFECTS:
+;	Cancel CTRL/O.  Enable echo, in case user typed CTRL/C.
+;	If cursor is not at left margin, print <CR><LF> to bring it there.
+;	Print out the string, using $FAP and U$FLUSH.
+;
+; SIDE EFFECTS:
+;	FIRQB and XRB clobbered.
+;-
+
+.ENABL	LSB
+
+U$PMT::	SUBR	<STRING>
+	CALL	U$TTRST		;Cancel CTRL/O, and enable echo.
+	CALL	U$MARGIN	;Bring cursor to left margin.
+	$FAP	<"!~T!AC">,STRING(R5);Print prompt with transparent controls
+	CALL	DOMT		;transparent controls for the flush also
+	CALL	U$FLUSH		;Force it out, even if it doesn't end with 
+				;<LF>.
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	U$MARGIN--move cursor to left margin if not already there
+;+
+; U$MARGIN--move cursor to left margin if not already there, by
+;	printing a <CR><LF>.  If detached, do nothing.
+;
+; USAGE:
+;	CALL	U$MARGIN
+;
+; OUTPUTS:
+;	If cursor is not already at left margin, a <CR><LF> is output.
+;	(This flushes the terminal buffer.)
+;
+; SIDE EFFECTS:
+;	XRB clobbered.
+;-
+
+.ENABL	LSB
+
+U$MARGIN:								;019
+	CALL	U$FLUSH		;Flush buffer.
+U$LMARGIN::
+	CALLX	CLRXRB		;Zero the XRB.
+				;XRB+XRCI = 0 (channel 0).
+	SYS	.POSTN		;Get cursor position.  
+				;(Ignore possible ?I/O to detached keyboard.)
+	TSTB	XRB+2		;Is cursor at left margin?
+	IFNZ			;If not then
+	$FAP	""<CR><LF>	;  Print a <CR><LF>.
+	ENDIF			;Endif
+	TST	PRTMOD		;Is PRTMOD set to prevent all output?
+	BMI	10$		;Yes, return and let somebody else reset it.
+	CLR	PRTMOD		;Clear CUI print modifiers in case we were
+				; already at left margin
+10$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	$FAO--Formatted ASCII Output
+
+.MACRO	$FAO	CTRLSTR,OUTLEN,BUFLEN,BUFAD,PLUGINS
+	.IRPC	C,<CTRLSTR>
+	.IF	IDN <C>,<">
+$$$IMM	=	1
+	.IFF
+	.IF	IDN <C>,<'>
+$$$IMM	=	1
+	.IFF
+$$$IMM	=	0
+	.ENDC
+	.ENDC
+	.MEXIT
+	.ENDR
+
+	.MCALL	CALB
+	.IF	EQ <$$$IMM-1>
+	.SAVE								;012
+	.PSECT	U$TEXT,RO,REL,LCL,CON
+$$$ADDR	=	.
+	.MCALL	.ASCIC
+	.ASCIC	<CTRLSTR>
+	.RESTORE							;012
+
+	.IF	B <PLUGINS>
+	 CALB	$FAO <#$$$ADDR,OUTLEN,BUFLEN,BUFAD>
+	.IFF
+	 CALB	$FAO <#$$$ADDR,OUTLEN,BUFLEN,BUFAD,PLUGINS>
+	.ENDC
+	.IFF
+	.IF	B <PLUGINS>
+	 CALB	$FAO <CTRLSTR,OUTLEN,BUFLEN,BUFAD>
+	.IFF
+	 CALB	$FAO <CTRLSTR,OUTLEN,BUFLEN,BUFAD,PLUGINS>
+	.ENDC
+	.ENDC
+	.GLOBL	$FAO
+	.ENDM	$FAO
+
+.SBTTL	$FAO--Formatted ASCII Output
+;+
+; $FAO--Formatted ASCII Output
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status:
+;		0	for success
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;	outlen	->	number of chars actually put into user buffer
+;
+; In case of buffer overflow, $FAO fits as many characters as it can into
+; user buffer.  All output variables are still meaningful.
+;-
+
+.ENABL	LSB
+
+$FAO::	SUBR	<CTRLSTR,OUTLEN,BUFLEN,BUFAD,ARGS>
+	MOVB	#YES,USRBUF	;We're using user's buffer.
+	TST	(R5)+		;Point at first arg.
+	.ASSUME	 CTRLSTR EQ 2	;
+	MOV	(R5)+,R3	;Address of control string.
+	.ASSUME	 OUTLEN EQ 4
+	PUSH	(R5)+		;Save address of where to put length
+				;of string transferred into user buffer.
+	.ASSUME	BUFLEN EQ 6
+	MOV	(R5)+,USRFREE	;Number of free slots in user buffer.
+	.ASSUME	 BUFAD EQ 10
+	MOV	(R5),USRNEX	;Address of next free slot in user buffer.
+	MOV	(R5)+,@(SP)	;Save address of next free slot.
+	.ASSUME	ARGS EQ 12	;R5 points at first plugin.
+	CALL	FA		;Format the output string.
+	SUB	USRNEX,@(SP)	;Compute how many chars ...
+	NEG	@(SP)+		;we put out.	
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	$FAP--Formatted ASCII Print
+
+.MACRO	$FAP	CTRLSTR,PLUGINS
+	.IRPC	C,<CTRLSTR>
+	.IF	IDN <C>,<">
+$$$IMM	=	1
+	.IFF
+	.IF	IDN <C>,<'>
+$$$IMM	=	1
+	.IFF
+$$$IMM	=	0
+	.ENDC
+	.ENDC
+	.MEXIT
+	.ENDR
+
+	.MCALL	CALB
+	.IF	EQ <$$$IMM-1>
+	.SAVE								;012
+	.PSECT	U$TEXT,RO,REL,LCL,CON
+$$$ADDR	=	.
+	.MCALL	.ASCIC
+	.ASCIC	<CTRLSTR>
+	.RESTORE							;012
+
+	.IF	B <PLUGINS>
+	 CALB	$FAP <#$$$ADDR>
+	.IFF
+	 CALB	$FAP <#$$$ADDR,PLUGINS>
+	.ENDC
+	.IFF
+	.IF	B <PLUGINS>
+	 CALB	$FAP <CTRLSTR>
+	.IFF
+	 CALB	$FAP <CTRLSTR,PLUGINS>
+	.ENDC
+	.ENDC
+	.GLOBL	$FAP
+	.ENDM	$FAP
+
+.SBTTL	$FAP--Formatted ASCII Print
+;+
+; $FAP--Formatted ASCII Print
+;
+; OUTPUTS:
+;	C=1	if error.
+;	R0	=	return status
+;		0	=	success
+;-
+
+.ENABL	LSB
+
+$FAP::	SUBR	<CTRLSTR,ARGS>
+	CLRB	USRBUF		;We're not using user's buffer.  We're
+				;using our own buffer.
+	TST	(R5)+		;Point at first plugin.
+	.ASSUME	CTRLSTR EQ 2
+	MOV	(R5)+,R3	;Address of control string.
+	.ASSUME	ARGS EQ 4	;R5 points at first plugin.
+	CALL	FA		;Format the output string.
+	RETURN
+
+.DSABL	LSB
+
+;+
+; FA--Format ASCII.
+;
+; INPUTS:
+; 	R5	->	first plugin
+; 	R3	->	control string
+;
+; CALL:
+;	CALL	FA
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status (0 for success)
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;
+; SIDE EFFECTS:
+;	R1-R5 random.
+;-
+
+;+
+; FAF -- Format ASCII with fixed length control strings
+;
+; INPUTS:
+;	R2	=	maximum length of the null padded control string
+;	R3	->	"control string"
+;	R5	->	first plugin
+;
+; CALL:
+;	CALL	FAF
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status (0 for success)
+;
+; SIDE EFFECTS:
+;	R1-R5 random.
+;-
+
+
+; We don't check for end of control string in the middle of a formatting
+; directive.  If that happens, we don't get sick, but we produce strange
+; results.
+
+; INTERNAL VARIABLES:
+;	R1	=	next char to put into buffer
+;	R2	=	number of chars of control string remaining to process
+;	R3	->	next character of control string to process
+;	R4	->	entry of DIRTBL that we're currently searching
+;	R5	->	next arg to plug in
+; DIRTBL is list of formatting directives that we understand.
+
+DIRTBL:	.WORD	"AC,DOAC	;!AC -- counted ASCII directive
+	.WORD	"AD,DOAD	;!AD -- ASCII string directive
+	.WORD	"AZ,DOAZ	;!AZ -- ASCIZ string directive
+	.WORD	"UB,DOUB	;!UB -- unsigned decimal byte directive
+	.WORD	"UW,DOUW	;!UW -- unsigned decimal word directive
+	.WORD	"UL,DOUL	;!UL -- unsigned decimal longword directive
+	.WORD	"SL,DOSL	;!SL -- signed decimal longword directive
+	.WORD	"OW,DOOW	;!OW -- octal word directive
+	.WORD	"RW,DORW	;!RW -- RAD50 word directive
+	.WORD	"~F,DOMF	;!~F -- Ignore noecho, nowarning & noverify
+	.WORD	"~E,DOME	;!~E -- Ignore noecho, noverify
+	.WORD	"~I,DOMI	;!~I -- Ignore noverify
+	.WORD	"~T,DOMT	;!~T -- Use transparent controls modifier
+	.WORD	0		;end of table
+
+.ENABL	LSB
+
+FA:	CLR	R2
+	BISB	(R3)+,R2	;Get number of chars in string.
+FAF:	TST	R2		;Any chars left?
+	BLE	25$		;No, finished
+	TSTB	(R3)		;Is next char a null?
+	BEQ	25$		;Yes, we must be finished.
+	CMPB	(R3),#'!	;Is next char a "!"?
+	IFNE			;If not then
+15$:	MOVB	(R3)+,R1	;  Get next char.
+	CALL	PUTCHR		;  Put it into buffer.
+	BCS	30$		;  Quit if error.
+	DEC	R2		;  Update char count.
+	BR	FAF		;  Loop on
+	ENDIF			;Endif
+
+; We see an exclamation point.  Check for presence of a directive
+
+	MOV	#DIRTBL,R4	;Point at table of directives.
+	INC	R3		;Point at first char of directive.
+	DEC	R2		;One fewer chars remain in ctrl string.
+20$:	CMPB	(R3),(R4)	;Does first char match table entry?
+	IFEQ			;If so then
+	CMPB	1(R3),1(R4)	;  Does second char match table entry?
+	IFEQ			;  If so then
+	CMPB	(R3)+,(R3)+	;    Point at char following directive.
+	CMPB	-(R2),-(R2)	;    Two less chars remain in ctrl string.
+	PUSH	<R2,R3,R4>	;    Save some registers.
+	CLR	R0		;    Preset no error.
+	CALL	@2(R4)		;    Dispatch to routine to process this
+				;    directive.
+	POP	<R4,R3,R2>	;    Restore the registers.
+				;    Now R1 random, R0=status, 
+				;    R5 -> next plugin.
+	BCS	30$		;    Quit if error.
+	BR	FAF		;    Loop onward.
+	ENDIF			;  Endif
+	ENDIF			;Endif - Table entry doesn't match.
+
+	CMP	(R4)+,(R4)+	;Point at next table entry.
+	TST	(R4)		;Did we try all possible entries?
+	BNE	20$		;No, try to match another table entry.
+	DEC	R3		;Yes, point back at exclamation point
+	INC	R2		;Count this character again
+	BR	15$		;Put this into buffer
+
+25$:	CLR	R0		;Flag no error. (Clears C-bit also)
+30$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	DOAC--Process a !AC (counted ASCII) directive.
+;+
+; DOAC--Process a !AC (counted ASCII) directive.  
+;
+; INPUTS:
+;	R5	->	counted ASCII string (first byte is exclusive char
+;			count)
+;
+; CALL	DOAC
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status:
+;		0	for success
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;	R5	incremented by 2, to point at next plugin
+;
+; SIDE EFFECTS:
+;	R1-R4	random
+;-
+
+.ENABL	LSB
+
+DOAC:	MOV	(R5)+,R1	;Point at counted ASCII string.
+	MOV	R1,R3
+	CLR	R2
+	BISB	(R3)+,R2	;Get number of chars in string.
+	IFNZ			;If there are any chars then
+10$:	MOVB	(R3)+,R1	;  Get next char.
+	CALL	PUTCHR		;  Put it into buffer.
+	BCS	20$		;  Quit if error.
+	SOB	R2,10$		;  Loop onward while more chars to output.
+	ENDIF
+	;CLR	R0		;Flag no error.
+	;CLC			;Flag no error.
+20$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	DOAD--Process a !AD (ASCII string) directive.
+;+
+; DOAD--Process a !AD (ASCII string) directive.  
+;
+; INPUTS:
+;	R5	->	length of string
+;	R5+2	->	address of string
+;
+; CALL	DOAD
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status:
+;		0	for success
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;	R5	incremented by 4, to point at next plugin
+;
+; SIDE EFFECTS:
+;	R1-R4	random
+;-
+
+.ENABL	LSB
+
+DOAD:	MOV	(R5)+,R2	;Get length of string.
+	MOV	(R5)+,R3	;Get address of string.
+	TST	R2		;Are there any chars?
+	IFNZ			;If so then
+10$:	MOVB	(R3)+,R1	;  Get next char.
+	CALL	PUTCHR		;  Put it into buffer.
+	BCS	20$		;  Quit if error.
+	SOB	R2,10$		;  Loop onward while more chars to output.
+	ENDIF
+	;CLR	R0		;Flag no error.
+	;CLC			;Flag no error.
+20$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	DOAZ--Process a !AZ (ASCIZ string) directive.
+;+
+; DOAZ--Process a !AZ (ASCIZ string) directive.  
+;
+; INPUTS:
+;	R5	->	address of null-terminated string
+;
+; CALL	DOAZ
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status:
+;		0	for success
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;	R5	incremented by 2, to point at next plugin
+;
+; SIDE EFFECTS:
+;	R1-R4	random
+;-
+
+.ENABL	LSB
+
+DOAZ:	MOV	(R5)+,R3	;Get address of string.
+10$:	MOVB	(R3)+,R1	;Get next char.
+	BZE	20$		;It's the null terminator. Return with C=0.
+	CALL	PUTCHR		;Put it into buffer.
+	BCC	10$		;Loop onward unless error.
+20$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	DOUB--Process a !UB (unsigned decimal byte ) directive.
+;+
+; DOUB -- Process a !UB (unsigned decimal byte ) directive.  
+;
+; INPUTS:
+; 	R5	->	unsigned byte to convert to decimal
+;
+; CALL	DOUW 
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status:
+;		0	for success
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;	R5	incremented by 2, to point at next plugin.
+;
+; SIDE EFFECTS:
+;	R1-R4 random.
+;-
+
+; INTERNAL VARIABLES:
+;	R4	=	number of digits output so far
+;	R3	=	running quotient
+;	R1	=	next char to output
+
+.ENABL	LSB
+
+DOUB:	CLR	R3		;Clear number to convert
+	BISB	(R5)+,R3	;Number to convert.
+	INC	R5		;Point at next WORD address
+	BR	DOWD		;Go do it as though it were a word
+
+.DSABL	LSB
+
+.SBTTL	DOUW--Process a !UW (unsigned decimal word) directive.
+;+
+; DOUW -- Process a !UW (unsigned decimal word) directive.  
+;
+; INPUTS:
+; 	R5	->	unsigned integer to convert to decimal
+;
+; CALL	DOUW 
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status:
+;		0	for success
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;	R5	incremented by 2, to point at next plugin.
+;
+; SIDE EFFECTS:
+;	R1-R4 random.
+;-
+
+; INTERNAL VARIABLES:
+;	R4	=	number of digits output so far
+;	R3	=	running quotient
+;	R1	=	next char to output
+
+.ENABL	LSB
+
+DOUW:	MOV	(R5)+,R3	;Number to convert.
+	.BR	DOWD		;Do word
+				
+DOWD:				;R3 = number to convert
+	CLR	R4		;Haven't output any digits yet.
+				;Repeat
+10$:	CLR	R2		;  Zero MSB for div.
+	DIV	#10.,R2		;  Divide R3 by 10. Remainder (next digit) in 
+				;  R3.  Quotient in R2.
+	ADD	#'0,R3		;  Convert digit to ASCII.
+	PUSH	R3		;  Push digit.
+	INC	R4		;  Update digit counter.
+	MOV	R2,R3		;  Set up quotient for another divide.
+	BNE	10$		;  While more digits to output, loop onward.
+
+20$:	MOVB	(SP)+,R1	;Get next digit to put into buffer.
+	CALL	PUTCHR		;Put it into buffer.
+	SOB	R4,20$		;Loop while more digits to output.
+	;BCS	30$		;Quit if error.
+	;CLR	R0		;Flag no error.
+	;CLC			;Flag no error.
+30$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	DOUL--Process a !UL (Unsigned decimal longword) directive.
+;+
+; DOUL--Process a !UL (Unsigned decimal longword) directive.
+;
+; INPUTS:
+; 	R5	->	address of two word block containing unsigned 
+;			32-bit integer
+;
+; CALL	DOUL
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status:
+;		0	for success
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;	R5	incremented by 2, to point at next plugin.
+;
+; SIDE EFFECTS:
+;	R1-R4 random.
+;-
+.ENABL	LSB
+
+DOUL:	CLR	R4		;Indicate unsigned call	
+	BR	DOLW		;Do longword call
+	
+.DSABL	LSB
+
+.SBTTL	DOSL--Process a !SL (Signed decimal longword) directive.
+;+
+; DOSL--Process a !SL (Signed decimal longword) directive.
+;
+; INPUTS:
+; 	R5	->	address of two word block containing signed 
+;			32-bit integer
+;
+; CALL	DOSL
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status:
+;		0	for success
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;	R5	incremented by 2, to point at next plugin.
+;
+; SIDE EFFECTS:
+;	R1-R4 random.
+;-
+
+	TMPORG IMPURE
+NUM:	.BLKW	2
+	UNORG
+	
+.ENABL	LSB
+
+DOSL:	MOV	#1,R4		;Indicate signed call
+DOLW:				;Do long word: R4=0 -> unsigned, R4=1 -> signed
+	MOV	(R5)+,R1	;(R1) = least significant bits
+				;(R1+2)=most significant bits
+	MOV	#NUM,R2		;Point to number storage location
+	MOV	(R1)+,2(R2)	;Need (R1) = most significant bits
+	MOV	(R1),(R2)	;     (R1+2) = least significant bits
+	MOV	R2,R1		;Point to NUM
+	CLR	R2		;Suppress leading zeros
+	SUB	#12.,SP		;Make room for 10 digits and sign (if allowed)
+	MOV	SP,R0		;R0 -> Output buffer
+	MOV	R0,-(SP)	;Now save R0 on stack
+	TST	R4		;Signed or unsigned?
+	IFEQ			;If unsigned then
+	CALLX	$CDBL		;  Do unsigned conversion to ascii
+	ELSE			;Else
+	CALLX	$CDBLS		;  Do signed conversion to ascii
+	ENDIF			;Endif
+	MOV	(SP)+,R2	;R2 -> output buffer	
+	SUB	R2,R0		;Compute number of characters
+	.ASSERT	R0 GT #0	;There are characters
+	.ASSERT	R0 LE #11.	;Not more than 11, though
+	MOV	R0,R4		;R4 = number of characters 
+20$:	MOVB	(R2)+,R1	;Get next digit to put into buffer.
+	CALL	PUTCHR		;Put it into buffer.
+	SOB	R4,20$		;Loop while more digits to output.
+	ADD	#12.,SP		;Restore stack
+	;BCS	30$		;Quit if error.
+	;CLR	R0		;Flag no error.
+	CLC			;Flag no error.
+30$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	DOOW--Process a !OW (octal word) directive.
+;+
+; DOOW -- Process a !OW (octal word) directive.  
+;
+; INPUTS:
+; 	R5	->	unsigned integer to convert to octal
+;
+; CALL	DOOW 
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status:
+;		0	for success
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;	R5	incremented by 2, to point at next plugin.
+; 
+; SIDE EFFECTS:
+;	R1-R4 random.
+;-
+
+; INTERNAL VARIABLES:
+;	R4	=	number of digits output so far
+;	R3	=	running quotient
+;	R1	=	next char to output
+
+.ENABL	LSB
+
+DOOW:	MOV	(R5)+,R3	;Number to convert.
+	CLR	R4		;Haven't output any digits yet.
+				;Repeat
+10$:	CLR	R2		;  Zero MSB for div.
+	DIV	#8.,R2		;  Divide R3 by 8. Remainder (next digit) in 
+				;  R3.  Quotient in R2.
+	ADD	#'0,R3		;  Convert digit to ASCII.
+	PUSH	R3		;  Push digit.
+	INC	R4		;  Update digit counter.
+	MOV	R2,R3		;  Set up quotient for another divide.
+	BNE	10$		;  While more digits to output, loop onward.
+
+20$:	MOVB	(SP)+,R1	;Get next char to put into buffer.
+	CALL	PUTCHR		;Put it into buffer.
+	SOB	R4,20$		;Loop while more digits to output.
+	;BCS	30$		;Quit if error.
+	;CLR	R0		;Flag no error.
+	;CLC			;Flag no error.
+30$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	DORW--Process a !RW (RAD50 word) directive.
+;+
+; DORW -- Process a !RW (RAD50 word) directive.  
+; Don't output spaces.  //Spaces other than trailing spaces should be output.//
+;
+; INPUTS:
+; 	R5	->	word of RAD50 to convert
+;
+; CALL	DORW 
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	exit status:
+;		0	for success
+;		U.LONG if string didn't fit into user buffer ($FAO only)
+;	R5	incremented by 2 to point at next plugin.
+;
+; SIDE EFFECTS:
+;	R1-R4 random.
+;-
+
+RADTBL:	.ASCII	<40>/ABCDEFGHIJKLMNOPQRSTUVWXYZ$.?0123456789/		;019
+
+; R4	=	number of chars output so far
+; R3	=	running quotient
+
+.ENABL	LSB
+
+DORW:	CLR	R4		;Haven't pushed any chars yet.
+	MOV	(R5)+,R3	;Get RAD50 word to convert.
+10$:	CLR	R2		;Zero the high-order bits.
+	DIV	#50,R2		;Divide so next RADIX-50 char is remainder.
+	MOVB	RADTBL(R3),-(SP);Save the corresponding ASCII.
+	INC	R4		;Update character counter.
+	MOV	R2,R3		;Set up quotient for another divide.
+	BNZ	10$		;While more chars to output, loop onward.
+				;Now R4 = number of chars on stack.
+20$:	MOVB	(SP)+,R1	;Get next char to put into buffer.
+	CMP	R1,#SPACE	;Is it a space?
+	IFNE			;If not then
+	CALL	PUTCHR		;  Put it into buffer.
+	ENDIF
+	SOB	R4,20$		;Loop while more chars to output.
+	;BCS	30$		;Quit if error.
+	;CLR	R0		;Flag no error.
+	;CLC			;Flag no error.
+30$:	RETURN
+
+.DSABL	LSB
+
+DOMF:	BIS	#20,PRTMOD
+	RETURN
+DOME:	BIS	#40,PRTMOD
+	RETURN
+DOMI:	BIS	#200,PRTMOD
+	RETURN
+DOMT:	BIS	#40000,PRTMOD
+	RETURN
+
+.SBTTL	PUTCHR--Buffer a single character.
+;+
+; PUTCHR--Buffer a single character.
+;
+; INPUTS:
+;	R1	=	character to print.
+;
+; CALL	PUTCHR
+;
+; OUTPUTS:
+;	C=1	if	error.
+;	R0	=	return status:
+;		0	=	normal completion
+;		U.LONG	if character didn't fit into buffer.
+;			(Possible only with $FAO, not with $FAP.)
+;-
+
+.ENABL	LSB
+
+PUTCHR:	TSTB	USRBUF		;Are we putting character into user's
+				;buffer?
+	IFNZ			;If so then
+	TST	USRFREE		;  Is buffer full?
+	IFZE			;  If so then
+	MOV	#U.LONG,R0	;    Say ?Command too long.
+	SEC			;    Flag error.
+	BR	10$		;    Quit.
+	ENDIF
+	DEC	USRFREE		;  One less free slots in buffer.
+	MOVB	R1,@USRNEX	;  Move a char.
+	INC	USRNEX		;  Point at next free slot.
+	ELSE			;Else put char into terminal buffer.
+	TST	TERFREE		;  Is there room in buffer?
+	IFZE			;  If buffer is full then
+	CALL	U$FLUSH		;    Empty it.
+	ENDIF
+	.ASSERT	TERFREE GT #0	;  There's room now.
+	DEC	TERFREE		;  One less free slots in buffer.
+	MOVB	R1,@TERNEX	;  Move a char.
+	INC	TERNEX		;  Point at next free slot.
+	CMPB	R1,#LF		;  Did we put a line feed into buffer?
+	IFEQ			;  If so then
+	CALL	U$FLUSH		;    Flush the buffer.
+	ENDIF
+	ENDIF
+	CLR	R0		;Flag no error.
+	;CLC			;Flag no error.
+10$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.LONG>
+
+.SBTTL U$FLUSH--Flush terminal buffer.
+;+
+; U$FLUSH -- Flush terminal buffer
+; U$FORCE -- Flush terminal buffer, setting modifier indicating FORCED WRITE
+;-
+.ENABL	LSB
+
+U$FLUSH:								;019
+U$FORCE::CALLX	CLRXRB		;Zero XRB.
+	TST	PRTMOD		;What does the print modifier look like?
+	BMI	10$		;<0 so don't not print this message
+	MOV	PRTMOD,XRB+XRMOD;Set modifiers to whatever was specified
+	BIS	#100,XRB+XRMOD	;Make sure CUI mode is always set.
+	CLR	PRTMOD		;Reset PRTMOD one-shot to zero
+	MOV	#TER.BSIZ,-(SP)	;
+	SUB	TERFREE,(SP)	;Compute how many chars in buffer.
+	MOV	(SP),XRB+XRLEN	;
+	MOV	(SP)+,XRB+XRBC	;
+	IFNZ			;If there are any chars then
+	MOV	#TERBUF,XRB+XRLOC
+	;MOVB	#2*0,XRB+XRCI	;  Channel number is 0.
+	SYS	.WRITE		;  Write out the buffer.
+	PUSH	R0		;  Save this register
+	CLR	R0		;  Assume no error
+	BISB	FIRQB,R0	;  Set error code
+	;TST	R0		;  An error?  (Should only happen if a logfile
+				;  is open and the write caused quota exceeded 
+				;  or no room for user, etc...)
+	IFNZ			;  If error occured
+	CMP	R0,#QUOTA	;    Is error ?Quota exceeded?
+	IFEQ			;    If so then
+	CMESSAGE #U.NLOG	;      Say ?Unable to write to logfile
+	MOV	#QUOTA,R0	;      Reset message
+	ENDIF			;    Endif
+	CMESSAGE R0		;    Print the RSTS error message
+	ENDIF			;  Endif
+	POP	R0		;  Restore register
+	ENDIF			;Endif
+10$:	MOV	#TER.BSIZ,TERFREE;Buffer is empty now.
+	MOV	#TERBUF,TERNEX	;Next free slot is first slot in buffer.
+	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<QUOTA,U.NLOG>
+
+.SBTTL	U$RSTP--Reset terminal buffer.
+
+.ENABL	LSB
+
+U$RSTP::MOV	#TERBUF,TERNEX
+	MOV	#TER.BSIZ,TERFREE
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	U$TTRST--Restart terminal output.
+;+
+; U$TTRST--Restart terminal output after possible ^C or ^O.
+;
+; Cancel ^O.  Ignore ?I/O to detached keyboard and all other errors.
+;
+; CALL	U$TTRST
+;
+; SIDE EFFECTS:
+; 	Byte 0 of FIRQB clobbered.
+;-
+
+.ENABL	LSB
+
+U$TTRST:SYS	.TTRST		;Cancel ^O. 				;019
+	RETURN
+
+.DSABL	LSB
+.END

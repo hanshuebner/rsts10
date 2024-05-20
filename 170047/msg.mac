@@ -1,0 +1,629 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.LIBRARY /CMN:NETDEF.SML/
+TITLE	MSG,<MESSAGE SEND/RECEIVE>,0A,10-MAY-91,GPK/KPH/KCG/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR MSG
+
+;+
+;
+;  000	GPK  14-Feb-84	Created by moving code out of FSS, SND
+;  001	KPH  11-Apr-84	Add .CMDLN hook to .MESAG
+;  002	GPK  25-Apr-84	Privilege name changes
+;  003	KCG  29-May-84	Correctly scrap the flag bit for a send by LOT
+;  004	KPH  25-Jun-84	Bugfixes
+;  005	KPH  05-Oct-84	Don't call MOVMEM if no data to send
+;  006  KPH  09-Apr-85	Bugfix in wait setup
+;
+;			[RSTS V9.2]
+;  007  KPH  25-Jul-85	Job Control Region
+;  008  KPH  24-Oct-85	Bugfix in ancient send/receive emulation
+;
+;			[RSTS V9.3]
+;  009  KPH  01-Oct-85	Changes for DECnet/E V4.0
+;  010  KPH  23-May-86	Call DECnet after successful receives
+;			Remove the use of posting
+;
+;			[RSTS V9.4]
+;  011	PJH  06-May-87	Fix Rtn of Job# in byte 5 on sends
+;
+;			[RSTS V10.0]
+;  012	JFM  17-Oct-89	Add hook for recall
+;  013  WRM  20-Jun-90	Protect from 0 length buffer call to MOVMEM
+;-
+
+.SBTTL	Handle .MESAG Monitor Call
+
+.MCALL	$MSGFUN			;Define .MESAG function codes
+	$MSGFUN
+
+	DEFORG	MSG
+
+;+
+;	R0 =  EMT code
+;	R1 -> JOBDA @JOBF
+;	R2 -> JDB2
+;	R3 -> Mapped XRB
+;	R4 -> Mapped FIRQB
+;	R5 -> RTS block
+;-
+
+	EMTENT	.MESAG,,EM2	; .MESAG comes here
+
+	MOVB	FQFIL(R4),R5	; Get function code for convienence
+	CMP	R5,#-25.	; Is it the .CMDLN write hook?		;001
+	BEQ	10$		; Yes, it sure is			;001
+	CMP	R5,#25.		; How about the .CMDLN read hook?	;001
+	BNE	20$		; No, not this time			;001
+10$:	JMPX	CMDLIN		; Yes, go to it				;001
+
+20$:	CMP	R5,#SR$RCL	; Is it command recall?			;012
+	BNE	22$		; No, carry on				;012
+	CALLMR	DCLRCL,KBDAP5	; Yes, do the DCL recall command from KBD ;012
+
+22$:	TST	(R3)		; Check user buffer length
+	BEQ	40$		; No buffer - go move the FIRQB
+	TST	R5		; Is it receive or remove?
+	BPL	30$		; Yes, go set C=1 as "read" indication
+	TST	XRBC(R3)	; Check count of bytes to send
+	BEQ	40$		; No message in buffer, go move the FIRQB
+	TST	(PC)+		; Set C=0 as "write" indication
+30$:	SEC			; Set C=1 as "read" indication
+	CALLX	CHKXRB		; Now check the parameters
+40$:	CALLM	MOVFQB,EMTAP5	; Move FIRQB to work block
+	MOV	R3,R4		; Put work block pointer here
+	MOV	#REMFQ,R0	; Guess at remove FIP code
+	TST	R5		; Whattayawannado ?
+	BEQ	60$		; =0, remove
+	BMI	70$		; <0, send
+	CMPB	R5,#SR$RCV	; Receive call?
+	BEQ	110$		; Yes, go do that
+	CMPB	R5,#SR$DCR	; Combined call?
+	BNE	50$		; No, skip
+	MAP	JOBJC6,APR=6,DATA ; Yes, map JCR entry			;007
+	MOV	JOBJCR,R0	; And point to it			;008
+	TST	JCMPTR(R0)	; Declared already?			;008
+	BNE	105$		; Yes, so just do the receive		;004
+50$:	MOV	#DCLFQ,R0	; Declare, set correct FIP code
+	CMP	R5,#LCL$MX	; Network function ?
+	BGT	80$		; Yes => check for networks installed
+60$:	CALLMR	FIPSND,EMTAP5	; No, so give the request to FIP
+
+70$:	CMP	R5,#SR$SLM	; Is this the send-mask function?
+	BEQ	SEND		; Yes, go do that
+	CMP	R5,#SR$SLD	; Is it a simple local send?
+	BEQ	SEND		; Yes, do that
+80$:	TST	(PC)+		; Clear carry, skip the "SEC"
+
+;;	RDOENT	MSGRDO
+	
+	SEC			; Indicate REDO entry
+	
+	CALL	@NETSER		; Call the DECnet/E service entry	;009
+	BNE	100$		; Return error if no networks
+	BVS	60$		; Go dispatch if FIP required
+90$:	RETURN			; Else just exit to "RTI3"
+
+100$:	ERROR	ERRERR		; "Missing special feature" error
+
+105$:	CLR	FQPPN(R4)	; Combined call, match conventions	;004
+	MOVB	#SR$RCV,FQFIL(R4) ; Set up receive function code	;010
+110$:	JMP	RECEVE		; Try to receive a message
+
+GLOBAL	<$FIPTBL,UDPAR0,NETSER>						;009
+
+.SBTTL	Send a message
+
+;+
+;	R4 -> Work block (a copy of the user's FIRQB)
+;		 +4  = -1 => Send
+;		      -11.=> Send with mask
+;		 +5  =	0 => Send by receiver ID
+;			Job # *2 => Send to Job
+;			Job # *2 + 1 => Send by name, check job number	;002
+;			<200> + Local Object Type => Send to Local Object
+;		 +6  =	Receiver ID for ID send (6 bytes ascii)
+;		+14  =	Parameter bytes (20. of them) if Send
+;		+20  =	Parameter bytes (16. of them) if Send-mask
+;
+;	In FIRQB on return:
+;		 +5  =	Job # *2 of receiving job
+;-
+
+.ENABL	LSB
+
+SEND:	MOV	R4,R3		; Copy FIRQB pointer to safe spot
+	CMP	(R3)+,(R3)+	;  and index to parameters
+	CMPB	(R3)+,#SR$SLM	; Is it send or send-mask?
+	BNE	40$		; If not -11., don't set up mask
+	ADD	#P$PARM,R4	; Point R4 to where mask goes
+	MAP	JOBJC6,APR=6,DATA ; Map job's JCR entry			;007
+	MOV	JOBJCR,R2	; And point to it			;007
+	ADD	#JCPRIV,R2	; Now point to caller's privs		;007
+	MOV	R2,R5		; Copy pointer to privileges		;007
+	TST	JCALPP-JCPRIV(R5) ; Alternate privileges valid?		;007
+	BEQ	10$		; No, not this time			;007
+	ADD	#JCALPV-JCPRIV,R5 ; Yes, so point to them		;007
+10$:	MOV	#PRIVSZ/2,R1	; Set up a loop count			;007
+20$:	MOV	(R2)+,-(SP)	; Stack the caller's mask
+	MOV	(R5)+,-(SP)	; And the (possible) third party mask
+	COM	(SP)		; Set up to do a .AND.
+	BIC	(SP)+,(SP)	; And it with caller's mask
+30$:	MOV	(SP)+,(R4)+	; Store this word
+	SOB	R1,20$		; Loop for the whole mask		;007
+.REPT	4-<PRIVSZ/2>
+	CLR	(R4)+		; We reserve 4 words max for mask
+.ENDR
+40$:	BIC	#40-1,R4	;  and fix up the FIRQB pointer
+	MOVB	(R3),R2		; Pick up job# *2 or Local Object Type (if any)
+	BPL	100$		; No <200> bit => not a Local Object Type
+	BIC	#^C<177>,R2	; Local Object Type: trash the flag bits   ;003
+	BNE	60$		; Non-zero => LOT passes its first check
+50$:	ERROR	BADFUO		; Bad Local Object Type or job# *2
+
+60$:	CLRB	(R3)+		; Clear LOT and point R3 -> ID area
+	CMP	R2,#SO.1MX	; LOT within "single-instance" range ?
+	BHI	50$		; Too high => error
+	ASL	R2		; Form word offset			;002
+	MOV	LOTTBL-2(R2),R5	; Get RIB address for indicated Local Object
+	BEQ	80$		; None found => no such receiver
+	MOVB	S.JBNO(R5),R2	; Pick up Local Object's job# *2
+	BR	125$		;   and go process the SEND		;004
+
+NOPRIV:	ERROR	PRVIOL		; Zap 'em with protection violation
+
+70$:	CALL	GETRIB		; Get RIB pointer for job # send
+	BCC	125$		; Receiver exists, so do it		;004
+80$:	ERROR	NOSUCH		; Receiver for message not found
+
+90$:	ERROR	BADCNT		; Local message "data" too big
+
+;+
+; At this point:
+;
+;	R2  ->	Job # *2 from FIRQB+5 or from LOTTBL (or 0)
+;	R3  ->	ID words in work block
+;	R4  ->	FIRQB
+;	R5  ->	Receiving RIB (if going to 120$, sending by Local Object Type)
+;-
+
+100$:	MOVB	(R3),R2		; Pick up job# *2 (if any)
+	CLRB	(R3)+		;  then clear it and point to ID
+	BITB	#1,R2		; Asking for send by name with job # test? ;002
+	BNE	105$		; Yes, skip ahead			;002
+	BIT	R2,#^C<63.*2>	; Is the job# *2 legal at all ?
+	BNE	50$		; No => error right away
+	TST	R2		; SEND by job # ?
+	BNE	70$		; Yes
+105$:	MOV	R2,-(SP)	; Save job number to test for if any	;002
+	CALL	FIXNUL		; Change nulls to blanks
+	MOV	#SNDLST,R5	; No, get root of the receiver ID list
+110$:	MOV	(R5),R5		; Go to next in the ID list
+	BEQ	80$		; End of list, no receiver, error
+	MOV	R3,R2		; Else copy the desired ID pointer
+	CMP	(R2)+,S.RCID(R5) ; Does the ID match?
+	BNE	110$		; Nope, keep looking
+	CMP	(R2)+,S.RCID+2(R5) ; Really match??
+	BNE	110$		; Nope
+	CMP	(R2)+,S.RCID+4(R5) ; Totally match???
+	BNE	110$		; Nope, loop it...
+	MOVB	S.JBNO(R5),R2	; A total match, get owning job # *2
+	BEQ	80$		; No job? an error!!
+	BIC	#1,(SP)		; Get rid of flag, see if job # test wanted ;002
+	BEQ	120$		; No, skip				;002
+	CMP	(SP),R2		; Job number match?			;002
+	BNE	80$		; No, so call it a mismatch		;002
+120$:	TST	(SP)+		; Toss test job number			;002
+125$:	BITB	#SA.LCL,S.ACCS(R5) ; Any local access allowed
+	BEQ	NOPRIV		; No, local access not allowed
+	BITB	#SA.PRV,S.ACCS(R5) ; Only privileged senders allowed
+	BEQ	130$		; Non-privileged is okay
+	MOV	R0,-(SP)	; Save R0
+	MOV	R5,-(SP)	;  and R5
+	MOVB	JOB,R0		; Get caller's job number
+	CALLX	CHKPRV,R4	; Check the privileges
+	 .BPRIV	SEND		; Must have "SEND" privs		;002
+	BCS	NOPRIV		; Otherwise error
+	MOV	(SP)+,R5	; Restore saved registers
+	MOV	(SP)+,R0
+130$:	TSTB	S.ACCS(R5)	; Are local SENDs 'XOFFed' ?
+	BMI	170$		; Yes - give NO ROOM type failure
+.ASSUME SA.XOF EQ 200
+	TST	JBWAIT(R2)	; Is the receiver hibernating?
+	BEQ	170$		; Yes, same as XOFF
+	CMPB	S.MCNT(R5),S.MMAX(R5) ; Can receiver handle another msg
+	BHIS	160$		; No - receiver is up to quota now
+	MAP	@UDPAR0,APR=6,DATA ; Map caller's first 4K		;007
+	MOVB	R2,@#140000+FIRQB+FQSIZM ;Return receiver's job number	;011
+	MOV	XRB+140000,R2	; Are we doing a send with data?	;004
+	BEQ	135$		; No, not this time			;004
+	MOV	XRB+XRBC+140000,R2 ; Get size of the message "data"
+	CMP	R2,#512.	; Is the size over the legal limit?
+..SLMT	==	.-2	;**PATCH** Local message SEND "data" size limit
+	BHI	90$		; Yes, error
+135$:	BUFFER	GETSML,0,40.	; Get a small buffer (not zeroed) for the PMB ;004
+	BVS	150$		; Die if no buffers available
+	MOV	R5,(R4)		; Save RIB pointer in PMB @ P$LINK
+	MOV	R2,R5		; Copy the "data" size
+	BEQ	190$		; No size, no "data", just "parameters"
+	MOV	R5,R1		; Set buffer size to allocate
+	ADD	#BUFHDR+40-1,R1	;  plus "BUFHDR" for header words
+	BIC	#40-1,R1	;   and round to a small buffer multiple
+	MOV	R4,-(SP)	; Save the PMB address
+	MOV	#40,R2		; Assume we may take from MONPOL
+	MOV	(R4),R4		; Re-get RIB pointer
+	CMP	S.BMAX(R4),R1	; Are we allowed to take this from MONPOL?
+	BHIS	140$		; Yes, skip
+	NEG	R2		; No, so indicate never from MONPOL
+140$:	CALLX	BUFFER,R5,<LRGPOL> ; Get the large buffer
+	MOV	R4,R2		; Move (possible) large buffer addr to here
+	MOV	(SP)+,R4	;  and restore the PMB address
+	BCC	180$		; We did get the large buffer
+	BUFFER	RETSML		;  else return the small buffer
+150$:	ERROR	NOBUFS		;  die on buffering failure
+
+160$:	BISB	#SA.XOF,S.ACCS(R5) ; 'XOFF' local SENDs if no more room
+170$:	CALL	220$		; Awaken the receiver just in case...
+	ERROR	NOROOM		;  since no more messages allowed
+
+180$:	BIT	R2,#37		; Is large buffer in Monitor's pool?
+	BNE	190$		; No, no buffer max update needed
+	MOV	(R4),R1		; Put the RIB pointer here
+	SUB	(R2),S.BMAX(R1)	; Decrease the current buffer byte count
+190$:	CMP	(R4)+,(R4)+	; Index to P$TYPE in the PMB
+.ASSUME	P$TYPE EQ 4
+	MOVB	FQERNO-6(R3),(R4)+ ; Store message type (-1 or -11.)
+	MOVB	JOB,(R4)+	; Store sender's job # * 2 in PMB
+.ASSUME	P$SNDR EQ P$TYPE+1
+	MOV	JOBJD2,R1	; Pick up caller's JDB2 pointer		;007
+	MOV	J2PPN(R1),(R4)+	; And fill in sender's PPN		;007
+.ASSUME	P$SPPN EQ P$SNDR+1
+	MAP	FIPPOL		; Map FIP pool for the IOB		;007
+	MOV	@JOBDA,R0	; Get caller's IOB pointer
+.ASSUME	JDIOB	EQ	0
+	MOV	(R0),R0		; Get KBDDB pointer
+	MOVB	#-1,(R4)+	; Assume sender detached
+	CMPB	DDJBNO(R0),JOB	; Does this job own the KB?
+	BNE	200$		; No job detached
+	BIT	#DDCONS,DDCNT(R0) ; Is it a console
+	BEQ	200$		; No job must be detached
+	MOVB	DDUNT(R0),-1(R4); Tell receiver the KB# of sender
+200$:	MAP	@#KISAR5,APR=5,DATA ; Restore our data mapping		;007
+	CLRB	(R4)+		; Clear out the reserved byte
+	MOV	R5,(R4)+	; Store bytes remaining
+.ASSUME	P$BREM EQ P$SPPN+4
+	ADD	#14-6,R3	; Index to "parameters" in FIRQB (+14)
+.ASSUME	P$PARM EQ P$BREM+2
+210$:	MOV	(R3)+,(R4)+	; Move parameters from work block to PMB
+	BIT	R4,#40-1	; Done ?
+	BNE	210$		; Total of 10. words to move
+	SUB	#40,R4		; Get top of PMB pointer again
+	MOV	(R4)+,R5	; Restore the RIB pointer
+	INCB	S.MCNT(R5)	; Bump message count for this rcvr
+	MOV	R2,(R4)		; Store data address in PMB
+.ASSUME	P$BUFA EQ 2
+	BEQ	215$		; No data, nothing to copy		;005
+	CALL	USRBUF		; Map the user's buffer
+	MOV	@DPAR6,R0	; Get "from" mapping
+	MOV	R5,R1		;  and "from" address
+	SUB	#20000,R1	; Now get from mapping via APR5		;004
+	MOV	R4,-(SP)	; Save PMB pointer
+	MOV	(R4),R4		; Get buffer's contorted address
+	CALLX	MAPBUF		; Map it, pointer in R3
+	ADD	#BUFHDR,R3	;  but skip the buffer header
+	CALLX	MOVMEM		; Move from user to system buffer
+	MOV	(SP)+,R4	; Restore R4
+215$:	MOV	-(R4),R5	; Point to top of PMB, and get RIB pointer ;005
+	CLR	(R4)		; Clear link word
+	SPLC	7		;;; Priority 7 in case this is ERRLOG
+	MOV	R4,@S.MLST+2(R5) ;;; Link new PMB into chain
+	MOV	R4,S.MLST+2(R5)	;;;   and set the end pointer
+	SPLC	3		;;; Drop back to priority 3
+220$:	MOVB	S.JBNO(R5),R4	; Get job # *2 of the receiver
+	CALLX	IOFIN4,R5,JSTIM	; Awaken rcvr since msg is queued
+	RETURN			;  and exit
+
+.DSABL	LSB
+
+GLOBAL	<LOTTBL,SNDLST,JBWAIT,LRGPOL,DPAR6>
+
+;+
+; FIXNUL - Replace nulls in receiver name by blanks
+;
+;	R3 ->	ID field in work block
+;
+;	CALL	FIXNUL
+;
+;	R2	munged
+;-
+
+FIXNUL:	MOV	R3,R2		; Copy ID pointer
+	ADD	#6,R2		; Point beyond it
+10$:	TSTB	-(R2)		; Is this byte a null?
+	BNE	20$		; No
+	MOVB	#40,(R2)	; Yes, replace by blank
+20$:	CMP	R2,R3		; Done checking?
+	BHI	10$		; No
+	RETURN
+
+
+
+;+
+; USRBUF - Map user's message buffer
+;
+;	CALL	USRBUF
+;
+;	R2 =	byte count
+;	R5 ->	buffer
+;	DPAR6	maps buffer
+;	R3	random
+;-
+
+USRBUF:	MAP	@UDPAR0,DATA,APR=6 ;Map the user's XRB
+	MOV	#XRB+140000,R3	;Point to it
+	MOV	XRBC(R3),R2	;Get the byte count
+	CALLRX	SCRUMX		;Map the buffer and return
+
+GLOBAL	<UDPAR0>
+
+; GETRIB - Get receiver ID block from job number.
+;
+;	R2 =  Job number times 2
+;
+;	CALL	GETRIB
+;
+;	R0 = Job number times two
+;	R1 -> Caller's JCR entry
+;	R5 -> Receiver ID block (RIB)
+;
+;	If C=0 then RIB exists
+;	If C=1 then no RIB exists
+
+GETRIB:	CMP	#JOBMX2,R2	; Valid job number on this system ?
+	BLO	10$		; No, return failure
+	TST	JOBTBL(R2)	; Does job exist?			;007
+	BEQ	10$		; No such job
+	MOV	R2,R0		; Copy job # * 2			;007
+	CALLX	MAPJCR		; Map the JCR entry for job		;007
+	MOV	JCMPTR(R1),R5	; Is job a receiver ?			;007
+	BEQ	10$		; Nope set C and exit
+	TSTB	S.SRBN(R5)	; Is this sub RIB #0?
+	BEQ	20$		; Yes found RIB and TST clears C bit
+10$:	SEC			; Set C bit = 1
+20$:	RETURN			; Now exit
+
+GLOBAL	<JOBMX2,JOBTBL>
+
+.SBTTL	Receive a message
+
+;+
+; Receive a message from the queue
+;
+;	R1 -> JOB DATA BLOCK @ JDFLG
+;	R3 -> FIRQB
+;	R4 -> FIRQB
+;		 +4 =  2 => RECEIVE
+;		 +5 =  BIT 0 => SLEEP ON NO MESSAGE INSTEAD OF ERROR
+;		       BIT 1 => TRUNCATE MESSAGES THAT ARE TOO LONG
+;		       BITS 3-2 =  0 => RECEIVE FIRST MESSAGE IN QUEUE
+;		                =  4 => RECEIVE ONLY SELECTED LOCAL MESSAGE
+;		                = 10 => RECEIVE ONLY SELECTED NETWORK MESSAGE
+;		                = 14 => *** SAME AS 4 ***
+;		 +6 =  SELECTION BYTE (@ +6) AND 'REAL' FLAG (@ +7)
+;		+32 =  SUB RIB NUMBER
+;
+;	IN FIRQB ON RETURN (RECEIVES):
+;		 +4 =  MESSAGE TYPE
+;		 +5 =  JOB # *2 OF MESSAGE SENDER
+;		 +6 =  PPN OF MESSAGE SENDER
+;		+10 =  KB # OF SENDING JOB OR -1 IF DETACHED
+;			(FOR LOCAL SENDS)
+;		+11 =  'UNUSED' BYTE
+;		+12 =  NUMBER OF BYTES REMAINING IN MESSAGE
+;		+14 =  PARAMETER BYTES (20. OF THEM)
+;-
+
+.SBTTL	Receive a message
+
+.ENABL	LSB
+
+10$:	RETURN			;Exit
+
+RECEVE:	CALL	GETRB3		;Search for the RIB
+	CALLM	EMLRCV,EMTAP5	; Hook for EMT Logger's special RECEIVE
+	BCC	10$		; EML took care of the call => all done
+	MOVB	JOB,R0		;Get caller's job number
+	CLR	JBSTAT(R0)	;Assume job wants to sleep
+	MOV	#JSTIM!JS.KB,JBWAIT(R0) ;(done here to avoid race conditions) ;006
+	CMP	R5,#ERLRIB	;IS THIS ERRLOG ?
+	BNE	30$		;NO, NORMAL 
+	SPLC	7		;;;UP TO PR7 FOR ERRLOG RECEIVES
+30$:	TST	-(SP)		;;;Get space for a back pointer		;004
+	CMP	(R3)+,(R3)+	;;;R3 -> FIRQB + 4			;004
+	MOV	R5,R2		;;COPY POINTER TO RECEIVER ID BLOCK
+	ADD	#S.MLST,R2	;; AND INDEX TO ROOT OF MESSAGE LIST
+40$:	MOV	R2,(SP)		;;SAVE PTR TO LAST MESSAGE (OR ROOT)
+	MOV	(R2),R2		;;GO TO NEXT MESSAGE IN LIST
+	BNE	45$		;;Got one, check it out			;010
+	JMP	180$		;;NO FURTHER MESSAGES, CHECK FOR STALL	;010
+
+45$:	CMPB	P$TYPE(R2),#SR$SLM ;;Local data with mask?		;010
+	BEQ	50$		;;Yes, skip (C=0)
+	CMPB	P$TYPE(R2),#SR$SLD ;;SET C=0 IF LOCAL DATA ('BHIS'='BCC')
+50$:	BIT	#4*400,(R3)	;;SELECTING LOCAL MESSAGES?
+	BEQ	60$		;;NO, CHECK FOR NETWORK SELECTION
+	BCC	70$		;;SEE IF SENDER JOB # MATCHES IF LOCAL DATA
+	BR	40$		;; ELSE LOOP FOR NEXT MESSAGE
+
+60$:	BIT	#10*400,(R3)	;;SELECTING NETWORK MESSAGES?
+	BEQ	80$		;;NO, TAKE ANY MESSAGE
+	BCC	40$		;;LOOP TO NEXT MESSAGE IF THIS IS LOCAL
+70$:	TST	6-4(R3)		;;ASKING FOR PARTICULAR JOB OR ULA ?
+	BEQ	80$		;;NO, SO GIVE USER THIS MESSAGE
+	CMPB	6-4(R3),P$SNDR(R2) ;;IS THIS THE DESIRED SENDER ?
+	BNE	40$		;;NO, SO LOOP TO NEXT MESSAGE
+80$:	SPLC	3		;Drop to level 3
+	MOV	#XRB+140000,R1	;Point to caller's mapped XRB
+	TST	P$BUFA(R2)	;Have data buffer?
+	BEQ	100$		;No, skip
+	MOV	(R1)+,R4	;Get user's buffer size
+.ASSUME	XRLEN EQ 0
+	MOV	P$BREM(R2),R0	;Get bytes remaining in this message
+	BEQ	100$		;NSP may have a buff without data	;013
+	CMP	R4,R0		;Does that fit?
+	BHIS	90$		;Yes, skip
+	MOV	R4,R0		;No, move only as much as fits
+90$:	MOV	R0,(R1)		;Set count to be moved
+.ASSUME	XRBC EQ XRLEN+2
+	SUB	R0,P$BREM(R2)	;Compute new bytes remaining
+	MOV	R2,-(SP)	;Save PMB pointer
+	MOV	R5,-(SP)	; and RIB pointer
+	MOV	P$BUFA(R2),R4	;Get message buffer address
+	CALLX	MAPBUF		;Map it
+	MOV	R3,R1		;Copy message buffer address
+	ADD	BF.OFF(R3),R1	; now point to data
+	CMP	R1,#140000	;Is this a monitor buffer?		;004
+	BLO	95$		;Yes, so don't set for APR5 mapping	;004
+	SUB	#20000,R1	;Set up for buffer mapping via APR5	;004
+95$:	ADD	R0,BF.OFF(R3)	;Update offset for next time
+	MOV	@DPAR6,R0	;Get "from" mapping
+	CALL	USRBUF		;Map the user buffer
+	MOV	R5,R3		;Copy over "to" address
+	CALLX	MOVMEM		;Move the data
+	MOV	(SP)+,R5	;Restore RIB pointer
+	MOV	(SP)+,R2	; and PMB pointer
+100$:	MOV	R2,R0		;Copy PMB pointer
+	CMP	(R0)+,(R0)+	;Skip 2 words of PMB
+	MAP	@UDPAR0,APR=6,DATA ;Map user's first 4K			;010
+	MOV	#140000+FIRQB+FQFIL,R3 ;And point to FIRQB @ FQFIL	;010
+110$:	MOV	(R0)+,(R3)+	;Move the PMB to FIRQB
+	BIT	#40-1,R0	;Done?					;010
+	BNE	110$		;Branch if not
+	MOV	P$BUFA(R2),R0	;Get data buffer address if any
+	TST	P$BREM(R2)	;Moved all data?
+	BEQ	120$		;Yes, or there wasn't any
+	MOV	JOBWRK,R3	;Point to work block again		;010
+	BIT	#2*400,FQFIL(R3) ;Truncation requested?			;004
+	BEQ	165$		;No, so leave PMB alone			;004
+120$:	BIT	#37,R0		;Is data buffer from MONPOL?
+	BNE	130$		;No, so skip
+	ADD	(R0),S.BMAX(R5)	;Yes, so fix up accounting of MONPOL use
+.ASSUME	BF.SIZ EQ 0
+130$:	DECB	S.MCNT(R5)	;COUNT AS ONE LESS MESSAGE PENDING
+	MOV	(SP),R1		;RESTORE PTR TO PREVIOUS PMB (OR ROOT)	;004
+	SPLC	7		;;;Lock out interrupts in case it's ERRLOG
+	MOV	(R2),(R1)	;;;DELINK THE PMB
+.ASSUME	P$LINK EQ 0
+	BNE	140$		;;;BRANCH IF NOT LAST MESSAGE IN LIST
+	MOV	R1,S.MLST+2(R5)	;;;RESET THE LIST END POINTER
+	BICB	#SA.XOF,S.ACCS(R5) ;;;NO MORE MESSAGES, 'XON' LOCAL SENDS
+140$:	SPLC	3		;Drop priority again
+	CALL	@NETPMB		;Ask DECnet to return this buffer	;009
+	BCS	165$		;It was returned, exit			;009
+150$:	MOV	P$BUFA(R2),R4	;Get data buffer pointer
+	BEQ	160$		;None, skip
+	BUFFER	RETURN		;Release it
+160$:	MOV	R2,R4		;Copy PMB pointer
+	BUFFER	RETSML		;Deallocate PMB
+165$:	TST	(SP)+		;Pop back pointer			;004
+	;CLC			;Mark as not a re-do (from TST above)	;010
+	MOV	JOBF,R1		;Point to job's JDB @ JDFLG		;010
+	MOV	JOBWRK,R4	;Point to job's work block		;010
+	CALL	@NETSER		;Tell DECnet about successful receive	;010
+170$:	MOVB	JOB,R0		;Get caller's job number
+	MOV	JBWAIT(R0),JBSTAT(R0) ;Make him runnable (not sleeping)
+	RETURN			; and exit
+
+180$:	TST	(SP)+		;;NO MESSAGES, POP BACK POINTER
+	CMP	R5,#ERLRIB	;;ERROR LOGGING?
+	BNE	200$		;;NOPE
+	BIT	#14*400,(R3)	;;;DOING SELECTION?
+	BEQ	190$		;;;NO, TRY FOR MISSED ERROR(S)
+	BIT	#4*400,(R3)+	;;;YES, ALLOWING LOCALS?
+	BEQ	200$		;;;LOCALS NOT ALLOWED
+	TSTB	(R3)		;;;ALLOW ERROR LOG (OR ANY)?
+	BNE	200$		;;;NOPE
+190$:	MAP	@UDPAR0,APR=6,DATA ;;;Map user's first 4K		;010
+	MOV	#140000+FIRQB,R4 ;;;And point to (mapped) FIRQB		;010
+	CALLX	ERLMSD		;;;Check for missed error(s)
+	BCC	170$		;;;Exit if we got one
+	MOV	JOBWRK,R4	;;;Get back work block pointer		;010
+200$:	SPLC	3		;;;DROP BACK TO LEVEL 3 NOW
+	SETERR	NOSUCH,JDIOST-JDFLG(R1) ;PRESET AN ERROR TO RETURN
+	BITB	#4,5(R4)	;SELECTING LOCAL MESSAGES?
+	BNE	210$		;YES, REALLY GIVE THE ERROR OR SLEEP	;004
+
+;	R1 -> JDB @ JDFLG
+;	R4 -> FIRQB
+;		+4 (BYTE) =2
+
+	;CLC			;MARK AS NOT A "REDO" (C=0 FROM SPLC 3 ABOVE)
+	CALL	@NETSER		;CHECK FOR MORE NETWORK MESSAGE(S)	;009
+	BNE	210$		;NO NETWORKS IF Z-BIT=0
+	BCC	170$		;A MESSAGE ALL SET IF NO ERROR (C=0)
+210$:	TST	-(R1)		;GET POINTER BACK TO TOP OF THE JDB
+.ASSUME	JDFLG EQ 2
+	ADD	#5,R4		;INDEX TO THE MODIFIER BYTE IN FIRQB	;004
+	BITB	#14,(R4)	;DOING SELECTION?
+	BEQ	230$		;NOPE
+	BITB	#4,(R4)		;YEP, SELECTING LOCALS??
+	BEQ	240$		;NO, SELECTING ONLY NETWORKS
+230$:	BICB	#SA.XOF,S.ACCS(R5) ;QUEUE EMPTY, 'XON' LOCAL SENDS AGAIN
+240$:	ASRB	(R4)		;USER WANT TO SNOOZE ?
+	BCC	170$		;NO - WOULD PREFER AN ERROR RIGHT NOW
+	CALLX	CLRRSQ		;ENSURE JOB IS SWAPABLE
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;007
+	MOV	JOBJCR,R1	;And point to it			;007
+	MOV	22-5(R4),JCCLOK(R1) ;Set the sleep timer		;007
+	JMPX	DMPJOB		;Exit, dumping the job			;004
+
+.DSABL	LSB
+
+GLOBAL	<ERLRIB,JBSTAT,JBWAIT,NETPMB,NETSER>				;009
+
+;+
+; GETRB3 - GET RECEIVER ID BLOCK FROM JOB NUMBER AND SUB RIB NUMBER
+;
+;	R4 -> FIRQB
+;		32+FIRQB = SUB RIB NUMBER
+;
+;	CALL	GETRB3
+;
+;	R5 -> RECEIVER ID BLOCK (RIB) OR 0 IF NONE
+;	R2 -> JDB2 @ J2MPTR
+;-
+
+GETRB3:	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;007
+	MOV	JOBJCR,R5	;And point to it			;007
+	ADD	#JCMPTR,R5	;Point to RIB poitner			;007
+10$:	MOV	(R5),R5		;POINT TO NEXT RIB
+	BEQ	20$		;NOT FOUND EXIT
+	CMPB	S.JBNO(R5),JOB	;THIS RIB FOR THIS JOB?
+	BNE	10$		;NO GO ON
+	CMPB	FQDEVN(R4),S.SRBN(R5) ;THIS THE RIGHT SUB RIB?
+	BNE	10$		;NO KEEP LOOKING
+	MAP	@UDPAR0,APR=6,DATA ;Yes, restore mapping for first 4K	;007
+	RETURN			;AND GO BACK
+
+20$:	ERROR	BADFUO		;Not a declared receiver		;007
+
+.END

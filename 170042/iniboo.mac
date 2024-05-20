@@ -1,0 +1,364 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /INIT:INIPFX/
+	.INCLUDE /INIT:DSKDEF/
+	.INCLUDE /INIT:TAPDEF/
+TITLE	BOOT,<RSTS/E INIT - BOOT OPTION>,0A,10-MAY-91,ABC/WBN/SHG/MHB/RVR/MND/DBM/VAM/TPT
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+
+.SBTTL	EDIT HISTORY FOR INIBOO
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-08
+;  001	MND  26-MAY-81	Removed text referencing the "RP07" device.
+;
+;				[RSTS V7.2]
+;  000	MND  22-Mar-82	CREATION - COPIED FROM V7.1-11
+;  001	MND  22-Mar-82	Added support for MSCP disks - UDA50/RA80
+;  002	MND  22-Oct-83	Added support for the Virtual Disk
+;  003	MND  15-Nov-83	Adjust the INITGO entry address for auto-START
+;
+;				[RSTS V9.0]
+;  000	DBM  06-Jan-84	Change <CR> to <LF> for VT200 support
+;  001	DBM  02-Jul-84	SOURCE CLEAR SEQ 1.1.30
+;  004  VAM  31-Oct-84	Added code in BOOTDK to put CSR and unit number
+;			of booted device in R1 and R0 for secondary
+;			controller boot.  Also, added more devices to the
+;			'DU' section of the BOOT help text.
+;  005	DBM  17-Dec-84	Remove RF and RS disks from the bootable device list
+;  006  VAM  19-Feb-85	Allow booting units 0-15 for MSCP devices
+;
+;				[RSTS V9.1]
+;  007  VAM  11-Apr-85	Pass CSR and unit number in R1 and R0 for tapes also.
+;			Also, added 'MU' device to BOOT help text.
+;  008	TPT  01-Feb-85	TMSCP support
+;  009  VAM  11-Jul-85	Do a READ-READ instead of a SKIP-READ when booting
+;			tapes, to allow driver to determine density correctly.
+;  010  VAM  05-Aug-85	Streamline magtape booting and allow driver to do
+;			autodensity selection.
+;
+;				[RSTS/E V9.4]
+;  011	GPK  23-Sep-86	Enter bootstraps at 2, not 0 for GPK; add some text
+;  012	PJH  10-Feb-87	Fix boot stuff to jmp to 0 on all but GPK
+;
+;				[RSTS/E V9.6]
+;  013  VAM  27-Jan-88	Allow passing of boot flags on reboot.
+;			Remove DECtape boot code (the end of an era!)
+;			Move JMPTO0 to ROOT so that we can be loaded into
+;			a memory-resident overlay.
+;
+;				[RSTS/E V9.7]
+;  014  VAM  29-Jan-89	Globalize GOBOFL so it can be jumped to from INICOP.
+;-
+
+
+
+.SBTTL	BOOT MACROS AND PARAMETERS
+
+DEFORG	BOOTXT
+
+.MACRO	I.MESS
+	TMPORG	BOOTXT
+.NLIST	BEX
+.ENDM	I.MESS
+
+
+.SBTTL	BOOT OPTION
+
+	DEFORG	BOO
+
+.ENABL	LSB
+
+BOOT::	TSTB	(R1)		;ALREADY AN ANSWER?
+	BNE	20$		;YES
+	CALLX	ASKER,R5	;**$DISKS**
+	 .WORD	10$		;SHORT TEXT
+	 GENTXT
+	 .ASCII	"  Bootable devices are:"<200>
+	 .ASCII	"	MT	TU10/TE10/TS03 magtape"<200>
+	 .ASCII	"	MM	TU16/TE16/TU45/TU77 magtape"<200>
+	 .ASCII	"	MS	TS11 class magtape"<200>
+	 .ASCII "	MU	TMSCP class magtape"<200>
+	 .ASCII	"	DK	RK05 disk"<200>
+	 .ASCII "	DL	RL01/02 disk"<200>
+	 .ASCII	"	DM	RK06/07 disk"<200>
+	 .ASCII	"	DP	RP02/03 disk"<200>
+	 .ASCII	"	DB	RP04/05/06 disk"<200>
+	 .ASCII	"	DR	RM02/03/05/80 disk"<200>	;RP07 also...
+;+ Hide these options from help						;011
+;	 .ASCII	"	DZ	GPK-3xx floppy disk"<200>		;011
+;	 .ASCII	"	DW	GPK-3xx hard disk"<200>			;011
+;-
+	 .ASCII	"	DU	MSCP class disk (RA60/80, RC25, RD51/52, RX50)"<200>	;004
+	 .ASCII	"  Type one of these device names to boot that device."<200>
+	 .ASCII	"  Type <CR> or 'SY' to reboot the system device."<200>
+
+10$:	 .ASCIZ	<177><12>"  Boot device? "
+	 UNORG
+	BCS	60$		;IF CTRL/Z, GET OUT
+	BEQ	BOOTSY		;IF <LF>, GO BOOT THE SYSTEM DEVICE
+20$:	CMP	(R1),#"RT	;IS IT ILLEGALLY NAMED?
+	BEQ	30$		;YES, CATCH IT IN LOOP
+	CMPB	(R1),#'R	;NO, IS IT OLD DISK NAME?
+	BNE	30$		;NO
+	MOVB	#'D,(R1)	;YES, USE NEW DISK NAME
+30$:	MOV	(R1)+,R2	;R2 = DEVICE NAME
+	MOV	#-1,R4		;R4 = FLAG SAYING NO UNIT NUMBER
+	TSTB	(R1)		;JUST THE DEVICE?
+	BEQ	GOBOOT		;YES, WILL GET UNIT LATER IF NEEDED
+	CMPB	(R1),#':	;NO, JUST DEV: ?
+	BEQ	40$		;YES, NULL BETTER FOLLOW THE COLON
+	CALLX	DECINP		;GET THE UNIT NUMBER
+	MOV	R0,R4		;COPY INTO R4
+	MOV	#7,R0		;Maximum unit number for non-MSCP disks	;006
+	CMP	R2,#"DU		;MSCP disk?				;006
+	BNE	35$		;Nope, keep max unit at 7.		;006
+	MOV	#15.,R0		;Otherwise, max unit number is now 15.	;006
+35$:	CMP	R4,R0		;Too big??				;006
+	BHI	NOTVAL		;YUP
+	TSTB	(R1)		;NO, DID HE TYPE DEVN ?
+	BEQ	GOBOOT		;YES, AOK
+	CMPB	(R1),#':	;NO, SO IT MUST END ON A COLON
+	BNE	NOTVAL		;DEVN?
+40$:	TSTB	1(R1)		;ENDED ON COLON, WHICH GOTTA BE LAST
+	BNE	NOTVAL
+
+
+;+
+; GOBOOT - BOOT A DEVICE
+; GOBOFL - Boot a device, preserving boot flags (used by BOOTSY).	;013
+;
+;	R2 =  DEVICE NAME IN ASCII (DISKS ARE "D?")
+;	R4 =  UNIT NUMBER
+;
+;	JMP	GOBOOT
+;-
+GOBOOT::CLRB	BOFLGS		;Get rid of unwanted boot flags.	;013
+GOBOFL::MOV	#BOOTDV,R1	;Get device list.			;014
+50$:	MOV	(R1)+,R0	;POINT TO DEVICE BOOTER
+	CMP	R2,(R1)+	;IS THAT THE ONE?
+	BEQ	70$		;YES
+	TST	(R1)		;MORE?
+	BNE	50$		;YES
+	MOV	#BOOTDK,R0	;MAYBE IT'S A KIND OF DISK
+	MOV	#DSKNAM,R5	;POINT TO LIST OF DISK NAMES
+55$:	CMP	R2,(R5)+	;IS THIS THE ONE?
+	BEQ	70$		;YES
+	TST	(R5)		;MORE?
+	BNE	55$		;YES
+NOTVAL:	MESSAG	<"  Not a valid boot device."<200>>
+60$:	EXIT			;AND GO BACK TO OPTION
+
+70$:	CALLX	TTYSTP		;WAIT FOR TTY
+	JMP	(R0)		;DISPATCH
+
+BOOTS0:	TST	R4		;ANY UNIT NUMBER?
+	BGT	NOTVAL		;OK IF NONE (R4=-1) OR UNIT 0
+	.BR	BOOTSY		;Make sure we end up at the right place.;013
+
+;+
+; BOOTSY - REBOOT THE SYSTEM DEVICE
+; BOOTSF - Reboot the system device, preserving boot flags.		;013
+;
+;	JMP	BOOTSY	or						;013
+;	JMP	BOOTSF							;013
+;-
+
+BOOTSY::CLC			;Clear "save boot flags" indicator.	;013
+80$:	MOV	SYSNAM,R2	;GET SYSTEM DEVICE NAME IN ASCII
+	MOV	SYSUSV,R4	;GET SYSTEM UNIT NUMBER
+	BCS	GOBOFL		;Save boot flags if wanted.		;013
+	BR	GOBOOT		;Otherwise, boot SY0: in normal fashion.;013
+
+BOOTSF::SEC			;Remember to save boot flags.		;013
+	BR	80$		;Go get system device name and unit.	;013
+
+.DSABL	LSB
+
+GLOBAL	<DSKNAM,SYSNAM,SYSUSV>
+
+
+BOOTDK:	SUB	#DSKNAM+2,R5	;COMPUTE DISK INDEX FROM POINTER
+	CMP	R5,#IDX$DV	;Is it really the Virtual Disk?		;002
+	BEQ	NOTVAL		;  Yes, not valid (Nice try anyway...)	;002
+	CLR	FLGGPK		;Assume not a GPK system		;012
+	CMP	R5,#IDX$DW	;Are we booting a GPK device?		;012
+	BEQ	5$		;Yes, so set it so			;012
+	CMP	R5,#IDX$DZ	;Try the other flavor			;012
+	BEQ	5$		;Yes, so do the same			;012
+	CMP	R5,#IDX$DF	;DOES THIS DISK HAVE UNITS?
+	BLOS	10$		;NO, USE UNIT 0
+	CALL	BOOTUN		;YES, ASK FOR UNIT NUMBER
+	BR	20$		;ENTER CODE TO READ THE BOOTSTRAP
+
+5$:	DEC	FLGGPK		;GPK boot? set the GPK flag		;012
+
+10$:	TST	R4		;DEVICE DOESN'T HAVE UNITS
+	BGT	NOTVAL		;SO NONZERO UNIT NUMBER IS ILLEGAL
+	CLR	R4		;USE ZERO FOR UNIT NUMBER
+20$:	CALLX	GETCSR		;GET THE CSR FOR THAT CONTROLLER
+	MOV	R3,R1		;COPY CSR ASSIGNMENT TO R1
+	CALL	CHKDEV,R5	;  AND MAKE SURE THERE'S SOMEONE OUT THERE
+	MOV	R5,R0		;SET UP DISK INDEX AND UNIT FOR FIP
+	MOV	R4,R1
+	MOVB	#-1,NOERR	;SET FLAG FOR SUPRESSING ERRORS
+	CALLX	SETFNS		;SET UP TO USE THIS UNIT
+	CLRB	NOERR		;DON'T SUPRESS ERRORS ANYMORE
+	CMPB	IOERR,#HNGDEV	;WAS THE DISK HUNG
+	BEQ	30$		;YES, COMPLAIN
+	CLR	R2		;READ FIP BLOCK #0
+	CLR	R3
+	CALLX	PARSEX,R5,<RFUN,0> ;READ INTO LOCATION ZERO
+	MOV	SYSNDX,R1	;SYSTEM DISK INDEX
+	MOV	SYSUNT,R4	;SYSTEM DISK UNIT NUMBER
+	CALLX	XXRSET		;RESET & SELECT THE RIGHT UNIT
+	MOV	SYSNDX,R5	;SYSTEM DISK INDEX IN R5
+	CALLX	GETCSR		;GET THE CSR AGAIN FOR THAT CONTROLLER
+	MOV	R3,@#B.CSR-B.BOOT ;PRESET THE CORRECT CSR ASSIGNMENT
+	MOV	R3,R1		;Also, put CSR into R1...		;004
+	MOV	SYSUNT,R0	; and unit number into R0 for boot.	;004
+	TSTB	AUTOIN		;Did we just finish an auto-INSTAL?	;003
+	BEQ	25$		;  No. Use boot's normal entry address.	;003
+	MOV	#INITGO-32,@#B.JMP+2-B.BOOT ; Yes set-up for auto-START!;003
+25$:	JMPX	JMPTO0		;And, go start bootstrap.		;013
+
+30$:	ERF	<"Disk is hung">
+
+
+.ENABL	LSB
+
+BOOTUN:	MOV	R1,-(SP)	;PRESERVE R1
+	MOVB	@SUBUNT(R5),R3	;GET MAX UNIT NO ALLOWED (SAVE IN R3)
+	MOV	R3,R0		;ALSO PUT IN R0 FOR DECSTR
+	MOV	#20$,R1		;R1 = ADDRESS TO STORE TEXT
+	CALLX	DECSTR		;  AND CONVERT IT TO ASCII
+	MOV	R4,R0		;ALREADY HAVE THE UNIT? (TST R0)	;001
+	BPL	30$		;YES, CHECK IT AGAIN
+10$:	CALLX	ASKER,R5	;ASK WHICH UNIT TO BOOT
+	 GENTXT	<"  Boot unit: ">
+	 GENTXT
+	 .ASCII	"  Enter unit number to boot (0-"
+20$:	 .ASCIZ	"??????): "
+	 UNORG
+	CALLX	DECINP		;GET THE UNIT NUMBER TYPED IN DECIMAL
+	MOV	R0,R4		;COPY IT TO R4
+30$:	CMPB	R4,R3		;CHECK IT AGAINST LIMIT FOR THIS DISK
+	BHIS	10$		;IF NOT WITHIN LIMIT, THEN ASK AGAIN
+	TST	R5		;BOOTING TO TAPE?
+	BMI	40$		;YES, CAN'T CHECK FOR UNIT PRESENT.
+	ASL	R0		;GET UNIT *2
+	ADD	DSKMID(R5),R0	;POINT TO MASS BUS ID TABLE	
+	CMP	(R0),#-1.	;  AND VERIFY THAT IT IS OUT THERE.
+	BEQ	NOTVAL		;MINUS ONE MEANS NON-EXSISTENT.
+40$:	MOV	(SP)+,R1	;RESTORE R1
+	RETURN			;RETURN WITH UNIT IN R4
+
+.DSABL	LSB
+
+GLOBAL	<DSKMID,DSKNAM,SYSNDX,SYSUNT,SUBUNT,IOERR,NOERR,HNGDEV>
+GLOBAL	<INITGO,AUTOIN>							;003
+
+
+BOOTRT:	MOV	R0,(R1)		;ERROR, SO STOP US
+	MESSAG	<"  Device error when trying to bootstrap device"<200>>
+	EXIT
+
+GLOBAL	<LKSCSR,CSR.XX,BOFLGS>						;013
+GLOBAL	<FLGGPK>							;012
+
+
+.ENABL	LSB
+
+.SBTTL	Read/Start Magtape Bootstrap					;010
+
+;+
+;	We use the index into BOOTDV passed in R1 to generate the device
+;	index for the tape we're trying to boot.
+;
+;	First, R1 as passed contains the absolute address of the entry in
+;	BOOTDV which is immediately after the one we want (at +4).  So,
+;	by subtracting the address of the highest index plus 4, R1 becomes
+;	a relative offset into BOOTDV, and dividing that by two gives
+;	the driver index since the table is ordered by driver index.
+;		(Ta da!!)
+;-
+
+BOOTAP:	SUB	#BOOTXX+4,R1		;Mung the BOOTDV index...	;010
+	ASR	R1			; ...to get the IDX$Mx.		;010
+	MOV	R1,R5			;Save it in the right place.	;010
+	CALL	BOOTUN			;GET THE UNIT NUMBER
+	MOV	R4,R1			;SET UNIT INTO CORRECT REGISTER
+	MOV	R5,R0			;SET UP TAPE INDEX
+	CLR	HIGHBF			;BE VERY SAFE ABOUT THIS
+	RESETB				;CLEAN UP LOW CORE
+	CALLX	SETTAP			;SET UP THE TAPE/REWIND
+	BCS	50$			;DON'T ALLOW THEM ERRORS
+	MOV	#7,I.DSQ+DSQCNT		;Assume it's a DOS label.	;009
+	CALLX	MAGIO,R5,<RFUN,0>	;Read the DOS label.		;009
+	BCC	10$			;If no errors, go on.		;009
+	CMPB	@#IOERR,#MAGRLE		;Was it a Record Length Error?	;009
+	BEQ	10$			;Yup, probably a new-format tape;009
+	BR	50$			;Otherwise, punt...		;010
+
+10$:	MOV	#256.,I.DSQ+DSQCNT	;Now, set up to read 1 block.	;009
+	CALLX	MAGIO,R5,<RFUN,0>	;THAT BLOCK IS THE BOOT
+	BCC	20$			;NO ERROR, GO TO BOOT
+	CMPB	@#IOERR,#MAGRLE		;WAS IT A RECORD LENGTH ERROR?
+	BEQ	20$			;YUP, PROBABLY A SAV/RES TAPE
+	BR	50$			;Nope, so call it a day.	;010
+
+20$:	MOV	R1,R0			;Stick unit number into R0...	;007
+	MOV	CSR.XX,R1		; ...and the CSR into R1.	;007
+	JMPX	JMPTO0			;Go "jump" to boot.		;013
+
+50$:	ERF	<"Magtape I/O error">
+
+.ENABL	LSB
+
+GLOBAL	<HIGHBF,I.DSQ,MAGRLE,IOERR,I.STAK,DSS$DV>			;002
+
+
+CHKDEV:	CMP	R1,#160000	;IS IT ON THE I/O PAGE?
+	BLO	10$		;NO, DEVICE NOT THERE
+	CALLX	TRASEC		;SET TO SET CARRY IF TRAP
+	TST	(R1)		;ASK THE DEVICE TO SAY SSYN
+	CALL	@(SP)+		;RESTORE THE VECTOR @ 4
+	BCS	10$		;NOTHING THERE
+	RETURN	R5		;BYE
+
+10$:	MESSAG	<"  Sorry, but that device doesn't exist."<200>>
+	EXIT
+
+GLOBAL	<DSKCSR>
+
+
+BOOTDV:	.WORD	BOOTAP,"MU	;Put magtapes in IDX$Mx order,		;010
+	.WORD	BOOTAP,"MS	; (most negative to least negative).	;010
+	.WORD	BOOTAP,"MT						;010
+	.WORD	BOOTAP,"MM						;010
+BOOTXX:				;End of magtape boot entries		;010
+	.WORD	BOOTS0,"SY
+	.WORD	0		;END LIST
+
+.END
+
+

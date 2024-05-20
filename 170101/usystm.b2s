@@ -1,0 +1,803 @@
+1	SUB USYSTM							      &
+\	ON ERROR GOTO 19000						      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   t i t l e				      &
+	!								      &
+	!	  subprogram : USYSTM					      &
+	!	     version : V10.1					      &
+	!	        edit : A					      &
+	!	   edit date : 10-MAY-91				      &
+	!	   author(s) : JJT,BGN,SEL				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!		  C O P Y R I G H T				      &
+	!								      &
+	!								      &
+	!		      Copyright (C) 1984, 1991 by		      &
+	!	Digital Equipment Corporation, Maynard, Mass.		      &
+	!								      &
+	!								      &
+	! This software is furnished under a license and may be used and      &
+	! copied  only  in accordance with the terms of such license and      &
+	! with the  inclusion  of  the  above  copyright  notice.   This      &
+	! software  or  any  other copies thereof may not be provided or      &
+	! otherwise made available to any other person.  No title to and      &
+	! ownership of the software is hereby transferred.		      &
+	!								      &
+	! The information in this software is subject to change  without      &
+	! notice  and should not be construed as a commitment by Digital      &
+	! Equipment Corporation.					      &
+	!								      &
+	! DIGITAL assumes no responsibility for the use  or  reliability      &
+	! of its software on equipment that is not supplied by DIGITAL.	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   c a l l   f o r m a t		      &
+	!								      &
+	!	CALL USYSTM						      &
+	!								      &
+	!	Argument	I/O	Usage				      &
+	!	========	===	=====				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m o d i f i c a t i o n   h i s t o r y   l o g		      &
+	!								      &
+	!								      &
+	! VER/ED	EDIT DATE	REASON				      &
+	! V9.3-17	17-Oct-86	(JJT) Remove SET SYSTEM/[NO]OPTIMIZE  &
+	! V9.5-03	26-Jul-87	(JJT) Add err message to /RELEASE     &
+	! V9.6-03	18-Dec-87	(JJT) Add LAT/FMS commands	      &
+	! V9.6-07	12-Feb-88	(JJT) Add new SET SYSTEM qualifiers   &
+	! V9.6-08	04-Mar-88	(JJT) Add /[NO]STATISTICS	      &
+	! V9.6-11	20-May-88	(JJT) Workaround CUI bug with /PK     &
+	! V9.7-01	07-Nov-88	(JJT) Add SET SYSTEM/DYNAMIC_REGION_QUOTA &
+	! V9.7-03	19-Dec-88	(JJT) Add Warp speed support	      &
+	! V9.7-03	05-Jan-89	(JJT) Add /Monitor_Name, /Swap_Maximum &
+	!					  /Answerback		      &
+	! V9.7-06	15-Mar-89	(JJT) Trap err 18 on SET SYSTEM/HOLD  &
+	! V9.7-08	11-May-89	(JJT) Trap err  3 on SET SYSTEM/HOLD  &
+	! V10.0-01	29-Aug-89	(SEL) Add SET SYSTEM/ASYNC	      &
+	! V10.0-K	11-Apr-90	(SEL) Set another bit in CONFIG.SYS on &
+	!					SET SYSTEM/ASYNC	      &
+	! V10.0-L	23-May-90	(SEL) Put 0 in the byte after the name &
+	!					on SET SYSTEM/MONITOR_NAME    &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   d e s c r i p t i o n		      &
+	!								      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	v a r i a b l e s  /  a r r a y s   u s e d		      &
+	!								      &
+	!	name		description				      &
+	!	====		===========				      &
+	!								      &
+	!******************************************************************** &
+
+									      &
+
+700	!	i n c l u d e   r e q u i r e d   M A P s , C O M M O N s     &
+	!								      &
+	!								      &
+	%INCLUDE "CUI:CUICMN.B2S"		!include CUI data section     &
+	%INCLUDE "SYSTEM:UTYKEY.B2S"		!include CUI common data      &
+
+750	COMMON	(DSPCMN)	INDENT.COLUMN%				      &
+
+760	MAP	(CONFIG)	BYTE	VERSION, !MAP THE CONFIG.SYS FILE     &
+				BYTE	REV.LEVEL,			      &
+				WORD	FLAG.BITS,			      &
+				BYTE	PK.NO,				      &
+				STRING	FILL = 1,			      &
+				BYTE	SWAP.MAX,			      &
+				STRING	FILL = 1,			      &
+				STRING	MON.NAME = 7,			      &
+				STRING	FILL = 497			      &
+									      &
+
+									      &
+
+910	DIM	FIRQB%(30%),			!SYScall array		      &
+		QUAL.NAME$(6%)			!Qualifier names	      &
+
+915	DIM #1%, ERR.$(255%) = 32%		!Dimension the Error file     &
+
+									      &
+
+1000	!	m a i n   s u b p r o g r a m   l o g i c		      &
+	!								      &
+	!								      &
+									      &
+									      &
+
+3999	!	p r o c e s s    c o m m a n d				      &
+									      &
+
+									      &
+
+6600	!SET SYSTEM							      &
+									      &
+\	REGAIN.PRIV$ = CHR$(6%)+CHR$(-21%)+CHR$(0%) !REGAIN TEMP PRIVS VAR    &
+\	DROP.PRIV$ = CHR$(6%)+CHR$(-21%)+CHR$(255%) !DROP TEMP PRIVS VAR      &
+\	CALL FET$CQ BY REF (REL.Q%)		!/RELEASE?		      &
+\	IF U.PRES% THEN				!YES			      &
+		HWCTL.PRIV% = FNCHECK.PRIV%("HWCTL")!CHECK FOR HWCTL PRIV     &
+\		IF NOT HWCTL.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?HWCTL privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		ON ERROR GOTO 6650		!  SET LOCAL ERROR TRAP	      &
+\		V$=SYS(CHR$(6%)+CHR$(29%)+CHR$(0%)) !RELEASE IT		      &
+\		ON ERROR GOTO 19000		!  RESET STANDARD ERROR TRAP  &
+\		PRINT "System released"					      &
+\	END IF								      &
+
+6603	CALL FET$CQ BY REF (HLD.Q%)		!/HOLD?			      &
+\	IF U.PRES% THEN				!YES			      &
+		HWCTL.PRIV% = FNCHECK.PRIV%("HWCTL")!CHECK FOR HWCTL PRIV     &
+\		IF NOT HWCTL.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?HWCTL privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		ON ERROR GOTO 6650		!  SET LOCAL ERROR TRAP	      &
+\		V$=SYS(CHR$(6%)+CHR$(29%)+CHR$(1%)) !HOLD IT		      &
+\		ON ERROR GOTO 19000		!  RESET STANDARD ERROR TRAP  &
+\		PRINT "System now on hold"				      &
+\	END IF								      &
+
+6605	SWCTL.PRIV% = FNCHECK.PRIV%("SWCTL")	!CHECK FOR SWCTL PRIV	      &
+\	CALL FET$CQ BY REF (LGN.Q%)		!/[NO]LOGIN SPECIFIED?	      &
+\	IF U.PRES% THEN				!YES			      &
+		IF NOT SWCTL.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCTL privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		IF U.NO% THEN			!/NOLOGIN SPECIFIED?	      &
+			V$ = SYS(CHR$(6%)+CHR$(-2%)) !YES		      &
+		ELSE				!			      &
+			CALL FET$A BY REF	!FETCH ANY ARGUMENT	      &
+\			IF U.PRES% THEN		!ARGUMENT PRESENT?	      &
+				MAXLOG%=VAL(LEFT$(U.STR$,U.LEN%)) !MAX LOGINS &
+\				V$ = SYS(CHR$(6%)+CHR$(-19%)+CHR$(MAXLOG%))   &
+						!SET LOGINS TO MAXLOG	      &
+			ELSE			!/LOGIN SPECIFIED	      &
+				V$ = SYS(CHR$(6%)+CHR$(-1%))!NO ARGUMENT, SET &
+\			END IF			!THE MAXIMUM NUMBER OF LOGINS &
+\		END IF							      &
+\	END IF								      &
+\	SWCFG.PRIV% = FNCHECK.PRIV%("SWCFG")	!CHECK FOR SWCFG PRIVILEGE    &
+\	CALL FET$CQ BY REF (NAM.Q%)		!/NAME SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required")	      &
+						!    PRINT ERROR MSG	      &
+\			SUBEXIT			!    EXIT		      &
+\		END IF							      &
+\		CALL FET$A BY REF		!  GET THE NAME		      &
+\		Z$ = SEG$(U.STR$,1%,U.LEN%)	!  EXTRACT IT		      &
+\		Z$ = EDIT$(Z$,8%+128%)		!  TRIM LEADING & TRAILING SP &
+\		Z$ = SEG$(Z$,2%,LEN(Z$)) IF ASCII(Z$)=34% !TRIM LEADING "     &
+\		Z$ = SEG$(Z$,1%,LEN(Z$)-1%)	!  TRIM TRAILING "	      &
+			IF ASCII(SEG$(Z$,LEN(Z$),LEN(Z$))) = 34%!IF THERE     &
+\		IF LEN(Z$) > 15% THEN		!  IF NAME IS TOO LONG	      &
+			CALL DISPLY ("?System name too long") !PRINT ERROR MSG &
+\			SUBEXIT			!    EXIT		      &
+\		END IF							      &
+\ FORNAMELOOP:	FOR I% = 1% TO LEN(Z$)		!  INSPECT EACH CHARACTER     &
+\			Z% = ASCII(SEG$(Z$,I%,I%)) ! GET THE ASCII OF THE CHAR &
+\			ITERATE FORNAMELOOP IF (Z% >=  32% AND Z% <= 126%) OR &
+					       (Z% >= 161% AND Z% <= 254%) OR &
+					       (Z%  =  11%) !CHECK VALIDITY   &
+\			CALL DISPLY ("?Invalid character in System name")     &
+\			SUBEXIT			!    PRINT ERR MSG & EXIT     &
+\		NEXT I%				!  NEXT CHARACTER	      &
+\		ERROR.FILE% = 0%		!  DEFAULT TO NO ERROR FILE   &
+\		V$ = SYS(REGAIN.PRIV$)		!  REGAIN TEMP PRIVS	      &
+\		Q$ = FNGET.SWAP$(5%)		!  SEE IF ERROR FILE PRESENT  &
+\		IF Q$ <> "None" THEN		!  IF IT DOES EXIST	      &
+		      V$ = SYS(CHR$(6%)+CHR$(23%)+CHR$(5%)+CHR$(0%))!REMOVE IT &
+\		      ERROR.FILE% = -1%		!    SET THE FLAG	      &
+\		END IF							      &
+\		OPEN "_SY0:[0,1]ERR.ERR" FOR INPUT AS FILE 1% !OPEN ERROR FILE &
+\		ERR.$(0%) = SEG$(ERR.$(0%),1%,13%) + Z$!PUT IN THE SYSTEM NAME &
+\		CLOSE 1%			!  CLOSE THE ERROR FILE	      &
+\		IF ERROR.FILE% THEN		!  IF THE ERROR FILE EXISTED  &
+			CHANGE FSS$(Q$,1%) TO FIRQB% !DO THE FSS ON ERROR FILE &
+\			FIRQB%(0%) = 30%	!    30 BYTES		      &
+\			FIRQB%(1%) = 6%		!    SYS CALL TO FIP	      &
+\			FIRQB%(2%) = 23%	!    SUBFUNCTION	      &
+\			FIRQB%(3%) = 5%		!    ADD/REMOVE ERROR FILE    &
+\			FIRQB%(4%) = 1%		!    ADD SYSTEM FILE	      &
+\			FIRQB%(I%) = 0% FOR I% = 5% TO 6% !CLEAR OUT	      &
+\			FIRQB%(I%) = 0% FOR I% =11% TO 22%!CLEAR OUT SOME MORE &
+\			CHANGE FIRQB% TO FIRQB$	!    CHANGE ARRAY TO A STRING &
+\			V$ = SYS(FIRQB$)	!    RE-ADD THE ERROR FILE    &
+\		END IF							      &
+\		V$ = SYS(DROP.PRIV$)		!  DROP TEMP PRIVS	      &
+\	END IF								      &
+\	BITS.TO.SET% = 0%			!CLEAR THE BITS TO SET	      &
+\	BITS.TO.CLR% = 0%			!CLEAR THE BITS TO CLEAR      &
+\	CALL FET$CQ BY REF (MDMH.Q%)		!/HANGUP SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		CALL FET$KA BY REF (IMM.K%)	! =IMMEDIATE SPECIFIED?	      &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			BITS.TO.SET% = BITS.TO.SET% OR 1% !SET THE SET BIT    &
+\			BITS.TO.CLR% = BITS.TO.CLR% AND NOT(1%) !CLR CLEAR BIT &
+\		END IF							      &
+\		CALL FET$KA BY REF (DLY.K%)	! =DELAYED SPECIFIED?	      &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			BITS.TO.CLR% = BITS.TO.CLR% OR 1% !SET THE CLEAR BIT  &
+\			BITS.TO.SET% = BITS.TO.SET% AND NOT(1%) !CLR SET BIT  &
+\		END IF							      &
+\	END IF								      &
+\	IF BITS.TO.SET% OR BITS.TO.CLR% THEN	!IF SOMETHING TO SET OR CLEAR &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT			!    EXIT		      &
+\		END IF							      &
+\		FIRQB%(0%) = 30%		!  30 BYTES		      &
+\		FIRQB%(1%) = 6%			!  SYS CALL TO FIP	      &
+\		FIRQB%(2%) = 34%		!  UU.CFG		      &
+\		FIRQB%(3%) = 3%			!  SET/CLEAR FEATURE PATCH    &
+\		FIRQB%(4%) = 0%			!  RESERVED		      &
+\		FIRQB%(5%) = BITS.TO.SET% AND 255% !1ST HALF OF BITS TO SET   &
+\		FIRQB%(6%) = SWAP%(BITS.TO.SET%) AND 255% !SECOND HALF	      &
+\		FIRQB%(7%) = BITS.TO.CLR% AND 255% !1ST HALF OF BITS TO CLR   &
+\		FIRQB%(8%) = SWAP%(BITS.TO.CLR%) AND 255% !SECOND HALF	      &
+\		FIRQB%(I%) = 0% FOR I% = 9% TO 30% !CLEAR UNUSED BYTES	      &
+\		CHANGE FIRQB% TO FIRQB$		!CHANGE THE ARRAY TO A STRING &
+\		CHANGE SYS(FIRQB$) TO FIRQB%	!DO THE SYS CALL	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (PSW.Q%)		!/PASSWORD_PROMPT SPECIFIED?  &
+\	GOTO 6620 IF NOT (U.PRES%)		!GO AROUND IF NOT PRESENT     &
+\	WACNT.PRIV% = FNCHECK.PRIV%("WACNT")!CHECK FOR WACNT PRIV	      &
+\	IF NOT WACNT.PRIV% THEN		!  IF NOT PRIVILEGED		      &
+		CALL DISPLY ("?WACNT privilege required") !SAY SO	      &
+\		SUBEXIT							      &
+\	END IF								      &
+\	PROMPT_FLAG%=0%				!DEFAULT TO /NOPASSWORD_PROMPT &
+\	IF NOT(U.NO%) THEN			!IF /PASSWORD_PROMPT	      &
+		CALL FET$KA BY REF (RMT.K%)	! =DIALUP SPECIFIED?	      &
+\		IF U.PRES% THEN						      &
+			PROMPT_FLAG%=16%				      &
+\		END IF							      &
+\		CALL FET$KA BY REF (NET.K%)	! =NETWORK SPECIFIED?	      &
+\		IF U.PRES% THEN						      &
+			PROMPT_FLAG%=PROMPT_FLAG% OR 32%		      &
+\		END IF							      &
+\		IF PROMPT_FLAG%=0% THEN		! IF NO KEYWORD SPECIFIED     &
+			PROMPT_FLAG%=64%	!  SET PASSWORD_PROMPT FOR ALL &
+\		END IF							      &
+\	END IF								      &
+\	CHANGE FSS$("SY0:[0,1]",1%) TO FIRQB%				      &
+\	FIRQB%(0%)=30%							      &
+\	FIRQB%(1%)=6%							      &
+\	FIRQB%(2%)=-25%							      &
+\	FIRQB%(3%)=-1%				!READ ATTR BLOCKETTE	      &
+\	FIRQB%(4%)=4%							      &
+\	FIRQB%(I%)=0% FOR I%=7% TO 22%					      &
+\	FIRQB%(I%)=0% FOR I%=27% TO 30%					      &
+\	CHANGE FIRQB% TO FIRQB$						      &
+\	ON ERROR GOTO 6650			!SET LOCAL ERROR TRAP	      &
+\	FIRQB$=SYS(FIRQB$)						      &
+\	CHANGE FIRQB$ TO FIRQB%
+6610	ON ERROR GOTO 19000			!RESET ERROR TRAP	      &
+\	FIRQB%(0%)=30%							      &
+\	FIRQB%(1%)=6%							      &
+\	FIRQB%(2%)=-25%							      &
+\	FIRQB%(3%)=-2%				!WRITE ATTR BLOCKETTE	      &
+\	FIRQB%(4%)=4%							      &
+\	FIRQB%(16%) = FIRQB%(16%) AND NOT (112%)!CLEAR OUT THE PROMPT FLAGS   &
+\	FIRQB%(16%)=FIRQB%(16%) OR PROMPT_FLAG%	!SET THE NEW FLAGS	      &
+\	CHANGE FIRQB% TO FIRQB$						      &
+\	FIRQB$=SYS(FIRQB$)						      &
+
+
+6620	CALL FET$CQ BY REF (STA.Q%)		!/[NO]STATISTICS SPECIFIED?   &
+\	IF U.PRES% THEN				!YES			      &
+		IF NOT SWCTL.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCTL privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		IF U.NO% THEN			!/NOSTATISTICS SPECIFIED?     &
+			V$ = SYS(CHR$(6%)+CHR$(34%)+CHR$(6%)+CHR$(1%)) !YES   &
+		ELSE							      &
+			FUNC% = 0%		!  DEFAULT TO ENABLE STATS    &
+\			CALL FET$KA BY REF (RES.K%) !FETCH =RESET	      &
+\			FUNC% = 2% IF U.PRES%	!  SET RESET FUNCTION	      &
+\			ON ERROR GOTO 6640	!  SET LOCAL ERROR TRAP	      &
+\			V$ = SYS(CHR$(6%)+CHR$(34%)+CHR$(6%)+CHR$(FUNC%))     &
+\			ON ERROR GOTO 19000	!  RESET STANDARD ERROR TRAP  &
+\		END IF							      &
+\	END IF								      &
+\	QUALIFIER.FOUND% = 0%			!DEFAULT TO NO QUALIFIERS     &
+\	FIRQB%(I%) = 0% FOR I% = 0% TO 30%	!CLEAR THE ARRAY	      &
+\	CALL FET$CQ BY REF (DLY.Q%)		!/DELAY SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT			!    EXIT		      &
+\		END IF							      &
+\		CALL FET$A BY REF		!  GET THE ARGUMENT	      &
+\		Z% = U.LOW%			!  AS AN INTEGER	      &
+\		FIRQB%(5%) = Z% AND 255%	!  STORE LOWER HALF	      &
+\		FIRQB%(6%) = SWAP%(Z%) AND 255%	!  STORE UPPER HALF	      &
+\		QUALIFIER.FOUND% = -1%		!  WE HAVE A QUALIFIER	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (DTE.Q%)		!/DATE SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT			!    EXIT		      &
+\		END IF							      &
+\		CALL FET$KA BY REF (ALP.K%)	!  =ALPHABETIC SPECIFIED?     &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			FIRQB%(7%) = 255%	!    SET ALPHABETIC DATE      &
+\		END IF							      &
+\		CALL FET$KA BY REF (NUM.K%)	!  =NUMERIC SPECIFIED?	      &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			FIRQB%(7%) = 1%		!    SET NUMERIC DATE	      &
+\		END IF							      &
+\		CALL FET$KA BY REF (STRD.K%)	!  =STARDATE SPECIFIED?	      &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			FIRQB%(7%) = 2%		!    SET STARDATE	      &
+\		END IF							      &
+\		QUALIFIER.FOUND% = -1%		!  WE HAVE A QUALIFIER	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (TIM.Q%)		!/TIME SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT			!    EXIT		      &
+\		END IF							      &
+\		CALL FET$KA BY REF (H12.K%)	!  =AM_PM SPECIFIED?	      &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			FIRQB%(8%) = 255%	!    SET 12 HOUR TIME	      &
+\		END IF							      &
+\		CALL FET$KA BY REF (H24.K%)	!  =24_HOUR SPECIFIED?	      &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			FIRQB%(8%) = 1%		!    SET 24 HOUR TIME	      &
+\		END IF							      &
+\		QUALIFIER.FOUND% = -1%		!  WE HAVE A QUALIFIER	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (LBL.Q%)		!/LABEL SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT			!    EXIT		      &
+\		END IF							      &
+\		CALL FET$KA BY REF (DOS.K%)	!  =DOS SPECIFIED?	      &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			FIRQB%(9%) = 1%		!    SET DOS LABELING	      &
+\		END IF							      &
+\		CALL FET$KA BY REF (ANSI.K%)	!  =ANSI SPECIFIED?	      &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			FIRQB%(9%) = 255%	!    SET ANSI LABELING	      &
+\		END IF							      &
+\		QUALIFIER.FOUND% = -1%		!  WE HAVE A QUALIFIER	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (DEN.Q%)		!/DENSITY SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		HWCFG.PRIV% = FNCHECK.PRIV%("HWCFG")!CHECK FOR HWCFG PRIV     &
+\		IF NOT HWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?HWCFG privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		FIRQB%(11%) = 0%		!  INITIALIZE THE LOW BYTE    &
+\		FIRQB%(12%) = 0%		!  INIT THE HIGH BYTE	      &
+\		CALL FET$KA BY REF (MIN.K%)	!  =MINIMUM SPECIFIED?	      &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			FIRQB%(11%) = 1%	!    SET THE MINIMUM	      &
+\		END IF							      &
+\		CALL FET$KA BY REF (MAX.K%)	!  =MAXIMUM SPECIFIED?	      &
+\		IF U.PRES% THEN			!  IF PRESENT		      &
+			FIRQB%(11%) = 32767% AND 255% !SET THE MAX LOW BYTE   &
+\			FIRQB%(12%) = SWAP%(32767%) AND 255%! SET THE MAX HIGH &
+\		END IF							      &
+\		IF (FIRQB%(11%) OR FIRQB%(12%)) = 0% THEN !IF NOT MIN OR MAX  &
+			CALL FET$A BY REF	!    GET THE DENSITY	      &
+\			Z% = U.LOW%		!    EXTRACT IT		      &
+\			FIRQB%(11%) = Z% AND 255% !  SET THE LOW BYTE	      &
+\			FIRQB%(12%) = SWAP%(Z%) AND 255% !SET THE HIGH BYTE   &
+\		END IF							      &
+\		QUALIFIER.FOUND% = -1%		!  WE HAVE A QUALIFIER	      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (DRQ.Q%)		!/DYNAMIC_REGION_QUOTA?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT			!    EXIT		      &
+\		END IF							      &
+\		IF U.NO% THEN			!  IF /NODYNAMIC_REGION_QUOTA &
+			Z% = 0%			!   SET IT TO ZERO	      &
+		ELSE							      &
+			CALL FET$A BY REF	!   GET THE ARGUMENT	      &
+\			Z% = U.LOW%		!   AS AN INTEGER	      &
+\		END IF							      &
+\		Z% = -1% IF Z% = 0%		!  PASS -1 FOR A ZERO	      &
+\		FIRQB%(13%) = Z% AND 255%	!  STORE LOWER HALF	      &
+\		FIRQB%(14%) = SWAP%(Z%) AND 255%!  STORE UPPER HALF	      &
+\		QUALIFIER.FOUND% = -1%		!  WE HAVE A QUALIFIER	      &
+\	END IF								      &
+\	IF QUALIFIER.FOUND% THEN		!IF WE HAVE A QUALIFIER	      &
+		FIRQB%(0%) = 30%		!  30 BYTES		      &
+\		FIRQB%(1%) = 6%			!  SYS CALL TO FIP	      &
+\		FIRQB%(2%) = 34%		!  CHANGE CONFIG CODE	      &
+\		FIRQB%(3%) = 2%			!  SET SYSTEM DEFAULTS CODE   &
+\		CHANGE FIRQB% TO FIRQB$		!  CHANGE ARRAY TO A STRING   &
+\		FIRQB$ = SYS(FIRQB$)		!  DO THE SYS CALL	      &
+\	END IF								      &
+									      &
+\	CALL FET$CQ BY REF (ANS.Q%)		!/ANSWERBACK SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCTL.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCTL privilege required")	      &
+						!    PRINT ERROR MSG	      &
+\			SUBEXIT			!    EXIT		      &
+\		END IF							      &
+\		CALL FET$A BY REF		!  GET THE NAME		      &
+\		Z$ = SEG$(U.STR$,1%,U.LEN%)	!  EXTRACT IT		      &
+\		Z$ = EDIT$(Z$,8%+128%)		!  TRIM LEADING & TRAILING SP &
+\		Z$ = SEG$(Z$,2%,LEN(Z$)) IF ASCII(Z$)=34% !TRIM LEADING "     &
+\		Z$ = SEG$(Z$,1%,LEN(Z$)-1%)	!  TRIM TRAILING "	      &
+			IF ASCII(SEG$(Z$,LEN(Z$),LEN(Z$))) = 34%!IF THERE     &
+\		IF LEN(Z$) > 24% THEN		!  IF NAME IS TOO LONG	      &
+			CALL DISPLY ("?Answerback message too long") !PRINT ERR &
+\			SUBEXIT			!    EXIT		      &
+\		END IF							      &
+\		V$ = SYS(CHR$(6%)+CHR$(34%)+CHR$(7%)+CHR$(0%)+Z$) !SET IT     &
+\	END IF								      &
+\	QUALIFIER.FOUND% = 0%			!DEFAULT TO NO QUALIFIERS     &
+\	REBOOT.TEXT$ = ""			!INIT THE REBOOT TEXT VARIABLE &
+\	NUM.OF.QUAL% = 0%			!INIT NUMBER OF QUALIFIERS    &
+\	CALL FET$CQ BY REF (LAT.Q%)		!/LAT SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		GOSUB 10000			!  OPEN THE CONFIG.SYS FILE   &
+\		SAVE.FLAG% = FLAG.BITS		!  SAVE THE CURRENT FLAG      &
+\		IF U.NO% THEN			!  IF /NOLAT		      &
+			FLAG.BITS = FLAG.BITS OR 2% !DISABLE LAT	      &
+		ELSE				!     /LAT		      &
+			FLAG.BITS = FLAG.BITS AND NOT(2%)!ENABLE LAT	      &
+\		END IF							      &
+\		IF SAVE.FLAG% <> FLAG.BITS THEN	!  IF WE CHANGED SOMETHING    &
+			QUALIFIER.FOUND% = 1%	!    FLAG IT		      &
+\			NUM.OF.QUAL% = NUM.OF.QUAL% + 1% !INC THE NUMBER      &
+\		END IF							      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (FMS.Q%)		!/FMS SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		GOSUB 10000 UNLESS BUFSIZ(1%)	!OPEN FILE IF NECESSARY	      &
+\		SAVE.FLAG% = FLAG.BITS		!  SAVE THE CURRENT FLAG      &
+\		IF U.NO% THEN			!  IF /NOFMS		      &
+			FLAG.BITS = FLAG.BITS AND NOT(1%) !DISABLE FMS	      &
+		ELSE				!     /FMS		      &
+			FLAG.BITS = FLAG.BITS OR 1%	!ENABLE FMS	      &
+\		END IF							      &
+\		IF SAVE.FLAG% <> FLAG.BITS THEN	!  IF WE CHANGED SOMETHING    &
+			QUALIFIER.FOUND% = QUALIFIER.FOUND% OR 2% !FLAG IT    &
+\			NUM.OF.QUAL% = NUM.OF.QUAL% + 1% !INC THE NUMBER      &
+\		END IF							      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (PKS.Q%)		!/PK SPECIFIED?		      &
+\	IF NOT(U.PRES%) THEN			!IF NOT PRESENT		      &
+		CALL FET$CQ BY REF (PK.Q%)	!  /PSEUDO_KEYBOARD SPECIFIED? &
+\	END IF								      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		GOSUB 10000 UNLESS BUFSIZ(1%)	!OPEN FILE IF NECESSARY	      &
+\		CALL FET$A BY REF		!  GET THE ARGUMENT	      &
+\		SAVE.FLAG% = PK.NO		!  SAVE THE CURRENT # OF PKs  &
+\		PK.NO = U.LOW%			!  GET THE NUMBER	      &
+\		IF SAVE.FLAG% <> PK.NO THEN	!  IF WE CHANGED SOMETHING    &
+			QUALIFIER.FOUND% = QUALIFIER.FOUND% OR 4% !FLAG IT    &
+\			NUM.OF.QUAL% = NUM.OF.QUAL% + 1% !INC THE NUMBER      &
+\		END IF							      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (WBT.Q%)		!/Warp speed SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		GOSUB 10000 UNLESS BUFSIZ(1%)	!OPEN FILE IF NECESSARY	      &
+\		SAVE.FLAG% = FLAG.BITS		!  SAVE THE CURRENT FLAG      &
+\		IF U.NO% THEN			!  IF /NOWarp speed	      &
+			FLAG.BITS = FLAG.BITS AND NOT(8%) !DISABLE Warp speed &
+		ELSE				!     /Warp speed	      &
+			FLAG.BITS = FLAG.BITS OR 8%	!ENABLE Warp speed    &
+\		END IF							      &
+\		IF SAVE.FLAG% <> FLAG.BITS THEN	!  IF WE CHANGED SOMETHING    &
+			QUALIFIER.FOUND% = QUALIFIER.FOUND% OR 8% !FLAG IT    &
+\			NUM.OF.QUAL% = NUM.OF.QUAL% + 1% !INC THE NUMBER      &
+\		END IF							      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (MON.Q%)		!/MONITOR_NAME SPECIFIED?     &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		SYSIO.PRIV% = FNCHECK.PRIV%("SYSIO")	!CHECK FOR SYSIO PRIV &
+\		IF NOT SYSIO.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SYSIO privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		GOSUB 10000 UNLESS BUFSIZ(1%)	!OPEN FILE IF NECESSARY	      &
+\		SAVE.NAME$ = MON.NAME		!SAVE THE CURRENT MONITOR NAME &
+\		CALL FET$A BY REF		!GET THE MONITOR NAME	      &
+\		Z$ = SEG$(U.STR$,1%,U.LEN%)	!EXTRACT THE FILENAME	      &
+\		CHANGE FSS$(Z$,1%) TO FIRQB%	!DO THE FILENAME SCAN	      &
+\		FIRQB%(5%) = 1% IF (FIRQB%(5%) OR FIRQB%(6%)) = 0% ! [0,1]    &
+\		IF (FIRQB%(5%) <> 1%) OR (FIRQB%(6%) <> 0%) THEN !IF NOT [0,1] &
+			CALL DISPLY ("?Monitor must be in _SY0:[0,1]")	      &
+\			SUBEXIT			!       PRINT ERROR AND EXIT  &
+\		END IF							      &
+\		IF (FIRQB%(29%) AND 8%) <> 0% THEN !IF THERE'S A FILETYPE     &
+			RAD50.TYPE% = 30772%	!  SET RAD-50 OF "SIL"	      &
+\			THIS.TYPE% = FIRQB%(11%)+SWAP%(FIRQB%(12%)) !GET TYPE &
+\			IF THIS.TYPE% <> RAD50.TYPE% THEN !IF THEY DON'T MATCH &
+				CALL DISPLY ("?Filetype must be .SIL")	      &
+\				SUBEXIT		!       PRINT ERROR AND EXIT  &
+\			END IF						      &
+\		END IF							      &
+\		D$ = "_SY0:["+NUM1$(FIRQB%(6%))+","+NUM1$(FIRQB%(5%))+"]"     &
+\		F$ = 	       RAD$(FIRQB%(7%)+SWAP%(FIRQB%(8%))) + !FILE     &
+			       RAD$(FIRQB%(9%)+SWAP%(FIRQB%(10%)))  !NAME     &
+\		F$ = EDIT$(F$,2%)		! REMOVE ALL SPACES	      &
+\		D$ = D$ + F$ + ".SIL"		! PUT IT ALL TOGETHER	      &
+\		ON ERROR GOTO 6640		! SET LOCAL ERROR TRAP	      &
+\		V$ = SYS(REGAIN.PRIV$)		! REGAIN TEMP PRIVS	      &
+\		OPEN D$ FOR INPUT AS FILE 2%	! OPEN THE FILE		      &
+\		CLOSE 2%			! AND CLOSE IT		      &
+\		V$ = SYS(DROP.PRIV$)		! DROP TEMP PRIVS	      &
+\		ON ERROR GOTO 19000		! RESET STANDARD ERROR TRAP   &
+\		F$ = LEFT(F$+STRING$(7%,0%),7%)	! PAD IT OUT TO 7 CHARACTERS  &
+\		MON.NAME = F$			! STORE IT		      &
+\		IF SAVE.NAME$ <> MON.NAME THEN	!  IF WE CHANGED SOMETHING    &
+			QUALIFIER.FOUND% = QUALIFIER.FOUND% OR 16% !FLAG IT   &
+\			NUM.OF.QUAL% = NUM.OF.QUAL% + 1% !INC THE NUMBER      &
+\		END IF							      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (SWM.Q%)		!/SWAP_MAXIMUM SPECIFIED?     &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		TUNE.PRIV% = FNCHECK.PRIV%("TUNE")	!CHECK FOR TUNE PRIV  &
+\		IF NOT TUNE.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?TUNE privilege required") !SAY SO      &
+\			SUBEXIT						      &
+\		END IF							      &
+\		GOSUB 10000 UNLESS BUFSIZ(1%)	!OPEN FILE IF NECESSARY	      &
+\		CALL FET$A BY REF		!  GET THE ARGUMENT	      &
+\		SAVE.FLAG% = SWAP.MAX		!  SAVE THE CURRENT SWAP MAX  &
+\		SWAP.MAX = U.LOW%		!  GET THE NUMBER	      &
+\		IF SAVE.FLAG% <> SWAP.MAX THEN	!  IF WE CHANGED SOMETHING    &
+			QUALIFIER.FOUND% = QUALIFIER.FOUND% OR 32% !FLAG IT   &
+\			NUM.OF.QUAL% = NUM.OF.QUAL% + 1% !INC THE NUMBER      &
+\		END IF							      &
+\	END IF								      &
+\	CALL FET$CQ BY REF (ASY.Q%)		!/ASYNC SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT SWCFG.PRIV% THEN		!  IF NOT PRIVILEGED	      &
+			CALL DISPLY ("?SWCFG privilege required") !SAY SO     &
+\			SUBEXIT						      &
+\		END IF							      &
+\		GOSUB 10000 UNLESS BUFSIZ(1%)	!OPEN FILE IF NECESSARY	      &
+\		FLAG.BITS  = FLAG.BITS OR 16%	!  SET ASYNC ENABLED BIT      &
+\		PUT #1%, BLOCK 1%		!  WRITE THE BLOCK OUT	      &
+\		SAVE.FLAG% = FLAG.BITS		!  SAVE THE CURRENT FLAG      &
+\		IF U.NO% THEN			!  IF /NOASYNC		      &
+			FLAG.BITS = FLAG.BITS AND NOT(4%) !DISABLE ASYNC      &
+		ELSE				!     /ASYNC		      &
+			FLAG.BITS = FLAG.BITS OR 4%	   !ENABLE ASYNC      &
+\		END IF							      &
+\		IF SAVE.FLAG% <> FLAG.BITS THEN	!  IF WE CHANGED SOMETHING    &
+			QUALIFIER.FOUND% = QUALIFIER.FOUND% OR 64% !FLAG IT   &
+\			NUM.OF.QUAL% = NUM.OF.QUAL% + 1% !INC THE NUMBER      &
+\		END IF							      &
+\	END IF								      &
+\	IF QUALIFIER.FOUND% THEN		!IF THERE'S A QUALIFIER	      &
+		PUT #1%, BLOCK 1%		!  WRITE THE BLOCK OUT	      &
+\		QUAL.NAME$(0%) = "LAT"		!  SET IN LAT TEXT	      &
+\		QUAL.NAME$(1%) = "FMS"		!  SET IN FMS TEXT	      &
+\		QUAL.NAME$(2%) = "Pseudo keyboard"!SET IN PK TEXT	      &
+\		QUAL.NAME$(3%) = "Warp speed"	!  SET IN Warp speed TEXT     &
+\		QUAL.NAME$(4%) = "Monitor"	!  SET IN Monitor TEXT	      &
+\		QUAL.NAME$(5%) = "Swap Maximum"	!  SET IN Swap Maximum TEXT   &
+\		QUAL.NAME$(6%) = "Asynchronous DDCMP driver" ! Async TEXT     &
+\		QUALS.COUNT% = 0%		!  INIT QUALIFIER COUNT	      &
+\ QUALS.LOOP:	FOR I% = 0% TO 6%		!  GO THRU EACH QUAL AGAIN    &
+\			ITERATE QUALS.LOOP	!   GET NEXT IF NOT SET	      &
+				IF (QUALIFIER.FOUND% AND 2%^I%) = 0%	      &
+\			QUALS.COUNT% = QUALS.COUNT% + 1% !INC THE COUNTER     &
+\			REBOOT.TEXT$ = QUAL.NAME$(I%) !GET THE QUALIFIER      &
+				IF QUALS.COUNT% = 1%	 ! IF ITS THE FIRST   &
+\			REBOOT.TEXT$ = REBOOT.TEXT$ + " and "+ !SET TEXT      &
+			   QUAL.NAME$(I%)		       !FOR JUST TWO  &
+			      IF (QUALS.COUNT% = 2%) AND (NUM.OF.QUAL% = 2%)  &
+\			REBOOT.TEXT$ = REBOOT.TEXT$ + ", "+ !SET TEXT	      &
+			   QUAL.NAME$(I%)		    !FOR MIDDLE	      &
+			      IF (QUALS.COUNT% >= 2%) AND		      &
+				 (NUM.OF.QUAL% > QUALS.COUNT%)		      &
+\			REBOOT.TEXT$ = REBOOT.TEXT$ + ", and "+ !SET TEXT     &
+			   QUAL.NAME$(I%)		    !FOR LAST QUAL    &
+			      IF (QUALS.COUNT% > 2%) AND		      &
+				 (NUM.OF.QUAL% = QUALS.COUNT%)		      &
+\		NEXT I%							      &
+\		PRINT "The ";REBOOT.TEXT$;" changes will take ";!PRINT INFO   &
+			"effect upon reboot"			!MESSAGE      &
+\	END IF								      &
+\	CLOSE 1%				!CLOSE THE FILE		      &
+\	ON ERROR GOTO 19000			!RESET STANDARD ERROR TRAP    &
+\	SUBEXIT					!EXIT			      &
+
+6640	IF ERR = 32% AND ERL = 6620 THEN	!IF ?No buffer space available &
+						! for SET SYSTEM/STATISTICS   &
+						!  or SET SYSTEM/ANSWERBACK   &
+		PRINT "?Insufficient XBUF space"!  PRINT ERROR MESSAGE	      &
+\		RESUME 6660			!   AND EXIT		      &
+\	END IF								      &
+\	IF ERR = 5% AND ERL = 6620 THEN		!IF ?Can't find file or account &
+						! for SET SYSTEM/MONITOR_NAME &
+		CALL DISPLY ("?Monitor not found in _SY0:[0,1]") !PRINT ERROR &
+\		RESUME 6660			!    AND EXIT		      &
+\	END IF								      &
+\	GOTO 19000				!  LET MAIN ERROR TRAP HAVE IT &
+
+6650	IF ERR = 18 AND ERL = 6600 THEN		!IF ?Illegal SYS() usage for  &
+						! SET SYSTEM/RELEASE	      &
+		PRINT "?System not on hold"	!  PRINT ERROR MESSAGE	      &
+\		RESUME 6660			!  AND EXIT		      &
+\	END IF								      &
+\	IF ERR = 3 AND ERL = 6603 THEN		!IF ?Account in use error for &
+						! SET SYSTEM/HOLD	      &
+	   PRINT "?System already on hold"				      &
+\		RESUME 6660			!  AND EXIT		      &
+\	END IF								      &
+\	IF ERR = 18 AND ERL = 6603 THEN		!IF ?Illegal SYS() usage for  &
+						! SET SYSTEM/HOLD	      &
+	   PRINT "?System cannot be placed on hold from a Pseudo keyboard"    &
+\		RESUME 6660			!  AND EXIT		      &
+\	END IF								      &
+\	RESUME 6610 IF ERR = 11 AND ERL = 6605	!CONTINUE IF NO PREVIOUS      &
+						! ATTRIBUTE BLOCKETTE	      &
+\	V$ = SYS(DROP.PRIV$)			!DROP TEMP PRIVS	      &
+\	GOTO 19000				!LET MAIN ERROR TRAP HAVE IT  &
+
+6660	V$ = SYS(DROP.PRIV$)			!DROP TEMP PRIVS	      &
+\	SUBEXIT								      &
+									      &
+
+10000	!								      &
+	!	S U B R O U T I N E S					      &
+	!								      &
+	ON ERROR GOTO 10090			!SET LOCAL ERROR TRAP	      &
+\	V$ = SYS(REGAIN.PRIV$)			!REGAIN TEMP PRIVS	      &
+\	OPEN "_SY0:[0,1]CONFIG.SYS" FOR INPUT AS FILE 1%, !OPEN CONFIG.SYS    &
+			ORGANIZATION VIRTUAL,				      &
+			MAP CONFIG					      &
+\	GET #1%, BLOCK 1%			!GET THE FIRST BLOCK	      &
+
+10010	ON ERROR GOTO 19000			!RESET ERROR TRAP	      &
+\	V$ = SYS(DROP.PRIV$)			!DROP TEMP PRIVS	      &
+\	RETURN								      &
+
+10080	PRINT "Creating Configuration file"	!PRINT INFO MESSAGE	      &
+\	OPEN "_SY0:[0,1]CONFIG.SYS" FOR OUTPUT AS FILE 1%, !OPEN CONFIG.SYS   &
+			ORGANIZATION VIRTUAL,				      &
+			MAP CONFIG					      &
+\	VERSION = 1%				!VERSION 1		      &
+\	REV.LEVEL = 0%				!REV LEVEL 0		      &
+\	FLAG.BITS = 0%				!LAT ENABLED AND FMS DISABLED &
+\	PK.NO = 1				!ONE PK			      &
+\	PUT #1%, BLOCK 1%			!WRITE IT OUT		      &
+\	GOTO 10010				!GO BACK		      &
+
+10090	RESUME 10080 IF ERR = 5% AND ERL = 10000 !CREATE FILE IF NOT THERE    &
+\	V$ = SYS(DROP.PRIV$)			!DROP TEMP PRIVS	      &
+\	ON ERROR GO BACK			!LET THE MAIN HANDLE IT	      &
+									      &
+
+15050	DEF FNCHECK.PRIV%(PRIV$)		!CHECK FOR PRIV PRIV$	      &
+\	FNCHECK.PRIV% = 0%			!  DEFAULT TO NOT PRIVILEGED  &
+\	FNCHECK.PRIV% = -1% UNLESS ASCII(SEG$(SYS(CHR$(6%)+CHR$(32%)+CHR$(1%)+ &
+				 STRING$(3%,0%)+PRIV$),3%,3%))		      &
+						!  CHECK FOR THE PRIVILEGE    &
+\	FNEND								      &
+									      &
+
+16200	DEF FNGET.SWAP$(Q%)						      &
+	!								      &
+	! FUNCTION:	FNGET.SWAP$	RETURN FILE SPECIFICATION OF	      &
+	!				SYSTEM FILE Q%			      &
+	! INPUT:			SYSTEM FILE #			      &
+	! RETURNS:			1) FILE SPECIFICATION IF FILE IS      &
+	!				   PRESENT			      &
+	!				2) "None" IF FILE IS NOT PRESENT      &
+	!				3) DEVICE+(NFS) IF NONFILE STRUCTURED &
+	!				   I.E., DK0: (NFS)		      &
+	!								      &
+	! NOTE: THE ADD/REMOVE SYSTEM FILE SYS() CALL WILL RETURN NULLS IN    &
+	!	THE FIRST TWO BYTES OF THE FILENAME IF THE DEVICE IS NONFILE  &
+	!	STRUCTURED.						      &
+	!								      &
+
+16210	ON ERROR GOTO 16230						      &
+	\ Q$="None"							      &
+	\ CHANGE SYS(CHR$(6%)+CHR$(23%)+CHR$(Q%)+CHR$(-1%)) TO FIRQB%	      &
+	\ Q$=CHR$(FIRQB%(23%))+CHR$(FIRQB%(24%))+NUM1$(FIRQB%(25%))+":"	      &
+	\ IF FIRQB%(7%)=0% AND FIRQB%(8%)=0% THEN			      &
+		Q$=Q$+" (NFS)"						      &
+	  ELSE								      &
+		Q$=Q$+"["+NUM1$(FIRQB%(6%))+","+NUM1$(FIRQB%(5%))+"]"	      &
+		     +RAD$(FIRQB%(7%)+SWAP%(FIRQB%(8%)))		      &
+		     +RAD$(FIRQB%(9%)+SWAP%(FIRQB%(10%)))		      &
+		     +"."+RAD$(FIRQB%(11%)+SWAP%(FIRQB%(12%)))		      &
+		!							      &
+		! SET ON ERROR TRAP FOR THIS FUNCTION.			      &
+		! SET DEFAULT TO "None".				      &
+		! IF THE FILE IS NOT THERE WE GET A CAN'T FIND FILE	      &
+		! OR ACCOUNT ERROR.					      &
+		! IF THE DEVICE IS NONFILE STRUCTURED THEN		      &
+		!	RETURN THE DEVICE LABEL+(NFS)			      &
+		! ELSE							      &
+		!	RETURN THE DEVICE LABEL+PPN+NAME.EXT		      &
+
+16215	IF POS(Q$,"(NFS)",1%) = 0% THEN		!IF NOT NON-FILE STRUCTURED   &
+		CHANGE FSS$(Q$,1%) TO FIRQB%	!  DO THE FILENAME STRING SCAN &
+\		FIRQB%(0%) = 30%		!  30 BYTES		      &
+\		FIRQB%(1%) = 6%			!  SYS CALL TO FIP	      &
+\		FIRQB%(2%) = 17%		!  DIRECTORY LOOKUP	      &
+\		FIRQB%(I1%) = 255% FOR I1% = 3% TO 4%!LOOKUP BY FILENAME      &
+\		CHANGE FIRQB% TO FIRQB$		!  CHANGE THE ARRAY TO STRING &
+\		CHANGE SYS(FIRQB$) TO FIRQB%	!  DO THE SYS CALL	      &
+\		SIZ.E% = FIRQB%(13%) + SWAP%(FIRQB%(14%))!GET THE SIZE OF IT  &
+\		SIZ.E$ = NUM1$(SIZ.E%)		!  MAKE A STRING OUT OF IT    &
+\		SIZ.E$ = SPACE$(7%-LEN(SIZ.E$))+SIZ.E$+" blocks" !PAD IT      &
+\		Q$ = Q$ + SIZ.E$		!  APPEND IT TO THE FILESPEC  &
+\		IF Q% <= 3% THEN		!  IF THIS IS A SWAPFILE      &
+			V$ = SYS(REGAIN.PRIV$)	!   GET PRIVS		      &
+\			SWAP.MAX% = PEEK(700%) AND 255% !GET SYSTEM SWAP MAX  &
+\			V$ = SYS(DROP.PRIV$)	!   DROP PRIVS		      &
+\			Q$ = Q$ + " ("+NUM1$(SIZ.E%/(4%*SWAP.MAX%))+" jobs @"+ &
+			    NUM1$(SWAP.MAX%)+"K Swap max)"		      &
+						!  CALCULATE # OF JOBS	      &
+\		END IF							      &
+\	END IF								      &
+
+16220	FNGET.SWAP$=Q$							      &
+	\ FNEXIT							      &
+		!							      &
+		! RESET THE PROGRAM ERROR TRAP LOCATION AND RETURN.	      &
+
+16230	RESUME 16220							      &
+		!							      &
+		! TRAP ERRORS						      &
+
+16240	FNEND								      &
+									      &
+
+
+19000	!	s t a n d a r d   e r r o r   h a n d l i n g		      &
+	!								      &
+	!								      &
+	ON ERROR GO BACK			!Let the Root error	      &
+						! handler handle it	      &
+
+
+32767	!	e n d   o f   s u b p r o g r a m			      &
+	!								      &
+	!								      &
+	SUBEND

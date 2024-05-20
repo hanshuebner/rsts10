@@ -1,0 +1,205 @@
+TITLE	MNTCUI,<MTDSMT'S CUI MODULE>,0A,10-MAY-91,SDL/FRL
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR MNTCUI 
+;+
+;
+;				[RSTS V8.0]
+;  000  SDL  12-Nov-82	Separated CUI code from MTDSMT.MAC module to form
+;			this module and help in overlaying
+;  001  SDL  03-Jan-83  Added comments to table describing command qualifiers
+;
+;				[RSTS V9.0]
+;  002  FRL  21-Sep-83	Invoked CUI .PSECTs here for RSX overlaying
+;  003  FRL  09-Apr-84  Allowed /NOSHAREABLE to take a job number
+;  004  FRL  16-Apr-84  Made compatible with V9.0 CUI
+;  005  FRL  02-Jul-84  New MOUNT qualifiers
+;  006  FRL  09-Jul-84  Take all of ONLCLN's CUI code out of DCL and put in here
+;  007  FRL  04-Feb-85  Add /OVERRIDE qualifier
+;  008  FRL  16-May-85	Allow /OVERRIDE at Packid prompt
+;	
+;-
+
+.SBTTL	DEFINITIONS AND MACROS
+
+;
+; This MNTCUI.MAC module contains the necessary CUI setup for defining 
+; the DCL MOUNT and DISMOUNT commands (for disks) which is needed by the 
+; MTDSMT.MAC module.  The 2 modules are separated so that MTDSMT can be in
+; the root and MNTCUI can be in an overlay.  Otherwise, the root would be
+; too large to link in ODT for debugging purposes.
+;
+
+
+	DEFORG	MNTCUI
+
+	.MCALL	$CUI,.ASCIC	;Invoke $CUI macro 			;006
+	$CUI	TABLE		;Include macros and symbols needed
+				;  for threaded routines and tables
+	$CUI	PSECTS		;Invoke the CUI .PSECTs			;002
+
+
+	ORG	MNTCUI
+
+
+; Command table for DCL MOUNT and DISMOUNT of disks
+
+CMDTBL::$THR			;Begin threaded language statements
+	$RDCMD			;Read the command line that's in core common
+				;  but do not prompt 
+	$PARKEY			;Parse a keyword on the command line
+	$ONKEY	MOU.K,MOU.CM	;If keyword = 'MOUNT', go to MOUNT routine 
+	$ONKEY 	DSMT.K,DIS.CM   ;If keyword = 'DISMOUNT', go to DISMOUNT 
+			        ;              routine
+	$ENDKEY			;If keyword in core common is neither 'MOUNT'
+				;  nor 'DISMOUNT', then "Illegal keyword" 
+				;  error is sent to the user 
+	$ENDTHR			;End threaded language statements 
+
+
+; Table of keywords:  global symbols needed by CUI to define the spelling of
+;		      keywords and to show their abbreviation rules of how we
+;		      expect to see them in core common, as passed by DCL.
+;
+; Commands 
+;
+ 	DEFKEY	MOU.K,   "MO-UNT"    ;   'MOUNT'
+	DEFKEY	DSMT.K,  "DIS-MOUNT" ;   'DISMOUNT'
+
+;									;006
+; Prompts								;006
+;									;006
+	TMPORG	U$TEXT							;006
+
+DEV$P:	.ASCIC	<"Device: ">						;006
+PCK$P:	.ASCIC	<"Pack-id: ">						;006
+
+	UNORG								;006
+
+;
+; Qualifiers (for the DCL 'MOUNT' command) [DCL must know of any changes here]
+;
+	DEFKEY  PRIV.Q,  "PRI-VATE"  ;   '/PRIVATE'   
+	DEFKEY  PUBL.Q,  "PU-BLIC"   ;   '/PUBLIC'  - for DISMOUNT command too
+ 	DEFKEY	SHAR.Q,  "SH-AREABLE" ;  '/SHAREABLE'
+	DEFKEY	NOSH.Q,	 "NOSH-AREABLE"; '/NOSHAREABLE'			;003
+	DEFKEY	REST.Q,	 "RES-TRICT" ;	 '/RESTRICT			;005
+	DEFKEY	NORE.Q,	 "NORES-TRICT";	 '/NORESTRICT			;005
+	DEFKEY	QUOT.Q,	 "QU-OTA"    ;	 '/QUOTA			;005
+ 	DEFKEY	REBU.Q,  "REB-UILD"  ;   '/REBUILD'			;005
+	DEFKEY	WRIT.Q,  "WR-ITE"    ;   '/WRITE'
+	DEFKEY	OVER.Q,  "OV-ERRIDE" ;   '/OVERRIDE'			;007
+	DEFKEY	ID.KEY,	 "ID-ENTIFICATION" ; /OVERRIDE argument		;007
+
+
+.SBTTL MOUNT COMMAND
+;
+; Define the command line for 'MOUNT', including its parameters, 
+; where the format is:
+;
+;	MOUNT device-name[:] label [logical-name[:]][/qualifier ...]
+;
+MOU.CM::$THR		
+	$DEFCMD	QUAL=MOU.Q,U.CMDC=1 ;Address of table of legal qualifiers 
+				    ;  for 'MOUNT', command code = 1
+	$PARM	DEVN.P,TYPE=U$DEV,PROMPT=DEV$P ;1st parameter = device-name ;006
+				; (not optional),
+				;  syntax type='U$DEV', which checks it for
+				;  legal device names
+	$FETCQ	OVER.Q		; Is /[NO]OVERRIDE present?		;007
+	$IF	PRESENT		; Yes, so check it			;007
+	$IF	YES		; If really /OVER, no pack-id allowed	;007
+	$PARM	LOGN.P,TYPE=U$LOGN,FLAGS=PF.OPT!PF.SEP ; Check logical name ;007
+				;2rd parameter = logical-name (optional),
+				;  syntax type='U$LOGN'
+				;  No blank needed between device and logical ;007
+	$GOTO	10$		;  Since /OVERRIDE, only two parameters	;007
+	$ENDIF			; It's really /NOOVER, Pack-id is required ;007
+	$ENDIF			; It's not there, Pack-id required	;007
+	$PARM	LABL.P,TYPE=U$LBL,FLAGS=PF.SEP,PROMPT=PCK$P,CONF=OVER.Q	;008
+				;2nd parameter = pack-id label (not optional), ;007
+				;  syntax type='U$LBL'
+				;  No blank needed between device and pack-id ;004
+	$PARM	LOGN.P,TYPE=U$LOGN,FLAGS=PF.OPT ;			
+				;3rd parameter = logical-name (optional),
+				;  syntax type='U$LOGN'
+10$:	$ENDCMD			;End the parse of the command line
+	$ENDTHR			;
+
+
+;
+; Define the legal qualifiers for the DCL 'MOUNT' command
+;
+MOU.Q:
+	DEFQUAL	PRIV.Q,CONF=<NOSH.Q,PUBL.Q>   ;		/PRIVATE	;003
+	DEFQUAL	PUBL.Q,CONF=<NOSH.Q,PRIV.Q,REST.Q> ;	/PUBLIC		;005
+	DEFQUAL	SHAR.Q,CONF=NOSH.Q	    ;		/SHAREABLE	;003
+	DEFQUAL	NOSH.Q,ARG=OPT,CONF=<SHAR.Q,PUBL.Q,PRIV.Q> ; /NOSHAREABLE ;003
+		DEFARG	TYPE=U$U8,MINVAL=1,MAXVAL=63	;JOB NUMBER	;003
+		ENDARG							;003
+	DEFQUAL	REST.Q,CONF=<NORE.Q,PUBL.Q> ;	  /RESTRICT		;005
+	DEFQUAL NORE.Q,CONF=REST.Q  ;		  /NORESTRICT		;005
+	DEFQUAL	QUOT.Q,FLAGS=QF.NEG ;		  /[NO]QUOTA		;005
+	DEFQUAL	REBU.Q,FLAGS=QF.NEG ;             /[NO]REBUILD 
+	DEFQUAL	OVER.Q,FLAGS=QF.NEG,ARG=OPT,CONF=LABL.P ;/[NO]OVERRIDE 	;008
+		DEFARG	ID.KEY						;007
+		ENDARG							;007
+	DEFQUAL	WRIT.Q,FLAGS=QF.NEG ;             /[NO]WRITE   
+	ENDQUAL			    ;End the list of qualifiers 
+
+
+
+
+.SBTTL DISMOUNT COMMAND
+;
+; Define the command line for DCL 'DISMOUNT', including its parameters 
+; where the format is:
+;
+;	"DISMOUNT device-name[:] [label][/qualifier]" 
+;
+DIS.CM::$THR			;
+	$DEFCMD	QUAL=DIS.Q,U.CMDC=2 ;Address of table of legal qualifiers
+				    ;  for 'DISMOUNT', command code = 2
+	$PARM	DEVN.P,TYPE=U$DEV,PROMPT= DEV$P				;006
+				;1st parameter = device-name (not optional)
+				;  (syntax type='U$DEV')
+	$PARM	LABL.P,TYPE=U$LBL,FLAGS=PF.OPT!PF.SEP ;
+				;2nd parameter = pack-id label (optional 
+				;   for privileged users), syntax type='U$LBL'
+	$ENDCMD			;End the parse of the command line 
+	$ENDTHR			;
+
+;
+; Define the legal qualifiers for the DCL 'DISMOUNT' command
+;
+DIS.Q:
+	DEFQUAL	PUBL.Q		;  /PUBLIC
+	ENDQUAL			;End the list of qualifiers 
+
+GLOBAL	<DEVN.P,LABL.P,LOGN.P>
+
+	UNORG
+
+	.END
+
+
+
+

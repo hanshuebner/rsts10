@@ -1,0 +1,392 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+.INCLUDE /CMN:HDRDEF/
+TITLE	SNP,<SNAP-SHOT DUMPER>,0A,10-MAY-91,MDS/JTC/WJS/GPK/FEK
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR SNP
+
+;+
+;
+;  000	MDS  11-Apr-81	CREATION - New algorithm to include XBUF dump
+;  001	JTC  18-May-81	Some changes to algorithm and dump table format
+;  002	WJS  29-Oct-82	New UUOENT for EMT Logger
+;
+;				[RSTS V9.0]
+;  003	GPK  28-Mar-83	Multiple privileges
+;  004	GPK  19-Apr-84	Privilege name changes
+;
+;				[RSTS V10.0]
+;  005	FEK  30-May-90	Improve content of Snaps
+;
+;-
+
+.SBTTL	DO A SNAP SHOT
+
+FQFSRT	SNP
+
+;+
+; UU.DMP - SNAP-SHOT DUMPER.
+;
+;	R4 -> FIRQB
+;
+;	This UUO dumps to the system crash file all the segments
+;	described in the memory dump table X.TAB.
+;
+;	The DSQ for the first segment is FIP's private DSQ.
+;	Subsequent DSQ's are obtained from small buffers.
+;	When a small buffer cannot be obtained, we wait for one
+;	of our outstanding DSQ's to be returned and then use it.
+;
+;-
+
+.DSECT	-2		;Define our frame area:
+
+SNPFRM:			;Start of our frame
+SNPQUE:	.BLKW		;"DSQ queue didn't hit empty" flag
+	.BLKW		;Count of outstanding DSQ's (R1 points here)
+SNPERR:	.BLKW		;Returned DSQ error status
+SNPFRE:			;End of our frame area
+.EQUATE	SNPFRL,SNPFRE-SNPFRM ;Length of our frame area
+
+.DSECT	,NOCREF		;Verify memory dump segment ordering.
+
+XM.ADD:	.BLKW		;Address of the area/64.
+XM.LEN:	.BLKW		;Length of the area/64.
+XMTLEN:			;Length of the table entry
+
+UNORG
+
+	UUOENT	DMP,SYSIO,,LOGABL ;On-line crash dumper			;004
+
+	CALLX	WOMSAT		;Make sure SATBUF is clean		;005
+	MOVB	#-1,@#SATUNT	; and marked as invalid			;005
+	CALL	LODAPR		;Now loadup some stuff into SATBUF	;005
+	MOV	#-1,-(SP)	;Set up the frame - No I/O error yet.
+	CLR	-(SP)		;   No DSQ's in progress yet either.
+	MOV	SP,R1		;   Set up our frame pointer.
+	CLR	-(SP)		;   Clear out the DSQ queue flag.
+	MOV	#X.TAB,R0	;Point to the dump table.
+	CLR	R5		;Start at block 0 of the crash file.
+
+10$:	MOV	(R0)+,R3	;Get address for next entry - XM.ADD.
+	MOV	(R0)+,R4	;Get size for next entry - XM.LEN.
+	BEQ	20$		;This is a null entry, skip it.
+	CALL	SNPSEG		;Go dump this segment.
+20$:	CMP	R0,#X.TAB+<XMSEGS*XMTLEN> ;Are we through yet?
+	BLO	10$		;Not yet, get another segment.
+	.BR	SNPFIN		;Fall through to the "Finish up" code.
+
+GLOBAL	<SATUNT,X.TAB>							;005
+
+SNPFIN:	TST	(R1)		;All through.  Did we dump anything?
+	BNE	10$		;Yes, go clean up.
+	ERROR	NOSUCH		;Nothing dumped.  Return an error.
+				;(The error trap cleans up the stack.)
+
+10$:	CALL	SNPWAT		;Wait for a DSQ to come back.
+	CMP	R4,#FIPAR	;Was it our private DSQ?
+	BEQ	20$		;Yes, don't return it to small buffer pool!
+	BUFFER	RETSML		;No, give it back to the small buffer pool.
+20$:	TST	(R1)		;Any more DSQ's expected back?
+	BNE	10$		;Yes, go get the next one.
+
+	CMP	(SP)+,(SP)+	;Tear down the frame - Ignore first 2 words.
+	MOV	(SP)+,R0	;   Now get our I/O error indicator.
+.ASSUME	SNPFRL	EQ	6
+.ASSUME	SNPERR	EQ	SNPFRE-2
+	BPL	SNPIOE		;Branch if we had an I/O error.
+	RETURN			;Successful exit from UU.DMP.
+
+SNPIOE:	BNE	10$		;Branch if specific I/O error occurred.
+	ERROR	DATERR		;Nothing specific, return a general I/O error.
+
+10$:	CALLRX	ERROR		;Die with a specific I/O error code.
+
+GLOBAL	<FIPAR>
+
+.SBTTL	Load the APRs into SATBUF
+
+;	LODAPR - Load the APR values plus some other stuff into SATBUF	;005+
+;
+;	The Kernal APRs are fairly useless in a SNAP dump.
+;	However, the User SPRs, Supervisor APRs, and other stuff
+;	may prove somewhat useful during dump analysis.
+;
+
+LODAPR:	NOP			;Testing point
+	MOV	#CRASAV,R0	;Get a starting point
+	MOV	#1000/2,R1	; and a length to...
+10$:	CLR	(R0)+		;CLEAR the old stuff out of there
+	SOB	R1,10$		; and get it all
+	MOV	#CRASAV+632,R2	;Set the APR save starting point
+	MOV	@#JOBDA,R0	;Get JOBs JDB pointer
+	BEQ	30$		; None, so nothing fancy
+	MOV	#CRASAV+712,R2	;Set the JOB stuff save starting point
+	MOV	#140000+KEY,R1	; and the JOB stuff source starting point
+	MOV	#<2+FQBSIZ+XRBSIZ>/2,R5 ; and finally the size
+	MOV	JDMCTL+M.PHYA(R0),R0 ;Get the address of the job
+	ADD	#HDRSIZ*<4000/100>,R0 ; add offset in slivers for the header
+	MAP	R0,APR=6,DATA,PIC ; now map the jobs low core
+20$:	MOV	(R1)+,-(R2)	;so we can copy the stuff
+	SOB	R5,20$		; and get every bit
+	MAP	FIPPOL		;Now Remap FIP
+30$:	MOV	#KISDR0+<8.*2>,R1 ;Point to MMU registers
+	MOV	#8.,R5		;There are 8. in each group
+40$:	MOV	-(R1),-(R2)	;Save a kernel desc reg
+	MOV	KISAR0-KISDR0(R1),-(R2) ;Save a kernel addr reg
+	MOV	UISDR0-KISDR0(R1),-(R2) ;Save a user desc reg
+	MOV	UISAR0-KISDR0(R1),-(R2) ;Save a user addr reg
+	BIT	#XC$IDS,@#X.CON	;Is there I & D space?
+	BEQ	50$		; if not then no supervisor either
+	MOV	SISDR0-KISDR0(R1),-(R2) ;Save a supervisor desc reg
+	MOV	SISAR0-KISDR0(R1),-(R2) ;Save a supervisor addr reg
+50$:	SOB	R5,40$		;Loop for all of them...
+	MOV	@#MMUSR0,-(R2)	;Save memory management register 0
+	MOV	@#MMUSR2,-(R2)	;Save memory management register 2
+	BIT	#XC$IDS,@#X.CON	;Is there I & D space?
+	BEQ	70$		;Branch if there is not
+	MOV	@#MMUSR1,-(R2)	;Save memory management register 1
+	MOV	@#MMUSR3,-(R2)	;Save memory management register 3
+	MOV	#KDSDR0+<8.*2>,R1 ;Point to data space mmu registers
+	MOV	#8.,R5		;There are 8. in each group
+60$:	MOV	-(R1),-(R2)	;Save a KERNEL desc reg
+	MOV	KDSAR0-KDSDR0(R1),-(R2) ;Save a KERNEL addr reg
+	MOV	UDSDR0-KDSDR0(R1),-(R2) ;SAVE A USER DESCRIPTOR REG.
+	MOV	UDSAR0-KDSDR0(R1),-(R2) ;SAVE A USER ADDR REG.
+	MOV	SDSDR0-KDSDR0(R1),-(R2) ;SAVE A Super DESCRIPTOR REG.
+	MOV	SDSAR0-KDSDR0(R1),-(R2) ;SAVE A Super ADDR REG.
+	SOB	R5,60$		;Loop for all of them to...
+70$:	BIT	#XC$UMR,@#X.CON ;Test for UMR's
+	BEQ	90$		;Branch if there are none
+	MOV	#<31.*2>,R5	;31. 2 word registers
+	MOV	#UNIWIN+<<31.*2>*2>,R1 ;Point just past the UMR's
+	SPLC	5		;Enter a higher state (don't change the UMRs)
+80$:	MOV	-(R1),-(R2)	;;Save the unibus mapping registers
+	SOB	R5,80$		;;Loop (or did you guess that?)
+	SPLC	3		;;and return to the lower world
+90$:	RETURN			;All done
+
+GLOBAL	<CRASAV,JOBDA,X.CON>						;005-
+
+.SBTTL	Write out a segment of memory
+
+;	SNPSEG - Write out segment of memory
+;
+;	R1	=	Our Frame (@ DSQ Count)
+;	R3	=	ADDRESS/64.
+;	R4	=	DATA_COUNT/64.
+;	R5	=	Next free block within crash file
+;
+;	CALL	SNPSEG
+;
+;	R0,R1	=	Same as passed
+;	R2-R4	=	Undefined
+;	R5	=	New next free block within crash file
+;			(rounded up to the next DCN)
+;
+
+SNPSEG:	MOV	#64.*<1024./64.>-<512./64.>,R2 ;Get MMU unit of 64KB-512B.
+
+10$:	CMP	R4,R2		;Is what's left more than 64KB-512B?
+	BHI	20$		;Yes, write a 64KB-512B chunk.
+	MOV	R4,R2		;No, just write out the remainder.
+20$:	CALL	SNPDSQ		;Obtain a DSQ and set it up.
+	ADD	R2,R3		;Update the memory address.
+	SUB	R2,R4		;Subtract the amount we wrote.
+	BNE	10$		;Loop if more to write out.
+
+	MOVB	@#X.SCS,R2	;Get system disk cluster size.
+	DEC	R2		;So we can round the block offset
+	ADD	R2,R5		; within the crash file
+	BIC	R2,R5		;  to the next disk cluster.
+	RETURN			;All done with this segment.
+
+GLOBAL	<X.SCS>
+
+.SBTTL	Get a DSQ and set it up
+
+;	SNPDSQ - Get a DSQ and set it up
+;
+;	R1	=	Our Frame (@ DSQ Count)
+;	R2	=	DATA_COUNT/64.
+;	R3	=	ADDRESS/64.
+;	R5	=	Next free block within crash file
+;
+;	CALL	SNPDSQ
+;
+;	R0-R4		Unchanged
+;	R5	=	New next free block within crash file
+;
+
+.DSECT	,NOCREF		;Verify the ordering of a DSQ.
+
+	.BLKW		;Queue link word
+DSQJOB:	.BLKB		;Requesting job number times 2
+DSQERR:	.BLKB		;Retry count and error flag
+DSQL3Q:	.BLKW		;Completion queue and L3Q bits to set
+DSQUNT:	.BLKB		;FIP unit number
+DSQFBM:	.BLKB		;FIP block number (MSB)
+DSQFBL:	.BLKW		;FIP block number (LSB)
+DSQRFN:	.BLKB		;RH11 function
+DSQMAM:	.BLKB		;Memory address of the transfer (MSB)
+DSQMAL:	.BLKW		;Memory address of the transfer (LSB)
+DSQCNT:	.BLKW		;Word count of the transfer
+DSQFUN:	.BLKB		;Operation function code
+DSQFAR:	.BLKB		;Queue fairness or priority
+DSQMSC:	.BLKW		;Misc. pointer
+DSQTOT:	.BLKW		;Total transfer counter
+DSQPDA:	.BLKW		;Physical disk address
+DSQOPT:	.BLKW		;Disk optimization word
+DSQOUN:	.BLKB		;Physical disk unit number * 2
+DSQSAV:	.BLKB		;Saved function
+DSQPTO:	.BLKW		;Offset pointer
+DSQCTO:	.BLKB		;Offset retry counter
+DSQPUN:	.BLKB		;Physical disk unit number
+DSQSIZ:			;Size of a DSQ in bytes
+
+UNORG
+
+SNPDSQ:	REGSCR			;Save the registers.
+	MOV	#FIPAR,R4	;Assume our private DSQ is available.
+	TST	(R1)		;Is it?  (Is this the first DSQ request?)
+	BEQ	10$		;Yes, use our private DSQ.
+	BUFFER	GETSML,,0	;Private used already, try for a small buffer.
+	BVC	10$		;Got one, use the small buffer.
+	CALL	SNPWAT		;No small buffer, wait for a DSQ to come back.
+
+10$:	INC	(R1)		;Count the DSQ.
+	ADD	#DSQFUN,R4	;Offset in DSQ where we start filling in.
+	MOV	#WFUN+<400*377>,(R4) ;DSQFUN=WRITE; DSQFAR=377 (Unfair!)
+	ASH	#5,R2		;Convert MMU length to a word count.
+	MOV	R2,-(R4)	;DSQCNT = Word count of the transfer
+	ADD	#377,R2		;Round out word count
+	CLRB	R2		; to a block.
+	SWAB	R2		;Now make it a block count.
+	ADD	R2,TOS.R5(SP)	;And update the returned block offset.
+	CLR	R2		;Clear out high order bits so we can convert
+	ASHC	#6,R2		; MMU address to two-word byte address.
+	MOV	R3,-(R4)	;DSQMAL = High bits of the memory address
+	MOVB	R2,-(R4)	;DSQMAM = Low bits of the memory address
+	CLRB	-(R4)		;DSQRFN = RH11 function = 0
+	MOV	@#X.DCN,R2	;Get crash file's starting DCN.
+	MOVB	@#SYSUNT,R3	;Get system disk unit number.
+	CALLX	CNVDC3		;Convert DCN to starting FBN of crash file.
+	ADD	R5,R2		;Add in block within crash file.
+	ADC	R3		;Add in carry.
+	MOV	R2,-(R4)	;DSQFBL = FIP Block Number LSB
+	MOVB	R3,-(R4)	;DSQFBM = FIP Block Number MSB
+	MOVB	@#SYSUNT,-(R4)	;DSQFUN = System Disk unit
+	MOV	#FPQDNE,-(R4)	;DSQL3Q = FIP completion with DSQ queing
+	MOV	@#FIJOB,-(R4)	;DSQJOB = Job # *2; DSQERR=??
+	CLR	-(R4)		;Clear the link queue word.
+	CALLRX	DISK		;And pass this DSQ off to DISK.
+
+GLOBAL	<FIPAR,X.DCN,SYSUNT,FPQDNE,FIJOB,DEVCLU>
+
+.SBTTL	Wait for a DSQ to complete
+
+;	SNPWAT - Wait for a DSQ to come back
+;
+;	Our Frame:
+;		SNPDSQ     =  Queue empty flag
+;	R1  ->	DSQ Count  =  Number of DSQ's outstanding
+;		SNPERR     =  Most recent DSQ error (if any)
+;
+;	CALL	SNPWAT
+;
+;	R0	=	Undefined
+;	R1-R3,R5 =	Same as passed
+;	R4	->	Returned DSQ
+;
+;	Our Frame:
+;		SNPDSQ     =  Updated queue empty flag
+;	R1  ->	DSQ Count  =  (Passed DSQ Count) - 1
+;		SNPERR     =  Updated most recent DSQ error (if any)
+;
+;+
+; The following assumptions are made:
+;
+; 1. Since each DSQ had FPQDNE in the DSQL3Q word, the FPDONQ queue
+;	will never be empty when FIPWAT returns.
+;
+; 2. Although DSQ's are added to the FPDONQ queue at interrupt priority,
+;	they are always added at the end.
+;
+; 3. When a DSQ is queued on FPDONQ, the L3Q flag to return to FIPWAT is
+;	set if and only if the queue was empty before queueing the DSQ.
+;
+; 4. By the time FIPWAT returns the L3Q flag has been cleared.
+;-
+;
+;               |-----------|      |-----------|      |-----------|
+;    FPDONQ::   |   Head    | ---> |    Link   | ---> |     0     |
+;               |-----------|      |-----------|      |-----------|
+;                                  |  Rest of  |      |  Rest of  |
+;                                /\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\
+;                                  |    DSQ    |      |    DSQ    |
+;                                  |-----------|      |-----------|
+;
+; Based on these assumptions:
+;
+; 1. Items are removed from the queue at priority 3 with no timing problems.
+;	The chain is shortened in one instruction by moving the link word
+;	of the first DSQ into the head.
+;
+; 2. By testing the Z-bit after shortening the chain, we can see if we
+;	emptied the queue.  If we emptied it and more DSQ's are on their
+;	way, the L3Q flag will get set again.  We should go through FIPWAT
+;	to wait for it to get set, (it may be already by the time we get
+;	there,) and to clear it.  If the queue did not become empty, the L3Q
+;	flag will not get set again.  In this case, we should not go through
+;	FIPWAT but should directly process the next item in the queue.
+;
+
+.DSECT	-2,NOCREF	;Verify position of the queue flag on the frame.
+
+SNPQUE:	.BLKW		;"DSQ queue didn't hit empty" flag
+	.BLKW		;Count of outstanding DSQ'S (R1 points here)
+
+UNORG
+
+SNPWAT:	TST	-(R1)		;More left in queue from last time?
+	BNE	10$		;Yes, go unlink top item.
+	CALLX	FIPWAT		;No, wait until we get something.
+
+10$:	CLR	(R1)+		;Guess at only one entry in the queue.
+	MOV	@#FPDONQ,R4	;Get the first DSQ in the queue
+	MOV	(R4),@#FPDONQ	; and unlink it from the rest.
+	BEQ	20$		;Yes, queue now momentarily empty.
+	DEC	SNPQUE(R1)	;No, flag that there's more in the queue.
+
+20$:	MOVB	DSQERR(R4),R0	;Any error from this DSQ?
+	BMI	30$		;No error.
+	MOV	R0,SNPERR(R1)	;Yes, remember the last error we see.
+
+30$:	DEC	(R1)		;One less DSQ outstanding.
+	RETURN			;Return the DSQ.
+
+GLOBAL	<FPDONQ>
+
+FQFEND
+.END
+

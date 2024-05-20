@@ -1,0 +1,253 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	BCKCMP,<Backup file compare routines>,0A,10-MAY-91,KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BCKCMP
+
+;+
+;
+;			[RSTS V9.0]
+;  000  KPH  05-Nov-84	Creation
+;  001  KPH  05-Nov-84  Bugfix
+;
+;			[RSTS V9.1]
+;  002  KPH  23-Aug-85	Remove query handling from CHKCOM
+;
+;-
+
+.SBTTL	Call any needed MACROs
+
+.MCALL	.ASCIC
+
+.SBTTL	Compare a file to a list
+
+;+
+; CHKLST - Compare a file to a list
+;
+;	$CURFI = Current file specification
+;	R1 -> List to check
+;
+;	CALL	CHKLST
+;
+;	C-bit set if file not found in list
+;	C-bit clear if file found in list
+;-
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+CHKLST::SAVREG			;Save all registers
+10$:	MOV	R1,R5		;R5 -> current entry
+	BEQ	60$		;None, so we're done
+	MOV	(R5)+,R1	;R1 -> Next entry
+.ASSUME	S$NEXT	EQ	0
+	MOV	(R5)+,R2	;Pick up PPN of current entry in list
+.ASSUME	S$PPN EQ S$NEXT+2
+	MOV	#$CURFI,R3	;R3 -> Current file cells
+	MOV	(R3)+,R4	;Pick up current file's PPN
+.ASSUME	C$PPN	EQ	0
+	CALL	CMPPPN		;Do PPNs match?
+	BCS	10$		;No, so try next entry in list
+30$:	MOV	#10.,R0		;Pick up number of bytes to compare
+40$:	MOVB	(R5)+,R2	;Pick up byte of file name from list
+	MOVB	(R3)+,R4	;Now pick up current file's name
+	CMPB	R2,#'?		;Wildcard character in list?
+	BEQ	50$		;Yes, so automatic match	
+	CMPB	R2,R4		;Do we have a match?
+	BNE	10$		;No, so failure
+50$:	SOB	R0,40$		;Match, so try the next word
+	TST	(PC)+		;Clear carry for success
+60$:	SEC			;Set carry for failure
+	RETURN			;And we're done
+
+GLOBAL	<$CURFI>
+
+;+
+; CHKCOM - Compare current file to comparison parameters
+;
+;	$CURFI = Current file
+;	$SELEC -> Select list
+;	$INCLU -> Include list
+;	$EXCLU -> Exclude list
+;
+;	CALL	CHKCOM
+;
+;	C-bit set to indicate file doesn't match
+;	C-bit clear indicates match
+;-
+
+; The following code depends on these relationships:
+
+.SAVE
+
+.DSECT				;Define Date and time comparison offsets
+
+D$EMDA:	.BLKW			;Earliest modification date
+D$LMDA:	.BLKW			;Latest modification date
+D$LMTI:	.BLKW			;Latest modification time
+D$EMTI:	.BLKW			;Earliest modification time
+D$ECDA:	.BLKW			;Earliest creation date
+D$LCDA:	.BLKW			;Latest creation date
+D$LCTI:	.BLKW			;Latest creation time
+D$ECTI:	.BLKW			;Earliest creation time
+D$SIZE:				;Size of entry in bytes
+
+.ASSUME	C$MTIM	EQ	C$MDAT+2
+.ASSUME	C$CDAT	EQ	C$MTIM+2
+.ASSUME	C$CTIM	EQ	C$CDAT+2
+
+.RESTORE
+
+CHKCOM::SAVREG			;Save all registers
+	MOV	$SELEC,R1	;R1 -> First entry in select list
+	BEQ	10$		;No select list, that's easy
+	CALL	CHKLST		;File in select list?
+	BCS	30$		;No, maybe it's in include list
+10$:	MOV	#$CURFI+C$MDAT,R1 ;R1 -> Current file modification date
+	MOV	#$DATTB,R2	;R2 -> Dates table
+	MOV	#2,R3		;R3 = Number of pairs to check
+
+; Low bounds check
+
+20$:	CMP	(R1),(R2)+	;Within lower date parameter?
+	BLO	30$		;No, current file is too low
+	BHI	25$		;Higher than lower limit, don't check times
+	CMP	C$MTIM-C$MDAT(R1),D$EMTI-D$LMDA(R2) ;Same day, created in time? 
+	BHI	30$		;No, file time is too early
+
+; High bounds check
+
+25$:	CMP	(R1),(R2)+	;Within higher date parameter?
+	BHI	30$		;No, the date is too late
+	BLO	27$		;Not on the exact date, so don't check time
+	CMP	C$MTIM-C$MDAT(R1),(R2) ;Is file date too late in the day?
+	BLO	30$		;Yes, it sure is, forget this
+27$:	CMP	(R2)+,(R2)+	;Offset to creation date
+	CMP	(R1)+,(R1)+	;In both places
+.ASSUME	<D$ECDA-D$LMTI> EQ 4
+.ASSUME	<C$CDAT-C$MDAT> EQ 4
+	SOB	R3,20$		;Loop for all the dates/times
+	MOV	$EXCLU,R1	;R1 -> First entry in exclude list
+	BEQ	40$		;No exclude list, that's easy
+	CALL	CHKLST		;File in list?
+	BCS	40$		;No, so this file passes the tests
+30$:	MOV	$INCLU,R1	;R1 -> First entry in include list
+	BEQ	50$		;No include list, so exit with C=1
+	CALL	CHKLST		;Go check out the include list
+	BCS	50$		;No, so forget it			;002
+40$:	TST	(PC)+		;Indicate that the file matches		;002
+50$:	SEC			;Indicate file doesn't match		;002
+	RETURN			;And we're done (condition codes set)	;002
+
+GLOBAL	<$CURFI,$DATTB,$EXCLU,$INCLU,$SELEC,C$FLAG>
+
+.SBTTL	Check for a PPN in select/include list
+
+;+
+; CHKPLS - Check for a PPN in lists
+;
+;	$CURFI = Current file
+;	$SELEC -> Select list
+;	$INCLU -> Include list
+;
+;	CALL	CHKPLS
+;
+;	C-bit set if PPN not found, otherwise C-bit is clear
+;
+; Note: We don't check the exclude list. This is because the
+; presence of a PPN in the exclude list does not indicate that
+; the entire PPN is excluded.
+;-
+
+CHKPLS::SAVREG			;Save all registers
+	MOV	$CURFI+C$PPN,R4	;R4 = PPN to check
+
+	MOV	$SELEC,R1	;R1 -> First entry in select list
+	CLC			;Guess at no select list
+	BEQ	10$		;No select list, so everything is selected
+	CALL	CHKPPN		;Is it in list?
+	BCC	10$		;No, not this time (C = 0)
+
+	MOV	$INCLU,R1	;Maybe we can find it in the include list
+	BNE	CHKPPN		;Check it out, and return indication to caller
+	SEC			;No include list, so say PPN not found
+10$:	RETURN			;And we're done
+
+GLOBAL	<$CURFI,$SELEC,$INCLU>
+
+.SBTTL	Check for a PPN in a list
+
+;+
+; CHKPPN - Check for a PPN in a list
+;
+;	R1 -> First entry in list
+;	R4 = PPN to check
+;
+;	CALL	CHKPPN
+;
+;	C-bit set to indicate PPN not found
+;	C-bit clear to indicate PPN is found
+;
+;	R1 = Undefined
+;	R2 = Undefined
+;-
+
+CHKPPN::MOV	S$PPN(R1),R2	;Pick up PPN to check
+	CALL	CMPPPN		;Do PPNs match
+	BCC	20$		;Yes, so we're done
+	MOV	(R1),R1		;Pick up link to next
+.ASSUME	S$NEXT	EQ	0
+	BNE	CHKPPN		;We have one, go get it
+	;SEC			;We're done, set carry for failure
+20$:	RETURN			;And now we're done
+
+;+
+; CMPPPN - Compare two PPNs
+;
+;	R2 = PPN that may contain wildcards
+;	R4 = PPN that doesn't contain wildcards
+;
+;	CALL	CMPPPN
+;
+;	C-bit set if PPNs don't match
+;	C-bit clear if PPNs do match
+;
+;	R2 = Undefined
+;-
+
+CMPPPN:	MOV	R4,-(SP)	;Save caller's R4			;001
+	CMP	R2,#-1		;Does this wildcard match everything?
+	BEQ	30$		;Yes, get out fast
+	CMPB	R2,#377		;Programmer number wild?
+	BEQ	20$		;Yes, then it always matches
+	CMPB	R2,R4		;Programmer numbers match?
+	BNE	40$		;No, so no match
+20$:	SWAB	R2		;Make project number convenient
+	CMPB	R2,#377		;Project number wild?
+	BEQ	30$		;Yes, then it always matches
+	SWAB	R4		;Get project number from current file's PPN
+	CMPB	R2,R4		;Project numbers match?
+	BNE	40$		;No, so try next file
+30$:	TST	(PC)+		;Clear carry to indicate success (and skip SEC)
+40$:	SEC			;Indicate PPNs don't match
+	MOV	(SP)+,R4	;Restore caller's R4 (don't touch C!)	;001
+	RETURN			;And now we're done
+
+.END

@@ -1,0 +1,397 @@
+.INCLUDE /CMN:COMMON/							;016
+.INCLUDE /CMN:KERNEL/							;016
+.INCLUDE /CMN:FLDEF/							;016
+.INCLUDE /CMN:KBDEF/							;016
+TITLE	UTL,<OVERLAY UTILITIES MODULE>,0A,10-MAY-91,AJK/WJS/GPK/FRL/KPH/DWF/WRM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR UTL
+
+;+
+;
+;  000	AJK  07-SEP-82	Creation (it wasn't hard)
+;  001	WJS  29-Oct-82	New UUOENT for EMT Logger
+;  002	GPK  23-Nov-82	Moved in some modules from UUO
+;
+;				[RSTS V9.0]
+;  003	GPK  28-Mar-83	Multiple privileges
+;  004	GPK  17-May-83	Added job header size max to UU.PRI
+;  005	DRP  23-May-83	Do not allow priority, etc. changes to jobs that
+;			are in kill phase.
+;  006	GPK  20-Sep-83	Add SYSMGR privilege
+;  007  FRL  28-Nov-83  Made compatible with extended L3Q capability
+;  008	KPH  13-Apr-84	Restrict PK stall system & priority change
+;  009	GPK  19-Apr-84	Privilege name changes
+;  010	KPH  28-Nov-84	Improve PK stall handling; bugfix in suspend code
+;  011	KPH  21-Jan-85	Bugfix in UU.PRI code
+;  012	KPH  21-Feb-85	Another bugfix in UU.PRI code
+;			Flagged as loadable (since it was)
+;			Move UU.DAT here (from PAS)
+;			Don't allow dates before March 1, 1985
+;			Wake up sleeping jobs on date and time changes
+;
+;			[RSTS V9.2]
+;  013  KPH  09-Aug-85	Add job control region
+;
+;			[RSTS V9.4]
+;  014  KPH  28-Jan-87	Remove JFKIL2 reference
+;  015	DWF  16-Feb-87	Add PK system job support
+;
+;			[RSTS V9.6]
+;  016  KPH  13-Oct-87	Add .INCLUDEs
+;			Optimize DDB reference in CHEKPK
+;			Change PK DDB reference to use CSR.KB
+;
+;			[RSTS V9.7]
+;  017	DRP  18-Oct-88	Source clear patch 3.5.15 which fixes a
+;			sign extend bug in UU.PRI.
+;  018	JFM  11-May-89	Fixed problem with stall system.
+;			Reorganized the whole routine for clarity.
+;
+;			[RSTS V10.0]
+;  019  WRM  12-Feb-90	Compensate JCSIZM for header size in UU.PRI
+;-
+
+.SBTTL	OVERLAY UTILITIES
+
+IONLY			;Invoke I-only FIP macros			;012
+
+FQFSRT	UTL,LODABL							;012
+
+	UUOENT	STL,HWCTL,,LOGABL ;STALL-SYSTEM FUNCTION		;009
+
+;+
+; UU.STL - STALL/UNSTALL SYSTEM
+;
+;	R4 -> FIRQB
+;		FQERNO = 0 => UNSTALL-SYSTEM
+;			 1 => STALL-SYSTEM
+;-
+
+STLSYS::MOVB	FQJOB(R4),R5	;R5 = Staller's job #			;008
+	TSTB	FQERNO(R4)	;Is request to unstall the system?
+	BEQ	50$		;Yes, go do that
+	;
+	; STALL THE SYSTEM
+	;
+	TSTB	@#STLJOB	;System already stalled?
+	BNE	60$		;Yes, error
+	MOV	@#FIJBDA,R1	;R1 -> JDB of stalling job		;008
+	CALL	CHEKPK		;Is this a PK?				;008
+	BCC	70$		;Yes, so forget the stall		;008
+	MOVB	R5,@#STLJOB	;Save requestor's  job# * 2		;008
+10$:	TST	@#JOB		;Are both JOB and NEXT 0?		;018
+.ASSUME	NEXT EQ JOB+1		;Test both bytes at same time		;018
+	BEQ	20$		;Yes, no problem			;018
+	L3QSET 	QDUMP		;Dump the current job			;018
+	L3QSET 	QFIP,WAIT2T	;Delay for two ticks			;018
+	CALLX	FIPWAT		;Wait for two ticks to resume		;018
+	BR	10$		;Loop until job is dumped		;018
+
+20$:	MOV	#DQS$XX,R1	;R1 -> Beginning of disk queue roots
+30$:	TST	(R1)+		;Check disk queues for empty
+	BEQ	40$		;Empty, check next one
+	L3QSET 	QFIP,WAIT2T	;Delay for two ticks			
+	CALLX	FIPWAT		;Wait for two ticks to resume
+	BR	20$		;Do entire check again
+
+40$:	CMP	#DQSEND,R1	;All queue roots checked?
+	BHI	30$		;Not yet
+	RETURN			;Yes, system is stalled!
+
+50$:	;
+	; UNSTALL THE SYSTEM
+	;
+	TSTB	@#STLJOB	;Is the system stalled?
+	BEQ	70$		;No, error
+	CMPB	R5,@#STLJOB	;Stalled by this job?			;008
+	BNE	70$		;No, this should not happen.
+	CLRB	@#STLJOB	;Unstall system
+	RETURN			;Done					;018
+
+60$:	ERROR	INUSE		;System already stalled during stall
+
+70$:	ERROR	BADFUO		;System not stalled during unstall, 
+				; or stall attempted from PK	
+
+
+GLOBAL	<FIPRVM,STLJOB,WAIT2T,FIPWAT,DQS$XX,DQSEND,FIJBDA>		;008
+
+.SBTTL	SET NUMBER OF ALLOWED LOGINS
+
+;+
+; UU.LOG - SET NUMBER OF ALLOWED LOGINS.
+;
+;	R4 -> FIRQB
+;		FQERNO =  ALLOWED NUMBER OF LOGINS
+;
+;	IN FIRQB ON RETURN
+;		FQERNO =  NUMBER OF ALLOWED LOGINS SET
+;-
+
+.ENABL	LSB
+
+	UUOENT	LOG,SWCTL,SYNC,LOGABL ;SET NUMBER OF LOGINS		;009
+
+	MOVB	FQERNO(R4),R0	;GET NUMBER TO SET
+	BR	10$		;NOW GO DO IT
+
+;+
+; UU.NLG - SET NUMBER OF LOGINS TO 1.
+;
+;	IN FIRQB ON RETURN
+;		FQERNO =  NUMBER OF ALLOWED LOGINS SET
+;-
+
+	UUOENT	NLG,SWCTL,SYNC,LOGABL ;DISABLE LOGINS			;009
+
+	CLR	R0		;SET A VERY SMALL NUMBER
+10$:	CMP	R0,@#MAXCNT	;IS NUMBER > MAXIMUM POSSIBLE?
+	BLOS	20$		;NO, O.K.
+
+;+
+; UU.YLG - SET HIGHEST POSSIBLE NUMBER OF LOGINS
+;
+;	IN FIRQB ON RETURN
+;		FQERNO =  NUMBER OF ALLOWED LOGINS SET
+;-
+
+	UUOENT	YLG,SWCTL,SYNC,LOGABL ;ENABLE LOGINS			;009
+
+	MOV	@#MAXCNT,R0	;SET IT TO THE MAXIMUM
+20$:	TST	R0		;IS THE NUMBER TOO SMALL (0)?
+	BNE	30$		;NO, O.K.
+	INC	R0		;YES, CHANGE IT TO AT LEAST 1
+30$:	MOVB	R0,@#MAXJOB	;NOW SET NUMBER OF POSSIBLE LOGINS
+	MOVB	R0,FQERNO(R4)	; AND RETURN THE NUMBER WE SET
+	DEC	R0		;WAS THE NUMBER WE JUST SET 1?
+	BNE	50$		;NO, EXIT
+	.BR	WAKEUP		;Yes, wake up those sleeping jobs	;012
+
+GLOBAL	<MAXCNT,MAXJOB,JBSTAT,JOBMAX>
+
+.SBTTL	Wake up all sleeping jobs
+
+;+
+; WAKEUP - Wake up all sleeping jobs
+;
+;	CALL	WAKEUP
+;
+;	R0 = Undefined
+;	R1 = Undefined
+;-
+
+WAKEUP:	MOV	#JBSTAT+2,R0	;YES, GET JOB STATUS TABLE POINTER	;012
+	MOV	#JOBMAX,R1	; AND A COUNT OF THE NUMBER OF JOBS
+40$:	BIS	#JSTIM,(R0)+	;AWAKEN ANY SLEEPING JOB
+	SOB	R1,40$		; FOR ALL POSSIBLE JOBS
+50$:	RETURN			;Now we're done
+
+.DSABL	LSB
+
+.SBTTL	CHANGE DATE/TIME
+
+;+
+; UU.DAT - CHANGE SYSTEM DATE/TIME.
+;
+;	R4 -> FIRQB
+;		+4 =  NEW DATE (0 FOR NO CHANGE)
+;		+6 =  NEW TIME (0 FOR NO CHANGE)
+;-
+
+	UUOENT	DAT,DATES,SYNC,LOGABL	;SET DATE/TIME			;012
+
+	CMP	(R4)+,(R4)+	;INDEX TO DATE/TIME			;012
+	MOV	(R4)+,R0	;GET NEW DATE				;012
+	BEQ	10$		;IF NONE, NO CHANGE			;012
+	CMP	R0,#MINDAT	;Is this a believable date?		;012
+	BLO	30$		;No, error				;012
+	MOV	R0,@#DATE	;IF GIVEN, SET IT			;012
+10$:	MOV	(R4)+,R0	;GET NEW TIME				;012
+	BEQ	20$		;IF NONE, NO CHANGE			;012
+	MOV	R0,@#TIME	;IF GIVEN, SET IT			;012
+	MOV	#60.,@#TIMSEC	;RESET THE SECONDS			;012
+20$:	BR	WAKEUP		;Now exit waking jobs up		;012
+
+30$:	ERROR	PRVIOL		;Bad date				;012
+
+.SBTTL	CHANGE PRIORITY, ETC.
+
+;+
+; UU.PRI - CHANGE PRIORITY, RUN BURST, MEMORY MAXIMUM.
+;
+;	R0 =  JOB NUMBER TIMES 2
+;	R4 -> FIRQB
+;		+4  =  JOB NUMBER
+;		       -1 FOR SELF
+;		+5  =  0   => LEAVE PRIORITY ALONE
+;		       <>0 => CHANGE PRIORITY
+;		+6  =  NEW JOB PRIORITY
+;		+7  =  0   => LEAVE RUN BURST ALONE
+;		       <>0 => CHANGE RUN BURST
+;		+10 =  NEW RUN BURST
+;		+11 =  0   => LEAVE TOTAL MEMORY MAXIMUM ALONE
+;		       <>0 => CHANGE MEMORY MAXIMUM
+;		+12 =  NEW MEMORY MAXIMUM
+;		+13 =  0   => Leave job header maximum alone		;004
+;		       <>0 => Change job header maximum			;004
+;		+14 =  New job header maximum				;004
+;-
+
+	UUOENT	PRI,TUNE,SYNC,LOGABL	;PRIORITY, ETC.			;009
+
+	CMP	(R4)+,(R4)+	;INDEX TO PARAMETERS
+	MOVB	(R4)+,R5	;GET JOB NUMBER				;010
+	ASL	R5		;NOW JOB NUMBER TIMES 2
+	BPL	10$		;IT IS REAL
+	MOV	R0,R5		;ELSE USE CALLER'S JOB
+10$:	CMP	R5,#JOBMX2	;LEGAL?
+	BHI	130$		;NOPE
+20$:	MOV	JOBTBL(R5),R1	;GET JOB DATA				;003
+	BEQ	130$		;NO JOB
+	TSTB	JDFLG2(R1)	;In kill phase?				;014
+.ASSUME	JFKILL	EQ	200
+	BMI	130$		;Yes, then don't allow any changes	;014
+	TSTB	(R4)+		;Desire priority change?		;010
+	BEQ	70$		;No, not this time			;010
+	MOV	R1,-(SP)	;Save JDB pointer			;013
+	BICB	#7,(R4)		;Yes, make this a legal value		;010
+	CALL	CHEKPK		;Is job to effect on a PK?		;010
+	BCS	30$		;No, not this time			;010
+	MOV	R1,R0		;Copy controller's job # * 2		;013
+	CALLX	MAPJCR		;Map the JCR entry			;013
+	MOVB	JCPRI(R1),R1	;Pick up job's priority			;013
+	MAP	FIPPOL		;Re-map FIP pool now			;013
+	BICB	#7,R1		;Trim off system bits			;010
+	CMPB	(R4),R1		;Trying to raise job above controller?	;010
+	BLT	30$		;No, this is fine			;010
+	MOVB	R1,(R4)		;Yes, so use controller's priority instead ;010
+30$:	MOV	(SP),R2		;Get JDB pointer			;013
+	MOV	(R2),R2		;Now get IOB pointer			;013
+.ASSUME	JDIOB	EQ	0
+40$:	MOV	(R2)+,R3	;Pick up DDB pointer			;013
+	BEQ	50$		;None, channel is closed		;010
+	CMPB	(R3),#IDX.PK	;Is this a PK?				;010
+.ASSUME	DDIDX	EQ	0
+	BNE	50$		;No, not this time			;010
+	MOV	DDFLAG(R3),R3	;Now get associated KB # * 2		;017
+	MOV	DEV.KB(R3),R3	;Now get DDB pointer for KB		;010
+	BIT	#DDCONS,DDCNT(R3) ;Is this a console?			;010
+	BEQ	50$		;No, not this time			;010
+	MOVB	DDJBNO(R3),R0	;Yes, so get controlled job # * 2	;013
+	BEQ	50$		;None, forget this			;010
+	MOV	JOBTBL(R0),R3	;Get JDB pointer for controlled job	;010
+	TSTB	JDFLG2(R3)	;Job being killed?			;014
+.ASSUME	JFKILL	EQ	200
+	BMI	50$		;Yes, so skip it			;014
+	CALLX	MAPJCR		;Map controlled job's JCR entry		;013
+	MOVB	JCPRI(R1),R3	;Get priority of controlled job		;013
+	MAP	FIPPOL		;And restore FIP pool mapping		;013
+	CMPB	(R4),R3		;Trying to lower below controlled job?	;010
+	BGT	50$		;No, not this time			;010	
+	MOVB	R3,(R4)		;Yes, so use controlled job's priority	;010
+50$:	BIT	#40-1,R2	;More to do?				;010
+	BNE	40$		;Yes, so go for it			;010
+	MOV	R5,R0		;No, copy job # * 2			;013
+	CALLX	MAPJCR		;And map the JCR entry			;013
+	MOVB	(R4),JCPRI(R1)	;Set the new priority			;013
+	MOV	(SP)+,R1	;And restore JDB pointer		;013
+	CMPB	(R4),#-121.	;Is the job stalled now?		;013
+	BGT	70$		;NO
+	CALLX	CLRRSQ		;YES, WIPE RESIDENCY QUANTUM
+	CMPB	R5,@#JOB	;IS THE STALLED JOB "JOB"?
+	BNE	60$		;NO					;010
+	L3QSET	QDUMP		;YES, FORCE JOB NOT TO BE "JOB" BEFORE "QSCHED"
+60$:	CMPB	R5,@#NEXT	;Is the stalled job next to run?	;010
+	BNE	70$		;No, not this time			;010
+	CLRB	@#NEXT		;Yes, so forget who NEXT is		;010
+70$:	MOV	R5,R0		;Copy job # * 2				;013
+	CALLX	MAPJCR		;And map the JCR entry			;013
+	ADD	#JCBRST-1,R1	;Now point to the cell in the JCR	;013
+	CALL	110$		;CALL FOR RUN BURST CHANGE
+	BCC	80$		;NO CHANGE
+	BGT	80$		;BURST O.K. IF >0
+	MOVB	#6,(R1)		;BAD VALUE, SET A DEFAULT		;013
+80$:	CALL	110$		;CALL FOR MEMORY MAXIMUM CHANGE
+.ASSUME	JCSIZM	EQ	JCBRST+1
+	BCC	100$		;NO CHANGE
+	MOVB	(R1),R2		;get a working copy of request size	;019
+	BNE	90$		;CHANGE, VALUE WAS NON-ZERO
+	INC	R2		;MAKE ZERO AT LEAST 1			;019
+90$:	MOV	R2,-(SP)	;save request value (as a word)		;019
+	MOVB	<JCHDRS-JCSIZM>(R1),R2 ;get header size for math wrk	;019
+	ADD	(SP)+,R2	;add header size to requested size	;019
+	MOVB	R2,(R1)		;JCSIZM now compenstated for header siz	;019
+	CMPB	(R1),@#SWPMAX	;IS THE VALUE OVER SWAP MAXIMUM?	;013
+	BLOS	100$		;NO, O.K.
+	MOVB	@#SWPMAX,(R1)	;YES, LOWER IT TO MAXIMUM		;013
+100$:	MAP	FIPPOL		;Restore FIP pool mapping		;013
+	RETURN			;Exit					;009
+
+110$:	CMPB	(R4)+,(R1)+	;SKIP TO NEXT IN BOTH PLACES		;013
+	NEGB	(R4)+		;CHANGE IT?
+	BCC	120$		;NO, EXIT C=0 (VALUE WAS 0)
+	MOVB	(R4),(R1)	;YEP, SO CHANGE IT			;013
+	;SEC			; AND EXIT C=1
+120$:	RETURN			;EXIT
+
+130$:	ERROR	BADFUO		;ERROR
+
+GLOBAL	<JOBMX2,FIPRVM,JOBTBL,SWPMAX,FIJBDA,IDX.PK,DEV.KB>		;010
+
+;+
+; CHEKPK - Check to see if a job is running on a PK:
+;
+;	R1 -> JDB of job to check
+;	R5 = Job # of job to check
+;
+;	CALL	CHEKPK
+;
+; If C = 0, job is running on a PK
+;
+;	R1 = Job # * 2 of controlling job
+;
+; If C = 1, job is running on a normal KB
+;
+;	R1 -> DDB of console for JOB
+;-
+
+CHEKPK:	MOV	@(R1)+,R1	;R1 -> Channel #0 DDB of job		;028
+.ASSUME	JDIOB	EQ	0						;008
+	CMPB	DDJBNO(R1),R5	;Is this job attached?			;008
+	BNE	10$		;No, not this time			;008
+	BIT	#DDCONS,DDCNT(R1) ;Really attached?			;008
+	BEQ	10$		;No, so this isn't a PK			;008
+	CMPB	#TTPK11,TTINTF(R1) ;Is this job running on a PK?	;008
+	BNE	10$		;No, not this time			;008
+	MOVB	DDUNT(R1),R1	;Yes, get unit number of KB		;028
+	ASL	R1		;Now get it times two			;028
+	MOV	CSR.KB(R1),R1	;Get controlling PK DDB			;028
+	MOVB	DDJBNO(R1),R1	;R1 = Controlling job's job #		;008
+	TST	(PC)+		;Clear carry for PK indication		;008
+10$:	SEC			;Set carry since not a PK		;008
+	RETURN			;And we're done				;008
+
+GLOBAL	<CSR.KB>							;028
+
+FQFEND			;That's all, folks.
+
+.END

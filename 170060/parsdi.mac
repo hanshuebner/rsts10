@@ -1,0 +1,242 @@
+	$BEGIN	PARSDI,<31.6>,<Parse directory name>
+
+;
+; THIS  SOFTWARE  IS FURNISHED UNDER A LICENSE AND MAY
+; BE USED OR COPIED ONLY IN ACCORDANCE WITH THE  TERMS
+; OF SUCH LICENSE.
+;
+; COPYRIGHT (c) 1985, 1987, 1989, 1991 BY DIGITAL EQUIPMENT CORPORATION.
+; ALL RIGHTS RESERVED.
+;
+; Peter H. Lipman
+;
+; Previously modified by
+;
+;	Loni Brown
+;	S. Ruzich
+;
+; Modified:
+;
+;	S. M. Thomas		30-April-1983
+;		SMT033 - Named directory support based on
+;			Simon Szeto's changes
+;
+;	Michael Pettengill	10-October-1983
+;		MLP106 - Make .GTDID and .GTDIR function correctly
+;
+;	P. K. M. Weiss		24-September-1984
+;		PKW065 - Add logical name support
+;
+;	L. M. Ziegler		16-may-84
+;		LMZ006 - make correction for non-name directory parsing.
+;
+;	P. K. M. Weiss		13-may-1987	31.4
+;		PKW126 - Fill in FDB extension for cpr
+;
+;	P. K. M. Weiss		8-Nov-1988	31.5
+;		PKW166 - Make sure carry is clear for cpr if f.ext is used
+;
+;	C. M. Katz		23-Oct-1991	31.6
+;		CMK001 - Don't support F.EXT to avoid large increase to FCS
+;			which would break F7FCLS library.
+;
+; **-.PRSDI-Parse directory specification
+;
+; This routine is a user interface routine that allows a user to
+; replicate the code in the module PARSE.  Who knows why anyone would
+; want to?!
+;
+; Inputs:
+;	R0=FDB address
+;	R1=Address of file name block
+;	R2=Pointer to dev, dir, and name descriptors
+;	R3=Default file name block or zero if none specified
+;
+; Outputs:
+;	C=0 if successful, C=1 if error, F.ERR set to reason
+;
+; All registers preserved
+;
+
+.PRSDI::MOV	#1,F.ERR(R0)	; Initialize error status
+
+;
+; **-..PSDI-Parse directory specification
+;
+; This is the internal interface used by .PARSE.  The directory
+; is filled into the FNB as appropriate from the dataset descriptor,
+; the default FNB, or from the default directory.
+;
+; The basic operation of this routine is to
+;	1) If the LUN is assigned to either a non file structured device
+;	   or to a single directory device, then exit after filling in
+;	   the DID field with the MFD File ID (4,4,0).
+;	2) If the FDB indicates a temporary file, then exit after filling
+;	   in the DID field with the MFD File ID (4,4,0).
+;	3) If a directory string was specified, then indicate that an
+;	   explicit directory was specified.
+;	4) If the directory string is "[]" or "<>", then lookup the default
+;	   directory else lookup the specified directory.
+;	5) If no directory string was specified and if a default FNB was
+;	   specified and it contains a directory ID and the device and unit
+;	   agree, then use the directory ID from the default FNB.
+;	6) Otherwise, use the task default directory to fill in the
+;	   directory ID.
+;
+; Inputs:
+;	R0=FDB address
+;	R1=Address of file name block
+;	R2=Pointer to dataset descriptor or zero if none specified
+;	R3=Default file name block or zero if none specified
+;
+; Outputs:
+;	Carry set if error, otherwise carry clear
+;	F.ERR is status
+;
+;	Directory ID field in FNB filled in
+;	Filename, type, and version cleared
+;
+; All registers are preserved.
+;
+
+..PSDI::BITB	#FD.DIR,F.RCTL(R0) ; Directory device?
+	BEQ	40$		; If EQ no
+	BITB	#FD.SDI,F.RCTL(R0) ; Single directory device?
+	BNE	40$		; If NE yes
+	BITB	#FA.TMP,F.FACC(R0) ; Temporary file?
+	BNE	40$		; If NE yes
+	.SAVR1			; Save all volatile registers
+	TST	R2		; Dataset descriptor specified?
+	BEQ	20$		; If EQ no
+	ASSUME	N.DRSZ,4
+	CMP	(R2)+,(R2)+	; Skip device descriptor
+	TST	(R2)		; Directory string specified?
+	BEQ	20$		; If EQ no
+
+	.IF 	EQ,R$RSTS	; CMK001 - not supported
+
+	MOV	F.EXT(R0),R4	; Is there a FDB extension?
+	BEQ	5$		; Nope
+	MOV	R3,-(SP)	; We're gonna wreck R3, so save it
+	MOV	(R2),R3		; Get the directory length in R3
+	CMPB	R3,FX.DMX(R4)	; Is the length longer than the max?
+	BLE	1$		; No, continue
+	MOVB	FX.DMX(R4),R3	; Use the max length as the length
+1$:	MOVB	R3,FX.DLN(R4)	; Put it in the length field in the extension
+	MOV	FX.DIR(R4),R4	; Point to the directory output string
+	MOV	2(R2),R5	; Point to the current directory string
+3$:	MOVB	(R5)+,(R4)+	; Move it
+	SOB	R3,3$		; All of it
+	MOV	(SP)+,R3	; Put R3 back
+5$:	CLC			; Make sure this is regarded as success
+	BITB	#FL.VCP,F.FLG(R0) ; Was this parsed using the VMS acp?
+	BNE	50$		; If NE, yes, DID already filled in, just return
+
+	.ENDC
+
+	BIS	#NB.DIR,N.STAT(R1) ; Indicate explicit directory string
+
+	.IF	GT,R$$NAM
+
+	MOV	2(R2),R5	; Point to directory string
+	CMP	#2,(R2)		; Is the directory explicitly default?
+	BNE	10$		; If NE no
+	MOVB	(R5)+,R4	; Get first bracket
+	SWAB	R4		; And then
+	BISB	(R5),R4		; The second bracket
+	CMP	#"][,R4		; Valid square brackets?
+	BEQ	30$		; If EQ yes
+	CMP	#"><,R4		; How about angle brackets?
+	BEQ	30$		; If EQ yes
+
+	.ENDC	; R$$NAM
+
+; Parse the directory specification and return the directory ID or
+; error status.  Registers R1-R5 need not be preserved.
+
+10$:	CALLR	..DIRF		; A directory specified or syntax error
+
+; Null directory descriptor, see if default directory ID from
+; default FNB can be used.
+
+20$:
+	.IF	GT,R$RSTS
+
+	TST	N.DID(R1)	;Is there a PPN already?
+	BNE	50$		;If NE yes
+
+	.ENDC
+
+	CALL	..DFDI		; Default DID available?
+	BCC	50$		; If CC yes
+
+; No directory available from the user, get the default directory
+; for the task and return the directory ID or error status.
+; Registers R1-R5 need not be preserved.
+
+30$:	CALLR	..PDI		; Lookup the default directory
+
+; Null task default directory descriptor - default to MFD
+
+40$:
+	.IF	EQ,R$RSTS
+
+	MOV	#4,N.DID(R1)	; Set the MFD file ID
+	MOV	#4,N.DID+2(R1)	;
+	CLR	N.DID+4(R1)	;
+
+	.IFF
+
+	CLR	N.DID(R1)	;
+
+	.ENDC
+
+50$:	RETURN
+
+;
+; Subroutine to get directory ID from default file name block
+; if it exists and is applicable (i.e., is MFD or device and
+; unit match).
+;
+; Inputs:
+;	R1=FNB
+;	R3=Default FNB or 0
+;
+; Outputs:
+;	C = 0 If DID used, C = 1 If not
+;
+
+..DFDI::TST	R3		; Default FNB specified?
+	BEQ	20$		; If EQ no
+	MOV	N.DID(R3),R4	; Directory ID field filled in?
+	BEQ	20$		; If EQ no
+
+	.IF	EQ,R$RSTS
+
+	CMP	#4,R4		; Is it MFD, which is present on all devices
+	BEQ	10$		; If EQ yes
+
+	.ENDC
+
+; Directory ID is specified, use it only if device and unit agree
+
+	CMP	N.DVNM(R3),N.DVNM(R1) ; Device name the same?
+	BNE	20$		; If NE no
+	CMP	N.UNIT(R3),N.UNIT(R1) ; And unit?
+	BNE	20$		; If NE no
+10$:	MOV	N.DID(R3),N.DID(R1) ; Move the default directory ID
+	MOV	N.DID+2(R3),N.DID+2(R1) ; To the file name block
+	MOV	N.DID+4(R3),N.DID+4(R1) ;
+	MOV	F.EXT(R0),R4	; Is there an extension?
+	BEQ	15$		; Nope
+	CLRB	FX.DLN(R4)	; We don't have a directory string
+15$:	TST	(PC)+		; Clear carry, avoid next instruction
+20$:	SEC			; Indicate failure
+	RETURN			;
+
+;
+;
+	$END	PARSDI
+;
+;
+	.END

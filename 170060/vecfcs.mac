@@ -1,0 +1,366 @@
+	.IF DF	STB
+	.IF EQ	SEG-1
+	.TITLE	FCSST1	Generate Symbol Table for segment 1
+	.IFF
+	.TITLE	FCSST2	Generate Symbol Table for segment 2
+	.ENDC
+	.IFF
+	.IF EQ	SEG-1
+	.TITLE	FCSLB1	Generate Library for segment 1
+	.IFF
+	.TITLE	FCSLB2	Generate Library for segment 2
+	.ENDC
+	.ENDC
+
+	.IDENT	/0103/
+
+;
+; COPYRIGHT (c) 1989,1985,1984 BY DIGITAL EQUIPMENT CORPORATION.
+; ALL RIGHTS RESERVED.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED
+; OR COPIED ONLY IN ACCORDANCE WITH THE TERMS OF SUCH LICENSE.
+;
+
+;
+; Michael Pettengill	9-April-1983
+; Susan Thomas		9-April-1983
+;
+; Modified by:
+;
+;	P. K. M. Weiss	15-October-1984		101
+;		PKW067 - Add logical name vectored entry points
+;
+;	L. B. McCulley	1-November-1984		102
+;		LBM001 - merge FCSRES and FCSFSL into a single image
+;
+;	L. B. McCulley		21-July-1989		0103
+;		LBM204 - add entry point for ..FIND  (to add an entry point 
+;			this module and FCSRS1BLD must be updated, and 
+;			possibly also VECJMP.MAC)
+;
+
+; This module defines entry point vectors for the FCS resident library.
+; Adapted from the modules VECFCS and VECFSL (which in turn derived from CMPAL)
+
+;
+; This module is assembled four times, twice for each of two segments.
+; The segment assembly is controlled by the value of SEG, SEG=1 for segment
+; one and SEG=2 for segement two.  The definition of STB controls the
+; assembly of the module for generating the STB and if not defined for the
+; generation of the library.
+;
+; If generating the STB, the module includes the global definitions for each
+; entry point at the associated transfer vector and the module is fully
+; extended to 4KW.
+;
+; If generating the library, the module includes only the JMPs for each
+; entry point.
+;
+; The first segment includes the I/O routines from FCS and other
+; miscellaneous routines, and the logic to support usage as a supervisor mode 
+; library.
+;
+; The second segment includes the FCS OPEN/CLOSE code and other code
+; related to file name processing.
+;
+; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+; !				W A R N I N G				!
+; !									!
+; ! there is a giant hack to accomodate use of a single image in both	!
+; ! user and supervisor mode.  It relates to the function of the CSM	!
+; ! instruction (hardware or software emulation thereof) which vectors	!
+; ! indirectly through supervisor mode virtual address 10(8) to find 	!
+; ! the supervisor mode entry point, in contrast to user-mode resident 	!
+; ! library entry vectors which are used by transferring control 	!
+; ! directly to a vector within a jump table.				!
+; ! The hack was required because the user-mode FCSRES had reserved	!
+; ! only four words at the module beginning for contigency, making the	!
+; ! first jump in the vector table occupy exactly the CSM vector.	!
+; ! The hack is a work-around, by replacing the two-word Jump instruction
+; ! with a Nop followed by a branch to the actual jump.  The CSM vector	!
+; ! is thus occupied by the Nop, and the CSM service routine is located	!
+; ! at the address specified by the Nop.  The NOP chosen was 270, which !
+; ! is not really a nop (but any library that cares about the state of 	!
+; ! the n-bit at entry is sick to start).  Thanks to MuLP for this one,	!
+; ! excerpts from his original comments (from the first prototype of 	!
+; ! this code) follow: 
+
+; ! "...The first vector was for .CTRL which has been moved...  However,!
+; ! to protect those programs that might reference .CTRL, its original	!
+; ! vector at 10 must be preserved.  This is accomplished by executing 	!
+; ! the previously mentioned convenient NOP and then branching to the 	!
+; ! real vector for .CTRL..."						!
+
+; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+;
+; Local Macro Definitions
+;
+
+	.MACRO	ENTRY	NAME
+	.IRP	NM,<NAME>
+	.IF DF	STB
+NM::	.BLKW	2
+	.IFF
+	JMP	NM
+	.ENDC
+	.ENDR
+	.ENDM	ENTRY
+
+; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+;
+; The following logic supports the task independent FCSFSL (supervisor mode) 
+; library.
+;
+; This module includes CMPAL which is, in essence, required in all
+; supervisor mode libraries.
+;
+
+;
+; **-CSM Dispatcher-Dispatch CSM entry
+; 
+; This module must be linked at virtual zero in the supervisor mode
+; library.  It is entered via a four word transfer vector of the form:
+;
+;	MOV	#completion-routine,-(SP)
+;	CSM	#routine
+;
+; Note: Immediate mode emulation of the CSM instruction is required
+; 	in the executive.
+;
+; The CSM instruction transfers control to the address contained in
+; supervisor mode virtual 10.  At this point the stack is the following:
+;
+;	  (SP)	routine address
+;	 2(SP)	PC (past end of transfer vector)
+;	 4(SP)	PS with condition codes cleared
+;	 6(SP)	Completion-routine address
+;	10(SP)	Return address
+;
+; A routine address of 0 is special cased to support return to
+; supervisor mode from a user mode debugging aid (ODT).  In this case
+; stack is the following:
+;
+;	  (SP)	zero
+;	 2(SP)	PC from CSM to be discarded
+;	 4(SP)	PS from CSM to be discarded
+;	 6(SP)	Super mode PC supplied by debugger
+;	10(SP)	Super mode PS supplied by debugger
+;
+
+; **********************************************************************
+; To allow positioning at virtual zero, this code must be in the blank
+; PSECT which is first in the TKBs PSECT ordering.
+; And it must be in Segment 1.
+; **********************************************************************
+
+	.PSECT
+
+BASE:
+
+	.IF	EQ, SEG-1	; only handle the CSM vector in segment 1
+
+; Debugger return to super mode entry. Must start at virtual zero
+
+	JMP	DEBRTT		; Go to debugger return to super mode
+	BPT			; Trap errant entries
+	BPT			; Trap errant entries
+
+; CSM transfer address, this word must be at virtual 10 in super mode
+
+	.ENABL	LSB
+
+	.if	df	STB
+.CTRL::	; define the label .CTRL here for compatibility with previous libs
+	.endc
+
+	.WORD	20$		; CSM dispatcher entry - also "SEN" instruction
+	BR	10$		; Do the revector to .CTRL
+
+
+;
+; These modules are relatively static and unlikely to change.  A small
+; amount of patch space is available.
+;
+;	GET-PUT OVERLAY - ENTRY POINTS FROM GET, PUT, READ, WRITE, ETC.
+;
+
+;	ENTRY	<.CTRL>		; ! previous to the CSM vector hack !
+
+	ENTRY	<.GET,.PUT,.READ,.WRITE,$DMUL,$DDIV,.GETSQ>
+	ENTRY	<.POSIT,.POSRC,.PUTSQ,.FCTYP,.CSI1,.CSI2,.OD2CT,.DD2CT>
+;
+;		FROM PNTMRK:
+	ENTRY	<.POINT,.MARK>
+;		FROM FLUSH:
+	ENTRY	<.FLUSH>
+;		FROM WAITU:
+	ENTRY	<.WAIT>
+;		FROM XQIOU:
+	ENTRY	<.XQIO>
+;		FROM RWFSR2:
+	ENTRY	<.RDFDR,.RDFFP,.RDFUI,.RFOWN,.WDFDR,.WDFFP,.WDFUI,.WFOWN>
+;
+;
+;		FROM EXST:
+	ENTRY	<$EXST>
+;
+;		FROM EDTMG:
+	ENTRY	<$EDMSG>
+;
+;		FROM CATB:
+	ENTRY	<$COTB,$CDTB>
+;
+;		FROM CBTA:
+	ENTRY	<$CBDAT,$CBDMG,$CBDSG,$CBOSG,$CBTA,$CBTMG,$CBVER,$CBOMG>
+;
+;		FROM EDDAT:
+	ENTRY	<$DAT,$TIM>
+;
+;		FROM CDDMG:
+	ENTRY	<$CDDMG>
+;									
+
+.iif	ne	.-BASE-270	.error	; CSM re-vectoring error !!!!!!
+
+20$:	JMP	CSMSVR		; entry fixed here, revector so server floats
+
+$CMPCS::			; entry for super-lib completion routine must
+	JMP	CMPCS		; also be vectored (to floating routine in this
+				; module) since it is referenced by task calls
+				; to super libs (in the CSM instruction args).
+
+10$:		; ! .CTRL comes thru here since the CSM vector hack (see above)!
+	.if df	STB
+	.BLKW	2	; if generating the STB just reserve space
+	.iff
+	JMP	.CTRL	; transfer to the real library entry point
+	.endc
+
+;
+;		FROM CSI4
+	ENTRY	<.CSI4>
+;
+; ***********************************************************************
+; *		End of Segment 1 jump vectors				*
+; * New entries should be added here. (if there's room - fat chance!)	*
+; ***********************************************************************
+
+	.DSABL	LSB
+
+; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+; ! The following is part of the hack to allow a single image to serve
+; ! requests for both user-mode and supervisor-mode library usage.
+; ! see the full explanation in the module introductory comments.
+; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+	.ENABL	LSB
+
+; Dispatch CSM entry 
+; CSM instruction vectors indirect thru VA 10(8) to revector at 270(8) to here
+; vector thru Super-mode VA 10(8) is hardware function (or exec emulation).
+; address at 270 is fixed by NOP instrcution opcode value.
+; revectors to allow flexibility; this code can grow/change/float as necessary.
+
+CSMSVR:	MOV	6(SP),2(SP)	; Set completion routine address for RETURN
+	JMP	@(SP)+		; Transfer to super mode library routine
+
+
+; Perform debugger return to super mode
+; actually entered at super mode VA 0 which JMPs here
+
+DEBRTT:	CMP	(SP)+,(SP)+	; Clean off PS and PC from CSM
+	TST	2(SP)		; Returning to user mode?
+	BR	10$		; Join common code
+
+;
+; **-$CMPCS-Completion routine which sets up only C in the PS
+;
+; Entry point must be vectored since it is used in the referencing task
+; supervisor library linkages (it is a CSM instruction argument) !
+;
+; Copy only carry to stacked PS.  Current stack:
+;
+;	 (SP)	PS with condtion codes cleared
+;	2(SP)	Completion routine address (to be discarded)
+;	4(SP)	Return address
+;
+CMPCS:
+	ADC	(SP)		; Set up carry
+	MOV	4(SP),2(SP)	; Setup return address for RTT
+	MOV	(SP)+,2(SP)	; And PS. Returning to super mode?
+10$:	BPL	20$		; If PL yes
+	MOV	#6,-(SP)	; Number of bytes for (SP), PS, and PC
+	ADD	SP,(SP)		; Compute clean stack value
+	MTPI	SP		; Set up previous stack pointer
+20$:	RTT			; Return to previous mode and caller
+
+
+	.DSABL	LSB
+
+
+	.IFF	;eq,seg-1  -or-  .if ne,seg-1
+
+	.WORD	0,0,0,0		; Reserve four words for contingencies
+
+;
+; The entry points related to the filename processing are expected to change.
+; Therefore they are placed in the second segment so that they have room to
+; expand without requiring a large amount of wasted space initially.
+;
+;
+;	OPEN OVERLAY ENTRY POINTS FROM OPEN, PARSE, CLOSE
+;
+	ENTRY	<.OPEN,.OPFNB,.OPFID,.ASCPP,.PPASC,.FINIT,.CLOSE,$RQCB,$RLCB>
+	ENTRY	<.PARSE,.PRSDI,.PRSDV,.PRSFN,.PPR50,.ASLUN>
+; what to do about .ODCVT, .VRCVT, .DDCVT ?????
+;		FROM GETDID:
+	ENTRY	<.GTDID>
+;		FROM GETDIR:
+	ENTRY	<.GTDIR>
+;		FROM EXTEND:
+	ENTRY	<.EXTND>
+;		FROM UDIREC:
+	ENTRY	<.ENTER,.FIND,.REMOV>
+;		FROM TRNCLS:
+	ENTRY	<.TRNCL>
+;		FROM MRKDL:
+	ENTRY	<.MRKDL>
+;		FROM DELETE AND DELJMP, SIMULATING DLFNB:
+	ENTRY	<.DELET,.DLFNB>
+;		FROM RENAME:
+	ENTRY	<.RENAM>
+;		FROM $PRINT:
+	ENTRY	<.PRINT>
+;		FROM DSPAT:
+	ENTRY	<$DSPAT>
+
+;		FROM PFCS
+	ENTRY	<.EXPLG>
+;
+;		FROM DIRECT -- for PIP
+	ENTRY	<..FIND>
+;
+; ***********************************************************************
+; *		End of Segment 2 jump vectors				*
+; * New Segment 2 entries should be added at this point.		*
+; ***********************************************************************
+
+	.ENDC	;eq/ne, SEG-1
+
+
+	.IF DF	STB
+
+;
+; If we are creating a module for STB generation, pad out the segment to
+; a full 4KW.
+;
+
+	.BLKB	20000+BASE-.
+
+	.ENDC
+
+
+	.END

@@ -1,0 +1,1500 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	RSTRMS,<Record/block handling for RESTORE>,0A,13-MAY-91,KPH/FRL/BGN/REG
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for RSTRMS
+
+;+
+;
+;			[RSTS/E V9.0]
+;  000	KPH  12-Dec-83	Creation
+;  001	KPH  02-Nov-84	Bugfixes
+;  002	KPH  14-Dec-84	More bugfixes
+;  003	KPH  03-Jan-85	Make XOR processing faster
+;
+;			[RSTS/E V9.1]
+;  004  KPH  30-Aug-85	Wait for asynch I/O to complete before restarting
+;
+;			[RSTS/E V9.2]
+;  005  FRL  20-Jan-86	Ensure rewind on RESTORE/VERIFY
+;
+;			[RSTS/E V9.3]
+;  006  KPH  20-Jan-86	Add block header CRC
+;			Bugfix in error recovery for disk backup sets
+;  007  FRL  25-Jul-86	Add .NAMEs (Also in BCKRMS)
+;
+;			[RSTS/E V9.5]
+;  008  BGN  10-Jul-87	Backup/directory support
+;  009  BGN  26-Aug-87  Free up buffers not there because of pending I/O
+;
+;			[RSTS/E V9.7]
+;  010  BGN  28-Sep-88  Add support for BACKUP/DIRECTORY header info
+;
+;			[RSTS/E V10.0]
+;  011  BGN  26-Oct-89  Add support for BACKUP image mode
+;  012	REG  20-Dec-89	Move RENPPN to RSTFIL
+;  013	REG  02-Apr-90	Honor /NOPROMPT for /VERIFY=ONLY
+;  014  REG  03-Apr-90	Add big blocks
+;  015  REG  27-May-90	Move DSKSTA:: to BCKSUB so IMGRMS can find it
+;  016  REG  13-Aug-90	Fix XOR recovery bad offsets and XOR block detection
+;  017  REG  15-Aug-90	Reset EOF after recovery backspace for disks
+;  018  REG  15-Aug-90	Preserve R0 before mapbufs where R0 is used for counts
+;  019  REG  16-Aug-90	Restore mapping after XOR verification error
+;  020  REG  30-Aug-90	Fix data recovery sleep problem
+;  021  REG  10-Sep-90	Handle data recovery at tape and disk EOF;
+;
+;			[RSTS V10.1]
+;  022  REG  07-Jan-91	Free up one APR
+;  023  REG  18-Mar-91  Don't rewind tapes before /VER=ONLY passes
+;  024  REG  08-Apr-91	Use BACKUP as output label if savset label is blank
+;-
+
+.SBTTL	Call any required MACROs
+
+.MCALL	CALBX,.ASCIC,$CUI,WSIG$S,ENAR$S,DSAR$S
+
+$CUI	MSG
+
+.SBTTL	Define our private Data Section
+
+	.PSECT	RWDATA,RW,D,LCL,REL,CON
+
+ACRQUE::.BLKW			;Link to first action routine
+DSKCLU::.BLKB			;Clustersize of disk to initialize
+XORCNT::.BLKB			;Count of blocks left until we get XOR block
+NXTDBK:	.BLKB	3		;Next block numer to read from disk
+	.BLKB			;Reserved
+NXTBLK:	.BLKW	2		;Block number of next block we expect
+RECSIZ:	.BLKW			;Bytes remaining for attribute processor
+RECPTR:	.BLKW			;Pointer to next byte for attribute processor
+RECTYP:	.BLKW			;Current record type for attribute processor
+BSZBLK:	.BLKW			;Block size in blocks
+REDQUE:	.BLKW			;Block ID of first block in read queue
+REDTAL:	.BLKW			;Block ID of last block in read queue
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+
+DIFMSB	=	891.		;MSB of minutes between Nov 17, 1858 and
+				;    Dec 31, 1969, inclusive
+
+DIFLSB	=	51264.		;LSB of minutes between Nov 17, 1858 and
+				;    Dec 31, 1969, inclusive
+
+CLUMIN:	.QUAD	600000000	;Tenths of microseconds in a minute
+
+MODNAM:	.ASCIC	<"RSTRMS">	;Module name
+
+.EVEN	;Cowgirls get the blues
+
+.SBTTL	Read all the records of a save set
+
+;+
+; RSTREC - Restore all the records of a save set
+; VFYREC - Verify all the records of a save set
+; DIRREC - Directory of the save set
+;
+; Come here to restore all the records of a save set. We will perform
+; the entire restore operation, and return when done.
+;
+; We will call a series of record processors to perform this restore.
+; The following are entry conditions to a record processor:
+;
+;	R3 -> Record header of record to process
+;	RSTFLG = Current operational flags
+;
+; A record handler is free to modify any register. Record handlers
+; exit with a RETURN instruction.
+;-
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+.ENABL	LSB
+
+VFYREC::CALLX	CLRFQB		;Clear out the FIRQB			;007
+	MOV	#^RVER,FIRQB+FQNAM1	;Change name 			;007
+	MOV	#^RIFY,FIRQB+FQNAM1+2	;  to VERIFY			;007
+	.NAME								;007
+	BIS	#RS$VFY,RESSUB	;Indicate this is the verify pass	;008
+	BIC	#DO.INI,C$FLAG	;Be sure we don't do an initialize now
+	BIT	#C2$ONL,C$FLG2	;Is this a verify-only pass?		;013
+	BNE	2$		;Yes, don't have to prompt for vol 1	;013
+	BIC	#C2$PRO,C$FLG2	;And be sure that we prompt for volume one ;002
+2$:									;013
+	MOV	#1,BBHDAT+BBH$VL ;Set volume one			;001
+	BIT	#C2$ONL,C$FLG2	;Is this a verify-only pass?		;023
+	BNE	222$		;Yes, don't rewind			;023
+	BIS	#DO.REW,C$FLAG	;Set rewind				;005
+222$:	BIT	#DO.RES,C$FLAG	;Is this a restore?
+	BNE	3$		;Yes, so restore mask is set properly
+	BIS	#DO.RES,C$FLAG	;Pretend that this is a restore		;005
+	MOV	#$RESMSK,R1	;R1 -> Restore mask
+	MOV	#-1,(R1)+	;Set the PPN wild
+	MOV	#"??,(R1)	;Set up ??
+	MOV	(R1)+,(R1)	;Now we have ????
+	MOV	(R1)+,(R1)+	;Now we have ??????
+	MOV	#".?,(R1)+	;Now we have ??????.?
+	MOV	#"??,(R1)	;Now we have ??????.???
+	BR	3$		;Now join up
+
+DIRREC::BIS	#RS$DIR,RESSUB	;Indicate a directory			;010
+	CALLX	CLRFQB		;Clear out the FIRQB			;008
+	MOV	#^RBCK,FIRQB+FQNAM1	;Change name 			;008
+	MOV	#^RDIR,FIRQB+FQNAM1+2	;  to BCKDIR			;008
+	BR	3$		;Join the main line			;008
+
+RSTREC::BIS	#RS$RES,RESSUB						;008
+	CALLX	CLRFQB		;Clear out the FIRQB			;007
+	MOV	#^RRST,FIRQB+FQNAM1	;Change name 			;007
+	MOV	#^RORE,FIRQB+FQNAM1+2	;  to RSTORE			;007
+3$:	.NAME								;010
+	NOP			;Debug					;014
+	CLR	BLKSIZ		;Indicate we don't know blocksize yet
+	CLR	RSTFLG		;Clear flags
+	CLR	NXTBLK		;Clear LSB of next expected block
+	CLR	NXTBLK+2	;And LSB of next expected block
+	CLRB	DSKCLU		;Initially use DCS for output pack PCS
+	MOV	#ACRQUE,ACRTAL	;Initialize the action routine queue tail
+	CLR	ACRQUE		;And the action routine queue head
+	MOV	#BRF$PR,DSKSTA	;By default, we create private disks
+	MOV	#-1,REDQUE	;Clear out our read queue
+	MOV	#-1,REDTAL	;And set up the tail pointer
+	CALLX	MOUNT		;Now mount the save set
+	MOV	BLKSIZ,R4	;Pick up block size in bytes
+	ASH	#-9.,R4		;Now convert it to blocks
+	BIC	#177600,R4	;Clear the sign extend			;014
+	MOV	R4,BSZBLK	;And save it
+
+; Set up for a new volume
+
+5$:	MOV	#1,NXTDBK	;Set up LSB of next disk block
+	CLRB	NXTDBK+2	;And set up MSB of next disk block
+	BIS	#RS.FRS,RSTFLG	;And set the first record in set flag
+
+; Set up for a new XOR block
+
+10$:	MOVB	$GRPSZ,XORCNT	;Set up the count of blocks until XOR block
+	BIC	#RS.XRT,RSTFLG	;Indicate XOR hasn't been tried yet
+
+; At this point, we'll need to read in a new block to establish new
+; record context
+
+20$:	ADD	#1,NXTBLK	;Update next expected block number
+	ADC	NXTBLK+2	;Double precision
+30$:	CALL	REDBLK		;Read in a new block
+	TSTB	R0		;Did we hit EOF or EOV?
+	BEQ	40$		;No, not this time
+	MOVB	R0,R1		;Save returned error code
+	DSAR$S			;Protect qx1bid test			;022
+	CMP	QX1BID,#-1	;;Do we have an XOR block?		;022
+	BEQ	35$		;;No, not this time
+	CALBX	RETBUF,#QX1BID	;;Yes, so return it			;022
+	MOV	#-1,QX1BID	;;And forget that we have one		;022
+35$:	ENAR$S			;Let 'em go now				;022
+	CMPB	R1,#EOF		;Did we hit EOF?
+	BNE	36$		;No, must be EOV this time...
+	JMP	CALEOF		;Yes, so call EOF processors
+
+; The code below is EOV processing...
+
+36$:	CALL	CHRACT		;Check for action routines
+	DSAR$S			;Disable AST's
+	TST	BUFUSE		;;Have we returned all our buffers?	;022
+	BEQ	37$		;;Yes, ready to dismount this volume
+	MOV	#-1,@#XRB	;;No, set up a long conditional sleep
+	.SLEEP			;;And go do it
+	ENAR$S			;;Now enable AST's
+	BR	36$		;And try again
+
+37$:	ENAR$S			;;Now enable AST's
+	CALLX	DISMNT		;Go and dismount this volume
+	INC	BBHDAT+BBH$VL	;Indicate we want the next volume now
+	CALLX	MOUNT		;Now mount that volume
+	MOVB	$GRPSZ,XORCNT	;Set up the count of blocks until XOR block
+	BIC	#RS.XRT!RS.NBX,RSTFLG ;Clear XOR-related flags
+	SUB	#1,NXTBLK	;Fix block number since read failed
+	SBC	NXTBLK+2	;Double precision
+	BR	5$		;Now set up for this new volume
+
+40$:	MOV	QDBVA,R3	;R3 -> Block header of new block	;022
+	CALL	CHKCRC		;Is CRC correct?
+	BCC	60$		;Yes, it sure is
+	CMESSAGE #BADCRC	;Report a header CRC error
+	CALBX	RETBUF,#QD1BID	;Return the block			;022
+	BR	30$		;And try again
+
+60$:	BIC	#RS.IBH,RSTFLG	;Guess that this will have a valid header;001
+	MOV	BBH$NO(R3),R1	;Pick up this block number LSB
+	MOV	BBH$NO+2(R3),R2	;And next expected block MSB
+	SUB	NXTBLK,R1	;Get difference LSB
+	SBC	R2		;Now carry
+	SUB	NXTBLK+2,R2	;Now get differece MSB
+	BNE	62$		;Block number is way off, forget it
+	CMP	R1,#1		;Did we lose too many blocks?
+	BNE	61$		;Maybe					;014
+	JMP	100$		;No, just one, we can do XORs		;014
+61$:	BLO	63$		;Zero, nothing lost at all
+62$:	JMP	160$		;Lost too many blocks, forget it
+
+63$:	TST	BBH$VL(R3)	;Is this the last block of this volume?
+	BPL	64$		;No, not this time
+	BIS	#RS.EOV,RSTFLG	;Yes, so set the EOV pending flag
+
+64$:	CMP	BBH$AP(R3),#1	;Is this a data block?
+	BNE	65$		;No, not this time
+	JMP	180$		;Yes, it sure is
+
+65$:	CMP	BBH$AP(R3),#2	;How about an XOR block?
+	BEQ	67$		;Yes, so handle it
+	JMP	230$		;No, so just ignore it
+
+66$:	JMP	90$		;Long branch				;022
+
+67$:	BIT	#RS$VFY,RESSUB	;XOR block, is this a verify?		;008
+	BEQ	66$		;No, so don't verify the XOR block	;022
+	BIT	#RS.XRT,RSTFLG	;Did we try XORs this group?
+	BNE	66$		;Yes, so we can't verify the XOR block	;022
+	TSTB	$GRPSZ		;Are we doing XORs this time?
+	BEQ	66$		;No, so ignore this XOR block		;022
+	CALBX	MAPBUF,<#QX1BID,#XORAVL,#QXBVA> ;Map the XOR buffer	;022
+	ADD	#HBSIZE+BBHSIZ,QXBVA ;Offset to data portion		;022
+	MOV	QD1BID,QD2BID	;Copy the data buffer ID		;022
+	MOV	QX1BID,QX2BID	;Copy the XOR buffer ID			;022
+	MOV	QXBVA,R1	;R1 -> Calculated XOR block to verify	;022
+	ADD	#BBHSIZ,R3	;R3 -> Read XOR block to verify
+	CLR	R4		;Init bytes remaining in block		;022
+	MOV	BLKSIZ,R2	;R2 = Length of XOR area + block header
+	ASR	R2		;Get a word count to compare
+	BIC	#100000,R2	;Clear the sign extend			;014
+	CMP	R2,#4096.-<HBSIZE/2> ; 1 APR - buffer header		;014
+	BLOS	68$		; No, proceed				;014
+	MOV	R2,R4		; Yes, copy blocksize			;022
+	MOV	#4096.-<HBSIZE/2>,R2 ; Set byte count at 1 APR's worth	;014
+	SUB	R2,R4		; Subtract an APR's worth of byte count	;022
+68$:	SUB	#BBHSIZ,R2 ;Now R2 has the byte count to compare
+				;**CIS** The compare below deserves CIS
+
+70$:	CMP	(R1)+,(R3)+	;Does this data match?
+	BEQ	80$		;Yes, XOR block seems OK so far
+	CMESSAGE <#NOVXOR>	;Tell them XOR block verify fails
+	BR	88$		;And we're done				;019
+
+80$:	SOB	R2,70$		;Now loop for the whole XOR block
+	TST	R4		; Any byte count remaining?		;022
+	BEQ	88$		; No, done with block			;014
+	CMP	R4,#4096.	; Is word count >= 4096?		;022
+	BLT	82$		; No					;014
+	SUB	#4096.,R4	; Yes, subtract another APR's worth	;022
+	MOV	#4096.,R2	; Set up one APR's word count		;014
+	BR	85$		; Go do the remapping			;014
+
+82$:	MOV	R4,R2		; Use remaining byte count		;022
+	CLR	R4		; Clear out the residual count		;022
+85$:	ADD	#128.,QD2BID	; Increment data address by 128 slivers	;022
+	ADD	#128.,QX2BID	; Increment XOR address by 128 slivers	;022
+	CALBX	MAPBUF,<#QD2BID,#DTAAVL,#QDBVA> ; Remap dta buf up 8Kb	;022
+	MOV	QDBVA,R3	; R3 -> virtual addr in data block	;022
+	CALBX	MAPBUF,<#QX2BID,#XORAVL,#QXBVA> ; Remap XOR buf up 8Kb	;022
+	MOV	QXBVA,R1	; R2 -> virtual addr in XOR block	;022
+	BR	70$		; Go do some more XOR'ing		;014
+
+88$:	CALBX	MAPBUF,<#QD1BID,#DTAAVL,#QDBVA> ; Restore data mapping	;022
+	ADD	#HBSIZE,QDBVA	;And the usual offset			;022
+	CALBX	MAPBUF,<#QX1BID,#XORAVL,#QXBVA> ; Restore XOR mapping	;022
+	ADD	#HBSIZE+BBHSIZ,QXBVA ; And the usual offset		;022
+90$:	CALBX	RETBUF,#QD1BID	;Dump this current block		;022
+	BIC	#RS.NBX,RSTFLG	;Indicate next block isn't an XOR block
+	JMP	10$		;And go handle this new group
+
+100$:	BIT	#RS.NBX,RSTFLG	;Did we miss an XOR block?
+	BEQ	105$		;No, not this time
+	CMESSAGE <#MISXOR>	;Report this missing XOR block
+	BR	170$		;And process this data block
+
+105$:	TSTB	$GRPSZ		;Are we doing XOR recovery?
+	BEQ	160$		;No, that's too bad, forget it
+	BIT	#RS.XRT,RSTFLG	;Have we already tried XOR recovery?
+	BNE	160$		;Yes, so we can't do it again
+	BIS	#RS.XRT,RSTFLG	;Well, we've tried it now
+
+; At this point, we will attempt to perform XOR recovery
+;
+;	R3 -> Block header of non-sequential block
+;	QD1BID = Buffer ID of non-sequential block			;022
+;	XORCNT = Number of blocks to XOR to recover data
+
+	MOV	BBH$NO(R3),R1	;Pick up this block LSB
+	MOV	BBH$NO+2(R3),R2	;And this block MSB
+	CLR	R5		;Initialize backspace counter
+110$:	INC	R5		;Say we need one more backspace
+	CALL	CLCXOR,R5	;Calculate the XOR for this block
+	 BR	120$		;First exit means dump block and continue
+	 ;BR			;Second exit means end of XOR group
+	CALBX	RETBUF,#QD1BID	;Return the current block		;022
+	MOV	QX1BID,QD1BID	;The XOR block is now the current block	;022
+	MOV	#-1,QX1BID	;Forget that we have an XOR block	;022
+	CALBX	MAPBUF,<#QD1BID,#DTAAVL,#QDBVA> ;Now map this as a data record;022
+	MOV	QDBVA,R3	;Point to buffer			;022
+	CLR	(R3)+		;Clear out flags			;020
+.ASSUME	HB$FLG	EQ	0						;020
+	MOV	#-1,(R3)	;Set no link to next			;020
+.ASSUME	HB$NXT	EQ	2						;020
+	CLRB	HB$PRC-HB$NXT(R3) ;And indicate no asynch I/O pending	;020
+	ADD	#HBSIZE,QDBVA	;And set pointer past buffer header	;022
+	CALL	BCKSPC		;Backspace the save set
+	BIS	#RS.IBH,RSTFLG	;Note that the block header is invalid
+	MOV	QDBVA,R3	;Point to the current block		;022
+	BR	180$		;Now process the record we just restored
+
+120$:	CALBX	RETBUF,#QD1BID	;Dump current block			;022
+130$:	ADD	#1,R1		;Update block number
+	ADC	R2		;Double precision
+	CALL	REDBLK		;Now read in the next block
+	TSTB	R0		;Did we hit EOF or EOV?
+	BNE	150$		;Yes, so we can't do XOR recovery	
+	MOV	QDBVA,R3	;R3 -> Block we just read		;022
+	CALL	CHKCRC		;Is CRC correct?
+	BCS	140$		;No, so we can't do XORs
+	CMP	BBH$NO(R3),R1	;Is this the block we expected
+	BNE	140$		;No, so we can't do XORs
+	CMP	BBH$NO+2(R3),R2	;Is this really the correct block?
+	BEQ	110$		;Yes, so XOR it
+
+140$:	INC	R5		;Fix backspace over strange block
+	CALBX	RETBUF,#QD1BID	;Toss this strange block		;022
+150$:	CALL	BCKSPC		;Now backspace the save set
+	JMP	30$		;And re-read the thing that got us here
+
+; We get here if we're not able to restore a block using XOR recovery
+
+160$:	BIS	#RS.NOS!RS.XRT,RSTFLG ;Set non-sequential and XOR tried
+	CMESSAGE #LSTDTA	;And tell them about it
+
+170$:	MOV	QDBVA,R3	;R3 -> Current block			;022
+	MOV	BBH$NO(R3),NXTBLK ;Make this the expected block now
+	MOV	BBH$NO+2(R3),NXTBLK+2 ;And set the MSB also
+
+; We have some block to process now, and our context is properly set up
+;
+;	R3 -> Current block @ block header
+
+180$:	MOV	QD1BID,QD2BID	;Save our initial ID			;022
+	ADD	#BBHSIZ,R3	;Now R3 -> first record in block
+	MOV	BLKSIZ,R4	;R4 = Size of block
+	SUB	#BBHSIZ,R4	;And forget about the header
+
+; Now we have a record to read
+;
+;	R3 -> Record to process
+;	R4 = Bytes left in record
+
+190$:	MOV	R3,R5		;R5 -> Current record
+	MOV	(R3),R1		;R1 = Length of current record
+.ASSUME	BRH$RS	EQ	0
+	BIT	#BRHSIZ-1,R1	;Valid record length?
+	BNE	220$		;No, better ignore the rest of the record
+	ADD	#BRHSIZ,R1	;Add in overhead area	
+	SUB	R1,R4		;Update bytes left in current record
+	BCS	220$		;Record too long, ignore the rest
+	ADD	R1,R5		;Now R5 -> Next record
+	MOV	BRH$RT(R3),R2	;R2 = record type of current record
+	CMP	R2,#BRTMAX	;Is this a record type we know about?
+	BLOS	200$		;Yes, that's good
+	MOV	R5,R3		;Point to the next record
+	BR	210$		;And do it
+
+200$:	ASL	R2		;Get record type times two
+	MOV	R5,-(SP)	;Save pointer to next record
+	MOV	R4,-(SP)	;And bytes left in this block
+	CALL	CHRACT		;Check for action routines
+	CALL	@RECTBL(R2)	;Dispatch to the proper record handler
+	CALL	CHRACT		;And check for action routines again
+	MOV	(SP)+,R4	;Restore bytes left in record
+	MOV	(SP)+,R3	;R3 -> Next record to do
+	BIC	#RS.FRS,RSTFLG	;Indicate this isn't first record in set now
+	CMP	R4,#BRHSIZ	;Is there more to do?
+	BLOS	230$		;No					;014
+
+	;Remap if we need to						;014
+	; First, see if the updated record pointer is pointing into	;014
+	; some other APR and if so, remap to wherever it is.		;014
+	; If not, then see if there's enough room in this APR area	;014
+	; for the entire record (unless it is a data type - 4, in which	;014
+	; case we will just transfer it without reading it.		;014
+	; If there isn't enough room, then remap.			;014
+
+210$:	MOV	R4,-(SP)	;Get a scratch reg			;022
+	MOV	R3,-(SP)	;Save R3				;014
+	SUB	QDBVA,R3	;Take away the base address		;022
+	CMP	QD1BID,QD2BID	;Are we still at square 1?		;022
+	BNE	212$		;No, proceed				;014
+	ADD	#HBSIZE,R3	;Skip past the buffer header size	;014
+212$:									;014
+	CMP	R3,#8192.	;Are we out of our APR?			;014
+	BHIS	213$		;Yes, remap				;014
+	MOV	(SP),R4		;Get record header			;022
+	MOV	BRH$RS(R4),R4	;Get byte count				;022
+	ADD	#BRHSIZ,R4	;Add the header size			;022
+	ADD	R3,R4		;Add the virtual address offset		;022
+	CMP	R4,#8192.	;Now are we over the APR?		;022
+	BLO	214$		;No, don't remap			;014
+
+213$:	MOV	R3,R4		;Copy address				;022
+	BIC	#77,R4		;Round down to sliver			;022
+	SUB	R4,R3		;Leave remainder in R3			;022
+	ASH	#-6,R4		;Turn address into slivers		;022
+	BIC	#176000,R4	;Clear the sign extend			;022
+	ADD	R4,QD2BID	;Add it to current ID			;022
+	CALBX	MAPBUF,<#QD2BID,#DTAAVL,#QDBVA> ;Remap			;022
+	ADD	QDBVA,R3	;Add the base back in			;022
+	MOV	R3,(SP)		;Prepare for next instruction		;014
+214$:	MOV	(SP)+,R3	;Update R3				;014
+	MOV	(SP)+,R4	;Restore reg				;022
+	BR	190$		;And do some more			;014
+
+220$:	CMESSAGE #BADRLN	;Tell them about the problem
+
+; We're done with this record, so let's XOR it
+
+230$:	CALBX	MAPBUF,<#QD1BID,#DTAAVL,#QDBVA> ; Map start of block	;022
+	BIC	#RS.NBX,RSTFLG	;Guess that next block shouldn't be XOR block
+	TSTB	$GRPSZ		;Are we doing XORs?
+	BEQ	240$		;No, so nothing to do
+	BIT	#RS.XRT,RSTFLG	;Have we already tried to do an XOR?
+	BNE	240$		;Yes, so nothing to do
+	ADD	#HBSIZE,QDBVA	;Add our usual offset			;022
+	CALL	CLCXOR,R5	;Calculate the XOR for the group
+	 BR	240$		;Queue this block for return
+	 CALL	RETBLK		;Last block, queue this block for return
+	BIS	#RS.NBX,RSTFLG	;Indicate next block should be an XOR block
+	JMP	10$		;And set up for new group
+
+240$:	CALL	RETBLK		;Queue the block for returning
+	JMP	20$		;And read in the next block
+
+GLOBAL	<BADRLN,LSTDTA,EOF,$GRPSZ,BLKSIZ,BADCRC,NOVXOR,$RESMSK,C$FLAG,MISXOR>
+GLOBAL	<BBHDAT,GENFLG,EOV,BUFUSE,C$FLG2,RESSUB,BRFHDR>			;008
+GLOBAL	<ATRTBL,RECTBL,EOFTBL,EOFTBE,ACRTAL,QDBVA,QD1BID>		;022
+GLOBAL	<QD2BID,QD1BID,QX2BID,DTAAVL,QX1BID>				;022
+GLOBAL	<DSKSTA>							;015
+.DSABL	LSB
+
+.SBTTL	Perform XOR calculation
+
+;+
+; CLCXOR - Perform XOR calculation
+;
+;	QD1BID = Buffer ID of current block				;022
+;	QX1BID = Buffer ID of XOR block					;022
+;	QXBVA = Virtual address of XOR block				;022
+;	QDBVA = Virtual address of current block + HBSIZE		;022
+;	XORCNT = Count of XORs left for group
+;
+;	CALL	CLCXOR,R5
+;
+;	R3 = Undefined
+;	R4 = Undefined
+;
+;	First exit - Dump the current block, XOR performed
+;
+;	Second exit - last XOR done for group
+;-
+
+CLCXOR:	MOV	R1,-(SP)	;Save a work register
+	MOV	R2,-(SP)	;And another one
+	MOVB	XORCNT,R3	;Save the current XOR count
+	DECB	XORCNT		;Say one more block went by in group
+	MOV	QDBVA,R2	;R2->block at data			;022
+	CMP	BBH$AP(R2),#2	;Is this an XOR block?			;016
+	BNE	10$		;Not yet, keep doing XOR's
+
+	TST	(R5)+		;Advance to second exit
+	BIT	#RS.XRT,RSTFLG	;Are we recovering a block?
+	BNE	10$		;Yes, so every XOR counts
+	BIT	#RS$VFY,RESSUB	;Are we verifying?			;008
+	BNE	10$		;Yes, continue				;014
+	JMP	50$		;No, so don't do the last XOR		;014
+
+10$:	CALBX	MAPBUF,<#QX1BID,#XORAVL,#QXBVA> ;Map the XOR buffer	;022
+	ADD	#HBSIZE+BBHSIZ,QXBVA ;Offset to XOR portion		;022
+	MOV	QD1BID,QD2BID	;Copy the data block ID			;022
+	MOV	QX1BID,QX2BID	;Copy the XOR block ID			;022
+	CLR	R4		;Init bytes remaining in block		;022
+	MOV	BLKSIZ,R2	;Pick up block size
+	CMP	R2,#8192.-HBSIZE ; blocksize > 1 APR-buffer header?	;014
+	BLOS	14$		; No, proceed				;022
+	MOV	R2,R4		; Yes, copy blocksize			;022
+	MOV	#8192.-HBSIZE,R2 ; Set byte count at 1 APR's worth	;014
+	SUB	R2,R4		; Subtract an APR's worth of byte count	;022
+	ASH	#-4,R4		; We do 'em 16-at-a-whack		;022
+	BIC	#170000,R4	;Clear the sign extend			;022
+14$:	SUB	#BBHSIZ,R2	;And forget about block header		;022
+	ASH	#-4,R2		;Now get the number of XORs to do	;003
+	BIC	#170000,R2	;Clear the sign extend			;014
+	MOV	QXBVA,R1	;R1 -> Current XOR block		;022
+	CMPB	$GRPSZ,R3	;Is this the first block of the group?
+	BNE	30$		;No, so go do some XORs
+15$:	MOV	QXBVA,R3	;R3 -> Destination address for move	;022
+	MOV	QDBVA,R1	;R1 -> Current block			;022
+	ADD	#BBHSIZ,R1	;Offset past block header		;016
+	BR	20$		;Move 'em				;014
+				;**CIS** The move below deserves CIS
+18$:	MOV	QDBVA,R1	; R3 -> virtual addr in data block	;022
+	MOV	QXBVA,R3	; R2 -> virtual addr in XOR block	;022
+20$:
+.REPT	8.								;003
+	MOV	(R1)+,(R3)+	;Move a word
+.ENDR									;003
+	SOB	R2,20$		;Now loop for the whole thing
+	TST	R4		; Any byte count remaining?		;022
+	BEQ	48$		; No, done with block			;014
+	CALL	150$		; Yes, remap the buffers		;014
+	BR	18$		; And do some more			;014
+
+30$:	MOV	QDBVA,R3	;R3 -> Current restore block		;022
+	ADD	#BBHSIZ,R3	;Advance to part that gets XORed	;016
+	BR	40$		;XOR 'em				;014
+
+38$:	MOV	QDBVA,R3	; R3 -> virtual addr in data block	;022
+	MOV	QXBVA,R1	; R2 -> virtual addr in XOR block	;022
+40$:
+.REPT	8.								;003
+	MOV	(R3)+,R0	;Pick up a word to XOR			;022
+	XOR	R0,(R1)+	;Now XOR it into the XOR block
+.ENDR									;003
+	SOB	R2,40$		;And loop for the whole block
+	TST	R4		; Any byte count remaining?		;022
+	BEQ	48$		; No, done with block			;014
+	CALL	150$		; Yes, remap				;014
+	BR	38$		; And do some more			;014
+
+48$:	CALBX	MAPBUF,<#QD1BID,#DTAAVL,#QDBVA> ;Restore data mapping	;022
+	ADD	#HBSIZE,QDBVA	;And set pointer past buffer header	;022
+	CALBX	MAPBUF,<#QX1BID,#XORAVL,#QXBVA> ;Restore XOR mapping	;022
+	ADD	#HBSIZE+BBHSIZ,QXBVA ;Offset to XOR portion		;022
+50$:	MOV	(SP)+,R2	;And restore another work register
+	MOV	(SP)+,R1	;And another one
+	RETURN	R5		;And now we're done
+
+; Remap the buffers							;014
+
+150$:	CMP	R4,#512.	; Is byte count >= 512?			;022
+	BLT	160$		; No					;014
+	SUB	#512.,R4	; Yes, subtract another APR's worth	;022
+	MOV	#512.,R2	; Set up one APR's byte count		;014
+	BR	170$		; Go do the remapping			;014
+
+160$:	MOV	R4,R2		; Use remaining byte count		;022
+	CLR	R4		; Clear out the residual count		;022
+170$:	ADD	#128.,QD2BID	; Increment data address by 128 slivers	;022
+	ADD	#128.,QX2BID	; Increment data address by 128 slivers	;022
+	CALBX	MAPBUF,<#QD2BID,#DTAAVL,#QDBVA> ; Remap dta buf up 8Kb	;022
+	CALBX	MAPBUF,<#QX2BID,#XORAVL,#QXBVA> ; Remap XOR buf up 8Kb	;022
+	RETURN			; Go do some more XOR'ing		;014
+
+GLOBAL	<$GRPSZ,GENFLG>
+
+.SBTTL	Check CRC of a block 
+
+;+
+; CHKCRC - Check CRC of a block 
+;
+;	R3 -> Current block
+;
+;	CALL	CHKCRC
+;
+;	C = 1 if CRC error, else 0
+;-
+
+CHKCRC:	SAVREG			;Save all registers
+	MOV	BBH$CS(R3),R5	;R5 = CRC of block
+	CLR	BBH$CS(R3)	;Clear out CRC for re-calculation
+	MOV	BBH$CR(R3),-(SP) ;Save LSB of block CRC			;006
+	MOV	BBH$CR+2(R3),-(SP) ;Save MSB of block CRC		;006
+	CLR	BBH$CR(R3)	;Clear block CRC LSB
+	CLR	BBH$CR+2(R3)	;And block CRC MSB
+	MOV	R3,R4		;Copy pointer to start of block		;006
+
+	MOV	#BBHSIZ,R1	;R1 = Size of buffer in bytes
+	CLR	R0		; Clear CRC accumulation register
+10$:	MOVB	(R3)+,R2	; Get character
+	XOR	R0,R2		; XOR old CRC and new character
+	BIC	#177400,R2	; Clear high byte
+	ASL	R2		; Make index into table
+	MOV	CRCTBL(R2),R2	; Get modifier word from table
+	CLRB	R0		; Clear low byte of old CRC
+	SWAB	R0		; Move high byte to low
+	XOR	R2,R0		; XOR modifier and old CRC
+	SOB	R1,10$		; Decrement counter and loop if <> 0
+	MOV	(SP)+,R2	;Restore MSB of block CRC		;006
+	MOV	(SP)+,R3	;Restore LSB of block CRC		;006
+	CMP	R5,R0		;Is the block header CRC correct?
+	BNE	20$		;No, not this time
+	BIT	#BH$NOC,BBH$FL(R4) ;Should we do CRC-32?		;006
+	BNE	15$		;No, forget the check then		;006
+	CALLX	CRC32		;Calculate the block CRC		;006
+	ADD	#HBSIZE,QDBVA	;Fix the offset				;022
+	CMP	R0,R2		;MSB of CRC correct?			;006
+	BNE	20$		;No, not this time			;006
+	CMP	R1,R3		;Yes, how about LSB?			;006
+	BNE	20$		;No, it isn't right			;006
+15$:	TST	(PC)+		;CRC correct, indicate success		;006
+20$:	SEC			;Set carry for CRC failure
+	RETURN			;And we're done
+
+GLOBAL	<CRCTBL>
+
+.SBTTL	Backspace a save set
+
+;+
+; BCKSPC - Backspace a save set
+;
+;	R5 = Backspace amount
+;
+;	CALL	BCKSPC
+;
+;	R5 = Undefined
+;
+; Note: If we are doing a tape backup, we will not receive any AST
+; completions while the backspace is taking place.
+;
+;-
+
+BCKSPC:	CALL	CANCEL		;Cancel all the pending I/O
+	TSTB	$SAVFLG		;Is saveset a disk?
+	BEQ	40$		;Yes, so do it the disk way
+.ASSUME	DSKHND	EQ	0
+10$:	CALLX	CLRXRB		;Clear out the XRB			;021
+	MOV	#4,@#XRB	;Function code is backspace
+	MOV	R5,@#XRB+2	;Using the number of records passed
+	MOV	#SAVFIL+<MTAHND*400>,@#XRB+XRCI ;Set channel number/handler
+	.SPEC			;Now go for it
+	CRASH			;And crash on errors
+	BIT	#RS.EOF!RS.EOV,RSTFLG ;Were we at EOF or EOV before the BS? ;021
+	BEQ	50$		;No, then we're done			;021
+	BIC	#RS.EOF!RS.EOV,RSTFLG ;Reset the flags			;021
+	BR	10$		;And reissue the backspace		;021
+
+40$:	MUL	BSZBLK,R5	;Convert backspace amount to blocks
+	SUB	R5,NXTDBK	;Update next disk block number
+	SBCB	NXTDBK+2	;Double precision
+	BIC	#RS.EOF!RS.EOV,RSTFLG ;We can't be at EOF or EOV any more ;017
+50$:	CALLR	CHRACT		;Exit checking for action routines
+
+GLOBAL	<$SAVFLG,QDBVA,QXBVA,XORAVL>					;022
+
+.SBTTL	Cancel outstanding I/O
+
+;+
+; CANCEL - Cancel outstanding I/O
+;
+;	CALL	CANCEL
+;
+;	R5 = R5 + (number of cancelled requests)
+;
+; All outstanding I/O is cancelled. Anything in the queue is thrown
+; away. If we are doing a tape backup, we will queue an error check
+; acknowledge in case any of the tape requests complete with error.
+;-
+
+CANCEL:	BIC	#RS.NBI,RSTFLG	;Reset the no-BS-increment bit		;021
+	MOV	R1,-(SP)	;Get a work register
+	DSAR$S			;Disable ASTs for a while		;022
+	MOV	#-1,REDTAL	;;Reset the tail pointer
+10$:	CMP	REDQUE,#-1	;;Anything in read queue?
+	BEQ	30$		;;No, not this time
+	CALBX	MAPBUF,<#REDQUE,#XORAVL,#CSBVA> ;;Map the first buffer	;022
+	MOV	CSBVA,R1	;;R1 -> First buffer in queue		;022
+	CMPB	HB$ERR(R1),#EOF	;;Did we hit a tapemark (EOF)?		;021
+	BEQ	11$		;;Yes					;021
+	CMPB	HB$ERR(R1),#EOV	;;Did we hit a tapemark (EOV)?		;021
+	BNE	12$		;;No					;021
+11$:	BIS	#RS.NBI,RSTFLG	;;Yes, suppress backspace increments	;021
+12$:	BIS	#HBF$RB,(R1)+	;;Flag to return this at AST level	;021
+.ASSUME	HB$FLG	EQ	0
+	MOV	(R1),-(SP)	;;Stash the link to next
+.ASSUME	HB$NXT	EQ	2
+	TST	-(R1)		;;Has this block's I/O completed?
+.ASSUME	HBF$IO	EQ	100000
+	BPL	20$		;;No, so the completion routine will dump it
+	CALBX	RETBUF,#REDQUE	;;Return this buffer
+20$:	MOV	(SP)+,REDQUE	;;Delink this from the queue
+	BIT	#RS.NBI,RSTFLG	;;Did we hit EOF or EOV?		;021
+	BNE	10$		;;Yes, don't add more backspaces	;021
+	INC	R5		;;Say one more block dequeued
+	BR	10$		;;And loop
+
+30$:	ENAR$S			;;Enable ASTs now
+35$:	TSTB	$SAVFLG		;Is this a disk backup?			;006
+.ASSUME	DSKHND	EQ	0
+	BEQ	40$		;Yes, so no error check acknowledge
+	CALLX	CLRXRB		;Clear out the XRB
+	MOV	#12,@#XRB	;Function is error check acknowledge
+	MOV	#SAVFIL+<MTAHND*400>,@#XRB+XRCI ;Set channel/handler index
+	.SPEC			;Now go for it
+	CMPB	@#FIRQB,#NOBUFS	;Are we out of buffers?
+	BNE	38$		;No, some other error, we should die...
+	CALL	CHRACT		;Check for action routines
+	WSIG$S			;Wait a second or so...
+	BR	35$		;And try again
+
+38$:	CRASH			;Go and die on errors
+
+40$:	MOV	(SP)+,R1	;Restore work register
+	CALLR	CHRACT		;And exit checking action routines
+
+GLOBAL	<$SAVFLG,NOBUFS>
+
+.SBTTL	Handle EOF processing
+
+;+
+; CALEOF - Call EOF handlers
+;
+; This routine is called at EOF processing. We call all the EOF processors,
+; dismount the save set, and then return, since we're done with the restore.
+;-
+
+CALEOF:	MOV	#EOFTBL,R3	;R3 -> EOF table
+10$:	CMP	R3,#EOFTBE	;Are we done yet?
+	BEQ	40$		;Yes, we sure are
+	MOV	(R3)+,R4	;Pick up entry condition bits
+	BEQ	20$		;This EOF handler is "always-call"
+	BIT	R4,RSTFLG	;Should we call this EOF handler?
+	BEQ	30$		;No, not this time
+20$:	MOV	R3,-(SP)	;Save pointer into EOF table
+	CALL	@(R3)+		;Call the EOF handler
+	MOV	(SP)+,R3	;And restore pointer
+30$:	TST	(R3)+		;Advance to next EOF handler
+	BR	10$		;And loop
+
+40$:	CALL	CHRACT		;Check for action routines
+	DSAR$S			;Disable AST's
+	TST	BUFUSE		;;Any outstanding I/O buffers?		;022
+	BEQ	50$		;;No, not this time
+	MOV	#-1,@#XRB	;;Yes, so set up a long conditional sleep
+	.SLEEP			;;Now wait
+	ENAR$S			;;Enable AST's
+	BR	40$		;And try again
+
+50$:	ENAR$S			;;Enable AST's
+	CALL	CHRACT		;Check for action routines one last time...
+	CALLRX	DISMNT		;Exit dismounting the save set
+
+GLOBAL	<RSTFLG,BUFUSE>
+
+.SBTTL	Define default record and attribute handler
+
+;+
+; DEFRAT - Default record and attribute handler
+;
+;	This is where unknown record values and attributes come.
+;	Nothing interesting happens here, but you might want to
+;	stick a BPT if you are curious.
+;-
+
+DEFRAT::RETURN			;Off to the processor that called us
+
+.SBTTL	The attribute dispatcher
+
+;+
+; ATRDSP - The attribute dispatcher
+;
+;	R3 -> Current record
+;
+;	CALBX	ATRDSP
+;
+; On entry to attribute processor:
+;
+;	R1 = Attribute type
+;	R2 = Attribute length
+;	R3 -> Attribute data (not necessarily an even value)
+;	R4 = User data from ATRENT macro
+;
+; Attribute processors may use any register. They exit with a return
+; instruction.
+;
+; If a particular record handler wants to support attributes, all it
+; needs to do is call us. We will then call each attribute handler
+; (declared with the ATRENT MACRO), doing range checks, and notifying
+; the user of any inconsistencies.
+;
+; On return to caller:
+;
+;	R0 = Returned status code
+;-
+
+ATRDSP::MOV	(R3)+,RECSIZ	;RECSIZ = Length of record
+.ASSUME	BRH$RS	EQ	0
+	SUB	#2,RECSIZ	;Subtract size of structure level
+	MOV	(R3),RECTYP	;Save record type
+.ASSUME	BRH$RT	EQ	BRH$RS+2
+	ADD	#BRHSIZ-BRH$RT,R3 ;R3 -> Structure level
+	CMP	(R3)+,#STRLVL	;Is this a structure level we support?
+	BEQ	10$		;Yes, that's good
+	CMESSAGE <#BADSTR,-(R3)>	;No, so tell them we've ignored it
+	BR	70$		;And ignore the whole record
+
+10$:	MOV	R3,RECPTR	;Save initial pointer
+20$:	CLR	R2		;Get ready to pick up attribute length
+	BISB	(R3)+,R2	;Pick up attribute length LSB
+	SWAB	R2		;Get ready for MSB
+	BISB	(R3)+,R2	;Pick up attribute length MSB
+	SWAB	R2		;Now get the bytes in the right order
+	TST	R2		;Are we done?
+	BEQ	70$		;Yes, we're done with this record
+	MOV	R2,R5		;Copy length to safe place
+	ADD	#4,R5		;Now R5 has length + overhead
+	SUB	R5,RECSIZ	;Update bytes remaining in record
+	ADD	R5,RECPTR	;And update pointer to next attribute
+	CLR	R1		;Get ready to pick up attribute type
+	BISB	(R3)+,R1	;Pick up type LSB
+	SWAB	R1		;Get ready for MSB
+	BISB	(R3)+,R1	;Pick up type MSB
+	SWAB	R1		;And get the bytes in the right order
+	CMP	R1,#ATRMAX	;Do we support this type of attribute?
+	BHI	60$		;No, so just ignore it
+	TST	R1		;Do we really support it?
+	BEQ	60$		;No, attribute zero is unknown
+
+; R1 = Attribute code
+; R2 = Attribute length
+; R3 -> Attribute data
+
+	MOV	R1,R5		;Copy attribute data to safe place
+	MUL	#12,R5		;Now R5 = offset into table
+	ADD	#ATRTBL-12,R5	;R5 -> Attribute table at this attribute
+	CMP	(R5)+,RECTYP	;Does this record type match?
+	BEQ	30$		;Yes, that's good
+	TST	-2(R5)		;Is this a match any attribute?
+	BEQ	30$		;Yes, so that's OK
+	CMESSAGE <#INVATR,R1,RECTYP> ;Tell them about the problem
+	BR	60$		;And handle the next attribute
+
+30$:	MOV	(R5)+,R4	;Pick up user data
+	CMP	R2,(R5)+	;Is attribute data long enough?
+	BLO	40$		;No, its too small
+	CMP	R2,(R5)+	;Is it too long?
+	BLOS	50$		;No, it makes it
+
+40$:	CMESSAGE <#INVALN>	;Tell them attribute has invalid length
+	BR	60$		;And handle the next attribute
+
+; At this point:
+;
+; R1 = Attribute code
+; R2 = Attribute length
+; R3 -> Attribute data
+; R4 = User data
+; R5 -> Address of user subroutine
+
+50$:	CALL	CHRACT		;Check for action routines
+	CALL	@(R5)+		;Now call the user's subroutine
+
+60$:	CALL	CHRACT		;Check for action routines
+	MOV	RECPTR,R3	;R3 -> Next attribute to handle
+	CMP	RECSIZ,#4	;More to do?
+	BHI	20$		;Yes, so do it
+
+70$:	CLR	R0		;Indicate success
+	CALLR	CHRACT		;Now exit checking for action routines
+
+GLOBAL	<BADSTR,INVATR,INVALN>
+
+.SBTTL	Parse a date/time attribute
+
+;+
+; PRSDAT - Parse a date/time attribute
+;
+;	R3 -> Attribute data in quad-word format (might be odd)
+;	R4 -> Where to place date and time words (must be even)
+;
+;	CALL	PRSDAT
+;
+;	All registers are altered
+;
+; This routine converts a quad-word date and time to two RSTS/E words
+; (date followed by time).
+;-
+
+PRSDAT::
+
+; The first thing to do is to allocate space for the quad words on the
+; stack, and copy the passed date into the allocated area.
+;
+; Note: This routine doesn't touch R4 until the end.
+;
+; R4 is the location to return the data.
+
+	SUB	#16.,SP		;Make room for dividend
+	MOV	SP,R1		;R1 -> Dividend work area
+10$:	MOVB	(R3)+,(R1)+	;Copy a byte
+	SOB	R2,10$		;For all eight bytes
+	MOV	R1,R2		;R2 -> Product area
+	MOV	SP,R1		;R1 -> Dividend area again
+	MOV	#CLUMIN,R0	;R0 -> Divisor (clunks per minute)
+	SUB	#8.,SP		;Make room for remainder
+	MOV	SP,R3		;R3 -> Remander area
+
+; Now we'll do the divide to get minutes
+
+	CALL	$DIVQ		;Now get back minutes since Nov 17, 1858
+
+; Now we pick up minutes and verify that they fit into 32 bits
+
+	MOV	R2,SP		;Dump remainder and divisor area
+	MOV	(SP)+,R1	;R1 = LSB of minutes since Nov 17, 1858
+	MOV	(SP)+,R0	;R0 = MSB of minutes since Nov 17, 1858
+	BIS	(SP)+,(SP)+	;Is this date way too big?
+	BNE	30$		;Yes, it sure is
+
+; Now we convert minutes to minutes since Dec 31, 1969 and make sure
+; that it fits.
+
+	SUB	#DIFMSB,R0	;Convert MSB to minutes since Dec 31, 1969
+	BCS	40$		;And error if it is too small
+	SUB	#DIFLSB,R1	;Convert LSB to minutes since Dec 31, 1969
+	SBC	R0		;Carry
+	BCS	40$		;And error if it is too small
+	BMI	30$		;Or too big
+
+; Now we will calculate the days since Dec 31, 1969 and minutes into the
+; current day. We will then convert the time to RSTS format.
+
+	MOV	#1440.,R5	;R5 has minutes per day
+	DIV	R5,R0		;Now R0 has days and R1 has minutes into day
+	BVS	30$		;Days better fit into 16 bits
+	SUB	R1,R5		;Now R5 has minutes 'til midnight (RSTS format)
+	MOV	R0,R1		;Now R1 = Days since Dec 31, 1969
+	BEQ	40$		;Dec 31, 1969 is too small
+
+; Now R1 has the number of days after Dec 31, 1969.
+; We will convert this to number of days after Jan 1, 1969. This is
+; done since we need to perform leap year calculation, and 1968 is
+; a leap year. We will divide the number of days (R1) into the
+; number of days in a leap year cycle (365.*4+1), which will give
+; us the number of leap years, and the number of days into the leap
+; year cycle.
+;
+; Note that for the following calculations, dates are zero-based.
+;
+;	R1 = Number of days after Dec 31, 1969
+;	R5 = Time in RSTS format
+
+	ADD	#364.,R1	;R1 has days since Jan 1, 1969
+	CLR	R0		;Clear MSB for divide
+	DIV	#<365.*4>+1,R0	;R0 = # leap year cycles, R1 = days in cycle
+	MOV	R0,R3		;Save leap year cycles in an safe place.
+
+; Now we have number of leap year cycles in R3 and number of days into
+; cycle in R1. We will divide this by the number of days in a year (365),
+; to give us the year within the leap year cycle. If the year in the cycle
+; is four, then it is actually day 366 of a leap year, so we will need
+; to special case that.
+;
+; Note that for the following calculations, dates are zero based.
+;
+;	R1 = Days into cycle
+;	R3 = Cycles since 1968
+;	R5 = Time in RSTS format
+
+	CLR	R0		;Clear MSB for divide
+	DIV	#365.,R0	;R0 = years into cycle, R1 = day within year
+	CMP	R0,#4		;Is this the special case?
+	BNE	20$		;No, not this time
+	DEC	R0		;Yes, so fix the year number (make it 3)
+	MOV	#365.,R1	;And make the day number 366 (zero-based)
+
+; Now we will do the final conversion into the RSTS/E date format.
+;
+;	R0 = Year within leap year cycle (zero based)
+;	R1 = Day within year (zero based)
+;	R3 = Leap years since 1969 (zero based)
+;	R5 = Time in RSTS format
+;
+; We will multiply R3 by 4, giving us the number of years to the base
+; of the leap year cycle. We will then add the number of years into
+; the cycle, which will give us the number of years since 1969.
+; We will then convert this to number of years since 1970, and multiply
+; it by 1000. to convert it to RSTS years format. We will then add in
+; the day number (+1), which will give us date in RSTS format.
+
+20$:	ASL	R3		;Now we have leap years * 2 since 1968
+	ASL	R3		;Now we have leap years * 4 since 1968
+	ADD	R0,R3		;Now we have years since 1969
+	DEC	R3		;Now we have years since 1970
+	CMP	R3,#65.		;Is this year too large?
+	BHI	30$		;Yes, forget it
+	MUL	#1000.,R3	;Now we have years in RSTS format
+	INC	R1		;Now days are one-based
+	ADD	R1,R3		;Now R3 has the date in RSTS format
+	BR	50$		;Now off to save it
+
+; Come here if the date is too large
+
+30$:	MOV	#65365.,R3	;Date is Dec 31, 2035
+	MOV	#1,R5		;And time is 11:59 PM
+	BR	50$		;And join up
+
+; Come here if the date is too large
+
+40$:	MOV	#1,R3		;Date is Jan 1, 1970
+	MOV	#1440.,R5	;And time is 12:00 AM
+
+; Now we save the date and time for the caller.
+;
+;	R3 = Date in RSTS format
+;	R4 -> Date and time save area
+;	R5 = Time in RSTS format
+
+50$:	MOV	R3,(R4)+	;Save the date for the user
+	MOV	R5,(R4)+	;And the time
+	RETURN			;And we're done
+
+.SBTTL	Quad divide subroutine
+
+;+
+; $DIVQ - Quad divide routine
+;
+;	R0 -> Divisor area
+;	R1 -> Dividend area
+;	R2 -> Quotient area
+;	R3 -> Remainder area
+;
+;	CALL	$DIVQ
+;
+;	All registers are preserved.
+;-
+
+$DIVQ:	SAVREG			;Save all registers
+	MOV	#65.,-(SP)	;Set up loop count
+	MOV	R2,R5		;R5 -> Quotient area
+	MOV	(R1)+,(R5)+	;Copy dividend into quotient area
+	MOV	(R1)+,(R5)+	; Word 2
+	MOV	(R1)+,(R5)+	;  Word 3
+	MOV	(R1)+,(R5)+	;   And word 4
+	MOV	R3,R4		;R4 -> Remainder area
+	CLR	(R4)+		;Clear out remainder area
+	CLR	(R4)+		; Word 2
+	CLR	(R4)+		;  Word 3
+	CLR	(R4)+		;   Word 4
+10$:	MOV	R3,R4		;R4 -> Remainder area
+	ROL	(R4)+		; Shift in next bit of dividend
+	ROL	(R4)+		; Word 2
+	ROL	(R4)+		; Word 3
+	ROL	(R4)+		; Word 4
+	MOV	R0,R1		;R1 -> Divisor
+	ADD	#8.,R1		;R1 -> High order of divisor
+	MOV	R4,R5		;R5 -> High order of remainder area
+	CMP	-(R1),-(R5)	;MSB of divisor = current remainder?
+	BNE	20$		;No, so check greater than or less than
+	CMP	-(R1),-(R5)	;Yes, so check LSB
+	BNE	20$		;Different, so check greater than/less than
+	CMP	-(R1),-(R5)	;Same, check next bits
+	BNE	20$		;Different, off to other check
+	CMP	-(R1),-(R5)	;3 MSBs match, now check the LSB
+20$:	BHI	30$		;Divisor > cur remainder, C is clear, branch
+	MOV	R0,R1		;R1 -> start of divisor
+	MOV	R3,R4		;R4 -> start of remainder
+	SUB	(R1)+,(R4)+	;Subtract divisor from remander
+	SBC	(R4)+		;Carry into word 2
+	SBC	(R4)+		; Word 3
+	SBC	(R4)		;  And word 4
+	CMP	-(R4),-(R4)	;Back to word 2 of remainder
+	SUB	(R1)+,(R4)+	;Subtract word 2
+	SBC	(R4)		;And carry into word 3
+	SBC	2(R4)		; And word 4
+	SUB	(R1)+,(R4)+	;Now subtract word 3
+	SBC	(R4)		;And carry into word 4
+	SUB	(R1)+,(R4)+	;Now subtract word 4
+	SEC			;Set bit to shift into quotient
+30$:	MOV	R2,R5		;R5 -> quotient area
+	ROL	(R5)+		;Shift new bit in from right
+	ROL	(R5)+		; Word 2
+	ROL	(R5)+		;  Word 3
+	ROL	(R5)+		;   Word 4
+	DEC	(SP)		;Count iterations
+	BNE	10$		;And loop
+	TST	(SP)+		;Clean the stack
+	RETURN			;And we're done
+
+.SBTTL	Queue reads for the save set and return the first one
+
+;+
+; REDBLK - Queue reads for the save set and return the first one
+;
+;	CALL	REDBLK
+;
+;	R0 = Returned error code
+;
+; Every time we are called, we will attempt to fill the buffer pool
+; with data, even if we have the block requested by the user. This
+; is done so that we can get very far ahead of mainline code.
+;
+; When we are no longer able to queue reads, we will check to see
+; if we have the block requested by the user. If we do, we'll establish
+; it as the current record, pick up completion status, and return
+; to our caller. If we don't, we'll wait a while, try to queue more
+; I/O, and see if our initial I/O request has completed. This process
+; will repeat until the first I/O request is satisfied.
+;-
+
+REDBLK::MOV	R1,-(SP)	;Get a work register
+10$:	CALL	CHRACT		;Check for action routines
+	TSTB	$SAVFLG		;Are we dealing with disk?
+	BNE	20$		;No, so block numbers are meaningless
+.ASSUME	DSKHND	EQ	0
+	CMP	NXTDBK,SAVSZL	;Are we at the end of the save set?
+	BNE	20$		;No, not this time
+	CMPB	NXTDBK+2,SAVSZM	;Are we really at the end?
+	BNE	20$		;No, not this time
+	BIS	#RS.EOF,RSTFLG	;Yes, so set pending EOF
+	JMP	70$		;And check for I/O complete		;014
+
+20$:	CMP	#-1,QX1BID	;Do we have an XOR buffer?		;022
+	BNE	25$		;Yes, so don't get another one
+	CALBX	GETBUF,<#QX1BID,#XORAVL,#QXBVA> ;Get an XOR buffer	;022
+	BCS	70$		;No more, wait for completions
+25$:	CALBX	GETBUF,<#QD1BID,#DTAAVL,#QDBVA> ;Get a data buff	;022
+	BCS	70$		;No more, check on posting completion
+	MOV	QD1BID,QD2BID	;Copy block ID				;022
+	MOV	QDBVA,R1	;R1 -> Block we just got		;022
+	CLR	(R1)+		;Clear out flags
+.ASSUME	HB$FLG	EQ	0
+	MOV	#-1,(R1)	;Set no link to next
+.ASSUME	HB$NXT	EQ	2
+	CLRB	HB$PRC-HB$NXT(R1) ;And indicate no asynch I/O pending
+	CALLX	CLRFQX		;Set up the XRB and FIRQB
+	MOV	#XRB,R1		;R1 -> XRB
+	MOV	BLKSIZ,(R1)+	;Set up block size
+	CLR	(R1)+		;Skip unused word
+	MOV	QDBVA,(R1)	;Set up address of buffer		;022
+	ADD	#HBSIZE,(R1)+	;And point past buffer header
+	MOVB	#SAVFIL,(R1)+	;And channel number times two
+	TSTB	$SAVFLG		;Is this a disk save set?
+.ASSUME	DSKHND	EQ	0
+	BNE	30$		;No, tape, don't deal with block number
+	MOVB	NXTDBK+2,(R1)+	;Disk, set block number MSB
+	MOV	NXTDBK,(R1)+	;And block number LSB
+30$:	MOV	#REDCMP,@#FIRQB+FQFIL ;Set completion routine address
+	MOV	QD1BID,@#FIRQB+FQPPN ;And block number to map buffer	;022
+	.READA			;Queue the read operation
+	MOVB	@#FIRQB,R0	;Pick up any directive error
+	CMPB	R0,#INUSE	;Are we doing too much I/O?
+	BEQ	60$		;Yes, so wait a while...
+	CMPB	R0,#NOBUFS	;Are we out of buffers?
+	BEQ	60$		;Yes, so wait a while
+	CRASH	R0		;Crash on any other directive errors
+	CMP	REDQUE,#-1	;Anything in the queue?
+	BNE	40$		;Yes, there sure is
+	MOV	QD1BID,REDQUE	;No, so make this the head of the list	;022
+	BR	50$		;And join up
+
+40$:	DSAR$S			;Disable AST's				;022
+	CALBX	MAPBUF,<#REDTAL,#DTAAVL,#ADBVA> ;;Map the last buffer	;022
+	MOV	ADBVA,R1	;;R1 -> Last buffer in chain
+	MOV	QD1BID,HB$NXT(R1) ;;Link this new block to chain	;022
+
+50$:	MOV	QD1BID,REDTAL	;;Set this as the tail of the queue	;022
+	ENAR$S			;;Enable AST's				;022
+	ADD	BSZBLK,NXTDBK	;Update block number
+	ADCB	NXTDBK+2	;Double precision
+	JMP	10$		;And loop, queueing I/O requests
+
+; We get here when we need to wait for ASTs to complete. 
+; ASTs have been disabled at the time that we are here.
+
+60$:	CALBX	RETBUF,#QD1BID	;.READA failed, return buffer		;022
+
+70$:	CMP	REDQUE,#-1	;Anything in queue?
+	BNE	80$		;Yes, so check for completion
+	BIT	#RS.EOF!RS.EOV,RSTFLG ;Nothing in queue, pending EOF or EOV?
+	BEQ	90$		;No, so wait for resources
+	MOVB	#EOF,R1		;Yes, set up to return EOF
+	BIT	#RS.EOV,RSTFLG	;Is the error really EOV?
+	BEQ	75$		;No, it is a real EOF
+	MOVB	#EOV,R1		;Set the error as EOV
+75$:	BIC	#RS.EOF!RS.EOV,RSTFLG ;Dump EOF and EOV flags
+	BR	120$		;And get out
+
+80$:	DSAR$S			;Disable AST's
+	CALBX	MAPBUF,<#REDQUE,#DTAAVL,#QDBVA> ;;Map the first buffer	;022
+	MOV	REDQUE,QD1BID	;;Copy the ID				;022
+85$:	MOV	QDBVA,R1	;;R1 -> First block in chain		;022
+	TST	(R1)+		;;I/O complete on first block?
+.ASSUME	HB$FLG	EQ	0
+.ASSUME	HBF$IO	EQ	100000
+	BMI	100$		;;Yes, so we're almost done here!
+	MOV	#-1,@#XRB	;;Set up for a long conditional sleep
+	.SLEEP			;;Go and wait
+	ENAR$S			;;Enable AST's
+	JMP	10$		;And try again
+	
+90$:	WSIG$S			;Wait a little while for resources
+	JMP	10$		;And try again
+
+100$:	ENAR$S			;;Enable AST's
+	CMP	REDQUE,REDTAL	;Is this the only block in the chain?
+	BNE	110$		;No, not this time
+	MOV	#-1,REDTAL	;Yes, so update the tail pointer
+110$:	MOV	REDQUE,QD1BID	;Set up the block ID of the current block;022
+	MOV	(R1),REDQUE	;Now update the link to first
+.ASSUME	HB$NXT	EQ	2
+	MOVB	HB$ERR-HB$NXT(R1),R1 ;Pick up returned error code
+	BEQ	115$		;None, that's good
+	CALBX	RETBUF,#QD1BID	;Return this block now			;022
+	TSTB	$SAVFLG		;Is this a disk backup?
+.ASSUME	DSKHND	EQ	0
+	BEQ	118$		;Yes, so all errors are unexpected
+	CALL	CANCEL		;Cancel outstanding I/O, acknowledge errors
+
+	CMPB	R1,#EOF		;Is the error EOF?
+	BEQ	120$		;Yes, it sure is
+	CMPB	R1,#EOV		;No, but how about EOV?
+	BEQ	120$		;Yes, it sure is
+
+118$:	CMESSAGE #ERRDST	;Tell them an error occured...
+	CMESSAGE R1		;Now tell them what it was
+	JMP	10$		;And try again
+
+115$:	ADD	#HBSIZE,QDBVA	;Now point past buffer header		;022
+120$:	MOVB	R1,R0		;Return the error code
+	MOV	(SP)+,R1	;Restore R1
+	CALLR	CHRACT		;Now exit checking action routine
+
+GLOBAL	<BLKSIZ,REDBLK,$SAVFLG,SAVSZL,SAVSZM,INUSE,NOBUFS,ADBVA,XORAVL>	;022
+GLOBAL	<EOF,EOV,ERRDST>
+
+;+
+; REDCMP - Completion routine for reads of save set
+;
+; This is an asynchronous completion routine for I/O into block
+; buffers.
+;
+; We are executed when the .READAs performed in REDBLK complete.
+;
+;	All registers are preserved.
+;	FIRQB & XRB are preserved.
+;
+; If HBF$RB has been set in the record header, we will immediatly
+; return the block. This bit is set to indicate that the buffer
+; chain wants to be deleted.
+;-
+
+REDCMP:	CALLX	ASYSAV,R5	;;Save asynchronous context
+	MOVB	@#FIRQB,R1	;;Pick up error code
+	MOV	@#FIRQB+FQPPN,CS1BID ;;Set the current asynch block #	;022
+	CALBX	MAPBUF,<#CS1BID,#DTAAVL,#CSBVA> ;;Map this buffer	;022
+	MOV	CSBVA,R2	;;R2 -> Block just read			;022
+	TSTB	(R2)		;;Does this block need to be dumped?
+.ASSUME	HB$FLG	EQ	0
+.ASSUME	HBF$RB	EQ	200
+	BPL	10$		;;No, not this time
+	CALBX	RETBUF,<#CS1BID> ;;Yes, so return it			;022
+	BR	20$		;;And get out...
+
+10$:	MOV	#HBF$IO,(R2)	;;Indicate I/O has completed
+.ASSUME	HB$FLG	EQ	0
+	MOVB	R1,HB$ERR(R2)	;;Set up returned error code
+20$:	RETURN			;;And now we're done
+
+GLOBAL	<CS1BID,CSBVA>							;022
+
+;+
+; RETBLK - Queue a block to be returned
+;
+;	QDBVA = Virtual address of block to be returned @ block header	;022
+;	QD1BID = Buffer ID of block to be returned			;022
+;
+;	CALL	RETBLK
+;
+;	R0 = Undefined
+;
+; This routine is used to queue a block for returning when we are
+; finished processing it. If the count of outstanding asynch I/O
+; for this block is zero, we will return it to the pool immediately.
+; Otherwise, we will flag it as needing to be returned when the
+; count reaches zero.
+;-
+
+RETBLK:	DSAR$S			;Protect the tstb			;022
+	CALBX	MAPBUF,<#QD1BID,#DTAAVL,#QDBVA> ;Map buffer header	;022
+	MOV	QDBVA,R0	;R0 -> Block to return @ block header	;022
+	TSTB	HB$PRC(R0)	;Any more I/O outstanding?		;014
+	BEQ	10$		;No, not this time			
+	BIS	#HBF$RB,HB$FLG(R0) ;Yes, so return it at AST level	;014
+	BR	20$		;And get out
+
+10$:	CALBX	RETBUF,#QD1BID	;Return the block			;022
+20$:	ENAR$S			;Let 'em go				;022
+	CALLR	CHRACT		;And exit checking for action routines
+
+.SBTTL	Initialize and mount the output disk
+
+;+
+; CHKINI - Initialize and/or mount the output disk if necessary
+;
+;	CALL	CHKINI
+;
+; Disk is initialized and/or mounted if user requested it and it
+; hasn't been done yet.
+;
+;	All registers are preserved.
+;-
+
+CHKINI::BIT	#RS.OVS,RSTFLG	;Output volume already set up?
+	BNE	200$		;No, so get out quickly
+	BIT	#GF.DIR,GENFLG	;Nothing to mount if this is /Directory	;008
+	BNE	200$		;So, jump out...			;008
+	SAVREG			;Save all registers
+	BIT	#DO.INI,C$FLAG	;Are we supposed to do an initialize?
+	BEQ	20$		;No, so don't initialize then...
+
+; The code below is for an initialize
+
+	CMPB	$DSKLB,#40	;Is this blank?				;024
+	BEQ	3$		;Yes, use the default			;024
+	TSTB	$DSKLB		;Did we ever get a label to use?
+	BNE	5$		;Yes, we sure did
+3$:	MOV	#"BA,$DSKLB	;No, so set it to be "BACKUP"
+	MOV	#"CK,$DSKLB+2	; ...
+	MOV	#"UP,$DSKLB+4	; ...
+
+5$:	CALBX	DSKINT,<DSKSTA,#$DSKDEV,$DSKUNT,#$DSKLB,<DSKCLU,B>>
+	CMP	R0,#1		;Did the disk get initialized?
+	BEQ	20$		;Yes, it sure did
+	MOV	#NOTINI,R2	;No, so get ready to report that
+	BR	300$		;And get out nicely
+
+; Now we'll mount the output disk... if it is already mounted, that is
+; fine.
+
+20$:	TST	$DSKUNT		;Is this a public structure request?
+	BEQ	30$		;Yes, so don't try to mount it!
+	CALLX	CLRFQX		;Clear out the FIRQB and XRB
+	MOVB	#UU.MNT,@#FIRQB+FQFUN ;Function is mount the disk
+	MOV	#2000!4000!10000!100000,@#FIRQB+FQMODE
+				;Mount - lookup pack ID, noshare, R/W
+	MOV	$DSKDEV,@#FIRQB+FQDEV ;Set the device name
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;And the unit number
+	.UUO			;Now go do the mount
+	MOVB	@#FIRQB,R2	;Pick up returned error code
+	BEQ	30$		;None, so disk is mounted now
+	CMPB	R2,#INUSE	;Was disk already mounted?
+	BEQ	30$		;Yes, so that's OK
+	CMESSAGE #ERRMOV	;Some other error, give our message
+	BR	300$		;Get out reporting RSTS error
+
+; Now that the output disk is mounted, we'll process /OUTLABEL if it
+; is present.
+
+30$:	TSTB	$DSKLB		;Do we need to verify output label?
+	BEQ	100$		;No, not this time
+
+	MOVB	#UU.ATR,@#FIRQB+FQFUN ;Function is read/write attributes
+	MOVB	#-4,@#FIRQB+FQFIL ;Subfunction is get pack attributes
+	MOV	$DSKDEV,@#FIRQB+FQDEV ;From the output device
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;And unit number
+	.UUO			;Now go for it
+	MOVB	@#FIRQB,R2	;R2 = Returned error code
+	BEQ	40$		;It worked, great
+	CMESSAGE #ERRROL	;Tell them error reading output label
+	BR	300$		;And get out reporting RSTS error
+
+40$:	MOV	#FIRQB+20,R0	;R0 -> Pack label in RAD-50
+	SUB	#6,SP		;Get some work space
+	MOV	SP,R5		;R5 -> work area
+	CALLX	RAD$W2		;Convert this pack label to ascii
+	MOV	#$DSKLBL+6,R1	;R1 -> Just past output label
+	MOV	#3,R2		;R2 = Count of words to compare
+50$:	CMP	-(R1),-(R5)	;Pack labels match?
+	BNE	60$		;No, not this time
+	SOB	R2,50$		;Yes, check more now
+	ADD	#6,SP		;Release our stack space
+	BR	100$		;Done, this is the correct volume...
+
+60$:	MOV	#WRGOVL,R2	;Get ready to report incorrect volume
+	BR	300$		;Now get out reporting it
+
+100$:	BIS	#RS.OVS,RSTFLG	;Be sure we initialize only this once
+200$:	RETURN			;And now we're done
+
+300$:	CMESSAGE R2		;Report the error to our user
+400$:	CMP	#-1,QD1BID	;Is there a current block?		;022
+	BEQ	405$		;No, continue				;009
+	CALBX	RETBUF,#QD1BID	;Return the current block		;022
+	MOV	#-1,QD1BID	;And forget that we have one		;022
+405$:	CALL	CANCEL		;Cancel outstanding I/O			;022
+	CMP	#-1,QX1BID	;Do we have an XOR block?		;022
+	BEQ	410$		;No, not this time			;004
+	CALBX	RETBUF,#QX1BID	;Yes, so return it			;022
+	MOV	#-1,QX1BID	;And forget that we have one		;022
+410$:	DSAR$S			;Disable AST's
+	TST	BUFUSE		;;Do we have any outstanding I/O?	;014
+	BEQ	420$		;;No, not this time			;004
+	CALLX	CLRXRB		;;Yes, clear out the XRB		;004
+	MOV	#-1,@#XRB	;;Set up for a long conditional sleep	;004
+	.SLEEP			;;See you in a while!			;004
+	ENAR$S			;;Enable AST's
+	BR	410$		;And try again				;004
+
+420$:	ENAR$S			;;Enable AST's
+	JMPX	RESTRT		;Now get out...				;004
+
+GLOBAL	<$DSKDEV,$DSKUNT,$DSKLB,NOTINI,C$FLAG,ERRMOV,WRGOVL,ERRROL,INUSE>
+GLOBAL	<BUFUSE>							;004
+;GLOBAL	<CURRID>							;014
+
+.SBTTL	Check for action routines
+
+;+
+; CHRACT - Check for action routines
+;
+;	CALL	CHRACT
+;
+; And all pending action routines are executed.
+;
+; All registers are preserved.
+;-
+
+CHRACT::SAVREG			;Save all registers
+10$:	DSAR$S			;;Disable ASTs
+	MOV	ACRQUE,R5	;;R5 -> First action routine
+	BEQ	30$		;;None, that's easy
+	MOV	(R5)+,ACRQUE	;;Save link to next action routine block
+	BNE	20$		;;We got one, don't change tail pointer
+	MOV	#ACRQUE,ACRTAL	;;Set the new action routine tail
+20$:	ENAR$S			;;Enable ASTs now
+	CALL	@(R5)+		;And enter this action routine
+	BR	10$		;Now loop for the next one
+
+; Upon entry to action routine:
+;
+;	R5 -> Action control block + 4
+;
+; Action routine is free to modify any registers.
+; It is the responsibility of the action routine to return the action
+; control block to the pool, if the action routine block was dynamically
+; allocated.
+
+30$:	ENAR$S			;;Enable AST's now
+	RETURN			;All done now...
+
+.END

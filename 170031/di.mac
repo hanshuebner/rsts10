@@ -1,0 +1,179 @@
+TITLE	DI,<DATE INVERSE FN>,02,31-MAY-90,WJS
+
+;                   Copyright 1974,1990 by Digital Equipment Corporation
+;                                  All rights reserved.
+;
+;          This software is furnished under a license and may be used and copied
+;          only  in  accordance  with  the  terms  of  such license and with the
+;          inclusion of the above copyright notice.  This software or any copies
+;          shall not be provided to any other person.   No title to or ownership
+;          of the software is hereby transferred.
+;
+;          The information in this software is subject to change without notice.
+;
+;          DIGITAL  assumes  no  responsibility  for the  use, functionality, or
+;          reliability of its  software  on equipment  which  is not supplied by
+;          DIGITAL.
+
+	.sbttl	DI	DATE%() function service mainline
+
+	org	DATI		;Overlays dummy in RC
+
+	.globl	INTFAS,SUCJS,RAD50
+
+	.enabl	lsb
+
+DATIFN:	JSR	R5,INTFAS	;Demand a single string argument
+	MOV	R5,-(SP)	;Save IPC
+	MOV	#40,-(R1)	;Specify conversion to upper case
+	CALL	SUCJS		;Do CVT$$(), point R2/R4 -> arg, pop header
+	MOV	(PC)+,-(SP)	;Onto SP stack with
+	 .BYTE	 '-,'.		;  delimiter bytes
+	CALL	DIGITS		;Parse first digit string (day or year)
+	CMPB	(R2)+,(SP)	;A hyphen next (dd-Mmm-yy format) ?
+	BNE	40$		;No => go parse for yy.mm.dd
+
+; Mmm-yy remaining to parse    (dd has been parsed into R3)
+
+	MOV	R3,R5		;Save parsed day
+	BEQ	BADARG		;Disallow zero for day
+	CLR	-(R1)		;No "extra" conversions in RAD50, please
+	CALL	RAD50		;RAD50 of "Mmm" onto R1 stack
+	MOV	#MOTABL,R0	;R0 -> table of RAD50 month names
+10$:	CMP	(R1),(R0)+	;Match?
+	BEQ	30$		;Yes => go derive a number for month
+	TST	(R0)		;No:  more entries in table?
+	BNE	10$		;Yes => go check next entry for match
+BADARG:	ERROR	LOGERR,FATAL	;No, table exhausted:  signal error
+
+30$:	SUB	#MOTABL,R0	;R0 <- an index from 2. to 24.
+	ASR	R0		;R0 <- an index from 1. to 12.
+	MOV	R0,(R1)		;Replace month-table probe with month
+	CMPB	(R2)+,(SP)+	;Demand second hyphen delimiter
+	BNE	BADARG		;Not there!  => error
+	CALL	DIGITS		;Now parse digits for year
+	BR	50$		;Continue with common code
+
+; mm.dd remaining to parse    (yy has been parsed into R3)
+
+40$:	MOV	R3,R0		;Save years
+	SWAB	(SP)		;Use period instead of hyphen for delimiter
+	CMPB	-1(R2),(SP)	;Demand period for delimiter
+	BNE	BADARG		;Not there!  => error
+	CALL	DIGITS		;Parse digits for month
+	CMP	R3,#12.		;In range 13. - 99. ?
+	BHI	BADARG		;Yes => disallow that for month
+	MOV	R3,-(R1)	;Save second-parsed digits (month)
+	BEQ	BADARG		;Disallow zero for month, too
+	CMPB	(R2)+,(SP)+	;Demand second period delimiter
+	BNE	BADARG		;Not there!  => error
+	CALL	DIGITS		;Parse digits for day
+	MOV	R3,R5		;Save parsed day
+	BEQ	BADARG		;Disallow zero for day
+	MOV	R0,R3		;Year back into R3, setting condition codes
+;	.br	50$		;Continue with common code
+
+;+
+;  50$
+;
+;  Input:	((R1))  = month
+;		(R5)    = day
+;		(R3)    = year
+;-
+
+50$:	MOV	#2,R2		;R2 <- usual February subtrahend (30.-28.)
+	BIT	#3,R3		;Leap year?
+	BNE	55$		;No => subtrahend stays at 2
+	DEC	R2		;Yes, a leap year:  subtrahend is 1  (30.-1.)
+55$:	SUB	#70.,R3		;Presume input year 1970.-1999.
+	BPL	60$		;Presumption correct => it's 00.-29. now
+	ADD	#100.,R3	;Nope:  better be 2000.-2035. (30.-65.)
+60$:	CMP	R3,#65.		;Within limits?
+	BHI	BADARG		;No => go signal error
+	MUL	#1000.,R3	;Year becomes thousands
+	MOV	#^b<0001101011010101>,R0  ;R0 <- long_vs_short_month mask
+80$:	MOV	#30.,R4		;Presume a 30-day month
+	ASR	R0		;Set carry if a long month
+	BEQ	BADARG		;Month out of limits => error
+	ADC	R4		;Now we have 30. or 31.
+	CMP	R0,#^b<0000011010110101>  ;Are we working on February?
+	BNE	90$		;No => month's length correctly set in R4
+	SUB	R2,R4		;Yes:  make it 28. or 29.
+90$:	ADD	R4,R3		;Add month's contribution to date
+	DEC	(R1)		;Is this the user's month?
+	BNE	80$		;No => continue
+	SUB	R4,R3		;Yes:  back out whole-month's contribution
+	CMP	R5,R4		;User's day spec within its month?
+	BHI	BADARG		;No => error
+	ADD	R5,R3		;Yes:  add it into total date
+	MOV	R3,(R1)		;Pass returned function value on R1 stack
+	MOV	(SP)+,R5	;Restore IPC
+	RETURN
+
+	.sbttl	MOTABL	Table of RAD50 month names
+
+MOTABL:	.WORD	^rJAN
+	.WORD	^rFEB
+	.WORD	^rMAR
+	.WORD	^rAPR
+	.WORD	^rMAY
+	.WORD	^rJUN
+	.WORD	^rJUL
+	.WORD	^rAUG
+	.WORD	^rSEP
+	.WORD	^rOCT
+	.WORD	^rNOV
+	.WORD	^rDEC
+	.WORD	0
+
+	.dsabl	lsb
+
+	.sbttl	DIGITS	Parse a digit string
+
+;+
+;  DIGITS	Parse a digit string
+;
+;  Input:	R2 -> first possible digit
+;		R4 -> 1st byte beyond parsable string
+;
+;  Output:	R2 -> first byte not parsed
+;		(R3) = converted number from parsed digits
+;		        (guaranteed within range 0. - 99.)
+;-
+
+	.enabl	lsb
+
+DIGITS:	CLR	R3		;Initialize accumulator
+	CALL	20$		;Accumulate leading digit
+	BCS	BADARG		;No digit there => error
+10$:	CMP	R3,#99.		;Too many digits?
+	BHI	BADARG		;Yes => error
+	CALL	20$		;No:  accumulate another trailing digit
+	BCC	10$		;Another digit accumulated => loop
+	RETURN			;No digit was available:  exit
+
+
+
+;+
+;  20$		Accumulate one digit into R3, advance R2
+;
+;  Output:	Carry set if no digit available
+;-
+
+20$:	CMP	R2,R4		;Is next byte within string?
+	BHIS	30$		;No => exit without parsing it
+	CMPB	(R2),#'0	;Yes:  too low for a digit?
+	BLO	30$		;Yes, too low => exit
+	CMPB	(R2),#'9	;No:  too high for a digit?
+	BHI	30$		;Yes, too high => exit
+	MUL	#10.,R3		;No, a good digit:  shift accumulator left
+	MOVB	(R2)+,-(SP)	;Expand byte to a word on SP stack
+	BIC	#^c<17>,(SP)	;Convert 60-71 to 00-11
+	ADD	(SP)+,R3	;Add new digit into accumulator
+	TST	(PC)+		;Go return with Carry clear
+30$:	SEC			;No digit:  return with Carry set
+	RETURN
+
+	.dsabl	lsb
+
+	.end

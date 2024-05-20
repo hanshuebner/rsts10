@@ -1,0 +1,744 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+TITLE	FUT,<FILE UTILITY CODE>,0K,23-JUN-92,FEK/WJS/GPK/KPH
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR FUT
+
+;+
+;
+;  000	FEK  28-Sep-82	CREATION - [RSTS V8.0]
+;  001	WJS  29-Oct-82	New UUOENT for EMT Logger
+;
+;				[RSTS V9.0]
+;  002	GPK  25-Mar-83	Add permanent file function
+;  003	GPK  28-Mar-83	Multiple privileges
+;  004	GPK  22-Sep-83	Cleanups, new UU.PRM code
+;  005	GPK  22-Nov-83	Add code for executable protection checks
+;  006	KPH  17-Feb-84	Add set/clear UU.NOK bit to UU.FIL
+;			Disable UU.PRM code
+;			Add "don't return protection violation" if can't
+;			set something to UU.FIL
+;  007	GPK  19-Apr-84	Privilege name changes
+;  008	GPK  11-May-84	Allow non-priv'd setting of creation date/time
+;  009	GPK  14-Sep-84	Fix bug in 008
+;  010	KPH  29-Aug-84	Changes for APR5 FIP pool
+;
+;			[RSTS V9.2]
+;  011  KPH  25-Jul-85	Job Control Region
+;
+;			[RSTS V10.0]
+;  012	FEK  02-Nov-89	Add [NO]BACKUP/[NO]IGNORE bits, make loadable, and make
+;			open files do protection checks same as closed ones
+;
+;			[RSTS V10.1]
+;  013	FEK  21-Nov-91	Don't allow change of P bit on installed SIL
+;			Make sure disk size is updated when DLA is changed.
+;-
+
+	IONLY			;Invoke I-only FIP definitions		;012
+
+FQFSRT	FUT,LODABL							;012
+
+.SBTTL	FILE UTILITY CALL
+
+;+
+; UU.FIL - FILE UTILITY CALL.
+;
+;	R1 -> JDB
+;	R4 -> FIRQB
+;		FQFIL	=  CHANNEL NUMBER ON WHICH FILE IS OPEN, OR 0
+;		+5	=  FUNCTION FLAG BITS (FN)
+;			       1 => SET/RESET PLACED BIT ON FILE (NOT IF 10)
+;			       2 => NO RETRIEVAL INFORMATION IF NOT PLACED
+;			       4 => CHANGE BACKUP STATISTICS
+;			      10 => CHANGE RTS NAME (NOT IF 1, 20, 100 OR 200)
+;			      20 => FIND DCN CORRESPONDING TO VBN (NOT IF 10)
+;			      40 => MAKE FILE NON-CONTIGUOUS
+;			     100 => SET/RESET SEQUENTIAL MODE (NOT IF 10)
+;			     200 => SET/RESET CACHING (NOT IF 10)
+;		FQPPN	=  PPN (IF FQFIL = 0)
+;		FQNAM1	=  FILE NAME (2 WORDS) (IF FQFIL = 0)
+;		FQEXT	=  EXTENSION (IF FQFIL = 0)
+;		+16-+21	=  NEW RTS NAME (2 WORDS OF RAD50) (IF FN 10)
+;		+16	=  LSB OF VBN TO LOCATE (IF FN 20)
+;		+20	=  NEW VALUES FOR PLACED, CACHE, SEQUENTIAL, NOK BITS ;006
+;			       2 =  PLACED BIT (IF FN 1)
+;			       4 =  SEQUENTIAL BIT (IF FN 100)
+;			      10 =  No BACKUP bit (If FN1 4)		;012
+;			      40 =  No delete/rename bit (If FN1 1)	;006
+;			     100 =  No IGNORE bit (If FN1 10)		;012
+;			     200 =  CACHING BIT (IF FN 200)
+;		+21	=  MSB OF VBN TO LOCATE (IF FN 20)
+;		+22	=  NEW DATE OF LAST ACCESS (0 => NO CHANGE) (IF FN 4)
+;		+24	=  NEW DATE OF CREATION    (0 => NO CHANGE) (IF FN 4)
+;		+26	=  NEW TIME OF CREATION    (0 => NO CHANGE) (IF FN 4)
+;		FQDEV,FQDEVN = DEVICE TO USE (IF FQFIL = 0)
+;		+34	=  Secondary function bits (FN1)		;006
+;			      1  => Set/clear no delete/rename bit	;006
+;			      2  => Don't return PRVIOL for priv'd FNs	;006
+;			      4  => Set/clear no backup bit		;012
+;			     10  => Set/clear no ignore bit		;012
+;			     20  => Always use DLA supplied (IF FN4)	;012
+;
+;	IN FIRQB ON RETURN
+;		+3	=  VALUES FOUND FOR PLACED, CACHE, SEQUENTIAL BITS
+;			       2 =  FILE IS PLACED 
+;			       4 =  FILE IS SEQUENTIAL
+;			      10 =  File is set NOBACKUP		;012
+;			      20 =  FILE IS CONTIGUOUS
+;			      40 =  File is set no delete/rename	;006
+;			     100 =  File is set IGNORE			;012
+;			     200 =  FILE IS TO BE CACHED
+;		+4	=  DCN OF VBN TO LOCATE
+;			   0 IF VBN OUT OF RANGE, NO FN 20,
+;				OR FN 2!20 BUT NOT PLACED
+;		+6	=  ATTRIBUTE WORD #1.
+;		+10	=  ATTRIBUTE WORD #2.
+;		+12	=  ATTRIBUTE WORD #3.
+;		+14	=  ATTRIBUTE WORD #4.
+;		+16	=  ATTRIBUTE WORD #5.
+;		+20	=  ATTRIBUTE WORD #6.
+;		+22	=  ATTRIBUTE WORD #7.
+;		+24	=  ATTRIBUTE WORD #8.
+;		+26	=  ATTRIBUTE WORD #9.
+;		+30	=  ATTRIBUTE WORD #10.
+;		+32	=  ATTRIBUTE WORD #11.
+;		+34	=  FILE'S RTS NAME PART 1
+;		+36	=  FILE'S RTS NAME PART 2
+;-
+
+	UUOENT	FIL,,,LOGABL,DOLOG	;FILE UTILITY CALL
+
+	NOP
+	MOVB	#ERRFQ,JDPOST(R1) ;RETURN ALMOST ALL OF FIRQB
+	CLR	-(SP)		;Start with no WCB pointer		;012
+	MOVB	FQFIL(R4),R2	;GET SPECIFIED CHANNEL			;012
+	BEQ	30$		;IF NONE, LOOK FOR FILE BY NAME
+	CMP	R2,#15.		;CHANNEL IN RANGE?			;012
+	BHI	10$		;NO, ERROR
+	ASL	R2		;MAKE IT TIMES 2			;012
+	ADD	(R1),R2		; AND POINT TO IOB SLOT			;012
+	MOV	(R2),R1		;GET IOB ENTRY FOR WCB			;012
+	BEQ	20$		;ERROR IF NOT OPEN
+	BIT	#DDNFS!WC$UFD!377,(R1) ;IS THIS A TRUE FILE ON DISK
+.ASSUME	SC$UFD	EQ	WC$UFD
+	BNE	40$		;NO, PROTECTION VIOLATION
+	MOV	R4,R0		;COPY FIRQB POINTER
+	ADD	#FQPPN,R0	; AND INDEX TO PPN + FILE NAME
+	MOV	W$FCB(R1),R5	;R5 -> FCB for file @ F$CLUS		;006
+	MOV	F$PPN-F$CLUS(R5),(R0) ;Save the PPN of this file	;012
+	CALLX	RNE		;READ THE NAME ENTRY OF THE FILE
+	MOV	R1,(SP)		; Save the WCB pointer			;012
+	BR	70$		; AND SHIFT AND EXAMINE THEM		;012
+
+10$:	ERROR	BSERR		;BAD CHANNEL NUMBER
+
+20$:	ERROR	NOTOPN		;CHANNEL NOT OPEN
+
+30$:	CALLX	GUN,R5		;LOOK FOR FILE BY NAME, SO CHECK THE DEVICE
+	  BR	60$		;DISK IS OK
+40$:	ERROR	PRVIOL		;OTHERWISE, ERROR
+
+50$:	ERROR	NOSUCH		;NO SUCH FILE
+
+60$:	MOV	R4,R0		;COPY FIRQB POINTER
+	ADD	#FQPPN,R0	; AND INDEX TO PPN + FILE NAME
+	CALLX	SDU		;LOOK FOR THE FILE ON DISK
+	BCS	50$		;ERROR IF NOT FOUND
+70$:	MOVB	UPROT(R5),R1	;Get protection code			;003
+	MOV	(R0),R0		;Get PPN				;003
+	CALLX	CHKACC		;Check access rights			;003
+	BIT	#DDAUX,R0	;Execute lockout?			;005
+	BNE	80$		;Yes, no execute access allowed		;005
+	BIC	#DDRLO,R0	;No, so allow read type access here	;005
+80$:	SWAB	R0		;Match conventions			;003
+	ASRB	R0		; (SHIFT HERE TO GET LOCK BITS)		;012
+.ASSUME	DDRLO/400 EQ 2							;003
+
+GLOBAL	<FIUSER>
+
+	MOV	R3,FQNAM1(R4)	;SAVE THE LINK TO THE NAME ENTRY
+	MOV	R0,R3		;GET THE PROTECTION CODE IN R3
+	CMP	(R4)+,(R4)+	;INDEX TO FQFIL IN FIRQB
+.ASSUME	FQFIL	EQ	4
+	CLRB	-(R4)		;CLEAR RETURNED BITS
+	CLR	R2		;Get ready to get function code		;006
+	BISB	FQCLUS-FQFUN(R4),R2 ;Get MSB of function bits into LSB	;006
+	SWAB	R2		;Now get MSB of function bits in MSB	;006
+	BISB	FQSIZM-FQFUN(R4),R2 ;GET FUNCTION BITS LSB		;006
+	MOVB	FQNAM2-FQFUN(R4),R0 ;PICK UP PARAMETERS
+	BIT	R2,#10		;RTS NAME CHANGE?
+	BEQ	100$		;NO
+	BIT	R2,#<1!20!100!200>+<<1!4!10>*400> ;YES, ALSO FUNCTIONS	;012
+				;		THAT USE THAT SPACE?	;006
+	BNE	40$		;CAN'T INTERMIX
+100$:	TSTPRV	TUNE,@#FIPRVM	;Allowed to change cache flags?		;007
+	BNE	105$		;Yes
+	BIT	#1000,R2	;Do they want protection violation?	;006
+	BEQ	103$		;Yes, they sure do			;006
+	BIC	#100!200,R2	;No, so turn off caching		;007
+103$:	BIT	#100!200,R2	;Trying to change caching?		;007
+	BNE	40$		;YES, PROTECTION VIOLATION		;006
+105$:	BIT	#4,R2		;Changing any dates?			;009
+	BEQ	110$		;No, no further questions		;009
+	TSTPRV	DATES,@#FIPRVM	;Allowed to change dates?		;007
+	BNE	110$		;Yes					;007
+	TST	FQMODE-FQFUN(R4) ;No, but leaving last access alone?	;008
+	BEQ	110$		;Yes, so no privs required		;008
+	BIT	#1000,R2	;Do they want protection violation?	;006
+	BEQ	118$		;Yes, so give it to them		;008
+	CLR	FQMODE-FQFUN(R4) ;No, so just leave last access alone	;008
+110$:	BIT	#400,R2		;Are they trying to change the P-bit?	;006
+	BEQ	150$		;No, so no special checks		;006
+	TSTPRV	SYSIO,@#FIPRVM	;Privileged to mess with the system?	;007
+	BEQ	140$		;No, so this certainly isn't OK		;006
+	CMP	FQPPN-FQFUN(R4),#1 ;Is this a file in [0,1]?		;006
+	BNE	150$		;No, so any P-bit changes go		;006
+	; Check for *.SYS
+
+	CMP	UNAM+4(R5),#^RSYS ;Is this a .SYS file?			;006
+	BNE	112$		;No, so it might be OK			;013
+	CMP	UNAM+2(R5),#^RT  ;Might it be INIT.SYS or SATT.SYS?	;006
+	BNE	111$		;No, not this time			;013
+
+	; Check for SATT.SYS on any disk
+
+	CMP	UNAM(R5),#^RSAT	;Are they trying to play with SATT?	;006
+	BEQ	140$		;Yes, that certainly isn't OK		;006
+
+	; Check for INIT.SYS on SY0:
+
+	CMP	UNAM(R5),#^RINI	;Is this INIT.SYS?			;006
+	BR	116$		;Now join up check for SY0:		;013
+
+	; Check for SWAP.SYS on SY0:
+
+111$:	CMP	UNAM+2(R5),#^RP  ;How about ???P.SYS?			;013
+	BNE	1111$		;No, not this one (go check CRASH.SYS)	;013
+	CMP	UNAM(R5),#^RSWA	;Monkeying with SWAP.SYS?		;013
+	BR	116$		; But, on SY0:?				;013
+
+	; Check for CRASH.SYS on SY0:
+
+1111$:	CMP	UNAM+2(R5),#^RSH ;How about ???SH.SYS?			;013
+	BNE	120$		;No, not this one (go check BADB.SYS)	;013
+	CMP	UNAM(R5),#^RCRA	;Monkeying with CRASH.SYS?		;013
+	BR	116$		; But, on SY0:?				;013
+
+	; Check for an opened *.SIL (installed SIL) on SY0:
+
+112$:	CMP	UNAM+4(R5),#^RSIL ;Is this a *.SIL file?		;013
+	BNE	115$		; No, so it is OK			;013
+	CMP	UNAM(R5),@#MONNAM ;Is it the installed one?		;013
+	BNE	150$		; No, so it is OK			;013
+	CMP	UNAM+2(R5),@#MONNAM+2 ;Really the installed one?	;013
+	BNE	150$		; No, so it is OK			;013
+	BR	117$		; Yes, But, on SY0:?			;013
+
+	; Check for ERR.ERR on SY0:
+
+115$:	CMP	UNAM+4(R5),#^RERR ; Is it a *.ERR file?			;013
+	BNE	150$		; No, go check the next type		;013
+	CMP	UNAM(R5),#^RERR	;Is it ERR???.ERR?			;013
+	BNE	150$		;No, so its OK!				;013
+	TST	UNAM+2(R5)	;Second part Blank = ERR.ERR		;013
+116$:	BNE	150$		; No, so it is OK			;013
+117$:	CMPB	@#FIPUNT,@#SYSUNT ;Playing with the system disk?	;006
+	BR	130$		; YES?! (EQ) ERROR, NO (NE) OK		;006
+
+118$:	ERROR	PRVIOL		;OTHERWISE, ERROR
+
+	; Check for BADB.SYS on any disk
+
+120$:	CMP	UNAM(R5),#^RBAD	;Does this look like BADB.SYS?		;006
+	BNE	150$		;No, certainly not			;006
+	CMP	UNAM+2(R5),#^RB  ;Well, is it?				;006
+130$:	BNE	150$		;No, this file is ok			;006
+140$:	BIT	#1000,R2	;Do they want protection violation?	;006
+	BEQ	118$		;Yes, so give it to them		;006
+	BIC	#400,R2		;Forget that they want to change P-bit	;006
+150$:	ASR	R3		;CHECK THE READ LOCK BIT		;006
+	BCS	118$		;NO READ ACCESS MEANS NO USE AT ALL
+	ASR	R3		;CHECK THE WRITE LOCK BIT
+	BCS	160$		;NO WRITE ACCESS MEANS NO CHANGES
+	MOVB	@#FIPUNT,R3	;GET FIP UNIT NUMBER
+	ASL	R3		; (*2)
+	BIT	#UC.WLO,UNTCNT(R3) ;IS THIS UNIT WRITE LOCKED?
+	BEQ	170$		;IF NOT, CHANGES ARE LEGAL
+160$:	BIT	#<1!4!10!40!100!200>+<<1!4!10>*400>,R2			;012
+				;Do they want to change disk?		;006
+	BEQ	170$		;No, so this is easy			;006
+	BIT	#1000,R2	;Do they want protection violation?	;006
+	BEQ	118$		;Yes, so give it to them		;006
+	BIC	#<1!4!10!40!100!200>+<<1!4!10>*400>,R2			;012
+				;CLEAR FUNCTIONS WHICH MODIFY DISK	;006
+170$:	BIT	R2,#<1!40!100!200>+<<1>*400> ;CHANGE NAME ENTRY?	;012
+	BEQ	180$		;NO
+	MARK	FIBUF		;YES, WE'LL CHANGE THE NAME BLOCK
+180$:	CALLX	SNE		;FIND FCB IF FILE OPEN (returned in R1)
+	MOV	#UL.CHE,R3	;GET A HANDY BIT
+	TSTB	R2		;SET/RESET CACHING FOR THE FILE?	;006
+	BPL	190$		;NO, SKIP				;006
+	BIC	R3,(R5)		;ASSUME HE WANTS IT OFF
+	TSTB	R0		;GOOD GUESS?
+	BPL	190$		;YES
+	BIS	R3,(R5)		;NO, TURN IT ON
+190$:	BIT	R3,(R5)		;AFTER ALL THAT, IS FILE MARKED FOR CACHING?
+	BEQ	200$		;NO
+	BISB	#200,(R4)	;YES, RETURN THAT TO THE USER
+200$:	ADD	#UAA,R5		;POINT TO LINK TO ACCOUNTING ENTRY
+	BIT	#100,R2		;SET/RESET SEQUENTIAL INDICATION?	;006
+	BEQ	210$		;NO, SKIP				;006
+	BIC	R3,(R5)		;ASSUME RESET
+	BIT	R3,R0		;GOOD GUESS?
+	BEQ	210$		;YES, SKIP
+	BIS	R3,(R5)		;NO, MAKE IT SEQUENTIAL
+210$:	BIT	R3,(R5)		;NOW IS IT SEQUENTIAL?
+	BEQ	220$		;NO, SKIP
+	BISB	R3,(R4)		;YES, TELL THE USER
+220$:	TST	R1		;IS THERE AN FCB? (OPEN FILE)
+	BEQ	240$		;NO, SKIP
+	TST	(R1)+		;INDEX TO F$FID
+.ASSUME	F$FID	EQ	2
+
+GLOBAL	<SYSUNT,FIPRVM,FIPUNT,UNTCNT,MONNAM>				;013
+
+	BIC	#UL.CLN,(R1)	;YES, ASSUME NOT SEQUENTIAL
+	BIT	R3,(R5)		;GOOD GUESS?
+	BEQ	230$		;YES
+	BIS	#UL.CLN,(R1)	;NO, INDICATE SEQUENTIAL IN FCB
+230$:	BIS	R3,(R1)		;ASSUME CACHING FOR THE FILE
+	BIC	ULNK-UAA(R5),R3	;CLEAR R3 IF THAT'S TRUE
+	BIC	R3,(R1)		;CLEAR CACHING BIT IF FILE ISN'T CACHED
+240$:	CMP	-(R5),-(R5)	;BACK UP TO STATUS BYTE
+.ASSUME	USTAT	EQ	UAA-4
+	MOV	@#FIPUNT,-(SP)	;Save FIP unit number and FIPGEN	;007
+	FJMP	MORFIL		;And off to the next overlay		;006
+
+GLOBAL	<DEVCLU,FIPRVM,UNTCNT,FIPUNT>					;006
+
+FQFEND									;006
+
+FQFSRT									;006
+
+;+									;006
+; MORFIL - Even more UU.FIL						;006
+;									;006
+;	R0 =	New values for several bits
+;	R1 ->	FCB if file open @ F$FID				;007
+;	R2 =	Requested flag bits 					;012
+;	R4 ->	FIRQB @ FQFUN						;007
+;	R5 ->	Name entry @ USTAT					;007
+;	(SP) -> FIPUNT, WCB pointer if open (else 0)			;013
+;-									;006
+
+
+MORFIL:	NOP
+	MOV	(SP)+,@#FIPUNT	;Set up the proper FIP unit number	;007
+	BIT	#40,R2		;SHOULD WE CHANGE CONTIGUOUS BIT?
+	BEQ	270$		;NO, SO DON'T DO ANYTHING
+	BICB	#US.NOX,(R5)	;CLEAR THE CONTIGUOUS BIT IN THE NAME ENTRY
+	MOV	R1,-(SP)	;Save the FCB pointer if file is open	;006
+	BEQ	260$		;NOT OPEN, NO NEED TO SEARCH		;006
+	MOV	F$WCB-F$FID(R1),R1;GET A POINTER TO THE FIRST WCB	;006
+250$:	BIC	#WC$CTG,(R1)	;CLEAR THE CONTIGUOUS BIT		;006
+	MOV	W$WCB(R1),R1	;GET A POINTER TO THE NEXT WCB ON THIS FILE ;006
+	BIC	#37,R1		;CLEAR THE LOWER FLAG BITS		;006
+	BNE	250$		;LOOP IF THIS IS A REAL LINK		;006
+260$:	MOV	(SP)+,R1	;Restore the FCB pointer		;006
+270$:	MOV	#US.PLC,R3	;GET A HANDY MASK
+	ASR	R2		;CHANGE PLACEMENT ON FILE?
+	BCC	280$		;NOPE, SKIP IT
+	BICB	R3,(R5)		;ASSUME HE WANTS IT OFF
+	BIT	R3,R0		;GOOD GUESS?
+.ASSUME	US.PLC	EQ	2	;THIS IS WHAT WE CLAIM TO CHECK
+	BEQ	280$		;YES, LEAVE IT OFF
+	BISB	R3,(R5)		;NO, TURN IT ON
+280$:	MOV	#US.NOK,R3	;Get a handy mask			;006
+	TSTB	R2		;Should we touch the P bit?		;006
+	BPL	290$		;No, not this time			;006
+	BICB	R3,(R5)		;Assume he wants it off			;006
+	BIT	R3,R0		;Good guess?				;006
+.ASSUME	US.NOK	EQ	40						;006
+	BEQ	290$		;Yes, leave it off			;006
+	BISB	R3,(R5)		;No, turn it on				;006
+290$:	MOVB	(R5),-(SP)	;GET USTAT BITS				;006
+	BIC	#^C<US.PLC!US.NOX!US.NOK>,(SP) ;MASK TO WHAT USER MAY SEE ;006
+	TST	R1		;IS THERE AN FCB (OPEN FILE?)
+	BEQ	300$		;NO
+	BICB	#<US.PLC!US.NOX!US.NOK>,F$STAT-F$FID(R1) ;YES, FORCE BITS INTO FCB ;006
+	BISB	(SP),F$STAT-F$FID(R1) ;TO CORRESPOND TO DISK FILE
+300$:	BISB	(SP)+,(R4)	;PASS IT ON
+.ASSUME	US.NOX	EQ	20	;THIS IS WHAT WE CLAIM TO RETURN
+	MOV	(R5)+,-(SP)	;GET THE STATUS BITS AND PROTECTION CODE ;012
+	ASR	R2		;RESTRICT VBN LOOKUP IF NOT PLACED?
+	BITB	(SP),R3		;YES, SEE IF IT IS PLACED
+	BCC	310$		;NOPE, LOOKUP EVEN IF PLACED
+	BNE	310$		;RESTRICTED, BUT FILE WAS PLACED
+	BIC	#20/4,R2	;NO, TURN OFF THE LOOKUP FUNCTION (bit 4)
+310$:	TST	(R5)+		;SKIP ACCESS COUNTS IN NAME ENTRY
+	MOV	(R5)+,R3	;GET LINK TO ACCOUNTING ENTRY
+	MOV	(R5),R1		; AND SAVE LINK TO RETRIEVAL INFORMATION
+	CALLX	RDE		;READ THE ACCOUNTING INFORMATION
+	MOV	(R5)+,-(SP)	;SAVE LINK TO ATTRIBUTE INFORMATION
+	MOV	R1,-(SP)	; AND SAVE LINK TO RETRIEVAL INFORMATION
+	ADD	#FQMODE-FQFUN,R4 ;POINT TO NEW BACKUP STATISTICS
+	CLRB	-(SP)		;CLEAR A FLAG FOR THE MARK FIBUF
+	ASR	R2		;SET NEW BACKUP STATISTICS?
+	BCC	40$		; No, CONTINUE with BACKUP/IGNORE checks ;012
+	MOV	(R4)+,R3	;GET NEW DATE OF LAST ACCESS/MODIFICATION
+	BEQ	10$		;NO CHANGE - CONTINUE
+	MOV	R3,(R5)		;CHANGE IT
+.ASSUME	UDLA	EQ	2
+	INCB	(SP)		;SET FLAG TO MARK FIBUF
+	MOV	10(SP),R3	;Is there a WCB for this file?		;013
+	BEQ	10$		; NO, so life is easy			;013
+	BICB	#WC$DLW,W$FLAG(R3) ;   Keep this DLA, not on close	;013
+	MOV	W$FCB(R3),R3	;Now get the FCB pointer		;013
+	MOV	-(R3),USIZ-UDLA(R5) ; Ensure correct size LSB		;013
+	MOVB	-(R3),R3	; and get the size MSB			;013
+	BEQ	10$		;if none, then we're all set		;013
+	CLR	URTS-UDLA(R5)	;If MSB, then clear RTS name flag	;013
+	MOVB	R3,<URTS+2>-UDLA(R5) ;and set the MSB size		;013
+10$:	MOV	(R4)+,R3	;GET NEW CREATION DATE
+	BEQ	20$		;NO CHANGE - CONTINUE
+	MOV	R3,UDC-UDLA(R5)	;CHANGE IT
+	INCB	(SP)		;FLAG THE CHANGE
+20$:	MOV	(R4),R3		;GET NEW CREATION TIME
+	BIC	#^C<UTC.TM>,R3	;Get just a valid time			;012
+	BEQ	30$		;NO CHANGE - CONTINUE
+	BIC	#UTC.TM,UTC-UDLA(R5) ;Clear out just the old time	;012
+	BIS	R3,UTC-UDLA(R5)	;CHANGE IT				;012
+	INCB	(SP)		;FLAG THE CHANGE
+30$:	CMP	-(R4),-(R4)	;FIX THE FIRQB POINTER
+40$:	BIT	#<4*400>/10,R2	;Change the BACKUP flag?		;012
+	BEQ	42$		; NO					;012
+	INCB	(SP)		;FLAG THE CHANGE			;012
+	BIC	#UTC.BK,UTC-UDLA(R5) ;assume they want BACKUP		;012
+	BIT	#10,R0		;Do they want BACKUP or NOBACKUP?	;012
+	BEQ	42$		;Leave as BACKUP			;012
+	BIS	#UTC.BK,UTC-UDLA(R5) ;Set as NOBACKUP			;012
+42$:	BIT	#<10*400>/10,R2	;Change the IGNORE flag?		;012
+	BEQ	44$		; NO					;012
+	INCB	(SP)		;FLAG THE CHANGE			;012
+	BIC	#UTC.IG,UTC-UDLA(R5) ;assume they want NOIGNORE		;012
+	BIT	#100,R0		;Do they want IGNORE or NOIGNORE?	;012
+	BEQ	44$		;Leave as NOIGNORE			;012
+	BIS	#UTC.IG,UTC-UDLA(R5) ;Set as IGNORE			;012
+44$:	BISB	(SP)+,@#FIBMOD	;MARK BUFFER IF CHANGED			;012
+	BIT	#UTC.BK,UTC-UDLA(R5) ;Is NOBACKUP set?			;012
+	BEQ	47$		; No					;012
+	BISB	#10,FQFUN-FQMODE(R4) ;Yes, so set the return flag	;012
+47$:	BIT	#UTC.IG,UTC-UDLA(R5) ;Is IGNORE set?			;012
+	BEQ	48$		; No					;012
+	BISB	#100,FQFUN-FQMODE(R4) ;Yes, so set the return flag	;012
+48$:	MOV	4(SP),R0	;Get the protection stuff in a register	;012
+	MOV	R4,R1		;COPY THE FIRQB+22 POINTER
+	ASR	R2		;CHANGE THE RTS NAME?
+	BCC	70$		;NO, NOT THIS TIME
+	ADD	#URTS-UDLA,R5	;POINT TO RTS NAME WORD 2
+	TST	(R5)+		;COULD THIS BE A LARGE FILE?
+	BNE	50$		;NO, IT HAS AN RTS NAME ALREADY
+	TSTB	(R5)		;MAYBE, IS THIS REALLY A LARGE FILE
+	BNE	70$		;YES,  CAN'T CHANGE THE RTS NAME
+50$:	CMP	-(R4),-(R4)	;BACK POINTER UP TO THE NEW RTS NAME
+	TST	(R4)+		;NEW NAME START WITH 0?
+	BNE	60$		;NO, GO AHEAD WITH THE CHANGE
+	ASL	R0		;CHECK THE PROTECTION CODE
+	BMI	70$		;IF COMPILED CHAN'T CHANGE TO ZERO RTS NAME
+.ASSUME	UP.RUN*400*2 EQ 100000
+	TST	(R4)		;FIRST WORD ZERO, SECOND MUST BE ZERO
+	BNE	70$		;NOPE, CAN'T CHANGE THE MSB OF A FILE SIZE
+60$:	MOV	(R4),(R5)	;MOVE IN NEW RTS NAME
+	MOV	-(R4),-(R5)	;  AS 2 WORDS
+	MARK	FIBUF		;INDICATE A CHANGE
+70$:	BIS	#36,R4		;POINT TO LAST WORD OF FIRQB
+	BIS	#16,R5		; AND TO LAST WORD IN A.E.
+	CLR	R3		;ASSUME MSB SIZE IS 0
+	MOV	-(R5),(R4)	;IN ANY CASE, LOAD FIRQB WITH REAL RTS NAME
+	MOV	-(R5),R0	;GET FIRST WORD OF NAME
+.ASSUME	URTS	EQ	16-2-2
+	BNE	80$		;NO MSB SIZE HERE
+	MOVB	(R4),R3		;GET THE MSB SIZE
+	CLR	(R4)		; BUT RETURN NO RTS NAME
+80$:	MOV	R0,-(R4)	;SET FIRST WORD OF RTS NAME
+	ASR	R2		;DO WE DO FILE RETRIEVAL INFORMATION?
+	BCC	100$		;NOPE, GO INDICATE THAT
+	MOVB	-(R1),R0	;GET MSB OF DESIRED VBN FROM FIRQB+21
+	DEC	R1		;FIX POINTER
+	MOV	-(R1),R1	; AND GET LSB OF DESIRED VBN
+	CMPB	R0,R3		;COMPARE MSB'S
+	BNE	90$		;IF DIFFERENT, GO SORT IT OUT
+	CMP	R1,USIZ-URTS(R5) ;MSB'S MATCH, COMPARE THE LSB'S
+90$:	BLOS	110$		;VBN IS IN RANGE, SO IT'S OK
+100$:	CLR	R0		;VBN OUT OF RANGE OR NO VBN REQUEST, CLEAR
+	CLR	R1		; VBN REGISTERS
+110$:	MOV	#36-6/2,R2	;GET COUNT OF FIRQB WORDS TO CLEAR
+120$:	CLR	-(R4)		;CLEAR OUT THE RETURNED ATTRIBUTE DATA
+	SOB	R2,120$		; AND THE RETURNED DCN
+	;CLR	R2		;CLEAR REGISTER (FROM 'SOB' LOOP)
+	SUB	UCLUS-URTS(R5),R2 ;GET -(FILE CLUSTER SIZE) AS A MASK
+	MOVB	@#FIPUNT,R3	;GET THE FIP UNIT NUMBER
+	ASL	R3		;DOUBLE IT FOR WORD ADDRESSING
+	MOVB	DEVCLU(R3),R5	;SAVE THE DEVICE CLUSTER SIZE FOR LATER
+	MOV	(SP)+,R3	;GET THE LINK TO THE RETRIEVAL INFORMATION
+	SUB	#1,R1		;MAKE THE VBN INTO 0 - N-1 RANGE
+	SBC	R0		; CARRYING
+	BLO	160$		;IF ZERO, DO NO WORK
+	MOV	R1,(R4)		;SAVE THE VBN LSB
+	BIC	R2,(R4)		; AND MASK OFF BLOCK WITHIN FILE CLUSTER
+	BR	140$		;ENTER THE DIVIDE LOOP
+
+GLOBAL	<FIPUNT,FIBMOD>							;006
+
+130$:	;CLC			;C=0 FROM 'BCC'
+	ROR	R0		;SHIFT THE VBN
+	ROR	R1		; TO DIVIDE IT BY THE FILE CLUSTER SIZE
+	ASRB	R5		;SHIFT THE DCS
+	BEQ	140$		; TO COMPUTE VBN'S DEV CLU IN TARGET FILE CLU
+	ASR	(R4)		;  SHIFTING ADDITION FACTOR
+140$:	ASR	R2		;DONE DIVIDING?
+	BCC	130$		;NO, LOOP
+	DIV	#7,R0		;COMPUTE RETRIEVAL ENTRY NUMBER
+	INC	R0		; AND ADD ONE FOR SOB LOOP
+150$:	CALLX	RDECHK		;READ NEXT RETRIEVAL ENTRY
+	BEQ	160$		;ERROR!!! RETURN GARBAGE
+	MOV	(R5)+,R3	;GET LINK TO NEXT
+	SOB	R0,150$		; AND LOOP FOR ENOUGH RETRIEVAL ENTRIES
+	ASL	R1		;SHIFT CLUSTER NUMBER WITHIN ENTRY
+	ADD	R1,R5		;POINT TO THE FILE CLUSTER DCN
+	ADD	(R5),(R4)	; AND COMPUTE FINAL DCN FOR VBN
+160$:	TST	(R4)+		;SKIP THE DCN WORD
+	MOV	(SP)+,R3	;RESTORE LINK TO ATTRIBUTES
+	MOV	#34-6/2,R1	;GET COUNT OF ATTRIBUTE WORDS TO LOAD
+170$:	CALLX	RDECHK		;GET (ANOTHER) ATTRIBUTE ENTRY
+	BEQ	190$		;NO MORE, SO QUIT
+	MOV	(R5)+,R3	;GET POSSIBLE LINK TO NEXT
+180$:	BIT	R5,#20-1	;DONE WITH THIS ENTRY?
+	BEQ	170$		;YES, DO ANOTHER
+	MOV	(R5)+,(R4)+	;NO, MOVE IN A WORD
+	SOB	R1,180$		; AND LOOP UNTIL FIRQB IS FULL
+190$:	ADD	#4,SP		;Trash prot code and WCB pointer	;013
+	RETURN			;AHHHHHHHH
+
+FQFEND
+
+.REM	\								;006
+
+FQFSRT
+
+; When implimented this code should be moved to another module since
+; there is no reason to make this part loadable.
+
+.SBTTL	Permanent file/installed task manipulation
+
+	UUOENT	PRM,INSTAL,SYNC,LOGABL,DOLOG				;007
+
+;+									;002
+; UU.PRM - Permanent file control					;004
+;									;002
+; Also used to define privilege mask for privileged programs		;002
+;									;002
+;	R0 = Caller's job # * 2						;011
+;	R2 ->	JDB2							;004
+;	R4 ->	FIRQB							;002
+;		FQFIL	Channel number on which file is open		;002
+;		FQSIZM	Subfunction					;002
+;			0 = cancel permanent open			;002
+;			1 = set permanent open				;002
+;			2 = declare privileges				;002
+;		FQNAM2	Privilege mask (if FQSIZM = 2)			;002
+;									;002
+; Nothing interesting is returned.  Error codes:			;002
+;									;002
+;	BADFUO	Not a disk file, or UFD or marked for delete		;002
+;		Also occurs on subfunction 2 if file is not runnable	;002
+;		or if the caller has temporary privileges in effect	;002
+;	NOTOPN	Channel isn't open					;002
+;	BSERR	Invalid channel number					;002
+;	INUSE	Privilege mask already declared (if FQSIZM = 2)		;002
+;	NOBUFS	No buffer available					;004
+;-									;002
+
+.ENABL	LSB								;004
+
+	MOV	R0,R5		;Put job number into a safe place	;011
+	MOVB	FQFIL(R4),R0	;Get channel number			;002
+	BNE	10$		;Branch if one was specified		;004
+	TSTB	FQSIZM(R4)	;Is this a "remove" subfunction?	;004
+	BEQ	20$		;Yes, so skip FCB lookup		;004
+10$:	CMP	R0,#15.		;Legal?					;002
+	BHI	40$		;No					;002
+	MOV	(R1),R3		;Get IOB address			;002
+	ASL	R0		;Get channel * 2			;002
+	ADD	R0,R3		;Get pointer into IOB			;002
+	MOV	(R3),R3		;Get DDB/WCB pointer			;002
+	BEQ	50$		;Error if not open			;002
+	TSTB	(R3)		;Disk?					;002
+.ASSUME	DDIDX EQ 0							;002
+	BNE	60$		;No, error				;002
+	MOV	W$FCB(R3),R3	;Get FCB pointer			;002
+	BIC	#40-1,R3	;Point to the top			;002
+	BITB	#US.UFD!US.DEL,F$STAT(R3) ;UFD or marked for delete?	;002
+	BNE	60$		;Yes, error				;002
+20$:	MOVB	FQSIZM(R4),R0	;Get subfunction code			;002
+	CMP	R0,#2		;Legal?					;002
+	BHI	60$		;No					;002
+	ASL	R0		;Convert to word offset			;002
+	ADD	R0,PC		;Dispatch				;002
+	 BR	REMFIL		;Remove permanent file			;004
+	 BR	ADDFIL		;Add permanent file			;004
+	 .BR	ADDMSK		;Add privileged program			;004
+
+ADDMSK:	CMPB	F$PROT(R3),#UP.RUN!UP.PRV ;Priv and runnable?		;004
+	BLO	60$		;No, error				;004
+	MOV	R5,-(SP)	;Save job number * 2 			;011
+	CALL	ADDFIL		;Yes, go add it to the list		;004
+	CALLX	MAPBUF		;Map the XBUF FCB copy again		;004
+	ADD	#F$WCB,R3	;Point to flags word			;004
+	BIS	#FC$EXT,(R3)+	;Set "extended data" bit		;004
+.ASSUME	F$PRIV EQ F$WCB+2						;004
+	ADD	#FQNAM2,R5	;Point to privilege mask in FIRQB	;002
+	MOV	(SP)+,R0	;Restore the job number			;011
+	CALLX	GETJCR		;Get caller's JCR entry mapping		;011
+	ADD	#JCAPRV,R1	;Point to his authorized privs		;011
+	MOV	@#DPAR6,R0	;Get a handy pointer to the MMU		;011
+	MOV	(R0),R4		;Now get MMU value to map FCB		;011
+	MOV	#PRIVSZ/2,-(SP)	;Number of words to move		;011
+
+; R0 -> KISAR6 or KDSAR6
+; R1 -> Caller's authorized privileges
+; R2 = MMU address for mapping caller's JCR
+; R3 -> Installed file FCB
+; R4 = MMU address for mapping FCB
+; R5 -> Caller's FIRQB @ FQNAM2
+; SP -> Count to do, ...
+
+30$:	MOV	R2,(R0)		;Map caller's JCR			;011
+	MOV	(R1)+,-(SP)	;Pick up user's authorized privs	;011
+	COM	(SP)		;Complement for BIC			;002
+	BIC	(SP)+,(R5)	;Disallow any privs the user can't have	;004
+	MOV	R4,(R0)		;Map installed file FCB			;011
+	MOV	(R5)+,(R3)+	;Set up the privileges in the FCB	;002
+	DEC	(SP)		;Say one more time went by		;011
+	BNE	30$		;More, go do it				;011
+	TST	(SP)+		;Done, clean up the stack		;011
+	MAP	FIPPOL		;Restore mapping			;011
+	RETURN								;004
+
+40$:	ERROR	BSERR		;Bad channel				;002
+
+50$:	ERROR	NOTOPN		;Channel is closed			;002
+
+60$:	ERROR	BADFUO		;Illegal file				;002
+
+70$:	ERROR	INUSE		;Privileges already declared		;002
+
+80$:	ERROR	NOBUFS		;No buffer for extended FCB		;002
+
+90$:	ERROR	DTOOOF		;Too many open files on unit		;004
+
+ADDFIL:	MOV	R4,R5		;Save FIRQB pointer			;004
+	CALL	FNDPRM		;Find this file in the permanent list	;004
+	BCC	70$		;Error if already present		;004
+	MOVB	F$UNT(R3),R0	;Get FIP unit number			;004
+	ASL	R0		; times 2				;004
+	MOV	#UC.CNT,-(SP)	;This is the limit to check		;004
+	BIC	UNTCNT(R0),(SP)+ ;At the max for open count?		;004
+	BEQ	90$		;Yes, error				;004
+	BUFFER	GETLRG,FCBESZ,64.,LRGPOL ;Allocate the FCB data buffer	;004
+	BCS	80$		;Can't, error				;004
+	MOV	R3,R1		;Copy the FCB pointer			;004
+	MOV	@#OVRBUF,R0	;Get the FIP pool APR 5 MMU address	;010
+	CMP	R1,#140000	;FCB in FIP pool?			;004
+	BLO	100$		;No					;004
+	SUB	#20000,R1	;Yes, fix up for APR5 addressing	;004
+	MOV	@#FPLAP6,R0	;And get the MMU address		;010
+100$:	MOV	#40,R2		;Byte count to move			;004
+	CALLX	MAPBUF		;Map XBUF, point R3 to it		;004
+	CALLX	MOVMEM		;Now move the FCB			;004
+	CALLX	MAPBUF		;Set R3 to point to buffer again	;004
+	MOV	@#PRMLST,(R3)	;Link current first one to this one	;004
+.ASSUME	F$LINK EQ 0							;004
+	MOV	R4,@#PRMLST	; and make this one new first one	;004
+	CLR	F$ACNT(R3)	;Clear out open count in copied FCB	;004
+.ASSUME	F$RCNT EQ F$ACNT+1	;Read-regardless count also		;004
+	BIC	#^C<37>!FC$EXT,F$WCB(R3) ;Clear WCB link and EXT flag	;004
+	MOVB	F$UNT(R3),R0	;Get FIP unit number			;002
+	ASL	R0		; times 2				;002
+	INC	UNTCNT(R0)	;Flag one more open file		;002
+	MAP	FIPPOL,DATA,APR=6,PIC ;Restore FIP mapping		;004
+	RETURN			;Done					;004
+
+REMFIL:	TSTB	FQFIL(R4)	;Doing a remove-all?			;004
+	BNE	120$		;No					;004
+110$:	CLR	R2		;Yes, indicate no previous buffer	;004
+	MOV	@#PRMLST,R4	;Get address of first buffer		;004
+	BEQ	140$		;None left, done			;004
+	CALL	REMONE		;Remove one file			;004
+	BR	110$		; and repeat				;004
+
+120$:	CALL	FNDPRM		;Find file in permanent list		;004
+	BCS	140$		;It isn't there, that's easy		;004
+REMONE:	MOV	R4,-(SP)	;Save address of this buffer		;004
+	CALLX	MAPBUF		;Map it					;004
+	MOVB	F$UNT(R3),R0	;Get FIP unit number			;004
+	ASL	R0		; times 2				;004
+	DEC	UNTCNT(R0)	;Flag one less open file		;004
+	MOV	(R3),-(SP)	;Stack link to next buffer		;004
+.ASSUME	F$LINK EQ 0							;004
+	MOV	#PRMLST,R3	;Assume this one is first one		;004
+	MOV	R2,R4		;Copy address of previous		;004
+	BEQ	130$		;Was first				;004
+	CALLX	MAPBUF		;Not first, map previous buffer		;004
+130$:	MOV	(SP)+,(R3)	;Link next to previous or listhead	;004
+.ASSUME	F$LINK EQ 0							;004
+	MOV	(SP)+,R4	;Restore current			;004
+	CALLX	MAPBUF		;Map it again				;004
+	MOV	#<FCBESZ+37>&^C37,(R3) ;Set size in buffer header	;004
+.ASSUME	BF.SIZ EQ 0							;004
+	BUFFER	RETURN		;Release the buffer			;004
+140$:	MAP	FIPPOL,DATA,APR=6,PIC ;Restore FIP mapping		;004
+	RETURN			;Done					;004
+
+FNDPRM:	MOVB	F$UNT(R3),R0	;Get FUN of file			;004
+	CMP	(R3)+,(R3)+	;Skip to PPN				;004
+.ASSUME	F$PPN EQ 4							;004
+	ADD	#FQPPN,R4	; and in FIRQB too			;004
+	MOV	#<FQEXT+2-FQPPN>/2,R2 ;Word count to copy		;004
+150$:	MOV	(R3)+,(R4)+	;Move a word				;004
+	SOB	R2,150$		;PPN, name, extension			;004
+	BIC	#40-1,R4	;Point R4 back to top of FIRQB		;004
+	CALLX	SCNPRU		;Look through permanent file list	;004
+	BIC	#40-1,R3	;Fix FCB pointer back to top		;004
+	RETURN			;Done, Carry set from CALLX SCNPRU	;004
+
+.DSABL	LSB								;004
+
+FQFEND
+
+GLOBAL	<PRMLST,FPLAP6,OVRBUF,DPAR6>					;011
+
+\									;006
+
+.END

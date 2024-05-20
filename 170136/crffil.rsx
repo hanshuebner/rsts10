@@ -1,0 +1,106 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element CRFFIL.RSX
+;  *3    18-AUG-1986 11:18:31 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:14:49 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:34:28 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element CRFFIL.RSX
+	.NLIST							;Edit Level 00
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	CRFFIL - Cross reference options/file handling
+	.SBTTL	CRFFIL - Cross reference options/file handling
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Too many people to list here
+;
+;   Created:	From the dust and dirt
+;
+;  Abstract:	CRFFIL - Cross reference options/file handling
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;--
+
+
+;	System Library "MCALLS"
+
+	.MCALL	FDAT$R,FDOP$R,CSI$
+
+	CSI$
+
+	PURE	PUREI,I
+
+;+
+; **-CRFSET-*-SET CREF OPTIONS
+;-
+
+CRFSET::CALL	GSARG		;++022 GET OPTION ARGUMENT
+	BEQ	200$		;++022 IF EQ NONE LEFT
+	SCANW	CRFROL		;++022 CHECK FOR ARGUMENT LEGALITY
+	BEQ	CRFSET		;++022 IF EQ INVALID--IGNORE
+	BIS	SYMBOL+2,CRMASK	;++022 COPY MASK BITS INTO CONTROL WORD
+	BR	CRFSET		;++022 REPEAT FOR ALL SPECIFIED OPTIONS
+200$:	TST	CRMASK		;++022 WERE ANY OPTIONS SPECIFIED?
+	BNE	300$		;++022 IF NE YES
+	MOV	#CRINIT,CRMASK	;++022 IF NOT, SET DEFAULT OPTIONS
+300$:	RETURN			;++022
+
+
+;
+; **-$OPCRF-*-OPEN CRF OUTPUT FILE
+;
+
+$OPCRF::			;++022
+	CLR	FDBTBL+CRFCHN	;++022 ASSUME CREF OUTPUT NOT DESIRED
+	BIT	#CRMSK,CSIBLK+C.MKW1  ;++022 CREF DESIRED?
+	BEQ	200$		;++022 IF EQ NO
+	MOV	FDBTBL+LSTCHN,R1  ;++022 GET ADDR OF LST FILE FDB
+	ADD	#F.FNB+N.FNAM,R1  ;++022 POINT PAST FILE ID
+	CALL	$GTFDB		;++022 GET NEXT AVAILABLE FDB
+	MOV	R0,FDBTBL+CRFCHN  ;++022 USE IT FOR THE CRF FILE
+	MOV	R0,R2		;++022 COPY ADDR INTO R2
+	ADD	#F.FNB+N.FNAM,R2  ;++022 POINT PAST THE FILE ID
+	MOV	#<S.FNB-6>/2,R3	;++022 GET NUMBER OF WORDS TO COPY
+100$:	MOV	(R1)+,(R2)+	;++022 CRF FILE WILL HAVE SAVE NAME,
+	SOB	R3,100$		;++022 ETC AS THE LST FILE
+	CLR	F.FNB+N.FVER(R0)  ;++022 EXCEPT USE DEFAULT VERSION
+	MOV	#^RCRF,F.FNB+N.FTYP(R0)  ;++022 AND FILE TYPE .CRF
+	FDAT$R	R0,#R.FIX	;++022 FILE HAS FIXED LENGTH RECORDS
+	FDOP$R	R0,#7		;++022 USE LUN 7
+	MOV	#CRFCHN,R1	;++022 PUT CRF SOFTWARE CHANNEL # IN R1
+	MOV	#CSIM5,R3	;++022 SET ERROR MESSAGE IN CASE OF ERROR
+	CALL	$OPNWT		;++022 OPEN OUTPUT FILE
+200$:	RETURN			;++022
+
+
+	.END

@@ -1,0 +1,185 @@
+.INCLUDE /SYSTEM:BCKPFX.MAC/
+TITLE	BACKUP,<RSTS Backup and Restore Facility>,0B,21-JUN-91,KPH/BGN
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BACKUP
+
+;+
+; Edit	By	Date		Reason
+;
+; 000	KPH	16-Nov-83	Creation for Version 9.0
+; 001	KPH	02-Nov-84	Fix RESTRT problem
+; 002   BGN	10-Jul-87	Add diretory support
+; 003   BGN     14-May-89	Init the dynamic region here
+; 004   BGN	25-MAY-89	Don't init the dynamic region here because
+;				we don't know the recordsize of a RESTORE
+; 005   BGN     16-Mar-88	Add image support
+; 006	REG	19-Dec-89	Add /VERIFY=ONLY
+; 007	REG	18-Jan-90	Drop temp privs
+; 008	REG	01-Feb-90	Move CRASH and BUFWAT from BCKSUB to get room
+;
+;			[RSTS V10.1]
+;  009  REG  07-Jan-91	Free up one APR
+;-
+
+.SBTTL	Set up listing options
+
+L$$IST	=	1		;List prefix files
+
+.SBTTL	Call any needed MACROs
+
+.MCALL	.ASCIC,EXST$S,ENAR$S						;009
+
+.SBTTL	Define our private data
+
+	.PSECT	RWDATA,RW,D,LCL,REL,CON
+
+SAVESP:	.BLKW			;Saved SP for error restarts
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+MODNAM:	.ASCIC	<"BACKUP">	;Our module name for fatal errors
+
+.EVEN	;In the quietest moments
+
+.SBTTL	The root of our problems...
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+.ENABL	LSB
+
+BACKUP::MOV	SP,SAVESP	;Save the stack for RESTRT		;001
+	MOV	#JFSYS,@#XRB	; We won't need privs for a while	;007
+	.CLEAR			; So drop 'em				;007
+	CALLX	BCKCUI		;Do the initial dialogue
+5$:	ENAR$S			;Make sure AST's are enabled		;009
+	MOV	#INIBID,R1	;R1 -> start of BID variables		;009
+	MOV	BIDSIZ,R2	;R2 = number of BID variables		;009
+6$:	MOV	#-1,(R1)+	;Init the BID to "no buffer"		;009
+	SOB	R2,6$		;Do 'em all				;009
+
+	MOV	#INIBVA,R1	;R1 -> start of BVA variables		;009
+	MOV	BVASIZ,R2	;R2 = number of BVA variables		;009
+7$:	CLR	(R1)+		;Clear it right out			;009
+	SOB	R2,7$		;Do 'em all				;009
+
+	BIT	#DO.IMA,C$FLAG	;Image mode?				;005
+	BEQ	8$		;No, continue				;005
+	CALLX	IMGREC		;Call image root			;005
+	BR	20$		;Exit (IMGREC will handle the verify)	;005
+
+8$:	BIT	#GF.DIR,GENFLG	;Is this a directory?			;009
+	BEQ	9$		;No, must be a backup or restore	;009
+	CALLX	DIRREC		;Do the directory			;002
+	BR	20$		;Next Command				;002
+
+9$:	BIT	#C2$ONL,C$FLG2	;Is this a /VERIFY=ONLY?		;009
+	BNE	15$		;Yes, go do it				;006
+	BIT	#DO.RES,C$FLAG	;Is this a restore?			;002
+	BEQ	10$		;No, backup, go for it
+	CALLX	RSTREC		;Go restore this save set
+	BR	15$		;And get out
+
+10$:	CALLX	BCKREC		;Initialize record handling routines
+15$:	BIT	#DO.VER,C$FLAG	;Do we need to do a verify?
+	BEQ	20$		;No, not this time
+	CALLX	VFYREC		;Yes, so verify this save set
+20$:	CALLX	UNLODL		;Unload the last save set
+25$:	CALLX	OUTCLS		;Close the log file
+30$:	CALLX	CUIAGI		;Try for another command
+	BR	5$		;And off to it...
+
+GLOBAL	<C$FLAG,GENFLG,C$FLG2>						;006
+GLOBAL	<INIBID,BIDSIZ,INIBVA,BVASIZ>					;009
+
+;+
+; RESTRT - Restart point
+;
+;	JMP	RESTRT
+;
+; Come here if there is a fatal error. 
+;-
+
+RESTRT::MOV	SAVESP,SP	;Restore the stack pointer
+	CALLX	CLRFQB		;Clear out the FIRQB
+	MOVB	#RSTFQ,@#FIRQB+FQFUN ;Function is reset channels
+	MOVB	#-15.*2,@#FIRQB+FQFIL ;Indicate to close all but channel #15
+	CALFIP			;Now go for it
+	CRASH			;And die on errors
+	BR	30$		;Now try again
+
+.DSABL	LSB
+
+.SBTTL	Crash on errors							;008
+
+;+
+; CRASH - Crash on errors
+;
+;	CALBX	CRASH,<MESSAGE,PARAMS...>
+;
+;
+; Come here to abort because of a fatal error. We will call the
+; CUI message facility with the passed parameters, and then issue
+; a BPT instruction.
+;
+; If we are linked with a debugger, we will enter the debugger.
+; If we are not, we will go to the trap handler, which will write
+; a post-mortem dump.
+;-
+
+CRASH::	CALLX	U.MSG		;Go and output the message
+	TST	14		;Is there a trap routine to handle this?;013
+	BEQ	10$		;No, so handle it here.			;013
+	BPT			;And BOOM!
+
+10$:	EXST$S	#EX$ERR		;Exit with status
+
+.SBTTL	Wait for small buffers
+
+;+
+; BUFWAT - Wait for small buffers
+;
+;	FIRQB = Error code to check
+;
+;	CALL	BUFWAT,R5
+;
+; First exit if NOBUFS was the error code. XRB is altered.
+;
+; Second error for all other errors, or no error at all.
+;
+; Come here to check for NOBUFS error. If the error is NOBUFS, we will
+; sleep for one second, and take the first exit.
+;
+;-
+
+BUFWAT::CMPB	@#FIRQB,#NOBUFS	;Did we run out of small buffers?	;003
+	BNE	10$		;No, not this time			;003
+	MOV	#1,@#XRB	;Yes, set up a one second sleep		;003
+	.SLEEP			;Now go for it...			;003
+	CRASH			;Sleeps can't fail!			;003
+	BR	20$		;And we're done				;003
+
+10$:	TST	(R5)+		;Set up for second exit			;003
+20$:	RETURN	R5		;All done now				;003
+
+GLOBAL	<NOBUFS>							;008-
+
+.END	BACKUP

@@ -1,0 +1,5934 @@
+.INCLUDE	%CMN:COMMON.MAC%
+.INCLUDE	%CMN:KERNEL.MAC%
+.INCLUDE	%EDV:NIDEF.MAC%
+.INCLUDE	%EDV:XHDEF.MAC%
+.LIBRARY	%CMN:NETDEF.SML%
+TITLE	XHDVR,<DEQNA Ethernet device driver>,0F,24-AUG-91,KCG/JHC/DBM/DSD
+
+;
+;		COPYRIGHT (c) 1974, 1988, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+
+
+
+.SBTTL	Edit history for XHDVR.MAC
+
+;+
+;
+; EDIT	BY	DATE		REASON
+;
+;				[RSTS V9.3]
+;  000	KCG	01-Jul-85	Creation
+;  001	DBM	02-Sep-86	DDB definition (QNA/LQA and physical address)
+;
+;				[RSTS V9.4]
+;  002  DSD	16-Feb-87	Code review changes for optimization
+;  003  DSD	06-Apr-87	Reduced PR5 code execution time in XHREAD
+;				Fix L3Q handeling
+;				Update register use documentation in routines
+;  004  DSD	15-May-87	Update more register use documentation
+;
+;				[RSTS V9.5]
+;  005  DSD	04-Jun-87	Fix mapping in system transmits
+;				Make line/circuit counters count correctly
+;				Move controller state check into SPC$XH
+;				Fix stack handling in SETPHY
+;  006  DSD	02-Sep-87	Zero CCB BF.MMU address to allow tracing
+;
+;				[RSTS V9.6]
+;  007	KCG	08-Dec-87	Fix DISABL's Pending Xmit chain dequeuing.
+;  008	DSD	07-Jan-88	Clear CC.DFL for system supplied buffers
+;  009	DSD	17-Feb-88	Allow DECnet to turn cir qna off and on
+;				when LAT is present
+;  010	KCG	07-Apr-88	Fix UNPADing to allow a seemingly incorrectly
+;				padded message.
+;
+;				[RSTS V9.7]
+;  011  JHC	10-Nov-88	Fix offsets and checking in MOP Req Cntrs
+;  012	DSD	13-Feb-89	Fix SYSID message receipt number and dev type
+;  013	DSD	12-Apr-89	Fix timeing window in close
+;
+;				[RSTS V10.0]
+;  014  BGN	30-Jan-90	Fix minor problem with SYSID message length
+;				And don't mung multicast count in PDB
+;				until the addresses are validated
+;
+;  015	CMK	20-Aug-91	Include the 4-byte CRC check when deciding
+;				when header packet length must be used.
+;-
+
+
+
+
+.SBTTL	Define needed symbols
+
+.MCALL	$CCB,$NETDDB,$NETDEF,$COUNT,$NETFQB,$NCB,$EVTCOD,$EVTTYP,$EVLDEF,$NICE
+
+	$CCB			;Define CCB layout
+	$NETDDB			;Define network device fixed DDB layout
+	$NETDEF			;Define miscellaneous DECnet constants
+	$COUNT			;Define the counter maintenance macros
+	$NETFQB			;Define network FIRQB layouts
+	$NCB			;Define network counter layouts
+
+	$EVTCOD			;\
+	$EVTTYP			; \  Used for
+	$EVLDEF			; /  Event logging
+	$NICE			;/
+
+	.ENABL	LC		;Miscellanous stuff
+
+
+
+
+.SBTTL	DDB	QNA DDB layout
+
+;+
+;
+;  The last 4 words of ethernet DDB's are jammed by INIT.SYS to
+;  contain the controller type (QNA vs LQA in this case) and the
+;  controller's default physical address.  INIT.SYS assumes these
+;  to always be the last four words of the DDB, so any additions
+;  must be made before these words.
+;
+;-
+	.DSECT	L.DDEP		;Start device dependent DDB after DECNET   ;001
+	.EVEN			;For sanity's sake			   ;001
+
+QNALQA:	.BLKW			;DEQNA/DELQA designator (RAD50 of QNA/LQA) ;001
+QNADPA:	.BLKB	6		;Default Physical Address		   ;001
+
+
+
+
+.SBTTL	ORG	The main coding section
+
+;+
+;
+; Define the code section for the XH QNA driver.  Patch with ONLPAT to symbol
+; XHDVRM.
+;
+;-
+	DEFORG	XHDVRM
+	ORG	XHDVRM
+
+
+
+
+.SBTTL	DSP	Level 3 dispatch bit/table definition
+
+;+
+;
+; These macro calls define the bits and table definitions for level three
+; processing at the CON$XH entry point.
+;
+; Order of these routines is important.  They are executed in top down order.
+;
+;-
+	STRFUN	DSP$ST
+
+	DEFFUN	C$DIS,DISABL		;Disable Controller
+	DEFFUN	C$SWI,SWINIT		;Software Initialization
+	DEFFUN	C$MUL,MULCST		;Set new multicast list
+	DEFFUN	C$SID,SYSID		;Transmit the system ID message
+
+	ENDFUN	DSP$MX
+
+;
+; The following assumptions must succeed for the L3Q mechanism to work
+; correctly.
+;
+
+.ASSUME	E.DSP+2 EQ E.QLNK
+.ASSUME	E.DSP+6 EQ E.CONQ
+
+
+
+
+.SBTTL	MOP	Define MOP multicast addresses
+
+MOPLST:			;Loop assistance multicast address CF-00-00-00-00-00
+LOOPAS:	HEX	<CF-00-00-00-00-00>
+
+MOPNUM	= <<.-MOPLST>/QADR$L>		;number of MOP multicast addresses
+
+REMCON:			;Remote Console multicast address AB-00-00-02-00-00
+	HEX	<AB-00-00-02-00-00>
+
+MOPPRT:
+PR.RMC:	HEX	<60-02>			;DNA Remote Console Protocol Type
+PR.LPB:	HEX	<90-00>			;Loopback Message Protocol Type
+
+MOP$NM	= <<.-MOPPRT>/2>		;number of MOP protocol types
+
+
+
+
+.SBTTL	STATES	State diagram of operation
+
+;
+;     The driver recognizes five states of operation  for  the  QNA  device.
+;     The  following  diagram  illustrates  the  state  transitions that the
+;     device could be put through during a session.
+;
+;                    +------------------+
+;                    |                  |
+;                    |                  |   HW Failure
+;                    |  HW Init         |----------------
+;                    |                  |                |
+;                    |                  |                |
+;                    +------------------+                |
+;                             |                          |
+;                             v                          v
+;                    +------------------+              +------------------+
+;                    |                  |              |                  |
+;                    |                  | User Request |                  |
+;                    |  SW Oneshot      |<-------------|  Disabled        |
+;                    |                  |              |                  |
+;                    |                  |              |                  |
+;                    +------------------+              +------------------+
+;                             | Success                      ^      ^
+;                             v                              |      |
+;                    +------------------+                    |      |
+;                    |                  |                    |      |
+;                    |                  |     HW Failure     |      |
+;              ----->|  SW Init         |--------------------       |
+;             |      |                  |                           |
+;             |      |                  |                           |
+;             |      +------------------+                           |
+;       Xmit  |               | Success                             |
+;     Timeout |               v                                     |
+;             |      +------------------+                           |
+;             |      |                  |                           |
+;             |      |                  |  HW Failure/User Request  |
+;              ------|  Running         |---------------------------
+;                    |                  |
+;                    |                  |
+;                    +------------------+
+
+
+
+
+.SBTTL	INIT	Description of initialization procedure
+
+;
+; The QNA driver initializes the controller in the following steps;
+;
+; 1) DEA$XH
+;
+; Monitor enters DEA$XH entry point for start of initialization.  Basically,
+; defines all data structures in the Ethernet region.  Defines state of
+; controller to be "SW Oneshot".
+;
+; 2) CON$XH SWINIT SWONE$
+;
+; Control is passed to this routine which is responsible for allocating MOP
+; buffers, linking it in the list, turn once per second code on, and setting
+; software reset on the CSR.  Changes state to "SW Init".
+;
+; 3) TMO$XH
+;
+; Waits for two seconds to pass (allows controller to stabilize).  Not really
+; necessary, but done anyway.  This may be found to be too long of a time to
+; wait since the DEQNA will need to be re-inited a bunch of times.
+;
+; 4) CON$XH SWINIT SWINI$
+;
+; This is to verify that the device did reset.  If it did not, the controller
+; is disabled.
+;
+; 5) CON$XH MULCST
+;
+; Builds the address list for the device.  Turns on IE (interrupt enable), IL
+; (internal loop, makes it inactive), and sets the interrupt vector.
+;
+; 6) INT$XH RECINT SETACK
+;
+; Verifies that the setup list made it through the controller.  If there was an
+; error, the device is disabled.  Set RE (receive enable), and changes state to
+; "Running".
+;
+
+
+
+
+.SBTTL	ERL$XH	Error logging entry point
+
+;+
+;
+; Called (as usual) through the LOG$XH EMT.			03/24/86 DBM
+;
+;	Ethernet region mapped
+;
+; Registers on entry:
+;
+;	R3 -> CDB
+;	R4 -> PDB
+;	R5 -> CCB
+;
+; A zero value for R4 -> PDB or R5 -> CCB indicates that the associated	;003
+; structure was not available at the time the error was detected.
+; (i.e. there is no PDB information available for a receive failure)
+;
+;-
+	.ENABL	LSB
+
+	TMPORG	XHDINT,12
+	.WORD	ERL$XH
+	UNORG
+
+ERL$XH:
+	MOV	R2,-(SP)	;;;Save previous R2 value
+	MOV	R3,-(SP)	;;;Save CDB pointer
+	MOV	R5,-(SP)	;;;Save CCB pointer
+	MOVB	E.UNT(R3),R2	;;;get unit number * 2			;002
+	MOV	CSR.XH(R2),R2	;;;get CSR pointer
+	MOV	R4,R1		;;;Use PDB (If any) as DDB pointer
+	BEQ	5$		;;;None, don't bias it
+	SUB	#PDBOFF,R1	;;;Point back to top of PDB
+5$:	MOV	R2,R3		;;;Put CSR pointer in proper place
+	CALLX	ERLDVR,R5	;;;Call the error logger
+	  .BYTE	ERC$XH		;;;Error code
+	  .BYTE	PDBSIZ		;;;PDB size in bytes
+	  .BYTE	-2,2		;;;Vector Addr Offset, 2 regs (vect addr + CSR)
+	  .BYTE	0,0		;;;End
+	TST	R5		;;;was a CCB passed?			;003
+	BEQ	20$		;;;no, skip looking for one		;003
+10$:	BITB	#1,1(R5)	;;;Owned by system job? Event logging	;002
+	BEQ	20$		;;;No, belongs to some job
+	CLRB	1(R5)		;;;Yes, zero out (system) job number
+20$:	MOV	#7*400+16.,-2(R2) ;;;CCB is a small buffer, using field 7
+	MOV	(SP)+,(R2)+	;;;Log CCB pointer
+	BNE	30$		;;;There was a CCB, good.
+	CMP	-(R2),-(R2)	;;;No CCB, don't log anything
+30$:	MOV	(SP)+,R3	;;;Restore CDB pointer
+	BEQ	40$		;;;None.  No problem.
+	MOV	#-8.*400+<QNASIZ/2>,(R2)+ ;;;CDB uses field 8, but call us
+	MOV	#50$,(R2)+	;;;...at this address to log it
+40$:	MOV	#-1,(R2)	;;;Terminate control table
+	MOV	(R2)+,(R2)	;;;In both places
+	MOV	(SP)+,R2	;;;restore previous value of R2
+	RETURN			;;;Finish up in error logger
+
+50$:	MOV	#QNASIZ/2,R1	;;;CDB size in words
+	SUB	#CDBOFF,R3	;;;Point to top of CDB
+	MAP	PUSH,APR=6,DATA	;;;Save APR6 mapping
+60$:	CALL	MPENT2		;;;Make sure we're mapped		;003
+	MOV	(R3)+,R0	;;;Grab a word
+	MAP	(SP),APR=6,DATA	;;;Make sure message buffer is mapped
+	MOV	R0,(R5)+	;;;Store the word in the buffer
+	SOB	R1,60$		;;;Fetch another word
+	MAP	POP,APR=6,DATA	;;;Restore APR6 mapping
+	RETURN			;;;All done
+
+	GLOBAL	<CSR.XH,XHDATA>
+
+
+
+
+.SBTTL	ASN$XH	Assign entry point (disable)
+
+;+
+;
+; This routine will indicate the device is sharable if a user tries to assign
+; an Ethernet device.  If the user if CFGJOB (job 3), it is a call to disable
+; the device.  The device can only be disabled by CFGJOB if no open portals
+; exist on the CDB.
+;
+;	R0 =	job num * 2, CFGJOB (job 3) for disable
+;	R1 ->	DDB of device
+;
+;	CALL	ASN$XH
+;
+;	R2 =	unit num * 2
+;	R3 ->	CDB of device
+;
+;	IF C=0 then device disabled by CFGJOB
+;	IF any portal exits through (ERROR INUSE)
+;
+;-
+	.ENABL	LSB
+
+	TMPORG	ASNTBL,12
+	 .WORD	ASN$XH
+	UNORG
+
+ASN$XH:
+	NOP				; debugging stuff		;011
+	CMPB	#CFGJOB,R0		;System command?		;002
+	BEQ	10$			;Yes, CFG disable
+	CLR	R0			;Always say it's available	;003
+	RETURN				;return (no limit to Enet devie);003
+
+10$:	CALL	MPENET			;Map the Ethernet region	;002
+	MOVB	DDUNT(R1),R2		;get unit number
+	ASL	R2			;make unit * 2			;002
+	MOV	XHDATA+XHCDB(R2),R3	;Get CDB pointer.
+	TST	E.PRTL(R3)		;any portals on controller?
+	BEQ	20$			;no, disable the controller
+	ERROR	INUSE			;set inuse error and fail	;002
+
+20$:	SETFUN	C$DIS			;;request disabling function at L3. ;003
+	MOVB	R0,DDJBNO(R1)		;mark device as disabled by CFG
+	MAP	POP,APR=6,DATA		;restore previous mapping
+	CLC				;success			;002
+	RETURN				;and exit
+
+	GLOBAL	<XHDATA,CSR.XH>
+
+
+
+
+.SBTTL	DEA$XH	Deassign entry point (init/re-enable)
+
+;+
+;
+; This code executes the software initialization sequence for the QNA device
+; (DOES NOT EXECUTE BD ROM CODE).  This routine will be called for one of two
+; reasons.
+;
+; 1) System startup.  The LOD overlay will call this routine to initialize
+;    the driver.  The driver can detect that this is the system startup call
+;    by checking BIT15 of the XHINIT word (if not set, then it's good).
+;
+; 2) User re-enable.  This will be entered upon the UU.CFG sys call from the
+;    user to enable the device.  This command is accepted only if the QNA is
+;    in the SW Disabled state (3 in DDJBNO) of the DDB.
+;
+; This routine will execute the code required for the "SW Oneshot" code since
+; no device interaction is required.  "SW Init" is executed at CON$ processing
+; since it requires device interrupt processing.
+;
+; The sequence of events for this command are.
+;
+; - Determine if the CDB pointers need to be set.
+;	- If the CDB pointers are not set.
+;		- Clear out the entire Ethernet region (loc passed in
+;		  XHDCTL region) (if there is one).
+;		- Calculate/store xmt/rcv device ring buffer addresses.
+;		- Set pointer to SYSID buffer.
+;		- Save pointers to MULCST buffers.
+;		- Store CDB addresses/put CDB into "SW Oneshot" state.
+;		- Store MULCST buffer pointers in the CDB.
+;		- Store xmt/rcv buffer pointer addresses in CDB, and
+;		  initialize system buffer queue pointers.
+;		- Initialize SYSID buffer.
+;		- Initialize the random # generator seed.
+;		- Initialize the chain of "Running" CDBs
+;	- Else,
+;		- Set corresponding CDB (determined from DDB) state to
+;		  "SW Oneshot" if it is not disable by INIT.
+; - Do for all "SW Oneshot" CDBs.
+;	- Clear all CDB counters.
+;	- Set pointer to L3 queue root in CDB's L3Q region.
+;	- Initialize Device ring entries/pointers.
+;	- Load physical address of station from the device.
+;	- Queue all CDB's in "SW Oneshot" for "SW Init" processing on
+;	  CON$ processing.
+; - Stall the calling job/FIP via FPWAIT.  This will, for all intensive
+;   purposes, stall the driver at the point of the call.
+; - Note the transition to "Running" if "SW Init" succeeded, otherwise
+;   mark the device as "Disabled".
+; - Set BIT15 in XHDATA+XHINIT to signify at least 1 init is done.
+; - Return
+;
+;
+; The rest of the initialization ("SW Init") is done via CON$ processing since
+; xmit timeouts will cause the same re-initialization to be executed (why
+; duplicate code?).
+;
+;	R0 =	3  for initialization sequence.  Otherwise routine is NOP.
+;	R1 ->	DDB
+;
+;	CALL	DEA$XH
+;
+;	R0-R5	Random
+;
+;	Calling Job stalled until operation is complete.
+;
+;-
+	.ENABL	LSB
+
+	TMPORG	DEATBL,12
+	 .WORD	DEA$XH
+	UNORG
+
+DEA$XH:
+	MOV	#XHDATA+XHINIT,R2	;Get address of DCTL init flag	;002
+	TST	(R2)			;Have we been initialized before? ;002
+.ASSUME	XH$DON EQ BIT15
+	BPL	20$			;No, this is Start up Initialization
+	CMPB	#CFGJOB,R0		;Is this really a system command? ;002
+	BNE	35$			;No, so go exit			;002
+
+20$:	CALL	MPENET			;Map the Ethernet region	;002
+	TST	(R2)			;Have we been initialized before? ;002
+.ASSUME	XH$DON EQ BIT15
+	BPL	40$			;No, this is Start up Initialization
+;
+; * UU.CFG re-enable.
+;
+	MOVB	DDUNT(R1),R0		;Get unit number to re-enable
+	ASL	R0			;make unit * 2			;002
+	MOV	XHDATA+XHCDB(R0),R3	;Get CDB of corresponding unit
+	BEQ	30$			;exit if it isn't there
+	MOV	DEV.XH(R0),R1		;get DDB pointer
+	CLRB	DDJBNO(R1)		;clear out disabled flag
+	MOV	#E$ONE,E.STAT(R3)	;Set state to "SW Oneshot"
+	BIC	#XH$DON,(R2)		;Show initialization in progress ;002
+	MOVB	#1,(R2)			;show one controller initializing ;002
+	JMP	180$			;and continue with common
+
+30$:	MAP	POP,APR=6,DATA		;restore mapping
+35$:	RETURN				;and exit			;002
+
+;
+; * Start-up Initialization.
+;
+; - Clear region.
+;
+40$:	MOV	#140000,R0		;Set starting address of region
+	MOV	@#XHDATA+XHDSIZ,R1	;Get size of region in slivers
+	ASH	#5,R1			;Convert to number of words
+50$:	CLR	(R0)+			;Clear out region
+	SOB	R1,50$			;  for all the words in the region
+;
+; - Calculate/save xmt/rcv device ring buffer addresses.
+;
+	MOV	#MAX.XH,R0		;max number of controllers.
+	MOV	#140000,R4		;init used address space accumulator
+	MOV	#XHDATA+XHRING,R1	;get start of active rings	;002
+	MOV	#QBD$LN,R5		;get size of buffer descriptor list ;002
+60$:	MOV	(R1)+,R2		;Is this an active controller?	;002
+	BEQ	70$			;no, it must be disabled or not there
+	PUSH	R4			;Save address of this RCV ring buffer
+	MOVB	R2,R3			;R3 = # of rcv rings for this controller
+					;# of rings must be <= 127	;002
+	MUL	R5,R3			;R3 = number of bytes for RCV ring ;002
+	ADD	R3,R4			;Update R4 to point to next field
+	PUSH	R4			;Save address of the end of the RCV ring buffer
+	ADD	R5,R4			;Include Chain field		;002
+	PUSH	R4			;Save address of this XMT ring buffer
+	SWAB	R2			;swap bytes around of ring count
+	MOVB	R2,R3			;R3 = # of xmt rings for this controller
+	MUL	R5,R3			;R3 = number of bytes for XMT ring ;002
+	ADD	R3,R4			;Update R4 to point to next field
+	PUSH	R4			;Save address of the end of the XMT ring buffer
+	ADD	R5,R4			;Include Chain field		;002
+70$:	SOB	R0,60$			;Do for all controllers
+;
+; - SYSID buffer pointer.
+;
+	MOV	R4,@#XHDATA+XHIDBF	;Store location to SYSID buffer
+	ADD	#SID$LN,R4		;Update R4 to point to next field
+;
+; - MULCST buffer address calculation/storage.
+;
+	MOV	@#XHDATA+XHCCNT,R5	;get controller count
+	MOVB	R5,@#XHDATA+XHINIT	;Set number of controllers	;002
+80$:	PUSH	R4			;Save address of first MULCST buffer.
+	ADD	#MUL$LN,R4		;Update R4 to point to next field
+	SOB	R5,80$			;Save for all controllers
+;
+; - Store CDB addresses, set state.
+;
+	MOV	#MAX.XH,R1		;Get maximum controllers
+	ADD	#CDBOFF,R4		;make it point to real structure
+90$:	TST	XHDATA+XHRING(R0)	;Controller here?
+	BEQ	100$			;no, try next
+	MOV	R4,XHDATA+XHCDB(R0)	;store address of controller
+	MOV	#E$ONE,E.STAT(R4)	;set controller to "SW Oneshot" state
+;
+; - Set MULCST buffer addresses in CDB.
+;
+	POP	E.MULC(R4)		;store MULCST buffer location
+	ADD	#QNASIZ,R4		;Update R4 to point to next field ;002
+100$:	TST	(R0)+			;increment unit counter by 2
+	SOB	R1,90$			;Get every active controller a CDB
+;
+; - Set Device ring pointers in CDB, initialize system buffer queue pointers,
+;   set CDB unit number.
+;
+	CLR	R0			;Clear unit counter
+	MOV	#MAX.XH,R1		;Get maximum controllers
+130$:	MOV	XHDATA+XHCDB(R0),R3	;Get pointer to CDB
+	BEQ	140$			;skip if there isn't one
+	MOVB	R0,E.UNT(R3)		;set unit number of CDB
+	POP	E.BOTX(R3)		;restore bottom xmt ring pointer
+	POP	E.TOPX(R3)		;restore top xmt ring pointer
+	POP	E.BOTR(R3)		;restore bottom rcv ring pointer
+	POP	E.TOPR(R3)		;restore top rcv ring pointer
+	MOV	R3,E.RRBT(R3)		;set top of CDB addr in Rcv Rng Buf tail
+	ADD	#E.RRB,E.RRBT(R3)	;add offset so tail points to head
+	MOV	R3,E.RFRT(R3)		;set top of CDB addr in Rcv Pend Bf tail
+	ADD	#E.RFRE,E.RFRT(R3)	;add offset so tail points to head
+	MOV	R3,E.XRBT(R3)		;set top of CDB addr in Xmt Rng Buf tail
+	ADD	#E.XRB,E.XRBT(R3)	;add offset so tail points to head
+	MOV	R3,E.XPBT(R3)		;set top of CDB addr in Xmt Pend Bf tail
+	ADD	#E.XPB,E.XPBT(R3)	;add offset so tail points to head
+140$:	TST	(R0)+			;increment unit counter by 2
+	SOB	R1,130$			;addrs was stored for every act cntrler
+;
+; - Initialize SYSID buffer.
+;
+	MOV	@#XHDATA+XHIDBF,R0	;get base addr of the system id buff
+	ADD	#SID.TY,R0		;R0 points to first static field
+	MOV	#1140,(R0)+		;1140 oct = 60-02 hex Rem Consl Type
+	MOV	#SID$CC,(R0)+		;Count of valid bytes following
+	MOV	#7,(R0)+		;Function code = System ID
+	CLR	(R0)+			;Skip past receipt number
+	INC	(R0)+			;MOP version type (INC gives value 1)
+	MOV	#<<3*400>!3>,(R0)+	;MOP version length
+					;  MOP version    (current=3.0.0)
+	CLR	(R0)+			;  MOP ECO version
+					;  MOP user ECO version
+	MOV	#2,(R0)+		;Function type
+	MOV	#<<<BIT0!BIT6>*400>!2>,(R0)+ ;Function length
+					;  Function = Loop, Data Link counters
+	MOV	#<<7*400>!0>,(R0)+	;  <high byte of function>
+					;Hardware type
+	MOV	#<<6*400>!0>,(R0)+	;<high byte of hardware type>
+					;Hardware length
+	ADD	#<SID.CT-SID.HA>,R0	;skip past hardware address
+	MOV	#100.,(R0)+		;Communication Device type
+	MOV	#<<5*400>!1>,(R0)+	;Communication Device length
+					;  Communication Device = QNA
+	MOV	#200.,(R0)+		;Software ID type		;014
+	MOV	#<<-1*400>!1>,(R0)+	;Software ID length             ;014
+					;  Standard operating system	;014
+
+;
+; - Initialize the random # generator seed.
+;
+	CLR	R0			;Zero R0 to loop through controller ;002
+	MOV	#MAX.XH,R1		;Get maximum controllers
+150$:	TST	XHDATA+XHRING(R0)	;Controller here?
+	BNE	160$			;Yes, use it as your seed
+	TST	(R0)+			;Bump up unit counter
+	SOB	R1,150$			;Try
+	CRASH				;Bug, we shouldn't be here	;002
+160$:	MOV	CSR.XH(R0),R0		;get CSR base address
+	ADD	#QNA.AD+4,R0		;point to hw addr (upper 32 bits)
+	MOV	#XHDATA+XHSEED,R1	;get base address of seed
+	MOV	#4,R2			;counter register (4 bytes = 32 bits)
+170$:	MOV	(R0)+,R3		;copy over seed (QNA knows words only)
+	MOVB	R3,(R1)+		;hw addr is in low byte only
+	SOB	R2,170$			;copy all bytes over
+	CALL	NXTID			;select first timeout value for SYSID
+;
+; - Initialize chain of "Running" CDBs
+;
+	CLR	@#XHDATA+XHACT		;clear out active CDB list chain head
+
+;
+; * One shot initialization.
+;
+
+180$:	CLR	R0			;Clear unit counter
+	MOV	#MAX.XH,R1		;Get max number of controllers
+190$:	MOV	XHDATA+XHCDB(R0),R3	;get copy of CDB pointer
+	BEQ	240$			;none there
+	CMP	#E$ONE,E.STAT(R3)	;Is CDB in "SW Oneshot"?
+	BNE	240$			;no, try next controller.
+;
+; - Clear CDB counters.
+;
+	MOV	R3,R4			;get copy of CDB pointer
+	ADD	#E.CNTS,R4		;add offset to start of counters area
+	MOV	#<<E.CNTE-E.CNTS>/2>,R5	;number of words in counters area
+200$:	CLR	(R4)+			;clear out counter
+	SOB	R5,200$			; for all counters
+	CALL	CDBTIM			;set date/time last zeroed
+;
+; - Set pointer to L3 queue root in CDB's L3Q region.
+;
+	MOV	#<XHCONQ+2>,E.CONQ(R3)	;load address into L3Q area
+;
+; - Initialize device ring entries/pointers. (device not running, no PR5 needed)
+;
+	CALL	RESRNG			;Initialize RCV/XMT ring entries
+;
+; - Load physical address of station from ROM.
+;
+	MOV	CSR.XH(R0),R2		;get pointer to CSR
+	ADD	#QNA.AD,R2		;point to start of Address ROM
+	MOV	R3,R4			;get pointer to CDB
+	ADD	#E.PHYS,R4		;point to start of phys addr field
+	MOV	#QADR$L,R5		;get count of bytes in addr name
+	PUSH	R0
+230$:	MOV	(R2)+,R0		;copy byte of phys addr
+	MOVB	R0,(R4)+		;to CDB (QNA allows word access only)
+	SOB	R5,230$			;copy the entire name
+	POP	R0
+;
+; - Queue CDB for "SW Init" processing at L3.
+;
+	SETFUN	C$SWI			;Request rest of processing at L3. ;003
+240$:	TST	(R0)+			;Increment unit counter by two
+	SOB	R1,190$			;do for all controllers
+	MAP	POP,APR=6,DATA		;restore APR6
+	CALLX	FIPWAT			;Stall Mr. FIP.
+					;Presto, bango.  When we come back
+					;to here, the CDB should be out of
+					;"SW Init" and ready for trasition to
+					;"Running".
+	BIS	#XH$DON,@#XHDATA+XHINIT	;Signify Initialization Complete
+	RETURN
+
+	GLOBAL	<XHDATA,DEV.XH,CSR.XH,XHCONQ>
+
+
+
+
+.SBTTL	OPN$XH	Open portal entry point
+
+;+
+;
+; Perform a user/system job open.  Creates PDB data structure from monitor pool.
+; This command will only work if the controller is not disabled and in the
+; running state (we should never get called if controller is disabled).
+;
+; General routine flow,
+; * Verify protocal type/find position in list
+; * Allocate/Clear/Initialize/Link Portal Definition Block (PDB)
+; * Validate open mode, buffer count.
+; * Allocate receive buffers.
+; * Link previous PDB, exit.
+;
+;	R0 =	Unit Number * 2
+;	R1 ->	DDB
+;	R3 =	Job number * 2 ( Odd if system job )
+;	R4 ->	FIRQB
+;	R5 ->	Job's IOB entry (must be preserved)
+;
+;	CALL	OPN$XH
+;
+;	R0	Random
+;	R1 ->	PDB structure (PDB initialized)
+;	R2 =	Job number * 2
+;	R4 ->	FIRQB
+;
+;	Sysjobs	C=0 for success, C=1 for failure
+;	Usrjobs	Return for success, exits through (JMPX ERROR) for failure
+;
+;-
+	.ENABL	LSB
+
+	TMPORG	OPNTBL,12
+	 .WORD	OPN$XH
+	UNORG
+
+HIORD:	HEX	<AA-00-04-00>		;DECnet physical address	;009
+
+OPN$XH:
+	PUSH	<R5,R3>			;save IOB pointer, job #
+	CALL	MPENET			;Map the Ethernet region	;002
+	MOV	R3,R2			;get copy of the job number
+	MOV	XHDATA+XHCDB(R0),R3	;get CDB pointer
+;
+; * Verify protocal type/find position in list
+;
+20$:	MOV	R4,R5			;save FIRQB pointer
+	MOV	FQNENT(R4),R4		;R4 contains the protocol type
+	MOV	#BADFUO,R0		;assume error			;002
+	SWAB	R4			;swap bytes for 802.3 check      **802.3
+	CMP	#1500.,R4		;is type a valid Ethernet proto? **802.3
+	BHIS	130$			;no, join common error exit	;002
+30$:	SWAB	R4			;return type to real value       **802.3
+	PUSH	R1			;save DDB pointer
+	MOV	R3,R0			;get copy of CDB pointer
+	ADD	#E.PRTL,R0		;make pointer to queue head
+	MOV	(R0),R1			;Get pointer to first item in queue
+	BEQ	60$			;go setup first portal of list	;002
+40$:	CMP	R4,EP.TYP(R1)		;check for used protocol type	;002
+	BLO	60$			;postion is found
+	BEQ	50$			;duplicate protocal type
+	MOV	R1,R0			;make CURRENT, PREVIOUS
+	MOV	(R1),R1			;make NEXT, CURRENT
+	BNE	40$			;try it's protocal type out
+	BR	60$			;otherwise, append to end of list
+
+50$:	MOV	#INUSE,R0		;duplicate protocol type
+	BR	70$			;join common error exit
+
+;
+; * Allocate/Clear/Link to next/Initialize Portal Definition Block (PDB)
+;
+60$:	PUSH	<R1,R2>
+	BUFFER	GETLRG,PDBSIZ,64.,MONPOL ; allocate a PDB out of lowcore
+	POP	<R2,R1>
+	BCC	80$			; we have a PDB
+	MOV	#NOBUFS,R0		; No buffers.  Fail the open.
+70$:	POP	R1			; clean up the stack
+	BR	130$			; join common error exit
+
+					;	R0 ->	previous PDB
+					;	R1 ->	next PDB
+					;	R2 =	job num
+					;	R3 ->	CDB
+					;	R4 ->	PDB
+					;	R5 ->	FIRQB
+80$:	PUSH	<R4,R5>
+	MOV	#<PDBSIZ/2>,R5		;get size (in words) of PDB
+90$:	CLR	(R4)+			;clear word
+	SOB	R5,90$			;for all words
+	POP	<R5,R4>
+	MOV	R1,<EP.LNK+PDBOFF>(R4)	;link new PDB to NEXT PDB
+	POP	R1			;restore DDB pointer
+	MOV	(R1)+,(R4)+		;Move first two words of DDB over
+	MOV	(R1),(R4)		;  to first two words of PDB
+	ADD	#<PDBOFF-2>,R4		;offset to PDB link word
+	MOVB	R2,EPJBNO(R4)		;put in the owning job number
+	MOV	R3,EP.CDB(R4)		;initialize the CDB pointer
+	MOV	#"XH,EP.ID(R4)		;set 'XH' in to locate PDB easier.
+	MOV	FQNENT(R5),EP.TYP(R4)	;save protocol type
+	MOV	R4,EP.RCT(R4)		;initialize the rcv queue tail
+	ADD	#EP.RCV,EP.RCT(R4)	;  to point to rcv queue head
+;
+; * Validate open mode, buffer count.
+;
+	TST	FQMODE(R5)		;Real mode set?
+	BPL	100$			;no, get buffcount
+	MOVB	FQMODE(R5),EP.STS(R4) 	;get user open mode (pad/nopad)	;002
+100$:	MOVB	FQCLUS(R5),R1		;get num of rcv buffs to allocate
+	BPL	110$			;127. or less, try to get them
+	BEQ	140$			;buffers will be supplied	;002
+	MOV	#BADCNT,R0		;select bad buffer count error
+	BR	120$			;join common error exit
+
+;
+; * Allocate receive buffers.
+;
+110$:	MOV	R1,EP.BUF(R4)		;save the number of buffers for portal
+	CALL	ALOBUF			;allocate PDB's buffers (R1=# of bufs)
+	BCC	140$			;skip if success
+	MOV	#NOBUFS,R0		;select no buffers error
+;
+; * Common error exit.
+;
+120$:	CALL	RETPDB			;return the PDB
+130$:	BIT	#BIT0,R2		;is this a system job?
+	BNE	160$			;yes, simple exit
+	MOV	R5,R4			;restore FIRQB pointer
+	MAP	POP,APR=6,DATA		;restore previous mapping
+	POP	<R3,R5>			;restore IOB
+	JMPX	ERROR			;user job failure
+
+;
+; * Link previous PDB, exit.
+;
+140$:	MOV	R4,(R0)			;update PREVIOUS PDB link pointer
+.ASSUME	EP.LNK EQ 0			;NEXT link set previously
+	CALL	PDBTIM			;init PDB's date/time last zeroed
+	CMP	R2,#TRNJOB		;Is this DECnet/E? (v4.0 or after)
+	BNE	150$			;no, it's a different type...
+	TST	@E.PRTL(R3)		;Are there any portals open?	;009
+	BEQ	145$			;No, continue setting address	;009
+	CMP	E.PHYS(R3),HIORD	;Is the address already DECnet?	;009
+	BNE	142$			;No, skip it			;009
+	CMP	E.PHYS+2(R3),HIORD+2	;Really DECnet?			;009
+	BNE	142$			;No it isn't			;009
+	CMP	E.PHYS+4(R3),MYADDR	;Set to our DECnet node address? ;009
+	BEQ	145$			;Yes, it sure is		;009
+142$:	MOV	#INUSE,R0		;No, return inuse error		;009
+	BR	120$			;Go join common error		;009
+
+145$:	BIS	#EF$DNT,E.STS(R3) 	;  indicate controller has DECnet on it
+	BIS	#EP$DNT,EP.STS(R4) 	;  indicate portal has DECnet on it
+150$:	MOV	R4,R1			;set "fake" DDB pointer
+	SUB	#PDBOFF,R1		;make fake point to fake top
+	MOV	R5,R4			;restore FIRQB pointer
+	TST	(PC)+			; successful open.
+160$:	SEC				; system job failure
+	MAP	POP,APR=6,DATA		;restore previous mapping
+	POP	<R3,R5>			;restore job #, IOB
+	RETURN
+
+	GLOBAL	<INUSE,NOBUFS,BADCNT,HNGDEV,BADFUO,XHDATA,MYADDR>	;009
+
+
+
+
+.SBTTL	ALOBUF	OPN$XH	Allocate receive buffers
+
+;+
+;
+; Allocates specified number of comm buffers.  If succeeds, dump those buffers
+; into the receive free pool.  If fails, dump buffers back to system free pool.
+; The receive rings should be loaded at succesful completion.
+;
+;	Ethernet region mapped
+;
+;	R1 =	Number of buffers to allocate
+;	R3 ->	CDB  (used in LOADRP)
+;
+;	CALL	ALOBUF
+;
+;	IF C=0 then the all buffers were allocated
+;	IF C=1 then the buffers could not be allocated
+;
+;-
+	.ENABL	LSB
+
+ALOBUF:	TST	R1			; any bufs really wanted?
+	BLE	50$			; no, what a waste of time	;002
+	REGSCR				; save the registers
+	MAP	PUSH,APR=6,DATA		; save Ethernet region mapping
+	CLR	R2			; keep chain head in reg
+	CALLX	COMBUF			; get first (last in chain ) buffer pair
+	BCS	60$			; stop if none left
+	MOV	R5,R2			; Update head pointer
+	BR	40$			; go allocate more needed buffers ;002
+
+10$:	CALLX	COMBUF			; get a CCB/EXTPOL buffer pair
+	BCS	60$			; no buffers so exit		;002
+	BISB	#DF.CNT,CC.DFL(R5)	; make a real chain out of the chain ;002
+	MOV	R2,(R5)			; put on head of list
+	MOV	R5,R2			; make new buffer the head
+40$:	SOB	R1,10$			; keep going 'till we get all buffers ;002
+	MAP	POP,APR=6,DATA		; restore Ethernet region mapping
+	CALL	LOADR			; load rcv queues
+50$:	CLC				; return success		;002
+	RETURN				; exit
+
+60$:	MAP	POP,APR=6,DATA		; restore Ethernet region mapping
+	MOV	R2,R5			; forget count, save chain
+	CALL	DALOBF			; Deallocate them (R5 -> chain)
+	SEC				; return failure
+	RETURN				; exit
+
+
+
+
+.SBTTL	CLS$XH	Close portal entry point
+
+;+
+;
+; This entry point is responsible for closing a portal (it's called a channel
+; on RSTS).  It first returns any outstanding buffers from the posted list on
+; the portal, then tries to return the buffers that the portal initially
+; allocated.
+;
+; This is called by both user jobs and system jobs.  No errors are possible.
+;
+;	R0 =	unit number * 2
+;	R1 ->	PDB
+;	R5 ->	(PDB also, must be preserved)
+;
+;	CALL	CLS$XH
+;
+;	R2	random
+;	R3 ->	CDB
+;	R4	random
+;
+;	Carry is cleared always
+;
+;-
+	.ENABL	LSB
+
+	TMPORG	CLSTBL,12
+	 .WORD	CLS$XH
+	UNORG
+
+CLS$XH:
+	PUSH	R5
+	CALL	MPENET			;Map the Ethernet region	;002
+	MOV	R1,R4			;put PDB pointer in the correct place
+	ADD	#PDBOFF,R4		;and make it proper
+	SPLC	5			;;don't let any more messages accumulate ;013
+	BIS	#EP$MDL,EP.STS(R4)	;;mark PDB as going away	;013
+	MOV	EP.CDB(R4),R3		;;Get CDB pointer		;013
+	BIT	#EP$DNT,EP.STS(R4) 	;;Was it a DECnet portal?
+	BEQ	10$			;;no, continue
+	BIC	#EF$DNT,E.STS(R3) 	;;yes, indicate no DECnet/E on cntrler
+10$:	TSTB	EP.MCT(R4)		;;any multicasts defined?
+	BEQ	20$			;;no, don't need to modify address list
+	BIS	#EF$SMC,E.STS(R3)	;;tell MULCST to do system multicast
+	SETFUN	C$MUL			;;schedule new address list	;003
+20$:	TST	EP.BUF(R4)		;;Any unused buffs to return?
+	BEQ	60$			;;no, continue
+	MOV	E.RFRE(R3),R5		;;make pointer to head of new list
+	BEQ	50$			;;continue if none
+30$:	MOV	E.RFRE(R3),R2		;;make pointer to prev buff
+	MOV	(R2),E.RFRE(R3)		;;make free list not include it
+.ASSUME	CC.LNK EQ 0
+	BNE	40$			;;if free list is not empty
+	MOV	R3,E.RFRT(R3)		;;update the tail pointer
+	ADD	#E.RFRE,E.RFRT(R3)	;; to point to the head
+	DEC	EP.BUF(R4)		;;count the last buffer
+	BR	45$			;;return the chain
+
+40$:	DEC	EP.BUF(R4)		;;count one less buffer
+	BNE	30$			;;continue if there's more
+	CLR	(R2)			;;make sure last chain entry is blank
+45$:	CALL	DALOBF			;;return the chain
+50$:	ADD	EP.BUF(R4),E.XTRA(R3)	;;tell LOADRP to return these buffers
+60$:	MOV	EP.RCV(R4),R5		;;get pointer to message chain (DALOBF)
+	CALL	RETPDB			;;return the PDB
+	CALL	DALOBF			;;deallocate the buffers
+	SPLC	3			;resume normal priority
+	MAP	POP,APR=6,DATA		;restore previous mapping
+	POP	R5
+	CLC				;make sure everyone knows we succeeded
+	RETURN
+
+
+
+
+.SBTTL	RETPDB	OPN$XH/CLS$XH	Return a PDB
+
+;+
+;
+; Returns the given PDB structure.  Very unintelligent routine (all
+; queue's attached to PDB must be returned beforehand).  Unlinks PDB
+; from CDB's list (if not already).  Will not return the buffer until
+; the transmit counter is 0 (EP.XMO).
+;
+;	Ethernet region mapped
+;
+;	R3 ->	CDB
+;	R4 ->	PDB
+;
+;	CALL	RETPDB
+;
+;	R4	random
+;
+;-
+	.ENABL	LSB
+
+RETPDB:	PUSH	R0
+	MOV	R3,R0			;get copy of CDB pointer
+	ADD	#E.PRTL,R0		;make pointer to head of queue
+10$:	CMP	(R0),R4			;Is this PDB the desired PDB?
+	BEQ	20$			;yes, de-link it.
+	MOV	(R0),R0			;no, make pointer to next PDB
+	BNE	10$			;and try it
+	BR	30$			;trash it anyway - if not in list.
+
+20$:	MOV	(R4),(R0)		; delink the PDB from list
+.ASSUME	EP.LNK EQ 0
+30$:	TST	EP.XMO(R4)		;transmits all gone?
+	BNE	40$			;no, have to wait for awhile (SYSJOBs)
+	SUB	#PDBOFF,R4		;set PDB pointer to real start of buffer
+	MOV	#<<PDBSIZ+37>&<^C<37>>>,(R4) ; set size in small buff size
+	BUFFER	RETURN			; and give it back to MONPOL
+40$:	POP	R0
+	RETURN
+
+
+
+
+.SBTTL	DALOBF	OPN$XH/CLS$XH	Dealocate buffers assigned to a portal
+
+;+
+;
+; Return a chain of comm buffers to the system.  Mapping is not affected.
+;
+;	R5 ->	Chain of comm buffers
+;
+;	CALL	DALOBF
+;
+;	R5 =	0
+;
+;-
+	.ENABL	LSB
+
+DALOBF:	TST	R5		;any buffers passed?
+	BEQ	20$		;no, that was quick.
+	PUSH	R4		;R4 is munged by COMRET
+10$:	PUSH	(R5)		;save any pointer to next
+.ASSUME	CC.LNK EQ 0
+	CALLX	COMRET		;return CCB/EXTPOL pair
+	POP	R5		;get next pointer
+	BNE	10$		;if there is one, return it too
+	POP	R4
+20$:	RETURN			;and that was easy.
+
+
+
+
+.SBTTL	SER$XH	Service entry point
+
+;+
+;
+; This is the dispatch entry point for the service module of the driver.
+;
+;	R0 =	Controller num * 2
+;	R1 ->	PDB (at begginning, must add PDBOFF)
+;	R2 =	Function code
+;	R3 ->	XRB (if user job)
+;	R4 =	Job num * 2 (if user job)
+;	R5 ->	CCB for transaction (if system job) or
+;		Mapped user buffer (if user)
+;
+;	If Z=1 or C=0, then this is the first call
+;	If Z=0 or C=1, then this is a re-do call
+;
+;	CALL	SER$XH
+;
+;	R0-R1	random
+;	R3-R4	random
+;
+;	If complete with no errors (JMP IOEXIT)
+;	If complete with errors (SETERR <code>; JMP IOEXIT, or ERROR <code>)
+;	Try again later (JMP IOREDO)
+;	System job transaction complete (RETURN, C=0 success, C=1 failure)
+;
+;-
+	.ENABL	LSB
+
+	TMPORG	SERTBL,12
+	 .WORD	SER$XH
+	UNORG
+			;
+			; This table actually starts at offset 2 since there
+			; is no 0 command.
+			;
+SERDSP:	.WORD	XHREAD		;  2 - User .READ function
+	.WORD	XHWRIT		;  4 - User .WRITE function
+	.WORD	XHXMIT		;  6 - System transmit function
+	.WORD	XHSBUF		; 10 - System supply buffer function
+	.WORD	XHSTAT		; 12 - System get circuit/line status
+L.SERDS = <.-SERDSP>
+
+SER$XH:
+	TST	R2				;Any function passed?
+	BEQ	10$				;No, error
+	CMP	R2,#L.SERDS			;Greater than max function
+	BHI	10$				;yes, error
+	BEQ	5$				;equal, circ stat, do quickly
+	MOV	R3,R0				;get copy of XRB pointer
+	MOV	R1,R4				;get copy of PDB pointer
+	ADD	#PDBOFF,R4			;make it a real PDB pointer
+	CALL	MPENET				;Map the Ethernet region ;002
+	MOV	EP.CDB(R4),R3			;Get copy of CDB pointer
+	MOV	E.STAT(R3),R3			;get controller's state
+	MAP	POP,APR=6,DATA			;restore original mapping
+5$:	JMP	@<SERDSP-2>(R2)			;otherwise dispatch
+
+10$:	MOV	#NOTMTA,R0			;set illegal function error
+	MOV	<EPJBNO+PDBOFF>(R1),R1		;get job number
+	JMP	SPCERR				;and join common error exit
+
+	GLOBAL	<XHDATA,NOTMTA>
+
+
+
+
+.SBTTL	XHREAD	SER$XH	Execute a USER only .READ function
+
+;+
+;
+; This routine checks the given portal to see if any messages are
+; outstanding for delivery.  If so, it will "MOVMEM" the message to
+; the user's buffer.  If not, it will either stall the job or return
+; an error (depending on the open mode).
+;
+; The flow of command is as follows,
+;
+; * Have system check the XRB.
+; * If portal lost data, warn user that packets have been lost.
+; * If there is a message pending for the portal,
+;	- Pull off buffer CCB of message.
+;	- Get buffer size and starting address from the buffer header.
+;	- Truncate message if user's buffer is too small.
+;	- Update pointers, byte count, and transfer data.
+;	- Return buffers, load receive rings.
+; * Else, stall or give error.
+;
+;	R0 ->	XRB
+;	R2 =	2 (user .READ function code)
+;	R3 =	controller state
+;	R4 ->	PDB
+;	R5 ->	User buffer
+;
+;	JMP	XHREAD		(dispatched from SER$XH)
+;
+;	R0-R5	random
+;
+;	If success, IOEXIT is used
+;	If failure, either IOREDO, ERROR, or IOEXIT (for warnings)
+;
+;-
+	.ENABL	LSB
+
+XHREAD:
+;
+; * Have system check the XRB.
+;
+	MOV	R3,R1			;save controller state
+	MOV	R0,R3			;get copy of XRB pointer
+	SEC				;indicate .READ checking
+	CALLX	CHKXRB			;check away (errors don't come back)
+	MOV	R1,R3			;restore controller state
+;
+; * If portal lost data, warn user that packets have been lost.
+;
+	BIT	#EP$LST,EP.STS(R4) 	;did we lose some packets? (no buffers)
+	BEQ	10$			;no, so no warning needed.
+					;*Don't switch order of next two inst.
+	BIS	#EP$TLD,EP.STS(R4)	;Show that user has been told
+	BIC	#EP$LST,EP.STS(R4)	;Clear so no more errors
+	ERROR	DATERR			;packet(s) lost, warn with DATERR
+;
+; * If there is a message pending for the portal,
+;
+10$:	TST	EP.RCV(R4)		;Any CCB's to move for user	;003
+	BEQ	90$			;None, stall or fail
+;
+; - Pull off buffer CCB of message.
+;
+20$:	SPLC	5
+	MOV	EP.RCV(R4),R3		;;get current CCB
+	MOV	(R3),EP.RCV(R4)		;;off of the receive queue
+.ASSUME	CC.LNK EQ 0
+	BNE	30$			;;Don't adjust tail if not at end
+	MOV	R4,EP.RCT(R4)		;;adjust tail pointer to
+	ADD	#EP.RCV,EP.RCT(R4)	;;  point to head
+30$:	SPLC	3							;003
+;
+; - Get buffer size and starting address from the buffer header.
+;
+	MAP	PUSH,APR=6,DATA		;temp save of user mapping
+	MAP	CC.BUF+BF.MMU(R3),APR=6,DATA ; map message buffer
+	MOV	CC.BUF+BF.VIR(R3),R1 	;get virtual pointer to buffer
+	MOV	BF.CNT(R1),R2		;Transfer this whole buffer
+	ADD	BF.OFF(R1),R1		;add offset to actual beginning of data
+	BIC	#170000,R1		;clear out old virtual bits
+	BIS	#120000,R1		;make it virtual via APR5
+	MAP	POP,APR=6,DATA		;restore user buffer APR6 mapping
+;
+; - Truncate message if user's buffer is too small.
+;
+	CMP	R2,(R0)			;Room in user's receive buffer?
+.ASSUME	XRLEN EQ 0
+	BLOS	70$			;yes, go setup and copy.
+	SETERR	MAGRLE,@IOSTS		;no, post record length error
+	MOV	(R0),R2			;truncate to remaining length
+.ASSUME	XRLEN EQ 0
+	BEQ	80$			;when zero no more room		;003
+;
+; - Update pointers, byte count, and transfer data.			;002
+;
+70$:	SUB	R2,(R0)			;adjust buffer length remaining
+.ASSUME	XRLEN EQ 0
+	ADD	R2,XRBC(R0)		;keep track of the byte count
+	PUSH	<R3,R0>
+	MOV	CC.BUF+BF.MMU(R3),R0 	;get APR address of 'from' data
+	MOV	R5,R3			;get copy of user data buffer pointer
+	ADD	R2,R5			;offset to next fill address (if any)
+					; R0 =  PAR value of buffer
+					; R1 -> Start of 'from' location (APR5 mapping)
+					; R2 =  byte count
+					; R3 -> Start of 'to' location (APR6 mapping)
+	CALLX	MOVMEM			;Do the transfer
+	POP	<R0,R3>			;restore XRB pointer, current msg list
+;
+; - Return buffers, load receive rings.
+;
+80$:	MOVB	CC.DFL(R3),-(SP)	;save CCB flags			;003
+	CLR	(R3)			;ensure last zero link
+.ASSUME	CC.LNK EQ 0
+	CALL	MPENET			;Map the Ethernet region	;002
+	MOV	R0,-(SP)		;save XRB pointer		;003
+	MOV	R4,-(SP)		;save PDB pointer		;003
+	MOV	R5,-(SP)		;save user buffer address	;003
+	MOV	R3,R5			;get copy of CCB pointer	;003
+	MOV	EP.CDB(R4),R3		;Get copy of CDB pointer
+	CALL	LOADR			;load rcv queues
+	MOV	(SP)+,R5		;restore user buffer address	;003
+	MOV	(SP)+,R4		;restore PDB pointer		;003
+	MOV	(SP)+,R0		;restore XRB pointer		;003
+	INC	EP.BUF(R4)		;show one more free buffer	;003
+	MAP	POP,APR=6,DATA		;restore original mapping
+	BITB	#DF.CNT,(SP)+		;another buffer in msg?		;003
+	BNE	20$			;get another buffer if chained	;003
+	JMPX	IOEXIT			;done, post to JOB.
+
+;
+; * Else, stall or give error.
+;
+90$:	TST	R3			;Is device running?
+.ASSUME	E$RUN EQ 0
+	BNE	110$			;no, tell user
+	BIT	#BIT13,XRMOD(R0)	;check for the Stall bit
+	BEQ	100$			;No, so give him an error
+	MOVB	EPJBNO(R4),R4		;get job num * 2
+	JMPX	IOREDO			;and set about waiting.
+
+100$:	ERROR	NOSUCH			;no stall, no receives there
+
+110$:	ERROR	HNGDEV			;device is disabled
+
+	GLOBAL	<XHDATA,JS.XH,JBWAIT,NOSUCH,HNGDEV,DATERR>
+
+
+
+
+.SBTTL	XHWRIT	SER$XH 	Execute a USER only .WRITE function
+
+;+
+;
+; Enqueues user's request on the xmit pending queue (At this implementation,
+; we are only doing synchronous I/O).  If the request is successfully entered,
+; the calling job will be locked and stalled until the transmit completes.
+; If device is not running (i.e., "Disabled"), the user is given the hung
+; device error.
+;
+; Command flow is as follows,
+;	* Check state of controller.
+;	* Have system check XRB.
+;	* Get CCB, redo job if NOBUFs.
+;	* Check XRB parameters.
+;	* Put copy of physical station address into message.
+;	* If padding is enabled, pad message if it needs it.
+;	* Calculate/store physical address of user buffer.
+;	* Save job.
+;	* Load xmit pending and ring queues.
+;
+;	R0 ->	XRB
+;	R2 =	4 (user .WRITE function code)
+;	R3 =	controller state
+;	R4 ->	PDB
+;	R5 ->	User buffer
+;
+;	JMP	XHWRIT		(dispatched from SER$XH)
+;
+;	R0-R5	random
+;
+;	Stack will be clean.
+;	Exit via SAVJBL/RTI3 on success.
+;	Exit via CHKXRB, ERROR on failure.
+;	Exit via IOREDO, CCB wait
+;
+;-
+	.ENABL	LSB
+
+XHWRIT:
+;
+; * Check state of controller.
+;
+	TST	R3			;Is device running?
+.ASSUME	E$RUN EQ 0
+	BEQ	5$			;Yes, it's important that it is.
+	ERROR	HNGDEV			;device is disabled (probably)
+;
+; * Have system check XRB.
+;
+5$:	MOV	R0,R3			;get copy of XRB
+	MOV	XRBC(R3),R1		;save XRBC
+	CLR	XRBC(R3)		;clear out XRBC for .READ checking
+	SEC				;indicate read checking (read/write) ;002
+	CALLX	CHKXRB			;check XRB, if bad we don't return here
+	MOV	R1,XRBC(R3)		;restore XRBC
+;
+; * Get CCB, redo job if NOBUFs.
+;
+	MOV	R4,R3			;Save PDB pointer
+	MOVB	EPJBNO(R3),R1		;set job number * 2		;003
+	CALL	GETCCB			;get a CCB, if none we don't return ;003
+;
+; * Check XRB parameters.
+;
+10$:	MOV	R4,R1			;get copy of CCB pointer
+	MOV	R3,R4			;restore PDB pointer
+	MOV	R2,CC.FC(R1)		;store function code
+	MOV	R4,CC.DDB(R1)		;store circuit (PDB) pointer
+	BIT	#BIT0,XRLOC(R0)		;Odd starting address
+	BNE	30$			;yes, get rid of it
+	CMP	(R0)+,#60.		;is buffer > minimum buffer length
+.ASSUME	XRLEN EQ 0
+	BLO	30$			;no, bad length
+	CMP	(R0),#1514.		;Is byte count within acceptable size
+.ASSUME	XRBC EQ 2
+	BHI	30$			;no, too high
+	TSTB	EP.STS(R4)		;padding mode set?		;002
+	BPL	35$			;yes, check XRBC for padded packets ;002
+	CMP	(R0),#60.		;is byte count at least minimum?
+.ASSUME	XRBC EQ 2
+	BHIS	40$			;yes, give it a try.
+	.BR	30$			;no, too low			;002
+
+30$:	MOV	R1,R4			;get copy of CCB for return
+	BUFFER	RETSML			;return the CCB
+	ERROR	BADCNT			;no, bad count error
+
+35$:	CMP	(R0),#16.		;is byte count at least minimum? ;003
+.ASSUME	XRBC EQ 2
+	BLO	30$			;no, too low			;002
+;
+; * Put copy of physical station address into message.
+;
+40$:
+	MOV	@DPAR6,R2		;get copy of current mapping
+	CALL	MPENT2			;map the Ethernet region	;003
+	MOV	EP.CDB(R4),R3		;get pointer to CDB
+	PUSH	E.PHYS+4(R3)		;save all
+	PUSH	E.PHYS+2(R3)		;  words in station
+	PUSH	E.PHYS(R3)		;    source address
+	MAP	R2,APR=6,DATA		;      restore user buffer mapping
+	POP	PK.SRC(R5)		;    Put station
+	POP	PK.SRC+2(R5)		;  source address into
+	POP	PK.SRC+4(R5)		;packet's source address
+	MOV	EP.TYP(R4),PK.PRT(R5)	;store portal's protocol type
+;
+; * If padding is enabled, pad message if it needs it.
+;
+	CALL	PAD			;pad the message if necessary
+;
+; * Calculate/store physical address of user buffer.
+;
+	PUSH	(R0)			;save number of bytes to xmit
+.ASSUME	XRBC EQ 2
+	MOV	R1,R2			;get copy of CCB pointer
+	CLR	R0			;clear for address conversion
+	MOV	@DPAR6,R1		;get copy of current MMU address
+	ASHC	#6,R0			;make it into 22-bit physical address
+	SUB	#140000,R5		;subtract APR6 offset of user buff
+	ADD	R5,R1			;add offset into APR region to data
+	ADC	R0			; (making sure we do 32bit arithmatic)
+	CLR	CC.BUF+BF.VIR(R2)	;make sure LOADXR knows this is phys
+	MOV	R0,CC.BUF+BF.ADR(R2)	;store high order address
+	MOV	R1,CC.BUF+BF.MMU(R2)	;store low order address
+	POP	R0			;restore xmit byte count
+	ASR	R0			;make it word count
+	BCC	70$			;If not odd byte count
+	BIS	#QA$L,CC.BUF+BF.ADR(R2)	;set odd byte termination
+	INC	R0			;account for odd byte in word count
+70$:	NEG	R0			;make two's complement
+	MOV	R0,CC.BUF+MS.SIZ(R2)	;store size (QNA style) of xmit
+;
+; * Save job.
+;
+	MOV	EPJBNO(R4),R4		;get job number * 2
+	MOV	#JS.SY,JBWAIT(R4)	;make job wait for completion
+	MOV	@#JOBF,R1		;get JDB @JDFLAG into R1
+	MOV	R2,R4			;save CCB pointer
+					;SAVJBL does not use R3 or R4
+	CALLX	SAVJBL,R5		;stop job, but leave locked
+	MOV	R4,R5			;restore CCB pointer into R5 for LOADXP
+;
+; * Load xmit pending and ring queues.
+;
+	CALL	MPENT2			;set Ethernet region mapping	;003
+	CALL	LOADX			;load transmit queues
+	JMPX	RTI3			;and see what happens
+
+	GLOBAL	<BADCNT,HNGDEV,XHDATA,DPAR6>
+
+
+
+
+.SBTTL	XHXMIT	SER$XH	System job transmit
+
+;+
+;
+; This routine enqueues system job xmit requests (FC$XMT) onto the pending and
+; ring queues.  Sends back error to system job if controller is disabled.
+;
+;	R2 =	function code (FC$XMT)
+;	R3 =	controller state
+;	R4 ->	PDB
+;	R5 ->	CCB (could be chain)
+;
+;	JMP	XHXMIT		(Dispatched from SER$XH)
+;
+;	R0-R5	random
+;
+;	C=0 success or failure
+;
+;-
+	.ENABL	LSB
+
+XHXMIT:	CALL	MPENET			;map ethernet region		;003
+	MOV	R4,CC.DDB(R5)		;store PDB pointer
+;
+; * Check state of controller.
+;
+	TST	R3			;Is device running?
+.ASSUME	E$RUN EQ 0
+	BEQ	10$			;Yes, queue it up.
+	MOVB	#FC$XER,CC.FC(R5)	;tell sysjob this failed
+	MOV	#HNGDEV,CC.SEC(R5)	;device is disabled
+	SPLC	5
+	MOV	EPJBNO(R4),R1		;;select job number to post to
+	CALL	PSTSYS			;;post buffer back to sysjob
+	SPLC	3
+	BR	20$			;and fail quietly
+
+;
+; * Queue for transmit.
+;
+10$:	MOVB	R2,CC.FC(R5)		;store function code
+	MOV	EP.CDB(R4),R3		;get CDB pointer
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ;map the message buffer
+	MOV	R5,R2			;save CCB pointer
+	MOV	CC.BUF+BF.VIR(R5),R5	;get virtual pointer to buffer
+	MOV	R5,R0			;get copy of message pointer
+;
+; Note: This padding mechanism will not work for chained message
+;       transmits.  Additional work will have to be done since
+;       BF.CNT of the first buffer does not contain the entire length
+;	of the message.
+;
+; Note:	Since this is a system job transmitt, we expect the system job
+;	to allways pass a buffer of at least 60 bytes.  In this way we
+;	can zero the needed bytes on the end of a message that are less
+;	than 60 bytes to work in the same way as the UNA/ULA.
+;
+	ADD	#BF.CNT,R0		;make pointer to message size
+	ADD	BF.OFF(R5),R5		;make pointer to message start
+	CALL	PAD			;pad the message if necessary
+	MOV	R2,R5			;restore CCB pointer
+	CALL	MPENT2			;map ethernet region		;005
+	INC	EP.XMO(R4)		;indicate another xmit outstanding
+	MOV	EP.TYP(R4),R4		;get system job's protocol type
+	CALL	SETSRC			;load physical address into message
+	CALL	LOADX			;load transmit queues
+20$:	MAP	POP,APR=6,DATA		;restore previous mapping
+	CLC
+	RETURN
+
+	GLOBAL	<HNGDEV,XHDATA>
+
+
+
+
+.SBTTL	XHSBUF	SER$XH	Supply system buffer
+
+;+
+;
+; DECnet and system jobs are responsible for supplying the driver with comm
+; buffers. They supply them here, they are returned to them via a receive.
+;
+;	R4 ->	PDB
+;	R5 ->	CCB (only one)
+;
+;	JMP	XHSBUF		(Dispatched from SER$XH)
+;
+;	R0 =	random or error code
+;	R1-R3	random
+;	R5	random
+;
+;	C=0 if success
+;	C=1 plus error in R0 if failure ( > 32767 buffers allocated)
+;
+;-
+	.ENABL	LSB
+
+XHSBUF:	CLR	(R5)			;ensure no other associated buffs
+.ASSUME	CC.LNK EQ 0
+	PUSH	R4			;save PDB pointer
+	BIC	#<EP$LST!EP$TLD>,EP.STS(R4) ;clear quota flags
+	CLRB	CC.DFL(R5)		;Clear disposition flag		;008
+	CALL	MPENET			;Map the Ethernet region	;002
+	MOV	EP.CDB(R4),R3		;get CDB pointer
+	CALL	LOADR			;load rcv queues
+	MAP	POP,APR=6,DATA		;restore previous mapping
+	POP	R4			;restore PDB pointer
+	INC	EP.BUF(R4)		;show one more buff on portal
+	BPL	10$			;if believable ( < 32767 buffs )
+	MOV	#NOROOM,R0		;set unbelievable error
+	BR	20$			;Is this a VAX?
+
+10$:	TST	(PC)+			;success
+20$:	SEC				;failure
+	RETURN
+
+	GLOBAL	<NOROOM>
+
+
+
+
+.SBTTL	XHSTAT	SER$XH	Controller status command (currently unsupported)
+
+;+
+;
+; This has no meaning in an Ethernet environment.  Fails immediately with
+; PRVIOL.
+;
+;	JMP	XHSTAT		(Dispatched from SER$XH)
+;
+;	C=1 with PRVIOL in R0
+;
+;-
+	.ENABL	LSB
+
+XHSTAT:	MOV	#PRVIOL,R0		;Set error
+	SEC				;tell caller about error
+	RETURN				;and go back to caller
+
+	GLOBAL	<PRVIOL>
+
+
+
+
+.SBTTL	SPC$XH	Special function Service entry point
+
+;+
+;
+; This is the .SPEC entry point dispatch routine.  Both system jobs and user
+; jobs access these functions.
+;
+; The functions are,
+;	-4 = Set Physical address.
+;	-3 = Enable/Disable multicast address.
+;	-2 = Transfer line counters.
+;	-1 = Get line counters.
+;	 0 = Get circuit counters.
+;	 1 = Transfer circuit counters.
+;	 2 = Set receive buffer quota (not used).
+;
+;	R0 =	Controller num * 2
+;	R1 ->	PDB (must add PDBOFF to use as PDB)
+;	R2 =	Special function code
+;	R3 ->	XRB
+;	R4 =	Calling job num * 2 (odd if system job)
+;	R5 =	(mapped) XRB
+;
+;	CALL	SPC$XH
+;
+;	R4	must be preserved through the calls
+;
+;	Exit by,
+;
+;	RETURN - for all system jobs.
+;	JMP IOEXIT - for successful exit.
+;	JMP IOREDO - If we need a CCB and can't get one.
+;	JMP ERROR <code in R0 > - if there is an error.
+;	JMP RTI3 - if function requires otherthan immediate processing.
+;
+;-
+	.ENABL	LSB
+
+	TMPORG	SPCTBL,12
+	 .WORD	SPC$XH
+	UNORG
+
+S.SPCDS	= <.-SPCDSP>	;Start of fuction table
+	.WORD	SETPHY		; -10  NI$PHY - Change physical address
+	.WORD	ENAMUL		;  -6  NI$EML - Enable/disable multicast address
+	.WORD	XFRLIN		;  -4  NI$XFL - transfer line counters
+	.WORD	UPDCNT		;  -2  NI$LCT - update CDB line counters
+SPCDSP:	.WORD	GETCIR		;   0  FC$CIR - update CDB circuit counters
+	.WORD	XFRCIR		;   2  FC$XFR - transfer CDB circuit counters
+	.WORD	BUFQTA		;   4  FC$RCV - set receive buffer quota
+L.SPCDS	= <.-SPCDSP>	;End of function table
+
+SPC$XH:
+	ASL	R2			;make function code table addreassable
+	CMP	R2,#S.SPCDS		;Is this function below legal spec?
+	BLT	10$			;no, skip it
+	CMP	R2,#L.SPCDS		;Is this function higher than legal fn?
+	BGE	10$			;yes, skip it
+	CALL	MPENET			;map the Ethernet region	;005
+	MOV	PDBOFF+EP.CDB(R1),R0	;get copy of CDB pointer	;005
+	MOV	E.STAT(R0),R0		;get controller's state		;005
+	MAP	POP,APR=6,DATA		;restore original mapping	;005
+	TST	R0			;is controller running?		;005
+.ASSUME	E$RUN EQ 0
+	BEQ	5$			;yes, it is important		;005
+	MOV	#HNGDEV,R0		;set hung device error		;005
+	BR	15$			;join common error routine	;005
+
+5$:	MOV	R3,R0			;make copy of XRB pointer
+	MOV	R1,R4			;get copy of PDB (faked) pointer
+	ADD	#PDBOFF,R4		;make pointer to real PDB
+	JMP	@SPCDSP(R2)		;no, is legal function, dispatch to it.
+
+10$:	MOV	#NOTMTA,R0		;set not legal function error.
+15$:	MOV	R4,R1			;get job number * 2		;002
+;
+; SPCERR - takes R0, error code, and R1, job num * 2, as input.
+;
+SPCERR:	BIT	#BIT0,R1		;is this a system job?
+	BEQ	20$			;no, it's a user's job.
+	SEC				;yes, signal failure
+	RETURN
+
+20$:	JMPX	ERROR			;notify user of error
+
+	GLOBAL	<NOTMTA>
+
+
+
+
+.SBTTL	GETCCB	SPC$XH 	Get a CCB for .SPEC function
+
+;+
+;
+; This routine will try and get a CCB. If none are available it will pop the
+; return address off the stack and return to the callers caller for system
+; jobs or jump to IOREDO if user.
+;
+;	R1 =	Job number * 2
+;
+;	CALL	GETCCB
+;
+;	R0 =	NOBUFS error code
+;	R4 ->	CCB
+;
+;	EXIT via IOREDO, or RETURN
+;	C=0 for success, C=1 for failure
+;
+;-
+	.ENABL	LSB
+
+GETCCB:	BUFFER	GETSML,64.		;try and get a CCB		;003
+	BVC	10$			;return if we got a CCB		;003
+	TST	(SP)+			;get rid of return address	;003
+	BIT	#1,R1			;is this a system job?		;003
+	BEQ	20$			;no,  go wait for buffer	;003
+	MOV	#NOBUFS,R0		;yes, tell system job no buffs	;003
+	SEC				;signal failure			;003
+10$:	RETURN				;exit				;003
+
+20$:	BIS	#JSBUF,JBWAIT(R1)	;set buffer stall for job	;003
+	JMPX	IOREDO			;go wait for more buffers	;003
+
+
+
+
+.SBTTL	SETPHY	SPC$XH	Set phyiscal address function
+
+;+
+;
+; This routine changes physical address of the controller.  It can be called
+; by either a system job or a user job.
+;
+; MANIPULATION OF QMUL QUEUE IS DONE AT PR3.
+;
+; Flow is as follows:
+;	* If user job, Check Privs, have system check XRB.
+;	* Get CCB, redo if NOBUFs.
+;	* Check to ensure only one portal active.
+;	* Check XRB buffer boundaries.
+;	* Ensure that a given address is a physical address, copy it.
+;	* Queue CCB, request multicast, dump job.
+;
+;	R2 =	-10
+;	R3 ->	XRB
+;	R4 ->	PDB
+;	R5 ->	mapped XRB
+;
+;	JMP	SETPHY		(Dispatched from SPC$XH)
+;
+;	R0-R5	random
+;
+;	EXIT via SPCERR, IOREDO, or RTI3
+;	C=0 for success, C=1 for failure
+;
+;-
+	.ENABL	LSB
+
+SETPHY:	MOVB	EPJBNO(R4),R1		;get job num * 2
+;
+; * If user job, Check Privs, have system check XRB.
+;
+	BITB	#BIT0,R1		;Is this a system job?		;005
+	BNE	20$			;yes, no need to check privs and XRB
+	MOV	R1,R0			;set R0 for CHKPRV
+	CALLX	CHKPRV,R4		;check for SWCTL privilege <R0=job>
+	 .BPRIV	SWCTL				;<<trashes R5>>
+	BCC	10$			;continue if job had SWCTL
+	MOV	#PRVIOL,R0		;stop if job didn't have privs
+	BR	110$			;join common error routine
+
+10$:	MOV	(R3),R0			;save XRLEN	- C not affected
+	MOV	XRBC(R3),(R3)		;set for CHKXRB	- C not affected
+.ASSUME	XRLEN EQ 0
+;	CLC				;carry clear means write check	;002
+	CALLX	CHKXRB			;check XRB, if bad we don't return here
+	MOV	R0,(R3)			;restore XRLEN
+.ASSUME	XRLEN EQ 0
+;
+; * Get CCB, redo if NOBUFs.
+;
+20$:	MOV	R4,R0			;Save PDB pointer
+	CALL	GETCCB			;get a CCB, if none we don't return ;003
+	MOV	R4,R2			;get copy of CCB pointer
+	MOV	R0,R4			;restore PDB pointer
+;
+; * Check to ensure only one portal active.
+;
+	MOV	R3,R0			;get copy of XRB pointer
+	CALL	MPENET			;Map the Ethernet region	;002
+	MOV	EP.CDB(R4),R3		;get pointer to CDB
+	TST	@E.PRTL(R3)		;is there a link in the first portal?
+	BEQ	50$			;no, this could be a valid call
+	CMP	#TRNJOB,R1		;Is this DECnet?		;009
+	BNE	30$			;No, go return the error	;009
+	CMP	E.PHYS(R3),HIORD	;Is the address already DECnet?	;009
+	BNE	30$			;No, skip it			;009
+	CMP	E.PHYS+2(R3),HIORD+2	;Really DECnet?			;009
+	BNE	30$			;No it isn't			;009
+	CMP	E.PHYS+4(R3),MYADDR	;Set to our DECnet node address? ;009
+	BEQ	50$			;Yes, it sure is		;009
+30$:	TST	(SP)+			;remove saved previous mapping	;009
+	MOV	#INUSE,R0		;return busy error
+	BR	100$			;join common error code
+
+;
+; * Check XRB buffer boundaries.
+;
+50$:	MAP	POP,APR=6,DATA		;restore the previous mapping
+	BIT	#BIT0,XRLOC(R0)		;Odd starting address?
+	BNE	60$			;yes, get rid of it
+	CMP	XRBC(R0),#6.		;is byte count correct?
+	BEQ	70$			;yes, XRB is OK.
+60$:	MOV	#BADCNT,R0		;set error
+	BR	100$			;and join common
+
+;
+; * Ensure that a given address is a physical address, copy it.
+;
+70$:	MOV	R0,R3			;put copy of XRB ptr back
+	MOV	XRLOC(R3),R5		;Assume system job
+	BIT	#BIT0,R1		;system job?
+	BNE	75$			;yes, R5 already mapped
+	CALLX	SCRUMX			;map the caller's buffer
+75$:	BIT	#BIT0,(R5)		;is the address physical?
+	BEQ	80$			;yes, we'll put it in
+	MOV	#BADNAM,R0		;no, badname
+	BR	100$			;report error to caller
+
+80$:	PUSH	(R5)+			;save first word of address
+	PUSH	(R5)+			;     second
+	PUSH	(R5)			;     third
+	CALL	MPENT2			; map the Ethernet region	;003
+	MOV	EP.CDB(R4),R3		;get CDB pointer again
+	SPLC	5
+	POP	E.PHYS+4(R3)		;;save third word of address
+	POP	E.PHYS+2(R3)		;;     second
+	POP	E.PHYS+0(R3)		;;     first
+	BIS	#EP$PHY,EP.STS(R4)	;;Indicate portal phys addr setup
+	SPLC	3
+;
+; * Queue CCB, request multicast, dump job.
+;
+	JMP	SPCSTL			;join common spec stalling code
+
+100$:	MOV	R2,R4			;get copy of CCB pointer for its return
+	BUFFER	RETSML			;return the buffer
+110$:	JMP	SPCERR			;join common spc error routine
+
+	GLOBAL	<NOBUFS,PRVIOL,INUSE,BADNAM,HNGDEV,XHDATA,MYADDR>	;009
+
+
+
+
+.SBTTL	ENAMUL	SPC$XH	Enable a multicast address on a portal
+
+;+
+;
+; This routine is called by both user and system jobs.  This function is
+; requested when a caller needs to update its PDB's multicast rcv list.
+;
+; MANIPULATION OF QMUL QUEUE IS DONE AT PR3.
+;
+; Flow is as follows:
+;	* Have system check XRB.
+;	* Get CCB, redo if NOBUFs.
+;	* Check XRB boundaries.
+;	* Make sure user's addresses are multicast.
+;	* Copy user's multicast adresses to portal.
+;	* Queue CCB, request multicast, dump job.
+;
+;	R2 =	-6
+;	R3 ->	XRB
+;	R4 ->	PDB
+;	R5 ->	mapped XRB
+;
+;	JMP	ENAMUL		(Dispatched from SPC$XH)
+;
+;	R0-R5	random
+;
+;	EXIT via SPCERR, IOREDO, or RTI3
+;	C=0 for success, C=1 for failure
+;
+;-
+	.ENABL	LSB
+
+ENAMUL:	MOVB	EPJBNO(R4),R1		;get job num * 2
+;
+; * Have system check XRB.
+;
+	TST	XRBC(R3)		;user wish to clear multicasts?	;005
+	BEQ	10$			;yes, so don't check xrb
+	BIT	#BIT0,R1		;system job?
+	BNE	10$			;yes, don't check the XRB
+	MOV	(R3),R0			;save XRLEN
+	MOV	XRBC(R3),(R3)		;set for CHKXRB
+.ASSUME	XRLEN EQ 0
+	CLC				;indicate .WRITE checking
+	CALLX	CHKXRB			;check XRB, if bad we don't return here
+	MOV	R0,(R3)			;restore XRLEN
+.ASSUME	XRLEN EQ 0
+;
+; * Get CCB, redo if NOBUFs.
+;
+10$:	MOV	R4,R0			;Save PDB pointer
+	CALL	GETCCB			;get a CCB, if none we don't return ;003
+	MOV	R1,R5			;save job num * 2		;005
+	MOV	R4,R2			;put CCB pointer in proper place
+	MOV	R0,R4			;restore PDB pointer
+;
+; * Check XRB boundaries.
+;
+	CLR	R0			;clear reg for future divide
+	TST	XRBC(R3) 		;user wish to clear multicasts?
+	BEQ	50$			;yes, do so immediately
+	CMP	#30.,XRBC(R3)		;Is count greater than max?
+	BLO	40$			;yes, bad count
+	MOV	XRBC(R3),R1		;get user's byte count
+	DIV	#6,R0			;div by 6 (must be multiple of 6)
+	TST	R1			;was there a remainder?
+	BEQ	50$			;no, count is good.
+40$:	MOV	#BADCNT,R0		;bad count error
+	MOV	R5,R1			;restore job num * 2
+	BR	100$			;give error (returning buffer, etc.)
+
+50$:	MOV	R5,R1			;restore job num * 2
+	TSTB	R0			;Clear or set addresses?	;014
+	BNE	52$			;Set addresses			;014
+	CLRB	EP.MCT(R4)		;Clear number of addr in PDB	;014
+        BR	85$			;And queue the CCB		;014
+;
+; * Make sure user's addresses are multicast.
+;
+52$:	MOV	XRLOC(R3),R5		;assume system job
+	BIT	#BIT0,R1		;system job?
+	BNE	55$			;yes, buffer already mapped
+	CALLX	SCRUMX			;map user's buffer
+55$:	PUSH	R5			;save pointer to user's buffer
+60$:	BIT	#BIT0,(R5)		;is this a multicast address?
+	BNE	70$			;yes, continue
+	POP	R5			;no, clean up the stack
+	MOV	#BADNAM,R0		;set badname error
+	BR	100$			;and return error
+
+70$:	ADD	#QADR$L,R5		;add offset to next mc address
+	SOB	R0,60$			;do for all user mc addresses
+	POP	R5			;then restore user buffer pointer
+;
+; * Copy user's multicast adresses to portal.
+;
+	SPLC	5			;;set prio up for mc list messing
+	MOV	XRBC(R3),R0		;;get valid number of bytes in mc buff
+	PUSH	R1			;;Save R1			;014
+	DIV	#6,R0			;;div by 6 (was a multiple of 6);014
+	POP	R1			;;Restore R1			;014	
+	MOVB	R0,EP.MCT(R4)		;;Save the count in PDB		;014
+	PUSH	R4			;;save the PDB pointer
+	ADD	#EP.CST,R4		;;make ptr to PDB's mc buff
+80$:	MOV	(R5)+,(R4)+		;;copy in the words
+	MOV	(R5)+,(R4)+		;; 2nd part			;014
+	MOV	(R4)+,(R4)+		;; 3rd part			;014
+	SOB	R0,80$			;;until all are copied
+	POP	R4			;;restore PDB pointer
+	SPLC	3			;;resume priority
+;
+; * Queue CCB, request multicast, dump job.
+;
+85$:	CALL	MPENT2			;map the Ethernet region	;003
+	MOV	EP.CDB(R4),R3		;get pointer to CDB
+	.BR	SPCSTL							;005
+
+SPCSTL:	MOVB	#QC$UMC,CC.FC(R2)	;store function code (user multicast)
+	MOV	R4,CC.DDB(R2)		;store circuit (PDB) pointer for posting
+	MOV	E.QMUL(R3),(R2)		;set link to next entry in queue
+.ASSUME	CC.LNK EQ 0
+	MOV	R2,E.QMUL(R3)		;set new head pointer
+	SETFUN	C$MUL			;request multicast list setup	;003
+	ASR	R1			;System or user job?
+	BCS	90$			;system job.
+	ASL	R1			;make job num * 2
+	MOV	#JFPOST,@JOBF		;signal posting required
+	CLR	JBSTAT(R1)		;make sure job is stalled
+	MOV	#JS.XH,JBWAIT(R1)	;show what we're waiting on
+	JMPX	DMPJOB			;save the calling user job
+
+90$:	CLC				;show success
+	RETURN				;and exit
+
+100$:	MOV	R2,R4			;get copy of CCB pointer for its return
+	BUFFER	RETSML			;return the buffer
+110$:	JMP	SPCERR			;join common error routine
+
+	GLOBAL	<NOBUFS,BADCNT,BADNAM,HNGDEV,XHDATA,JS.XH,JBSTAT,JBWAIT>
+
+
+
+
+.SBTTL	XFRLIN	SPC$XH	Transfer line (CDB) counters function
+
+;+
+;
+; Transfers CDB counters to caller's buffer.  Zero if XRBLK<>0 (and user job
+; has SWCTL).
+;
+; Flow is as follows,
+;	* Validate the XRB parameters.
+;	* Set the current date/time.
+;	* Move the counters to user's buffer.
+;	* Zero counters if requested.
+;	* Post I/O to user.
+;
+;	R2 =	-4
+;	R3 ->	XRB
+;	R4 ->	PDB
+;	R5 ->	mapped XRB
+;
+;	JMP	XFRLIN		(Dispatched from SPC$XH)
+;
+;	R0-R5	random
+;
+;	Counters transfered to passed buffer, and exit through IOEXIT (for
+;	user jobs).
+;	C=0 for success, C=1 for failure
+;
+;-
+	.ENABL	LSB
+
+XFRLIN:
+;
+; * Validate the XRB parameters.
+;
+	MOV	#E.CNT,R0		;Get count of counters
+	CALL	XFRXRB			;validate/SCRUMX the caller's XRB
+	BCS	70$			;exit if error (err in R0)
+;
+; * Set the current date/time in user's buffer.
+;
+10$:	MOV	R4,R1			;save the PDB pointer
+	MOV	R5,R4			;set buffer pointer for UPDZTM
+	CALLM	UPDZTM,GENAP5		;Give user current time
+	MOV	R1,R4			;restore PDB pointer
+;
+; * Move the counters to user's buffer.
+;
+	PUSH	R3			;save XRB pointer
+	ADD	#4,R5			;update buffer pointer past date/time
+	MOV	R0,R2			;Get copy of number of bytes to copy
+	SUB	#4,R2			;update num of bytes less date/time
+	MOV	@#XHDATA+XHDPA6,R0	;set mmu addr for 'from' stuff
+	MOV	EP.CDB(R4),R1		;get CDB pointer of PDB
+	ADD	#E.CNTS,R1		;offset to counters area
+	BIC	#170000,R1		;remove virtual addressing
+	BIS	#120000,R1		;set APR5 mapping
+	MOV	R5,R3			;set 'to' pointer
+	CALLX	MOVMEM			;R0=from mmu,R1->from,R2=Bcnt,R3->to
+	POP	R3			;retore XRB pointer
+;
+; * Zero counters if requested.
+;
+	TST	XRBLK(R3)		;Are we supposed to zero counters?
+	BEQ	40$			;no, don't worry about it
+	MOV	EPJBNO(R4),R0		;get job number
+	BITB	#BIT0,R0		;Is caller a system job?
+	BNE	20$			;yes, don't need to check privs
+	CALLX	CHKPRV,R4		;no, does user have SWCTL?
+	 .BPRIV	SWCTL				;<<trashes R5>>
+	BCC	20$			;user has SWCTL
+	MOV	#PRVIOL,R0		;return PRVIOL
+	BR	70$			;error exit
+
+20$:	CALL	MPENT2			; map the Ethernet region	;003
+	MOV	EP.CDB(R4),R2		;get PDB's CDB pointer
+	ADD	#E.CNTS,R2		;offset to start of counters
+	MOV	#<<E.CNTE-E.CNTS>/2>,R0	;get number of WORDS to clear
+30$:	CLR	(R2)+			;clear a cell
+	SOB	R0,30$			;for all cells in the counters
+	MOV	R3,R0			;save the XRB pointer
+	MOV	EP.CDB(R4),R3		;get CDB pointer again
+	CALL	CDBTIM			;update the date/time last zeroed
+	MOV	R0,R3			;restore XRB pointer
+;
+; * Post I/O to user.
+;
+40$:	TST	XRBC(R3)		;did user ask for partial counters?
+	BPL	50$			;no, no need to warn him
+	MOV	#MAGRLE,R0		;yes, warn him that he only got some
+	COM	XRBC(R3)		;make it a positive value
+	BR	70$			;give the error message
+
+50$:	JMP	SPCPST			;join spec posting common code
+
+70$:	MOV	EPJBNO(R4),R1		;put the job number in R1
+	JMP	SPCERR			;join common error routine.
+
+	GLOBAL	<PRVIOL,MAGRLE,XHDATA>
+
+
+
+
+.SBTTL	UPDCNT	SPC$XH	Initiate counter update (currently unsupported)
+
+;+
+;
+; This really doesn't do anything since the DEQNA doesn't keep track of its
+; own counters, but eventually the DELQA will.
+;
+;	R2 =	-2
+;	R3 ->	XRB
+;	R4 ->	PDB
+;	R5 ->	mapped XRB
+;
+;	JMP	UPDCNT		(Dispatched from SPC$XH)
+;
+;	Exit success (always) through IOEXIT or return (for sysjobs)
+;	C=0 for success, C=1 for failure
+;
+;-
+	.ENABL	LSB
+
+UPDCNT:	.BR	GETCIR			;does the same thing.
+
+
+
+
+
+.SBTTL	GETCIR	SPC$XH	Initiate get circuit counters (currently unsupported)
+
+;+
+;
+; This routine has no meaning on the DEQNA, but the DELQA will.
+;
+;	R2 =	0
+;	R3 ->	XRB
+;	R4 ->	PDB
+;	R5 ->	mapped XRB
+;
+;	JMP	GETCIR		(Dispatched from SPC$XH)
+;
+;	Exit via IOEXIT and return (for sysjobs)
+;	C=0 for success, C=1 for failure
+;
+;-
+	.ENABL	LSB
+
+GETCIR:	JMP	SPCPST			;join common posting code
+
+
+
+
+.SBTTL	XFRCIR	SPC$XH	Transfer circuit (PDB) counters function
+
+;+
+;
+; Transfers PDB counters to caller's buffer.  Zero if XRBLK<>0 (and user job
+; has SWCTL).
+;
+; Flow is as follows,
+;	* Validate the XRB parameters.
+;	* Set the current date/time.
+;	* Move the counters to user's buffer.
+;	* Zero counters if requested.
+;	* Post I/O to user.
+;
+;	R2 =	2
+;	R3 ->	XRB
+;	R4 ->	PDB
+;	R5 ->	mapped XRB
+;
+;	JMP	XFRCIR		(Dispatched from SPC$XH)
+;
+;	R0-R5	random
+;
+;	Counters transfered to passed buffer, and exit through IOEXIT (for
+;	user jobs).
+;	C=0 for success, C=1 for failure
+;
+;-
+	.ENABL	LSB
+
+XFRCIR:
+;
+; * Validate the XRB parameters.
+;
+	MOV	#EP.CNT,R0		;Get count of counters
+	CALL	XFRXRB			;validate/SCRUMX the caller's XRB
+	BCS	55$			;exit if error (err in R0)	;003
+;
+; * Set the current date/time in user's buffer.
+;
+10$:	MOV	R4,R1			;save the PDB pointer
+	MOV	R5,R4			;set buffer pointer for UPDZTM
+	CALLM	UPDZTM,GENAP5		;Update Z time.
+	MOV	R1,R4			;restore PDB pointer
+;
+; * Move the counters to user's buffer.
+;
+	ADD	#4,R5			;update buffer pointer past date/time
+	SUB	#4,R0			;update num of bytes less date/time
+	MOV	R4,R1			;get copy of PDB pointer
+	ADD	#EP.BCT,R1		;offset to counters area
+20$:	MOVB	(R1)+,(R5)+		;copy counter to caller's buffer
+	SOB	R0,20$			;for all requested words
+;
+; * Zero counters if requested.
+;
+	TST	XRBLK(R3)		;Are we supposed to zero counters?
+	BEQ	50$			;no, don't worry about it
+	MOV	EPJBNO(R4),R0		;get copy of job number
+	BITB	#BIT0,R0		;Is caller a system job?
+	BNE	30$			;yes, don't need to check privs
+	CALLX	CHKPRV,R4		;no, does user have SWCTL?
+	 .BPRIV	SWCTL				;<<trashes R5>>
+	BCC	30$			;user has SWCTL
+	MOV	#PRVIOL,R0		;return PRVIOL
+	BR	55$			;error exit			;003
+
+30$:	MOV	#<<EP.ECT-EP.BCT>/2>,R0	;get number of WORDS to clear
+	MOV	R4,R2			;get copy of PDB pointer
+	ADD	#EP.BCT,R2		;Make pointer to start of Counters area
+	MOV	R2,R1			;get pointer to start of counters
+40$:	CLR	(R1)+			;clear a cell
+	SOB	R0,40$			;for all cells in the counters
+	CALL	PDBTIM			;update the date/time last zeroed
+;
+; * Post I/O to user.
+;
+50$:	TST	XRBC(R3)		;did user ask for partial counters?
+	BPL	60$			;no, no need to warn him
+	MOV	#MAGRLE,R0		;yes, warn him that he only got some
+	COM	XRBC(R3)		;make it a positive value
+55$:	MOV	EPJBNO(R4),R1		;put job number in R1		;003
+	JMP	SPCERR			;join common error routine.	;003
+
+
+
+
+;									;003
+; * Post I/O to user testing for system job				;003
+;									;003
+SPCPST:
+60$:	BITB	#BIT0,EPJBNO(R4)	;Is caller a system job?
+	BNE	70$			;yes, do system return
+	BIS	#JFPOST,@JOBF		;post the I/O to user
+	JMPX	IOEXIT			;and away we go
+
+;									;003
+; * Set success and return to system job				;003
+;									;003
+BUFQT$:
+70$:	CLC				;show success
+	RETURN				;back to system job
+
+	GLOBAL	<PRVIOL,MAGRLE,XHDATA>
+
+
+
+
+.SBTTL	BUFQTA	SPC$XH	Set buffer quota (has no meaning)
+
+;+
+;
+; Nobody uses this anymore.
+;
+;	R2 =	4
+;	R3 ->	XRB
+;	R4 ->	PDB
+;	R5 ->	mapped XRB
+;
+;	JMP	BUFQTA		(dispatched from SPC$XH)
+;
+;	Simply returns
+;	C=0 for success, C=1 for failure
+;
+;-
+	.ENABL	LSB
+
+BUFQTA = BUFQT$
+
+
+
+
+.SBTTL	XFRXRB	SPC$XH	Validate/SCRUMX counters XRB
+
+;+
+;
+; Utility routine used by both XFRLIN and XFRCIR to validate the XRB and map
+; the caller's buffer (SCRUMX).
+;
+;	R0 =	Number of bytes in the counters.
+;	R3 ->	XRB
+; 	R4 ->	PDB
+;
+;	JMP	XFRXRB		(dispatched from SPC$XH)
+;
+;	R0 =	Number of bytes to transfer to caller's buffer, the complement
+;		of the number of bytes to transfer (when user's buffer is too
+;		small), or error num.
+;	R5 ->	Caller's buffer, on success
+;	C=0	no error encountered
+;	C=1	error encountered
+;
+;-
+	.ENABL	LSB
+
+XFRXRB:	MOV	XRLOC(R3),R5		;assume system job
+	BIT	#BIT0,EPJBNO(R4)	;System job?
+	BNE	35$			;yes, no check or mapping
+	MOV	XRBC(R3),R5		;save XRBC
+	MOV	R5,(R3)			;make XRLEN valid
+.ASSUME	XRLEN EQ 0
+	CLR	XRBC(R3)		;clear for CHKXRB
+	SEC				;indicate .READ checking
+	CALLX	CHKXRB			;can we do what we're doing?
+	MOV	R5,XRBC(R3)		;restore XRBC
+10$:	BIT	#BIT0,XRLOC(R3)		;Odd address?
+	BEQ	20$			;yes, give BADCNT
+	MOV	#BADCNT,R0		;put error in handy register
+	BR	40$			;and exit
+
+20$:	CMP	R0,XRBC(R3)		;Enough room in User's buff?
+	BLOS	30$			;yes, good
+	CLR	XRBLK(R3)		;no, don't let cntrs be zeroed
+	MOV	XRBC(R3),R0		;get the number requested
+	COM	R0			;indicate the overflow flag
+30$:	MOV	R0,XRBC(R3)		;set byte count of counters
+	CALLX	SCRUMX			;map the user's buffer
+	TST	R0			;asking for partial counters?	;003
+	BPL	35$			;no, so continue		;003
+	COM	R0			;yes, change count back to plus	;003
+35$:	TST	(PC)+			;show success
+40$:	SEC				;show failure
+	RETURN
+
+	GLOBAL	<BADCNT>
+
+
+
+
+.SBTTL	SLP$XH	Sleep checking entry point
+
+;+
+;
+; "Sleep" checking entry point.  Will only signal that a job should be waken
+; up if there is something in the queue.
+;
+;	R1 ->	PDB (must add PDBOFF to get correct offset)
+;
+;	CALL	SLP$XH
+;
+;	C=0 nothing needed
+;	C=1 job has data ready
+;
+;-
+	.ENABL	LSB
+
+	TMPORG	SLPTBL,12
+	 .WORD	SLP$XH
+	UNORG
+
+SLP$XH:
+	CMP	#0,EP.RCV+PDBOFF(R1)	;return C set if queue <> 0
+	RETURN
+
+
+
+
+.SBTTL	TMO$XH	Time out entry point (Once per second code)
+
+;+
+;
+; Decrements timers (once per second when controllers are active) and requests
+; processing when (or if) the timer reaches zero.
+;
+; There are currently two types timers.  There is a timer for the sending of
+; the system ID message which exists in the XHDCTL region, and there is a
+; general timeout timer which exists in each CDB.
+;
+; When the system ID timer expires, the fail count is zeroed in the CDB
+; (We allow a controller to have MAX.TO time outs every 8-12 minutes).
+;
+; If E.TMR expires, "SW Init" processing is requested.
+;
+;	CALL	TMO$XH
+;
+;	Timers updated, L3 service routines requested if necessary.
+;
+;	R3 trashed
+;
+;-
+	.ENABL	LSB
+
+	TMPORG	TMOTBL,12
+	 .WORD	TMO$XH
+	UNORG
+
+TMO$XH:
+	CALL	MPENET			;Map the Ethernet region	;002
+;
+; * Decrement SYSTEM ID counter
+;
+20$:	DEC	@#XHDATA+XHTIME		;;Tick
+	BNE	50$			;;skip sysid if more time	;002
+	CALL	NXTID			;;define new sysid timer clock
+30$:	MOV	@#XHDATA+XHACT,R3	;;get first active CDB
+	BIS	#EF$SIS,E.STS(R3)	;;declare a system wide ID
+	SETFUN	C$SID			;;Request SYSID message processing ;003
+40$:	CLR	E.FALC(R3)		;;Clear out fail count
+	MOV	E.LNK(R3),R3		;;get pointer to next active CDB
+	BNE	40$			;;clear out its fail count
+;
+; * Decrement transmit timeout counter
+;
+50$:	MOV	@#XHDATA+XHACT,R3	;;get first active CDB
+60$:	TST	E.TMR(R3)		;;Xmt timer active?
+	BEQ	70$			;;no, skip
+	DEC	E.TMR(R3)		;;Tick
+	BNE	70$			;;continue if there is time left
+	SETFUN	C$SWI			;;request "SW Init" function	;003
+70$:	MOV	E.LNK(R3),R3		;;get pointer to next "Running" CDB
+	BNE	60$			;;try next
+80$:	MAP	POP,APR=6,DATA		;;restore old DPAR6 value
+	RETURN				;; done
+
+	GLOBAL	<XHDATA,TIM.XH>
+
+
+
+
+.SBTTL	NXTID	TMO$XH	Compute the time to the next sys ID message
+
+;+
+;
+; Determine the time (in seconds) to wait to send the next system ID message.
+; As specified in the DNA Ethernet Node Product Architecture Specification, a
+; sysid message should be sent out every 8-12 minutes.
+;
+; Since this driver keeps track of time in seconds, a random number of seconds
+; between 480-720 is calculated for this time (this is done by calculating a
+; number between 0-240 and adding it to 480).
+;
+;	The random number formula used for this routine is:
+;
+;		New number  = (69069 * Last number) mod 2^32
+;
+;	This equation follows the general form of,
+;
+;		 Xn+1 = (aXn + C) mod m, with C = 0,
+;
+; which is discussed in Knuth, The Art of Computer Programming, Volume 2,
+; chapter 3, section 2. The multiplier of 69069 as well as the mod value is
+; taken from chapter 3, section 3, sub-section 4 (The Spectral Test) of
+; Volume 2 of Knuth.
+;
+; The random number derived by the equations above could be a 64 bit value. To
+; perform the mod operation, we use the lower 32 bits. We convert the value to
+; a number between 0-240 by multiplying the seed by 241. After that number is
+; found, the result is added to 480 and stored in the XHDCTL region as the
+; number of seconds to wait to send out the next system ID message.
+;
+;	Runs at PR5..
+;
+;	XHDATA+XHSEED =	The last 32 bit random number generated
+;
+;	CALL	NXTID
+;
+;	New time placed in XHDATA+XHTIME
+;
+;	R0-R3	random
+;
+;-
+	.ENABL	LSB
+
+NXTID:				;;To perform a multiplication by 69069, we
+				;;multiply by 3533 first then by 65536 (easier).
+
+	MOV	@#XHDATA+XHSEED+2,R0 ;;Load high order of last random number
+	MUL	#3533.,R0	;;Multiply high order by 3533.  This gives us
+				;;a possible 32 bit value of which we're only
+				;;interested in the low order word since the
+				;;high order goes into the 32:47 bit range.
+
+	MOV	@#XHDATA+XHSEED,R2 ;;Load low order of last random number
+	MUL	#3533.,R2	;;Multiply the low order by 3533.
+	BPL	10$		;;Branch around if there is no carry
+	ADD	#3533.,R2	;;Adjust high word for carry (to make unsigned)
+
+10$:	ADD	R1,R2		;;Add low order of high order multiplication to
+				;;high order of low order mulitplication, giving
+				;;the final result of 3533 * Last random number.
+
+	ADD	@#XHDATA+XHSEED,R2 ;;Add low order of last random number to high
+				;;order of 3533 * last random number, giving
+				;;multiplication of 65536.
+
+	MOV	R2,@#XHDATA+XHSEED+2	;;Store new high order random number
+	MOV	R3,@#XHDATA+XHSEED	;;Store new low order random number
+
+	MUL	#241.,R2	;;convert seed to number between 0-240
+	BPL	20$		;;no sign trouble to worry about
+	ADD	#241.,R2	;;correct for unsigned multiply
+20$:	ADD	#480.,R2	;;Add 8 minutes worth of seconds
+	MOV	R2,@#XHDATA+XHTIME	;;Store the result in XHDCTL
+	RETURN
+
+	GLOBAL	<XHDATA>
+
+
+
+
+.SBTTL	CON$XH	Level 3 queue entry point
+
+;+
+;
+; CON$ processing is a level 3 process to do meanial tasks such as sending
+; system ID, timeout processing, etc.
+;
+; The routines are dispatched to by setting bits in the dispatch flag word in
+; the CDB (via SETFUN macro).  All level three processing is done until the
+; XHCONQ queue is empty.
+;
+;	APR6 is scratch at level 3 queue
+;
+;	XHCONQ contains a queue of CDB's awaiting service of some sort.
+;
+;	CALL	CON$XH
+;
+;	R0-R5	random
+;
+;	Exit through RTI3
+;
+;-
+	.ENABL	LSB
+
+	L3QENT	QXHCON,,XHDAP5
+
+CON$XH:
+	CALL	MPENT2			;map ethernet region		;003
+10$:	MOV	@#XHCONQ,R3		;Get pointer to first item in queue
+	BNE	20$			;continue if there is something to do
+	JMPX	RTI3			;otherwise this routine is done
+
+20$:	SPLC	5			;;zap priority so noone can scrap queue
+	MOV	@#XHCONQ,R3		;;Get pointer again, just incase
+	MOV	(R3),@#XHCONQ		;;fix the first link word
+	CLR	(R3)			;;clear the link in the unlinked CDB
+	BIC	#$$QUED,E.DSP(R3)	;;show that CDB is no longer queued.
+	SPLC	3			;;zap priority down to 3 again
+	TST	-(R3)			;Any functions to do?
+.ASSUME	E.DSP EQ E.QLNK-2		;assure that DSP is where it should be
+	BEQ	10$			;No, try next one
+	MOV	#DSP$MX,R0		;set max number of functions
+	MOV	#DSP$ST,R1		;set pointer to start of dispatch table
+	MOV	#1,R2			;set starting bit mask
+30$:	BIT	R2,(R3)			;Is this bit set?
+	BNE	50$			;Yes, do the function
+	TST	(R1)+			;set to next function address
+	ASL	R2			;set to next bit
+40$:	SOB	R0,30$			;do loop for all entries in word
+	BR	10$			;go on to next when this one's finished
+
+50$:	BIC	R2,(R3)+		;clear the bit in the dispatch word ;002
+	REGSAV				;save registers			;002
+	CALL	@(R1)+			;dispatch to the corresponding routine
+	REGRES				;restore registers
+	TST	-(R3)			;any functions left to do?	;002
+	BEQ	10$			;no, on to the next one
+	BR	40$			;do the remaining function(s)
+
+	GLOBAL	<XHCONQ,XHDATA,XHDAP5>
+
+
+
+
+.SBTTL	DISABL	CON$XH	Disable controller on the fly
+
+;+
+;
+; This function is requested when there has been an unexplained non-existent
+; memory interrupt, a UU.CFG request to disable, excessive transmit timeouts,
+; and failure to come on-line properly.
+;
+; When disabled in this fashion, a system manager will always be able to
+; attempt to restart the device.
+;
+; The steps executed are as follows,
+;	* Ensure the device won't interrupt us anymore.
+;	* Change state to "Disabled".
+;	* Put unresolved messages from ring queue onto pending queue.
+;	* Clear ring entries.
+;	* Return errors for pending transmits.
+;	* Return Internal buffers.
+;	* Remove CDB from active list.
+;	* Cancell any remaining L3 functions requested for controller.
+;
+;	Ethernet region mapped
+;
+;	R3 ->	CDB
+;
+;	CALL	DISABL
+;
+;	R0-R2	random
+;	R4-R5	random
+;
+;	State changed, device no longer functioning
+;
+;-
+	.ENABL	LSB
+
+DISABL:
+;
+; * Ensure the device won't interrupt us anymore.
+;
+	MOVB	E.UNT(R3),R1		;get unit number * 2
+	MOV	#QNA$SR,@CSR.XH(R1)	;perform "Software Reset"
+;
+; * Change state to "Disabled".
+;
+	MOV	#E$DIS,E.STAT(R3)	;Good bye night life
+	MOV	DEV.XH(R1),R0		;get pointer to RSTS DDB
+	MOVB	#3.,DDJBNO(R0)		;Good bye America
+;
+; * Put unresolved messages from ring queue onto pending queue.
+;
+					;<<May already be done.>>
+	SPLC	5
+	CALL	SAVRNG			;;save the rings
+;
+; * Clear ring entries.
+;
+	CALL	RESRNG			;;reset the rings
+;
+; * Return errors for pending transmits.
+;
+10$:	MOV	E.XPB(R3),R0		;;get first (part of) message
+	BEQ	50$			;;None, we're done
+	MOV	(R0),E.XPB(R3)		;;Dequeue out of pending queue
+	BISB	#DF.ERR,CC.DFL(R0)	;;Indicate error (caller gets HNGDEV)
+	CLR	(R0)			;;clear link word
+.ASSUME	CC.LNK EQ 0
+	MOV	R0,R4			;;R0 -> chain, R4 -> current
+	MOV	#1,R2			;;initialize buff count to 1
+	BR	30$			;;join common
+
+20$:	MOV	E.XPB(R3),(R4)		;;link in next to previous
+	BEQ	110$			;;SW error, crash		;003
+	MOV	(R4),R4			;;make current pointer current	;007
+	MOV	(R4),E.XPB(R3)		;;Dequeue out of pending queue	;007
+	CLR	(R4)			;;clear current's link
+	INC	R2			;;count another buffer in message
+30$:	BITB	#DF.CNT,CC.DFL(R4)	;;is this the end of the message?
+	BNE	20$			;;no, get the next component
+40$:	CALLX	REGSAV,R5
+	CALL	XMTPST			;;post error to requestor
+	CALLX	REGRES,R5
+	BR	10$			;;do the next message on queue
+
+50$:	MOV	R3,E.XPBT(R3)		;;Update the tail pointer
+	ADD	#E.XPB,E.XPBT(R3)	;;  to point to the head
+;
+; * Return Internal buffers.
+;
+	MOV	R3,R4			;;get copy of CDB pointer
+	ADD	#E.MOPB,R4		;;make pointer to # of mop buffers
+	CALL	RETB$			;;return the mop buffers
+	INC	R4			;;make pointer to # of extra buffers
+.ASSUME	E.XTRB EQ E.MOPB+1
+	CALL	RETB$			;;return the internal buffers
+;
+; * Remove CDB from active list.
+;
+	MOV	#XHDATA+XHACT,R5	;;make pointer to first pointer
+60$:	CMP	R3,(R5)			;;does this pointer point to our CDB?
+	BEQ	70$			;;yes, unlink it
+	MOV	(R5),R5			;;get pointer to next CDB.
+	ADD	#E.LNK,R5		;;make pinter to next pointer.
+	TST	(R5)			;;is there a pointer?
+	BNE	60$			;;yes, check it
+	BR	80$			;;no, we really don't care, but ?????
+
+70$:	MOV	E.LNK(R3),(R5)		;;make previous point to next
+;
+; * Cancell any remaining L3 functions requested for controller.
+;
+80$:	CLR	@#TIM.XH		;;clear out timer
+	CLR	R4			;;clear for errlog. No PDB
+	CLR	R5			;;clear for errlog. No CCB
+	LOG$XH				;;log an error
+	CLRFUN	ALL,R3			;;clear away
+	TSTB	@#XHDATA+XHINIT		;;any controllers still being inited?
+	BEQ	100$			;;no, good than this isn't a bad sign
+	CALL	@EVTSAV			;;high prio event logging
+	BCC	90$			;;if no DECnet
+	CALLM	NIEINI,EVLAP5		;;log event failed event
+	CALL	@(SP)+			;;reset event logger
+90$:	DECB	@#XHDATA+XHINIT		;; count one less initing controller
+	BNE	100$			;; continue if there are more left
+	L3QSET	QFIP			;; Request FIP to unstall the system
+100$:	SPLC	3			; put priority back down
+	RETURN
+
+110$:	CRASH				;crash if queues get messed up	;003
+
+	GLOBAL	<CSR.XH,DEV.XH,TIM.XH,XHDATA,EVTSAV,LOG$XH>
+
+
+
+
+.SBTTL	RETB$	CON$XH	Return buffers to system
+
+;+
+;
+; This function returns internal buffers to the system.
+;
+;	Ethernet region mapped
+;
+;	R3 ->	CDB
+;	R4 ->	# of buffs to return
+;
+;	CALL	RETB$
+;
+;	R3 ->	CDB
+;	R5 =	random
+;
+;-
+	.ENABL	LSB
+
+RETB$:	TSTB	(R4)			;;mop/internal buffers gone?
+	BEQ	40$			;;yes, no need to do anything	;003
+10$:	MOV	E.RFRE(R3),R5		;;get first buffer in free list	;003
+	BEQ	50$			;;SW bug, crash			;003
+	MOV	(R5),E.RFRE(R3)		;;de-link it out of the queue
+	BNE	20$			;;continue if more buffers	;003
+	MOV	R3,E.RFRT(R3)		;;otherwise, make the tail
+	ADD	#E.RFRE,E.RFRT(R3)	;;   point to the head
+20$:	CLR	(R5)			;;clear link word		;003
+.ASSUME	CC.LNK EQ 0
+	CALL	DALOBF			;;deallocate the mop buffer
+	DECB	(R4)			;;show one less in store
+	BNE	10$			;;try to return another		;003
+40$:	RETURN								;003
+
+50$:	CRASH				;;crash if queues messed up	;003
+
+
+
+
+.SBTTL	SWINIT	CON$XH	"SW Init" processing (on the fly initialization)
+
+;+
+;
+; This function will be executed once at system startup, and any time after
+; that (during normal "Running") a recoverable error is encountered.  It is
+; responsible for executing the functional readiness commands to the device
+; for the start of normal ("Running") operation.
+;
+; The flow of command for this function depends on the entering state of the
+; CDB.  The following is a summary of the functions.
+;
+; "SW Oneshot"	- means that this is system startup time, or that the
+;		  controller has just been re-enabled.
+;		- Allocate minimum internal buffers.
+;			- if unable to get the buffers, return all of them
+;			  and disable the controller.
+;		- Link CDB into active CDB list.
+;		- Set Once a second timer (TIM.XH).
+;		- Join "Running" and "SW Oneshot" common code.
+;
+; "Running"	- means that the driver has detected a hardware error and
+;		  this is an attempt to recover.  Currrently this will get
+;		  called due to a transmit taking too long.
+;		- Log error.
+;		- Save any requests on the ring queue back to the pending
+;		  queue.
+;		- If SYSID message active on controller.
+;			- Find message on the pending queue.
+;			- If system wide, pass it to next controller.
+;			- If individual, return the CCB.
+;		- Disable device if it has been timing out too often.
+;		- Clear the rings.
+;		- Inc failure count.
+;		- Join "Running" and "SW Oneshot" commonn code.
+;
+; "Running" and "SW Oneshot" common code - common routines to both.
+;		- Make state transition to "SW Init".
+;		- Set E.TMR to 2.
+;		- Set QNA$SR (software reset) into the CSR.
+;		- Return to dispatch routine.
+;
+; "SW Init"	- this will invoke the second part of the init.  It comes
+;		  back here after waiting two seconds for the SW reset to
+;		  take effect.
+;		- Verify software reset worked.
+;		- Request MULCST list set up (leave CDB in "SW Init" state).
+;		- Return to dispatch routine.
+;
+;	Ethernet region mapped
+;
+;	R3 ->	CDB
+;
+;	CALL	SWINIT
+;
+;	R0-R5	random
+;
+;	Controller initialized and ready for running again
+;
+;-
+	.ENABL	LSB
+
+SWITBL:	.WORD	SWRUN$	;state "Running"       E$RUN  - Hardware questionable
+	.WORD	10$	;state "Disabled"      E$DIS  - Should never happen
+	.WORD	SWONE$	;state "SW Oneshot"    E$ONE  - Controller startup
+	.WORD	SWINI$	;state "SW Init"       E$INI  - Part II of "SW Init"
+
+SWINIT:	MOV	E.STAT(R3),R0		;get state number we're in
+	BIT	#<^C<E$RUN!E$DIS!E$ONE!E$INI>!BIT0>,R0 ;check for bad state ;002
+	BNE	10$			;go crash if unknown state	;002
+	JMP	@SWITBL(R0)		;perform required functions
+
+10$:	CRASH				;crash.  should never happen	;002
+
+;
+; * "SW Oneshot" entry point.  Controller startup.
+;
+SWONE$:
+;
+; - Allocate minimum Internal buffers.
+;
+;	There are two counters for internal buffers. E.MOPB for mop buffers,
+;	and E.XTRB for extra receive buffers.  The extra buffers are for keeping
+;	a continious supply of buffers not associated with anyone on the ring
+;	(to handle over quota situations and runt blasts).
+;
+	CLR	E.IBF(R3)		;Clear out record of internal buffers
+	MOV	#<XTR.BF+MOP.BF>,R1	;get num of internal buffs to get
+	CALL	ALOBUF			;try to get buffers
+	BCC	20$			;continue if successful
+	SETFUN	C$DIS			;Disable the controller		;003
+	RETURN				;and go back to dispatch routine
+
+20$:	MOV	#<<XTR.BF*400>!MOP.BF>,E.IBF(R3) ;record allocated buffers
+
+;
+; - Link CDB into active CDB list
+;
+	MOV	@#XHDATA+XHACT,E.LNK(R3) ;link CDB into active list
+	MOV	R3,@#XHDATA+XHACT	;update pointer to active CDB list
+;
+; - Set once a second timer
+;
+	MOV	#-1,@#TIM.XH		;set our once a second timer
+;
+; - Make CDB transition into "SW Init", Set Software Reset, exit SWINT
+;
+	MOV	#E$INI,E.STAT(R3)	;set the new state
+	MOV	#2,E.TMR(R3)		;sleep controller for two seconds
+	MOVB	E.UNT(R3),R0		;get unit number of controller
+	MOV	#QNA$SR,@CSR.XH(R0)	;set software reset
+	RETURN				;and that's it for part I of "SW Init"
+					;We should come back in two seconds with
+					;the SW reset command completely done.
+
+;
+; * "Running" entry point.  Hardware Problem.
+;
+SWRUN$:
+;
+; - Log error.
+;
+	SPLC	5			;;set operating prio
+	CLR	R4			;;no PDB
+	CLR	R5			;;no CCB
+	LOG$XH				;;log the error <CHECK CSR IN ERRLOG> ;002
+	MOVB	E.UNT(R3),R0		;;get unit number of controller
+	MOV	#QNA$SR,@CSR.XH(R0)	;;set software reset
+;
+; - Save any requests on the ring queue onto the pending queue.
+;
+	CALL	SAVRNG			;;save the rings
+;
+; - If SYSID message active on controller.
+;
+	BIT	#<EF$SIS!EF$SID>,E.STS(R3) ;;This controller doing a sysid?
+	BEQ	80$			;;no, carry on
+;
+; - Find message on the pending queue.
+;
+	MOV	#E.XPB,R1		;;make a pointer to head of pending queue
+	ADD	R3,R1			;;  by adding offset to CDB addr
+	MOV	E.XPB(R3),R0		;;Get pointer to first CCB on queue
+	BEQ	80$			;;none there? something's wrong
+30$:	CMPB	#QC$SID,CC.FC(R0)	;;Is this an individual SYSID CCB?
+	BEQ	40$			;;yes, we have it
+	CMPB	#QC$SIS,CC.FC(R0)	;;Is this a system wide SYSID CCB?
+	BEQ	40$			;;yes, we have it
+	MOV	R0,R1			;;make previous pointer current
+	MOV	(R0),R0			;;make current pointer next
+.ASSUME	CC.LNK EQ 0
+	BNE	30$			;;If we're not done looking
+	BR	80$			;;otherwise, again, something's wrong
+
+40$:	MOV	(R0),(R1)		;;Unlink the SYSID CCB
+.ASSUME	CC.LNK EQ 0
+	BNE	50$			;;If tail adjustment not needed
+	MOV	R1,E.XPBT(R3)		;;adjust the tail
+;
+; - If system wide, pass it to next controller.
+; - If individual, return the CCB.
+;
+50$:	CLR	(R0)			;;ensure link doesn't exist
+.ASSUME	CC.LNK EQ 0
+	BIT	#EF$SIS,E.STS(R3)	;;Was cntrlr doing a sytem wide sysid?
+	BEQ	60$			;;no, get rid of the message
+	CALL	PASTOK			;;Pass ID token to next (requires R0)
+	BCC	75$			;;if there is another controller pass it ;002
+	BIC	#XH$SID,@#XHDATA+XHINIT	;;clear out flag if done
+60$:	MOV	R0,R4			;;get copy of CCB pointer for return
+	BUFFER	RETSML			;;return the CCB
+	BIC	#EF$SID,E.STS(R3)	;;cleared for individual SYSID.
+	BR	75$			;;go check for CCB's		;002
+
+70$:	MOV	E.QSID(R3),R4		;;unlink the CCB
+	MOV	(R4),E.QSID(R3)		;; updating the queue head
+	BUFFER	RETSML			;;return it
+75$:	TST	E.QSID(R3)		;;any other sysid CCB's waitn on cntrlr? ;002
+	BNE	70$			;;no, goto next section		;002
+;
+; - Disable device if it has been timing out too much.
+;
+80$:	CMP	#MAX.TO,E.FALC(R3)	;;has this controller timed out too much?
+	BLOS	90$			;;yes, disable it
+	INC	E.FALC(R3)		;;increment the number of failures
+;
+; - Clear the rings.
+;
+	CALL	RESRNG			;;reset the rings
+
+;*
+;* The following code is put in to fastly handle the QNA hangs.  It depends
+;* on the SR bit not affecting the target address list (which the QNA does
+;* not touch after a SR).
+;*
+
+	MOVB	E.UNT(R3),R0		;;get unit number for controller
+	MOV	CSR.XH(R0),R0		;;get pointer to CSR
+	CLR	(R0)			;;clear out software reset
+	MOV	#<QNA$IL!QNA$IE>,(R0)	;;allow interrupts again
+	PUSH	R0			;;save CSR
+	CALL	LOADRR			;;reload the receive rings
+	CALL	LOADXR			;;reload the transmit rings
+	POP	R0			;;restore the CSR pointer
+	MOV	(R0),R1			;;get copy of current CSR
+	BIC	#<QNA$XI!QNA$RI>,R1	;;don't mess with interrupts
+	BIS	#QNA$RE,R1		;;enable the receiver
+	MOV	R1,(R0)			;;write it out to the CSR
+	SPLC	3
+	RETURN				;and carry on
+
+;
+; * Part II of "SW Init".
+;
+SWINI$:
+;
+; - Verify Software Reset command really worked, request multicast list setup.
+;
+	MOVB	E.UNT(R3),R0		;get unit number of controller
+	MOV	@CSR.XH(R0),R0		;get the csr
+	BIC	#<QNA$SR!BIT11!BIT14>,R0   ;clear out the reserved bits
+	CMP	#<QNA$OK!QNA$XL!QNA$RL>,R0 ;is controller in expected state?
+	BEQ	100$			;yep, device is in initial state
+90$:	SPLC	3			;resume to normal priority
+	SETFUN	C$DIS			;no, disable the device		;003
+	RETURN
+
+100$:	BIS	#EF$SMC,E.STS(R3)	;tell MULCST that this is the system.
+	SETFUN	C$MUL			;request multicast address list setup ;003
+	RETURN
+
+	GLOBAL	<XHDATA,TIM.XH,CSR.XH>
+
+
+
+
+.SBTTL	MULCST	CON$XH	Set up target list for controller
+
+;+
+;
+; This routine loads the broadcast, physical, and any multicast address
+; existing for the given channel.  If too many multicast addresses exist for
+; the QNA controller to handle, the broadcast and physical address is set as
+; well as the receive all multicast command.
+;
+; CDB's state transition to "Running" takes place in rcv interrupt processing
+; when the interrupt from the transmission of this target list is accepted
+; (RE is also enabled at rcv interrupt processing).
+;
+; The command flow is as follows:
+;	* Clear multicast work buffer.
+;	* Load broadcast address.
+;	* Load physical address.
+;	* Load multicast addresses from MOP list.
+;	* Load multicast addresses from PDB's.
+;		- Set "recieve all multicast" flag in CDB if exceeding (total)
+;		  14 addresses.
+;	* Pad the rest of the buffer with physical address.
+;
+;	* If System multicast is requested.
+;		- Get CCB for SETUP message. (Put on mulcst queue)
+;			- If NOBUFS, wait two ticks and come back
+;
+;	* If state is "SW Init", set interrupt vector, clear SR, set IL and IE
+;
+;	* Calculate physical address of multicast buffer.
+;	* For all CCB's on the mulcst queue.
+;		- Store physical address of multicast buffer in CCB.
+;		- Place on pending transmit queue.
+;
+;	* Set status flag "Multicast".
+;	* Load xmt rings, load rcv rings.
+;
+;	Ethernet region mapped
+;
+;	R3 -> CDB
+;	If response to .SPEC call, CCB will be in E.QMUL(R3)
+;
+;	CALL	MULCST
+;
+;	R0-R2	random
+;	R4-R5	random
+;
+;	Multicast list is queued for transmit
+;
+;-
+	.ENABL	LSB
+
+MULCST:	BIC	#<EF$RAM!EF$MUL>,E.STS(R3) ;Clear multicast related bits in CDB.
+;
+; * Clear Multicast buffer.
+;
+	CLR	R0			;Get handy zero register
+	MOV	E.MULC(R3),R1		;get starting address of buffer
+	MOV	#<MUL$LN/2>,R2		;  and the length in words
+10$:	MOV	R0,(R1)+		;clear word (MOV quicker than CLR)
+	SOB	R2,10$			;for all words in the buffer
+;
+; * Load Broadcast address
+;
+	MOV	#1,R0			;Set current slot number
+	ADD	E.MULC(R3),R0		;Make pointer to mulcst work buffer
+	MOV	#QADR$L,R1		;Set length of Ethernet address
+20$:	MOVB	#-1,(R0)		;Load the broadcast address (all 1s)
+	ADD	#10,R0			;set pointer to next cell in work buff
+	SOB	R1,20$			;do for all bytes.
+;
+; * Load Physical address
+;
+	MOV	#1,R0			;Set last used slot number
+	MOV	R3,R1			;get copy of CDB pointer
+	ADD	#E.PHYS,R1		;make it point to physical address
+	CALL	SETMUL			;set the multicast address
+;
+; * Load multicast address from MOP list
+;
+	MOV	#MOPLST,R1		;Get list of mop multicast addresses
+	MOV	#MOPNUM,R2		;Get number of mop multicast addresses
+30$:	CALL	SETMUL			;Set in the multicast address
+	SOB	R2,30$			;Do for all MOP mulitcast addresses
+.ASSUME MOPNUM LT 12			;assume that SETMUL will never fail
+;
+; * Load user multicast addresses
+;
+	MOV	E.PRTL(R3),R4		;get pointer to PDB lists
+40$:	MOV	R4,R1			;get copy of PDB pointer
+	BEQ	80$			;exit if done
+	MOVB	EP.MCT(R4),R2		;get number of user multicast addresses
+	BEQ	60$			;if none, do the next PDB
+	ADD	#EP.CST,R1		;make pointer multicast buffer
+50$:	CALL	SETMUL			;set the multicast address
+	BCS	70$			;if max multicast addresses hit
+	ADD	#QADR$L,R1		;offset to next address in list
+	SOB	R2,50$			;do for all multicast addresses
+60$:	MOV	(R4),R4			;get next PDB
+.ASSUME	EP.LNK EQ 0			;make sure link is where it should be
+	BR	40$			;and process it
+
+70$:	MOV	#2,R0			;set last slot used as being phys addr
+					;when we run out of multcast addr ;002
+	BIS	#EF$RAM,E.STS(R3)	;Set "Receive all multicasts" for CDB
+;
+; * Pad the MULCST buffer with physical address
+;
+80$:	MOV	R3,R1			;get copy of CDB address
+	ADD	#E.PHYS,R1		;make it point to the physical address
+85$:	CALL	UCSTML			;pad mulcst buffer with phys addr ;002
+	BCC	85$			;until it is full		;002
+;
+; * If System initialization multicast is requested.
+;
+; - Get CCB for SETUP message to set target list.
+;
+	BIT	#EF$SMC,E.STS(R3)	;system multicast requested?
+	BEQ	100$			;no, we must have a CCB.
+	BUFFER	GETSML,,20.		;get our small buffer for a CCB
+	BVC	90$			;if we got it
+	SETFUN	C$MUL,WAIT2T		;;request ourselves back	;003
+	JMPX	RTI3			;basically, stall dvr for 2 ticks
+
+90$:	BIC	#EF$SMC,E.STS(R3)	;show we honored system request
+	SPLC	5
+	MOV	E.QMUL(R3),(R4)		;;link new CCB into mulcst queue
+.ASSUME	CC.LNK EQ 0			;;assume link is truely at offset 0
+	MOV	R4,E.QMUL(R3)		;;update queue pointer
+	MOVB	#QC$SMC,CC.FC(R4)	;;say CCB is System multicast command
+	SPLC	3
+;
+; * If state is "SW Init", set interrupt vector, clear SR, set IL and IE.
+;
+100$: 	CMP	E.STAT(R3),#E$INI	;are we in "Software Init"?
+	BNE	110$			;no, all of this is done
+	MOVB	E.UNT(R3),R4		;get the unit number of controller
+	MOV	CSR.XH(R4),R0		;get pointer to CSR
+	MOV	XHDATA+XHVECT(R4),R4	;get interrupt vector
+	MOV	R4,QNA.VA(R0)		;set the interrupt vector
+	CLR	(R0)			;clear out the SR
+	MOV	#<QNA$IL!QNA$IE>,(R0)	;set required bits in CSR
+;
+; * Calculate physical address of multicast buffer.
+;
+110$:	CLR	R0			;Clear out high order reg
+	MOV	@#XHDATA+XHDPA6,R1	;set DPAR6 value of Ethernet region
+	ASHC	#6,R0			;Convert to physical 22 bit address
+	MOV	E.MULC(R3),R4		;Get virtual address of multicast buffer
+	SUB	#140000,R4		;Change virtual address to offset
+	ADD	R4,R1			;add offset to physical address
+	ADC	R0			;  not forgetting any carry
+;
+; * For all CCBs on the mulcst queue.
+;
+; - Set physical address of multicast buffer.
+;
+120$:	MOV	E.QMUL(R3),R5		;get pointer to first CCB
+	CLR	CC.BUF+BF.VIR(R5)	;ensure that LOADXR knows phys addr
+	MOV	R0,CC.BUF+BF.ADR(R5)	;set high order phys addr
+	BIS	#<QA$S!QA$E>,CC.BUF+BF.ADR(R5)	;tell QNA, SET-UP, End of Mess
+	MOV	R1,CC.BUF+BF.MMU(R5)	;set low order phys addr
+	;
+	; Another QNA bug requires that you send a SETUP packet less than 128
+	; bytes when the receiver is enabled.  The device will hang sometimes
+	; otherwise.  The value moved into CC.BUF+MS.SIZ(R5) must be less
+	; than 128 or the QNA will hang when the receiver is enabled.
+	;
+	MOV	#-<<QSU$ML-2>/2>,CC.BUF+MS.SIZ(R5) ;set length (wrds) setup cmd
+	BIT	#EF$RAM,E.STS(R3)	;Should we Receive All Multicasts?
+	BEQ	130$			;no, SETUP packet is complete
+	BIS	#QSU$AM,CC.BUF+MS.SIZ(R5) ;yes, set bit for All Multicast
+;
+; - Place on pending transmit queue.
+;
+130$:	MOV	(R5),R2			;get pointer to next CCB.
+	SPLC	5
+	CALL	LOADXP			;load CCB on xmit pending queue
+	SPLC	3
+	MOV	R2,E.QMUL(R3)		;set link to next CCB for mulcst
+	BNE	120$			;and process it, if there is one
+;
+; * Set status flag "Multicast".
+;
+	BIS	#EF$MUL,E.STS(R3)	;Set multicast flag (RCV Int will use)
+;
+; * load xmt rings, load rcv rings.
+;
+	SPLC	5
+	CALL	LOADRR			;;load rcv rings
+	CALL	LOADXR			;;load xmt rings
+	SPLC	3
+	RETURN				;returns back to L3Q dispatch routine
+
+	GLOBAL	<XHCONQ,CSR.XH>
+
+
+
+
+.SBTTL	SETMUL	CON$XH	MULCST	Set a multicast address into work buffer
+
+;+
+;
+; This is a utility routine used by MULCST to load a multicast address in
+; memory in to MULCST work buffer.  QNAs will only take 14 addresses onboard
+; (3 addresses are taken up by, broadcast address, physical address, and the
+; Loopback assitance address).  Returns carry set if R0 represents an index
+; out of range (more than 14 addresses).
+;
+;	UCSTML is the entry point for UnConditionally SeT MuLticast addr.
+;
+;	Set Target address message to the QNA looks like:
+;
+;	                Byte Offset
+;	Byte    0   1   2   3   4   5   6   7
+;	      +---+---+---+---+---+---+---+---+
+;       000   | X | a | b | c |   |   |   |   |      X = zeroes
+;	      +---+---+---+---+---+---+---+---+      a = broadcast address
+;       010   | X | a | b | c |   |   |   |   |      b = physical address
+;	      +---+---+---+---+---+---+---+---+      c = Loopback assistance
+;       020   | X | a | b | c |   |   |   |   |          address (CF-00-00-00-
+;	      +---+---+---+---+---+---+---+---+          00-00). Any other MOP
+;       030   | X | a | b | c |<--User addrs->|          addresses implemented
+;	      +---+---+---+---+---+---+---+---+          by the driver follow.
+;       040   | X | a | b | c |   |   |   |   |
+;	      +---+---+---+---+---+---+---+---+      Any unused addresses will
+;       050   | X | a | b | c |   |   |   |   |      be set to the physical
+;	      +---+---+---+---+---+---+---+---+      address.
+;       060   | X | X | X | X | X | X | X | X |
+;	      +---+---+---+---+---+---+---+---+
+;       070   | X | X | X | X | X | X | X | X |
+;	      +---+---+---+---+---+---+---+---+
+;       100   | X |   |   |   |   |   |   |   |
+;	      +---+---+---+---+---+---+---+---+
+;       110   | X |   |   |   |   |   |   |   |
+;	      +---+---+---+---+---+---+---+---+
+;       120   | X |   |   |   |   |   |   |   |
+;	      +---+---+---+---+---+---+---+---+
+;       130   | X |<------User addresses----->|
+;	      +---+---+---+---+---+---+---+---+
+;       140   | X |   |   |   |   |   |   |   |
+;	      +---+---+---+---+---+---+---+---+
+;       150   | X |   |   |   |   |   |   |   |
+;	      +---+---+---+---+---+---+---+---+
+;       160   | X | X | X | X | X | X | X | X |
+;	      +---+---+---+---+---+---+---+---+
+;       170   | X | X | X | X | X | X | X | X |
+;	      +---+---+---+---+---+---+---+---+
+;
+;	R0 =	1, 2, 3, 4, 5, 6, 7, 101, 102, 103, 104, 105, 106, or 107
+;		(index number of last used address)
+;	R1 ->	address of multicast address
+;	R3 ->	CDB
+;
+;	CALL	SETMUL
+;
+;	R0	updated to reference index just loaded
+;
+;	C=1 if there are already 14 addresses loaded
+;
+;-
+	.ENABL	LSB
+
+SETMUL:	CALL	MATMUL		;try to match current to previously loaded addr
+	BCS	20$		;match found, we're done (that was easy)
+UCSTML:	CMP	#107,R0		;Have we already loaded 14 addresses?
+	BLOS	30$		;Yes, notify the caller
+	INC	R0		;R0 was last used slot, now current
+	CMP	#7,R0		;Do we need to go to the second row?
+	BHIS	10$		;No, we're still on the first row.
+	CMP	#100,R0		;Are we already at the second row?
+	BLO	10$		;Yes, continue with second row
+	MOV	#101,R0		;set starting offset of second row.
+10$:	ADD	E.MULC(R3),R0	;add address to multicast buffer
+	MOVB	(R1)+,(R0)	;transfer source address to mulcst buffer
+	MOVB	(R1)+,10(R0)	;  byte 2
+	MOVB	(R1)+,20(R0)	;   byte 3
+	MOVB	(R1)+,30(R0)	;    byte 4
+	MOVB	(R1)+,40(R0)	;     byte 5
+	MOVB	(R1)+,50(R0)	;      byte 6
+	SUB	E.MULC(R3),R0	;Turn register back into offset count
+	SUB	#QADR$L,R1	;restore R1 to original value (* To be nice *)
+20$:	TST	(PC)+		;success
+30$:	SEC			;failure
+	RETURN
+
+
+
+
+.SBTTL	MATMUL	CON$XH MULCST SETMUL	Match mulcst addr to pre defnd addr
+
+;+
+;
+; Compares passed multicast address to already loaded multicast addreses to
+; check for it already being loaded.  If it is already loaded, there isn't
+; much sense of loading it again.
+;
+; This is not a tolerant routine, if R0 is bad the results could be bad.
+;
+;	R0 =	index into MULCST array (see SETMUL)
+;	R1 ->	address of multicast address.
+;	R3 ->	CDB
+;
+;	CALL	MATMUL
+;
+;	C=0 not previously loaded
+;	C=1 already there
+;
+;-
+	.ENABL	LSB
+
+MATMUL:	REGSCR
+	MOV	#1,R2			;start with first array index
+10$:	MOV	R2,R0			;get copy of current index
+	ADD	E.MULC(R3),R0		;make pointer in MULCST buffer
+	MOV	R1,R4			;get copy of passed mulicast addr
+	MOV	#QADR$L,R5		;get count of size of addr
+15$:	CMPB	(R0),(R4)+		;these bytes equal?
+	BNE	20$			;No, not a match
+	ADD	#10,R0			;make pointer to next byte
+	SOB	R5,15$			;do for all bytes of address
+	BR	40$			;we have a match, don't load it
+
+20$:	CMP	R2,TOS.R0(SP)		;have we done all possible compares?
+	BHIS	30$			;yes, we're done
+	INC	R2			;no, make next index
+	CMP	#7,R2			;are we past the first row?
+	BHIS	10$			;no, try this address
+	CMP	#100,R2			;are we already in the second row?
+	BLO	10$			;no, try this address
+	MOV	#101,R2			;yes, set second row index
+	BR	10$			;and try it out
+
+30$:	TST	(PC)+			;success (need to load mulcst address)
+40$:	SEC				;failure (no need to load mulcst addr)
+	RETURN
+
+
+
+
+.SBTTL	SYSID	CON$XH	Send the system ID message
+
+;+
+;
+; This is sent every 8-12 minutes as a "good citizen" message.  The time
+; between messages is determined by generating a random number between 8 and
+; 12 (this is done to prevent constant	collisions with other stations sending
+; their messages at the same time).  For this system wide system id, every
+; controller gets the message buffer, one after the other (passed as the
+; transmit interrupt returns buffer) (More or less a passing a "token" to all
+; controllers).  A system id is requested for an individual controller happens
+; as a result of the REQUEST ID MOP command.
+;
+; We use a very crude system ID message since the documentation of the message
+; and actual implementations are different.  The message is defined in the
+; impure section for the driver (defined in Ethernet region).
+;
+; For the system wide sysid, if a transmit timeout occurs on a controller that
+; was processing a system id message, the token is passed to the next
+; controller (if there is one) (occurs in SWINIT/SWRUN$).  (NOTE: There is a
+; window where a controller may not get passed the token to transmit the SYSID
+; message (if it is coming on-line), but it will pick it up at the next	issue
+; of SYSID).
+;
+; For the inidividual sysid, if a transmit times out, the message attempt is
+; aborted.
+;
+; The flow for this routine is as follows,
+;	* If any individual sysid requests exist.
+;		- Dequeue and load addresses and queue.
+;	* If any system sysid requests exist.
+;		- Get CCB for SYSID transmit.
+;		- load addresses and queue.
+;	* Load xmit rings.
+;
+;	Ethernet region mapped
+;
+;	R3 ->	CDB that requires the SYSID message
+;
+;	CALL	SYSID
+;
+;	R4-R5	random
+;
+;-
+	.ENABL	LSB
+
+SYSID:
+;
+; * If any individual sysid requests exist.
+;
+	SPLC	5
+	BIT	#EF$SID,E.STS(R3)	;;Any individual sysid requests?
+	BEQ	20$			;;no, check to see if system
+;
+; - Dequeue and load addresses and queue.
+;
+10$:	MOV	E.QRID(R3),R5		;;pull of first CCB in queue
+	BEQ	20$			;;exit if done
+	MOV	(R5),E.QRID(R3)		;;update queue pointer
+	MOVB	#QC$SID,CC.FC(R5)	;;indicate an individual sysid
+	CALL	SETAQ$			;;set address data/que
+	BR	10$			;;try for another one
+;
+; * If any system sysid requests exist.
+;
+20$:	BIT	#EF$SIS,E.STS(R3)	;;Any system sysid requests?
+	BEQ	40$			;;no, load rings and exit
+;
+; - Get CCB for SYSID transmit.
+;
+	BUFFER	GETSML,,20.		;;get our small buffer for a CCB
+	BVC	30$			;;if we got it
+	SETFUN	C$SID,WAIT2T		;;Request ourselves back	;003
+	SPLC	3			;return to PR3
+	JMPX	RTI3			;basically, stall dvr for 2 ticks
+;
+; - Load addresses and queue.
+;
+30$:	MOV	R4,R5			;;copy CCB to calling format reg
+	MOVB	#QC$SIS,CC.FC(R5)	;;indicate that it's system wide.
+	CALL	SETAQ$			;;set address data
+;
+; - Load xmit rings.
+;
+40$:	CALL	LOADXR			;;load the CCB on the xmit queues
+	SPLC	3			;;resume normal priority
+	RETURN				;exit
+
+	GLOBAL	<XHDATA,XHCONQ>
+
+
+
+
+.SBTTL	SETAQ$	CON$XH	Load in physical address of SYSID buffer
+
+;+
+;
+; This function loads the phisical address of the SYSID buffer.
+;
+;	Ethernet region mapped
+;
+;	R3 ->	CDB that requires the SYSID message
+;	R5 ->	CCB
+;
+;	CALL	SETAQ$
+;
+;	R0-R2	random
+;
+;-
+	.ENABL	LSB
+
+SETAQ$:
+;
+; * Load in physical address of SYSID buffer.
+;
+	CLR	R0			;;Clear out high order reg
+	MOV	@#XHDATA+XHDPA6,R1	;;set DPAR6 value of Ethernet region
+	ASHC	#6,R0			;;Convert to physical 22 bit address
+	MOV	@#XHDATA+XHIDBF,R2	;;Get virtual address of multicast buffer
+	BIC	#170000,R2		;;Change virtual address to offset
+	ADD	R2,R1			;;add offset to physical address
+	ADC	R0			;;  not forgetting any carry
+	CLR	CC.BUF+BF.VIR(R5)	;;signal that this is a phys addr CCB
+	MOV	R0,CC.BUF+BF.ADR(R5)	;;put the high order address in CCB
+	MOV	R1,CC.BUF+BF.MMU(R5)	;; store low order address
+	MOV	#<-<SID$LN/2>>,CC.BUF+MS.SIZ(R5);;size QNA style (2s comp words)
+;
+; * If there isn't a SYSID in progress.
+;
+	BIT	#XH$SID,@#XHDATA+XHINIT	;;sysid in progress elsewhere?
+	BNE	50$			;;yes, enqueue onto sysid.
+	BIS	#XH$SID,@#XHDATA+XHINIT	;;no, there is now.
+;
+; - Store physical station data, load onto pending queue.
+;
+	CALL	LODSID			;;load dynamic fields of SYSID message
+	CALL	LOADXP			;;load the sysid onto the pending queue
+	BR	60$			;;and skip forward
+;
+; * Else, Queue onto pending SYSID queue.
+;
+50$:	MOV	E.QSID(R3),(R5)		;;insert CCB at head of queue
+	MOV	R5,E.QSID(R3)		;;  updating head pointer
+60$:	RETURN
+
+	GLOBAL	<XHDATA,XHCONQ>
+
+
+
+
+.SBTTL	INT$XH	Interrupt processing entry point
+
+;+
+;
+; This is the main Interrupt dispatch point.  This routine will only recognize
+; that the interrupt occured.  It is the resposibility of the dispatched
+; routines to clear the interrupt.
+;
+; The flow for this dispatch routine is as follows:
+;	* Process NXM error Interrupts
+;	* Process Receive Interrupts
+;	* Process Transmit Interrupts
+;
+;	R0 =	Unit number * 2 of interrupting controller
+;
+;	CALL	INT$XH
+;
+;	R0-R5	random
+;
+;-
+	.ENABL	LSB
+
+	TMPORG	XHDINT,06
+	 .WORD	INT$XH
+	UNORG
+
+INT$XH:
+	CALL	MPENET			;Map the Ethernet region	;002
+	MOV	XHDATA+XHCDB(R0),R3	;;Get CDB pointer
+	MOV	CSR.XH(R0),R2		;;get pointer to CSR
+;
+; * Process NXM error Interrupts.
+;
+	BIT	#QNA$NI,(R2)		;;Non-Existent Memory?
+	BEQ	10$			;;no, good (I hate that when it happens)
+	MOV	#<QNA$RI!QNA$XI!QNA$SR>,(R2) ;;stop the device and,
+					;;don't allow other interrupt service
+	SETFUN	C$DIS			;;Disable controller (log error) ;003
+	BR	30$
+;
+; * Process Receive Interrupts.
+;
+10$:	BIT	#QNA$RI,(R2)		;;Receive Interrupt?
+	BEQ	20$			;;no, not this time
+	CALL	RECINT			;;process the receive
+	.BR	20$
+;
+; * Process Transmit Interrupts.
+;
+20$:	BIT	#QNA$XI,(R2)		;;Transmit Interrupt?
+	BEQ	30$			;;no, not this time
+	CALL	XMTINT			;;process the transmit
+30$:	MAP	POP,APR=6,DATA		;;Restore previous mapping
+	RETURN				;;Interrupt processing done
+
+	GLOBAL	<XHDATA,CSR.XH>
+
+
+
+
+.SBTTL	RECINT	INT$XH	Service receive interrupt
+
+;+
+;
+; This routine is called (at PR5) when a controller has interrupted.  The
+; function of this routine is to pull off any successful receives, and if
+; there is a matching protocol type, post the message to the portal.
+;
+; This routine does not care what state the controller is in.  However, the
+; routine that acknowledges the receipt of a SETUP message will base it's
+; action on the controller's state (this is how receive enable, QNA$RE, is set
+; after the address list is set).
+;
+; The general algorithm to this routine is,
+;
+;	> For all complete messages on the receive queue,
+;		* Extract a complete message off of the rings, and ring queue.
+;			- Clear the ring entry.
+;		* Determine success or failure of receive.
+;			- Log error/event.
+;		* Save size of message.
+;		* Fix BF.CNT field of last buffer in message.
+;		* Update counters.
+;		* Extract protocol type from message
+;		* If MOP protocal with driver command,
+;			- process MOP function.
+;		* Filter protocol types through portals.
+;			- check if multicast.
+;			- if it is, then match multicast address to portal.
+;		* Check Portal's buffer quota, update counters if over.
+;			- Log circuit event if DECnet's quota exceeded.
+;		* Update Circuit counters.
+;		* Post message to either system job (easiest) or user job.
+;
+;	> Redo routine if Rcv interrupt set, load Rcv rings.
+;
+;	Ethernet region mapped
+;
+;	R2 ->	CSR	(must be preserved)
+;	R3 ->	CDB	(must be preserved)
+;
+;	CALL	RECINT
+;
+;	R0	random
+;	R1	random
+;	R4-R5	random
+;
+;-
+	.ENABL	LSB
+
+RECINT:	MOV	(R2),R4			;;get copy of CSR
+	BIC	#QNA$XI,R4		;;don't want to involve xmit interrupt
+	MOV	R4,(R2)			;;clear the interrupt
+	PUSH	R2			;;save CSR
+;
+; * Extract a complete message off of the rings, and ring queue.
+;
+;	Note:	GETMSG sets R0 -> Message chain, R1 -> last ring entry,
+;		            R2 = number of buffers in chain.
+;
+10$:	PUSH	R3			;;save CDB
+	ADD	#E.RRB,R3		;;set offset to receive sub-block
+;	CLC				;;signal receive rings to GETMSG
+	CALL	GETMSG			;;get the first msg on the ring
+	POP	R3			;;restore CDB
+	BCC	20$			;;if we found a message
+;
+; > Redo routine if Rcv interrupt set, load Rcv rings.
+;
+	POP	R2							;002
+	BIT	#QNA$RI,(R2)		;;Did we get interrupted again?	;002
+	BNE	RECINT			;;Yes, see if more messages	;002
+	CALL	LOADRR			;;load up the rcv rings		;002
+	RETURN								;002
+
+;
+; * Determine success or failure of receive.
+;
+20$:	BIT	#<Q1$ERR!Q1R$ES>,QBD.S1(R1) ;;Was there an error or SETUP?
+	BEQ	90$			;;no, a successful received
+;
+; - Log error/event.
+;
+	BIT	#Q1R$RT,QBD.S1(R1)	;;Was this just a RUNT packet?
+	BNE	60$			;;yes, get rid of it.
+	BIT	#Q1R$ES,QBD.S1(R1)	;;SETUP response?
+	BEQ	30$			;;no, continue
+	CALL	SETACK			;;Acknowledge the Setup packet
+	BR	60$			;;try to get another message
+
+30$:	CLR	R4			;;zero for errlog. No PDB
+	MOV	R0,R5			;;save for errlog. CCB
+	MOV	QBD.S1(R1),E.STR1(R3)	;;save status word one for error
+	MOV	QBD.S2(R1),E.STR2(R3)	;;save status word two for error
+	LOG$XH				;;log the error
+	MOV	R3,R5			;; line - get copy of CDB
+	CALL	INC1,R3,E.RCVF		;; line - count a rcv failure
+	BIT	#Q1R$DS,QBD.S1(R1)	;;Is this a legitimate DISCARD?
+	BEQ	60$			;;no, it's illegitimate
+	CALL	@EVTSAV			;;DECnet Event logger on?
+	BCC	60$			;;no, don't log an event
+	MOV	#EDF$DO,R4		;;Assume a Data Overrun (OVF overflow).
+	BIT	#Q1R$CR,QBD.S1(R1)	;;--A CRC error?
+	BEQ	40$			;;    no
+	MOV	#EDF$BD,R4		;;    set Block Check Error
+40$:	BIT	#Q1R$FR,QBD.S1(R1)	;;--A Framing error?
+	BEQ	50$			;;    no
+	MOV	#EDF$FE,R4		;;    set Framing Error
+50$:	CALLM	NIERLF,EVLAP5		;;Log line receive failed event
+	CALL	@(SP)+			;;finish event
+
+60$:	CALL	CLRRNG,R5,E.RRB		;;clear msg off ring (regs from GETMSG)
+70$:	MOV	R0,R5			;;put message ptr in R5 for CALL
+	CALL	LOADRP			;;return message buffers to free pool
+80$:	BR	10$			;;try next message on ring
+;
+; * Save size of message.
+;
+;	Note:	R1 frees up for general use after this section.
+;
+90$:	MOV	R4,R5			;;get number of bytes received	;005
+	MOV	R5,CC.BUF+MS.SIZ(R0)	;;store size in CCB
+	CALL	CLRRNG,R5,E.RRB		;;clear msg off ring (regs from GETMSG)
+;
+; * Fix BF.CNT field of last buffer in message.
+;
+	MAP	PUSH,APR=6,DATA		;;save current mapping
+	PUSH	R0			;;save first CCB in list
+100$:	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA ;;map the CCB's xbuf buffer
+	MOV	CC.BUF+BF.VIR(R0),R1	;;get the virtual addr of xbuf buffer
+	CMP	BF.CNT(R1),R5		;;is this whole buffer used?
+	BGT	120$			;;no, it should be the last one
+	SUB	BF.CNT(R1),R5		;;account for the whole buffer
+	MOV	(R0),R0			;;get pointer to next CCB in chain
+.ASSUME	CC.LNK EQ 0
+	BNE	100$			;;continue if chain is valid
+	POP	R0			;; ILLEGAL MESSAGE (runt, etc.)
+	MAP	POP,APR=6,DATA		;; restore message CCB start ptr
+	BR	70$			;; return the buffers
+
+120$:	MOV	R5,BF.CNT(R1)		;;make BF.CNT in last buffer correct
+	BITB	#DF.CNT,CC.DFL(R0)	;;Was this really the last buffer?
+	BEQ	125$			;;Yes, every thing is good
+	CRASH				;;message chain is invalid
+
+125$:	POP	R0			;;restore first CCB pointer
+	MAP	POP,APR=6,DATA		;;restore original mapping
+;
+; * Update counters.
+;
+	MOV	CC.BUF+MS.SIZ(R0),R1	;; line - get number of bytes rcved
+	SUB	#PK.LEN,R1		;; line - remove header length	;005
+	MOV	R3,R5			;; line - get copy of CDB
+	CALL	COUNT2,R3,E.BYTR	;; line - count bytes rcved
+	MOV	R3,R5			;; line - get another copy of CDB
+	CALL	INC2,R3,E.BLKR		;; line - count as blocks rcved
+;
+; * Extract protocol type from message
+;
+	MAP	PUSH,APR=6,DATA		;;Store Ethernet region
+	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA ;;map the message buffer
+	MOV	CC.BUF+BF.VIR(R0),R5	;;get the virtual pointer to it
+	ADD	BF.OFF(R5),R5		;;add offset to data
+	MOV	PK.PRT(R5),R5		;;retrieve protocol type value
+;
+; * If MOP protocol with driver command,
+;
+	MOV	#MOP$NM,R4		;;Get number of mop protocol types
+	CLR	R1			;;clear out table index
+130$:	CMP	R5,MOPPRT(R1)		;;Is this the protocol MOP needs?
+	BNE	140$			;;no, try next
+	CALLX	REGSAV,R5
+	MOV	CC.BUF+BF.VIR(R0),R5 	;;get pointer to buffer
+	ADD	BF.OFF(R5),R5		;;  make pointer to message
+	CALL	@MOPDSP(R1)		;;Yes, dispatch to service routine
+	CALLX	REGRES,R5
+	BCS	150$			;;MOP function not supported by driver
+	MAP	POP,APR=6,DATA		;;re-map Ethernet region
+	BR	80$			;;MOP function done, try for more
+
+140$:	TST	(R1)+			;;increment the table index
+	SOB	R4,130$			;;type all MOP protocal types
+;
+; * Filter protocol types through portals.
+;
+150$:	MAP	POP,APR=6,DATA		;;re-map Ethernet region
+	MOV	E.PRTL(R3),R4		;;get pointer to PDB (portal) list
+	BEQ	70$			;;wow, no portals open
+160$:	CMP	R5,EP.TYP(R4)		;;does the message have its type?
+	BEQ	180$			;;yes, check it out
+	BLO	170$			;;if Protocal doesn't exist
+	MOV	(R4),R4			;;get pointer to next PDB
+.ASSUME EP.LNK EQ 0			;;assume link is where it should be
+	BNE	160$			;;try next PBD if it exists
+170$:	MAP	PUSH,APR=6,DATA		;;Store Ethernet region
+	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA ;;map the message buffer again
+	MOV	CC.BUF+BF.VIR(R0),R5	;;get the virtual pointer to it
+	ADD	BF.OFF(R5),R5		;;add offset to data
+	MOV	(R5),R5			;;get copy of 1st word of dest addr
+	MAP	POP,APR=6,DATA		;;restore Ethernet region mapping
+	ASR	R5			;;Sent to phys addr?
+	BCS	70$			;;no, multicast ignore it
+	MOV	R3,R5			;; line - get copy of CDB
+	CALL	INC1,R3,E.UDST		;; line - count as destination unknown
+	CALL	@EVTSAV			;;Event logger running?
+	BCC	70$			;;no, trash message
+	CLR	R2			;;Tell CLRRNG not to clear anymore
+	MOV	#EDF$UF,R4		;;set event to Unrecognized Frame Dst
+	JMP	50$			;;and log it.
+
+180$:	MAP	PUSH,APR=6,DATA		;;Store Ethernet region
+	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA ;;map the message buffer again
+	MOV	CC.BUF+BF.VIR(R0),R5	;;get the virtual pointer to it
+	ADD	BF.OFF(R5),R5		;;add offset to data
+;
+; - check if multicast
+;
+;	CLC				;;   used for CHKMUL return sts
+	BIT	#BIT0,(R5)		;;Multicast message?
+	BEQ	190$			;;no, it's a physical address
+;
+; - if it is, then match multicast address to portal.
+;
+	CALL	CHKMUL			;;check the mulcst against the PDB's lst
+	BCS	190$			;;no match count as unrecognized dest
+	MAP	POP,APR=6,DATA		;;restore Ethernet region mapping
+	MOV	CC.BUF+MS.SIZ(R0),R1	;; line - get number of bytes rcved
+	SUB	#PK.LEN,R1		;; line - remove header length	;005
+	MOV	R3,R5			;; line - get copy of CDB
+	CALL	COUNT2,R3,E.MBYR	;; line - count multicst bytes rcved
+	MOV	R3,R5			;; line - get another copy of CDB
+	CALL	INC2,R3,E.MBLR		;; line - count as multicst blocks rcved
+	BR	200$			;;branch ahead.
+;
+; * Check Portal's buffer quota, update counters if over.
+;
+190$:	MAP	POP,APR=6,DATA		;;Re-map Ethernet region (C preserved)
+	BCS	170$			;;If CHKMUL returned nomatch, scrap
+200$:	SUB	R2,EP.BUF(R4)		;;count PDB's limit (R2 set from GETMSG)
+	BGE	230$			;;continue if PDB's limit allows
+	ADD	R2,EP.BUF(R4)		;;otherwise, restore buff count
+	MOV	R4,R5			;; circ - get copy of PDB
+	CALL	INC1,R3,EP.UNA		;; circ - and count it
+	MOV	R3,R5			;; line - get copy of CDB
+	CALL	INC1,R3,E.USAV		;; line - count as user buff unavail
+	BIT	#EP$TLD,EP.STS(R4)	;;Has user been told about this before?
+	BNE	220$			;;yes, don't rub it in
+	BIS	#EP$LST,EP.STS(R4)	;;indicate message lost due to quota.
+210$:	BIT	#EP$DNT,EP.STS(R4)	;;Is this a DECnet portal?
+	BEQ	220$			;;no, scrap message
+	CALL	@EVTSAV			;;DECnet Event logger on?
+	BCC	220$			;;no, scrap message
+;
+; - Log circuit event if DECnet's quota exceeded.
+;
+	BIS	#EP$TLD,EP.STS(R4)	;;show that we told DECnet.
+	MOV	R4,R5			;;save PDB pointer
+	MOV	#EDF$UB,R4		;;define the 'User Buffer' event
+	CALLM	NIERCF,EVLAP5		;;log circuit receive failed event
+	MOV	R5,R4			;;restore PDB pointer
+	CALL	@(SP)+			;;finish event
+;
+; The following is commented out until DECnet knows what to do with the error.
+;		<This may never be fixed>
+;
+;	MOV	R4,R5			;;get copy of PDB pointer
+;	BUFFER	GETSML,,64.		;;Get an error CCB
+;	BVS	220$			;;if nobufs, no error
+;	MOV	#FC$RER,CC.FC(R4)	;;show receive error
+;	MOV	R5,CC.DDB(R4)		;;associate error with portal
+;	MOV	R4,R5			;;make copy of error CCB ptr
+;	MOV	#TRNJOB,R1		;;indicate DECnet
+;	CALL	PSTSYS			;;post the error CCB
+220$:	JMP	70$			;;trash message
+
+;
+; * Update Circuit counters.
+;
+230$:	MOV	CC.BUF+MS.SIZ(R0),R1	;; circ - get number of bytes rcved
+	SUB	#PK.LEN,R1		;; circ - remove header length	;005
+	MOV	R4,R5			;; circ - get copy of PDB pointer
+	CALL	COUNT2,R3,EP.BYR	;; circ - count as bytes rcved
+	MOV	R4,R5			;; circ - get copy of PDB pointer
+	CALL	INC2,R3,EP.BLR		;; circ - count as block rcved
+;
+; * Post message to either system job (easiest) or user job.
+;
+	CALL	RCVPST			;;Post I/O to the user or system job
+	JMP	10$			;;and try to get another msg off rings
+
+	GLOBAL	<XHDATA,EVTSAV,LOG$XH>
+
+
+
+
+.SBTTL	SETACK	INT$XH	RECINT	Acknowledge SET-UP command
+
+;+
+;
+; This routine acknowledges the receipt of a SETUP message (looped by the
+; controller).  This is the last stage of "SW Init".
+;
+;	Depending on the state of the CDB,
+;
+;	* For "SW Init", change state to running, release FIP if all CDBs done
+;	* For "Running", clear flag in CDB signifying addr setup
+;
+;	R0 ->	Message
+;	R1 ->	Ring entry
+;	R2 =	num of bufs in message
+;	R3 ->	CDB
+;
+;	CALL	SETACK
+;
+;	R4-R5	random
+;
+;	Message buffers should be freed up
+;
+;-
+	.ENABL	LSB
+
+SETTBL:	.WORD	30$		; E$RUN - "Running"	- Recognize receipt
+	.WORD	10$		; E$DIS - "Disabled"	- Shouldn't happen
+	.WORD	10$		; E$ONE - "One-shot"	- Shouldn't happen
+	.WORD	20$		; E$INI - "SW Init"	- Last part of "SW Init"
+
+SETACK:	MOV	E.STAT(R3),R4		;;Get state number we're in
+	BIT	#<^C<E$RUN!E$DIS!E$ONE!E$INI>!BIT0>,R4 ;check state bits ;002
+	BNE	10$			;;crash if unknown state	;002
+	JMP	@SETTBL(R4)		;;dispatch to action routine	;002
+
+10$:	CRASH				;; Should never be here
+
+;
+; * For "SW Init", change state to running, release FIP if all CDBs done.
+;
+20$:	CLR	E.STAT(R3)		;;Impose state transition
+.ASSUME	E$RUN EQ 0
+	MOVB	E.UNT(R3),R4		;;get unit number of controller
+	MOV	@CSR.XH(R4),R5		;;get copy of CSR
+	BIS	#QNA$RE,R5		;;set the receive enable bit
+	BIC	#<QNA$RI!QNA$XI>,R5	;;don't affect anything else
+	MOV	R5,@CSR.XH(R4)		;;set receive enable
+	TSTB	@#XHDATA+XHINIT		;;any controllers still being inited?
+	BEQ	10$			;;no, why are we here?  Hmmm	;002
+	DECB	@#XHDATA+XHINIT		;; count one less initing controller
+	BNE	30$			;; continue if there are more left
+	L3QSET	QFIP			;; Request FIP to unstall the system
+	.BR	30$
+;
+; * For "Running", clear flag in CDB signifying addr setup.
+;
+30$:	BIC	#EF$MUL,E.STS(R3)	;;Show that CDB not doing Addr list
+	RETURN
+
+	GLOBAL	<XHDATA,CSR.XH>
+
+
+
+
+.SBTTL	CHKMUL	INT$XH	RECINT	Check mulcst array for Mulcst Addr match
+
+;+
+;
+; Scans a PDB's multicast list for a match of a given destination address.
+;
+; The general flow is,
+;	* Get pointer to PDB's multicast array and number of addresses.
+;	* Try to match given multicast address to one in array.
+;
+;	R4 ->	PDB
+;	R5 ->	Multicast address
+;
+;	CALL	CHKMUL
+;
+;	C=1 if no match
+;	C=0 if match
+;
+;-
+	.ENABL	LSB
+
+CHKMUL:	PUSH	<R2,R3>
+	MOV	EP.MCT(R4),R2		;;get count of multicast adddresses
+	BEQ	40$			;;exit if none
+	MOV	R4,R3			;;get copy of PDB pointer
+	ADD	#EP.CST,R3		;;get pointer to multicast array
+10$:	CMP	(R5),(R3)		;;  First word of addr match?
+	BNE	20$			;;    no, try next
+	CMP	2(R5),2(R3)		;;  Second word of addr match?
+	BNE	20$			;;    no, try next
+	CMP	4(R5),4(R3)		;;  Third word of addr match?
+	BEQ	30$			;;    yes, we have a winner
+20$:	ADD	#QADR$L,R3		;;Make pointer to next array entry
+	SOB	R2,10$			;;do for all multicast address
+	BR	40$			;;no matches
+
+30$:	TST	(PC)+			;;success
+40$:	SEC				;;failure
+	POP	<R3,R2>			;;C preserved
+	RETURN
+
+
+
+
+.SBTTL	MOPDSP	INT$XH	RECINT	Dispatch and perform MOP operation
+
+;+
+;
+; Handles the MOP functions Request ID and Request Counters, also handles the
+; LOOP forwarding request (Replies are passed back up through the portals).
+; LOOP requests are addressed to the station's physical address, broadcast
+; address, or LOOP assistance multicast address.
+;
+;	Called at PR5.
+;
+;	CONSL$ handles Request ID, and Request counters.
+;		* check type of request.
+;			- fix sysid message for sending to requestor.
+;			- create counters message for sending to requestor.
+;		* Return any unused free buffers to receive free pool.
+;		* Adjust the mop buffer count.
+;		* Load message on rings.
+;
+;	LOOPB$ handles the Loopback message.
+;		* check function (return to portals if Reply).
+;		* update the message.
+;		* Adjust the mop buffer count.
+;		* Load message on rings.
+;
+;	Buffer with command mapped in DPAR6
+;
+;	R0 ->	CCB of received MOP message
+;	R2 =	Number of buffers in the message
+;	R3 ->	CDB (when Ethernet region mapped)
+;	R5 ->	Start of message in first buffer
+;
+;	CALL	@MOPDSP(Rx), where Rx = function number (0 or 2)
+;
+;	R0-R5	random
+;
+;	C=0 MOP function performed (or will be performed)
+;	C=1 MOP function not supported by driver
+;
+;-
+	.ENABL	LSB
+
+MOPDSP:	.WORD	CONSL$		;<60-02> Remote console
+	.WORD	LOOPB$		;<90-00> Loop back
+.ASSUME	MOP$NM EQ <<.-MOPDSP>/2>
+
+CONSL$:
+;
+; * check type of request.
+;
+	BITB	#BIT0,PK.SRC(R5)	;;is the message from a phys addr?
+	BNE	10$			;;no, we can't do anything with it.
+	CMPB	#RQID,RC.FUN(R5)	;;Is this a request ID function?   ;011
+	BEQ	ID$			;;Yes, process it.
+	CMPB	#RQCNTR,RC.FUN(R5)	;;Is this a req counters function? ;011
+	BEQ	CNTR$			;;Yes, process it.
+10$:	SEC				;;function not supported.
+	RETURN				;;return.
+;
+; - create counters message for sending to requestor.
+;
+CNTR$:	MOVB	#RQRSP,RC.FUN(R5)	;;set Counters function as code	;011
+	MOV	R5,R4			;;get copy of buffer pointer
+	MOV	PK.SRC(R4),(R4)+	;;copy up new destination
+	MOV	PK.SRC(R4),(R4)+	;;  address from the
+	MOV	PK.SRC(R4),(R4)		;;    source of the request
+	MOV	CC.BUF+BF.VIR(R0),R4	;;get copy of buffer header address
+	MOV	#RC.RCP+66+2,BF.CNT(R4)	;;put in new count
+	MOV	#66+<RC.RCP-PK.LEN>,PK.LEN(R5) ;;update the padding field
+	ADD	#RC.RCP+66+2,R5		;;make pointer to bottom of buffer area
+	MOV	@DPAR6,R4		;;save buffer mapping.
+	CALL	MPENT2			;;map the Ethernet region.	;003
+	CALL	TRIM$$			;;trim off any extra buffers.
+;
+;	Note: R3 is restored at the end of this mess.  DO NOT CHANGE R3! ;002
+;
+	MOV	R3,R1			;;get copy of CDB pointer
+	ADD	#E.RCVF,R1		;;make pointer to E.RCVF
+	CALL	SAVC$$,R3,6.		;;save E.RCVF - E.USAV on stack
+	CALL	RESC$$,R3,6.		;;Restore the 6 words into the buffer
+	SUB	#<<E.USAV+2>-E.DEF>,R1	;;make pointer to E.DEF
+	CALL	SAVC$$,R3,8.		;;save E.DEF - E.XFLG on stack
+	CALL	RESC$$,R3,8.		;;Restore the 8 words into the buffer
+	SUB	#<E.CDCF-E.BYTR>,R1	;; save E.BYTR - E.BTYS
+	CALL	SAVC$$,R3,4.		;;save on stack
+	ADD	#4,R1			;;set pointer to E.BLKR
+	CALL	SAVC$$,R3,4.		;;save on stack  E.BLKR - E.BLKS
+	SUB	#<E.MBLR-E.MBYR>,R1	;;set pointer to E.MBYR
+	CALL	SAVC$$,R3,2.		;;save on stack
+	ADD	#<E.MBLR-E.BLKR>,R1	;;set pointer to E.MBLR
+	CALL	SAVC$$,R3,2.		;;save on stack
+	CALL	RESC$$,R3,12.		;;Restore the 12 words we saved
+
+	PUSH	E.DTZR+2(R3)		;;save time/date last zeroed
+	PUSH	E.DTZR(R3)		;; both words
+	MOV	R4,R2			;;make copy of buffer's mmu address
+	MOV	SP,R4			;;make R4 point to stack
+	CALLM	CVTTIM,GENAP5		;;convert to seconds since last zeroed
+	MOV	R2,@DPAR6		;;reset message mapping
+	MOVB	1(SP),-(R5)		;;store low byte in message buffer ;011
+	MOVB	(SP)+,-(R5)		;;move hi byte (SP double incs)    ;011
+	TST	(SP)+			;;clean up the stack
+	MOV	PR.RMC,R4		;;set remote console protocol type
+	MOV	#1,R2			;;restore R2 (trashed by $$ routines)
+	BR 	50$			;;join common.
+
+;
+; - fix sysid message for sending to requestor.
+;
+ID$:	MOV	R0,R1			;;Get copy of CCB
+	ADD	#CC.SEC,R1		;;make pointer to SECondary buffer
+	MOV	#4,R4			;;get number of words in buffer area
+20$:	MOV	<CC.BUF-CC.SEC>(R1),(R1)+ ;;copy words up to secondary area
+	SOB	R4,20$			;;for all words
+	CALL	MPENET			;Map the Ethernet region	;002
+	TSTB	E.MOPB(R3)		;;There has to be a least one MOP buff
+	BEQ	60$			;;This op cannot succeed
+	CALL	TRIM$$			;;trim off any extra buffers
+	MOV	E.QRID(R3),(R0)		;;queue onto request ID queue
+.ASSUME	CC.LNK EQ 0
+	MOV	R0,E.QRID(R3)		;;update pointer
+	BIS	#EF$SID,E.STS(R3)	;;indicate individual sysid
+	SETFUN	C$SID			;;request sysid			;003
+	BR	80$			;;exit success
+;
+;
+; * check function (return to portals if Reply).
+;
+;
+LOOPB$:
+	BITB	#BIT0,(R5)		;;was address a multicast/broadcast?
+	BEQ	40$			;;no, phys addr, accept command
+	MOV	#LOOPAS,R1		;;get pointer to loop assist addr
+	CMP	(R1)+,(R5)		;;Loop assist?
+	BNE	30$			;;no, try broadcast
+	CMP	(R1)+,2(R5)		;;  Loop assist?
+	BNE	30$			;;  try broadcast
+	CMP	(R1),4(R5)		;;    Loop assist?
+	BEQ	40$			;;yes, accept command
+30$:	MOV	#-1,R1			;;get reg of -1
+	CMP	R1,(R5)			;;Broadcast addr?
+	BNE	90$			;;no, unsupported function
+	CMP	R1,2(R5)		;;  Broadcast addr?
+	BNE	90$			;;  unsupported function
+	CMP	R1,4(R5)		;;    Broadcast addr?
+	BNE	90$			;;    unsupported function
+
+;
+; * update the message.
+;
+40$:	MOV	LP.SKP(R5),R1		;;get skip count
+	BIC	#BIT0,R1		;;make sure it won't crash us
+	ADD	#LP.SKP+2+8.,R1		;;make packet offset where next cmd is
+	CMP	R1,CC.BUF+MS.SIZ(R0)	;;Is next command within message?
+	BHI	90$			;;No, trash it
+	SUB	#8.,R1			;;make offset to current cmd
+	CALL	CVTLOP			;;convert the loop message
+	BCS	90$			;;command wasn't loop forward
+	MOV	PR.LPB,R4		;;set protocol type for loopback
+
+;
+; Common code for CNTR$, ID$ and LOOPB$
+;
+
+;
+; * Adjust the mop buffer count.
+;
+50$:	CALL	MPENET			;Map the Ethernet region	;002
+	CMPB	R2,E.MOPB(R3)		;;mop buffers all gone?
+	BLOS	70$			;;No, use this buffer
+60$:	MAP	POP,APR=6,DATA		;;restore message mapping.
+	BR	90$			;;whoops, we lost this message
+
+70$:	SUB	R2,E.MOPB(R3)		;;show less buffers.
+;
+; * Load message on rings.
+;
+	MOVB	#QC$MOP,CC.FC(R0)	;;set mop function code in CCB.
+	MOV	R0,R5			;;get copy of CCB for loading on queue
+	CALL	SETSRC			;;load physical address for source
+	CALL	LOADX			;;load onto xmit queues.
+80$:	MAP	POP,APR=6,DATA		;;restore message mapping.
+	TST	(PC)+
+90$:	SEC
+	RETURN
+
+;
+; Trim off extra buffers
+;
+TRIM$$:	BITB	#DF.CNT,CC.DFL(R0)	;;did the requesting msg take 1 buf?
+	BEQ	93$			;;yes it's all set (weird otherwise)
+	PUSH	<R0,R5>
+	BICB	#DF.CNT,CC.DFL(R0)	;;declare this the end of the msg
+	MOV	(R0),R5			;;get pointer to remainer of msg
+	CLR	(R0)			;;make this message end
+.ASSUME	CC.LNK EQ 0
+	CALL	LOADRP			;;load the remainder of msg on queue
+	POP	<R5,R0>
+	MOV	#1,R2			;;make count of buffers be accurate
+93$:	RETURN
+
+;
+; Save words pointed to by R3 on stack
+;
+SAVC$$:	MOV	(R3)+,R2		;;get number of words to save
+95$:	MOV	(R1)+,-(SP)		;;Save stuff on stack
+	SOB	R2,95$			;;  Number should not be > 20.
+	RTS	R3
+
+;+
+; Restore words on stack into buffer pointed to R3 and APR in R4
+;	(be careful to back this stuff onto the buffer)
+;-
+
+RESC$$:	MOV	R4,@DPAR6		;;re-map buffer
+	MOV	(R3)+,R2		;;get number of words to restore
+100$:	MOVB	1(SP),-(R5)		;;copy high byte of information	;011
+	MOVB	(SP)+,-(R5)		;;and move it in (SP dbl incs)	;011
+	SOB	R2,100$			;;for all the words in the buffer
+	CALL	MPENT2			;;re-map Ethernet region	;003
+	RTS	R3
+
+	GLOBAL	<XHDATA,CSR.XH>
+
+
+
+
+.SBTTL	CVTLOP	INT$XH	RECINT	MOPDSP	Convert loop message for xmit
+
+;+
+;
+; Update the loop back message into forwarding form.  This is a little tricky
+; since the command area may span buffer boundaries.
+;
+; If we get into this routine, we know that there is enough information in the
+; message to complete the function.  We don't know, however, if the
+; information is valid.  You can only forward to a physical address.
+;
+;	R0 ->	CCB message (chain)
+;	R1 =	offset in message where function block lives
+;	R3 ->	CDB
+;
+;	CALL	CVTLOP
+;
+;	R1	random
+;	R4-R5	random
+;
+;	C = 0 If message modified.
+;	C = 1 If wasn't loop forward command (normally it's a reply)
+;	      or other error.
+;
+;-
+	.ENABL	LSB
+
+CVTLOP:	PUSH	<R2,R0>			;;save first buffer CCB
+	CALL	GETWD$			;;get first word of function block
+	CMP	#LPFRWD,R2		;;loop forward request?
+	BNE	20$			;;no, exit
+10$:	CALL	GETWD$			;;get the word
+	BIT	#BIT0,R2		;;Is it a physical address
+	BEQ	30$			;;yes, it is legal
+20$:	POP	R0			;;restore the chain pointer
+	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA ;;re-map the original buffer
+	SEC				;;indicate failure		;002
+	BR	50$			;;and fail
+
+30$:	PUSH	R2			;;yes, store first word
+	MOV	#<<QADR$L/2>-1>,R5	;;get remaining number of words in addr
+40$:	CALL	GETWD$			;;get the word from the message
+	PUSH	R2			;;save it
+	SOB	R5,40$			;;for all the words
+			;
+			; This is a bad practice, but little elegant
+			; alternatives are not available.
+			;
+	MOV	6(SP),R0		;;restore original pointer
+.ASSUME QADR$L EQ 6
+	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA ;;re-map the original buffer
+	MOV	CC.BUF+BF.VIR(R0),R4	;;make pointer to buffer header
+	ADD	BF.OFF(R4),R4		;;make pointer to start of message
+	POP	PK.DST+4(R4)		;;restore word 3
+	POP	PK.DST+2(R4)		;;  restore word 2
+	POP	(R4)			;;    restore word 1
+.ASSUME	PK.DST EQ 0
+	TST	(SP)+			;;clean up the stack
+	ADD	#8.,LP.SKP(R4)		;;update skip count
+50$:	POP	R2
+	RETURN
+
+;
+; GETWD$ - get a word from a message that may span several buffers.
+;			basic effect =  MOV  MESSAGE_BUFF(R1)+,R2
+;
+; Inputs:
+;	R0 -> current CCB.
+;	R1 =  current offset
+; Output:
+;	R0 updated.
+;	R1 = offset in (current) buffer + 2
+;	R2 = word at offset in R1
+;	R4 is trashed
+;
+GETWD$:
+60$:	MOV	CC.BUF+BF.VIR(R0),R4	;;get virtual address of buffer
+	CMP	R1,BF.CNT(R4)		;;will skip count span buffer
+	BLOS	70$			;;no, look it up
+	MOV	(R0),R0			;;yes, get next CCB
+.ASSUME	CC.LNK EQ 0
+	BEQ	65$			;;crash if not there
+	SUB	BF.CNT(R4),R1		;;subtract previous's data cnt from skip
+	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA ;;map the next message buffer
+	BR	60$			;;and try this buffer
+
+65$:	CRASH				;;illegal buffer chain
+
+70$:	ADD	BF.OFF(R4),R4		;;make pointer to data portion of buff
+	ADD	R1,R4			;;add in (modified) skip count
+	TST	(R1)+			;;make new offset
+	MOV	(R4),R2			;;return the word
+	RETURN
+
+	GLOBAL	<XHDATA>
+
+
+
+
+.SBTTL	RCVPST	INT$XH	RECINT	Post receive data to user
+
+;+
+;
+; Send data or error to requestor.  The action of this routine is based upon
+; what type of message is received.  If a message can get this far in the
+; receive interrupt processing, it can only be a message to a system job or
+; user job.
+;
+; For padded portals, this is where the count is adjusted to the length passed
+; in the LEN field of the packet (i.e., if a packet is 60 bytes long and
+; actually contains only 15 bytes, length is set to 15).
+;
+; For the given message type, the action is;
+;
+;	* "User read"
+;		- post Comm buffer to portal.
+;	* "System job read"
+;		- post Comm buffer to system job.
+;
+;	R0 ->	message
+;	R2 =	number of buffers in message
+;	R3 ->	CDB	(must be preserved)
+;	R4 ->	PDB
+;
+;	CALL	RCVPST
+;
+;	R0-R2	random
+;	R4-R5	random
+;
+;	Message posted to Portal, or to system job.
+;
+;-
+	.ENABL	LSB
+
+RCVPST:	MOV	R4,CC.DDB(R0)			;;ensure right portal is used.
+	CALL	UNPAD				;;Unpad the packet
+	BCC	10$				;;If packet was good
+	MOV	R0,R5				;;Framing error, put chain in R5
+	ADD	R2,EP.BUF(R4)			;;Reset portal quota	;010
+	CALL	LOADRP				;;Return the buffers
+	BR	50$				;;and exit
+
+10$:	MOVB	EPJBNO(R4),R1			;;get job number of portal
+	BIT	#BIT0,R1			;;User or system job?
+	BNE	40$				;;system job
+	MOV	R0,@EP.RCT(R4)			;;tack user message on end.
+20$:	BITB	#DF.CNT,CC.DFL(R0)		;;was this the last CCB?
+	BEQ	30$				;;yes, update tail pointer
+	MOV	(R0),R0				;;no, get pointer to next seg ;002
+.ASSUME	CC.LNK EQ 0
+	BEQ	60$				;;no, software problem
+	BR	20$				;;and try it
+
+30$:	MOV	R0,EP.RCT(R4)			;;update the tail pointer
+	MOV	R1,R4				;;get job number of sysjob
+	CALLX	IOFIN4,R5,<JS.XH!JSTIM>		;;unstall PDB's job
+	BR	50$				;;that was easy
+
+40$:	MOVB	#FC$RCP,CC.FC(R0)		;;set function code for sysjob
+	MOV	R0,R5				;;get copy to chain pointer
+	CALL	PSTSYS				;;post it to the system job
+50$:	RETURN
+
+60$:	CRASH
+
+	GLOBAL	<JS.XH,JBWAIT>
+
+
+
+
+.SBTTL	XMTINT	INT$XH	Service transmit interrupt
+
+;+
+;
+; This routine processes a QNA device transmit interrupt.  The function of
+; this routine is to pull off any successful transmits, and, send an
+; acknowledgement back to the requestor (queued to TRNQUE for DECnet, queued
+; for "other" system jobs, and POSTed to user jobs).
+;
+; Any SETUP messages that casue an interrupt, will essentially be ignored
+; since the SETUP message will also be echoed on a receive.  If a SETUP
+; message generates an error, the result will be unpredictable.
+;
+; This routine does not care what state the controller is in.
+;
+; The general algorithm for this routine is,
+;
+;	> For all complete messages on the transmit queue,
+;		* Determine success or failure of the transmit.
+;			- Log error/event.
+;		* Clean ring entries, count collisions.
+;		* Update counters.
+;		* Post completions to jobs.
+;
+;	> Redo routine if Xmit interrupt set, Load transmit rings.
+;
+;	Ethernet region mapped
+;
+;	R2 ->	CSR	(must be preserved)
+;	R3 ->	CDB	(must be preserved)
+;
+;	CALL	XMTINT
+;
+;	R0-R1	random
+;	R4-R5	random
+;
+;-
+	.ENABL	LSB
+
+XMTINT:	CLR	E.TMR(R3)		;;Clear timer (xmit interrupt rcvd)
+	MOV	(R2),R4			;;get copy of CSR
+	BIC	#QNA$RI,R4		;;don't want to mess with rcv interrupts
+	MOV	R4,(R2)			;;clear the interrupt
+	PUSH	R2
+;
+; * Extract a complete message off of the rings, and ring queue.
+;
+;	Note:	GETMSG sets R0 -> Message chain, R1 -> last ring entry,
+;		            R2 = number of buffers in chain.
+;
+10$:	PUSH	R3			;;save CDB pointer
+	ADD	#E.XRB,R3		;;set offset to xmit subblock
+	SEC				;;signal xmit rings to GETMSG
+	CALL	GETMSG			;;get the first msg on the ring
+	POP	R3			;;restore CDB pointer (C not affected)
+	BCC	20$			;;process message
+;
+; > Redo routine if xmit interrupt set, Load transmit rings.
+;
+140$:	POP	R2			;;				;003
+	BIT	#QNA$XI,(R2)		;;Interrupt get set during processing? ;003
+	BEQ	150$			;;no, everything is OK		;003
+	JMP	XMTINT			;;yes, see if anything is left	;003
+
+150$:	CALL	LOADXR			;;load up more rings (if any)	;003
+	RETURN				;;				;003
+
+;
+; * Determine success or failure of transmit.
+;
+20$:	BIT	#Q1$ERR,QBD.S1(R1)	;;Was there an error?
+	BEQ	70$			;;no, a successful transmit
+			;
+			; WARNING: DECOM transceivers set Q1X$LO on all xmits.
+			;
+	BIT	#Q1X$LO,QBD.S1(R1)	;;Was it a LOSS?  i.e., DECOM xcvr?
+	BNE	70$			;;yes, don't count it as an error
+;
+; - Count xmit failure.
+;
+	MOV	R3,R5			;; line - get copy of CDB
+	CALL	INC1,R3,E.XMTF		;; line - count transmit failure
+;
+; - Log error/event.
+;
+	MOV	CC.DDB(R0),R4		;;set  for errlog. PDB
+	MOV	R0,R5			;;set  for errlog. CCB
+	MOV	QBD.S1(R1),E.STR1(R3)	;;save status word one for error
+	MOV	QBD.S2(R1),E.STR2(R3)	;;save status word two for error
+	LOG$XH				;;log the error
+	BISB	#DF.ERR,CC.DFL(R0)	;;mark message as failed
+	BIT	#Q1X$FL,QBD.S1(R1)	;;Heart beat collision detect fail?
+	BEQ	30$			;;no, continue with regular failure.
+	MOV	R3,R5			;; line - get copy of CDB
+	CALL	INC1,R3,E.CDCF		;; line - count as collision check fail
+	CALL	@EVTSAV			;;Is DECnet Event Logging on?
+	BCC	60$			;;no, don't bother logging events
+	CALLM	NIECCF,EVLAP5		;;log collision check failed event
+	BR	55$			;;this message is done
+
+30$:	CALL	@EVTSAV			;;Is DECnet Event Logging on?
+	BCC	60$			;;no, don't bother logging events
+	CLR	R4			;;Assume Excessive collisions (ABORT)
+.ASSUME	EDF$EC EQ 0
+	BIT	#Q1X$NC,QBD.S1(R1)	;;--No carrier for transmit?
+	BEQ	50$			;;   Carrier was ok, assumption correct
+	MOV	#EDF$CC,R4		;;Carrier check did fail
+			;
+			; TDR value is useless for determining open and short
+			; circuits.  If they ever fix that problem (doubtful),
+			; the following should tell the difference.
+			;
+40$:
+50$:	MOV	QBD.S2(R1),R5		;;get the TDR of last xmit
+	BIC	#^C<Q2X$TD>,R5		;; (after getting rid of reserved bits)
+	SUB	#500.,R5		;; (and offsetting synch time)
+	CALLM	NIESNF,EVLAP5		;;log send failed event
+55$:	CALL	@(SP)+			;;finish event
+
+60$:	CALL	CLRRNG,R5,E.XRB		;;clear msg off ring (regs from GETMSG)
+	BR	130$			;;and tell somebody who cares
+;
+; * Clean ring entries, count collisions.
+;
+70$:	MOV	R4,-(SP)		;;save length of data field	;005
+	MOV	QBD.S1(R1),R4		;;get copy of status word 1
+	BIT	#Q1X$CN,R4		;;Any collisions occur?
+	BEQ	90$			;;no, good, don't have to count it
+	MOV	R3,R5			;; line - get copy of CDB
+	BIC	#^C<Q1X$CN>,R4		;; line - extract count of collisions
+	CMP	#BIT4,R4		;; line - Single or multiple collisions?
+	BNE	80$			;; line - multiple
+	CALL	INC2,R3,E.1COL		;; line - count as a single collision
+	BR	90$			;; line - clear ring
+
+80$:	CALL	INC2,R3,E.MCOL		;; line - count as a multiple collision
+90$:	CALL	CLRRNG,R5,E.XRB		;;clear msg off ring (frees R1 for use)
+;
+; * Update counters.
+;
+	MOV	(SP)+,R1		;;get length of data field	;005
+	SUB	#PK.LEN,R1		;;subtract the ethernet header	;005
+	BITB	#^C<FC$WRT!FC$XMT>,CC.FC(R0) ;;Is there a PDB (allows fns 2 4 6)
+	BNE	120$			;; no, do the line counters
+	MOV	CC.DDB(R0),R5		;; circ - get pointer to PDB
+	CALL	COUNT2,R3,EP.BYS	;; circ - count as bytes sent
+	MOV	CC.DDB(R0),R5		;; circ - get pointer to PDB
+	CALL	INC2,R3,EP.BLS		;; circ - count as blocks sent
+120$:	MOV	R3,R5			;; line - get copy of CDB
+	CALL	COUNT2,R3,E.BYTS	;; line - count bytes sent
+	MOV	R3,R5			;; line - get copy of CDB
+	CALL	INC2,R3,E.BLKS		;; line - count as blocks sent
+;
+; * Post completions to jobs.
+;
+130$:	CALL	XMTPST			;;The generic posting routine
+	JMP	10$			;;and try to get another one
+
+	GLOBAL	<XHDATA,EVTSAV,LOG$XH>
+
+
+
+
+.SBTTL	XMTPST	INT$XH	XMTINT	Post transmit acknowledgment to user
+
+;+
+;
+; Post normal completion to jobs.  There are several types of messages that
+; will require some special posting.  The type of posting depends on the
+; function code of CCB that the message is (CC.FC).
+;
+; For the function code of the message,
+;
+;	* "User write"
+;		- post I/O to JDB.
+;		- return CCB.
+;	* "System job xmit"
+;		- find system job number.
+;		- decrement xmit outstanding count.
+;		- find completion status.
+;		- enqueue on system queue (and set corresponding L3Q).
+;	* "User multicast setup request"
+;		- If system job, post completion CCB to system job.
+;		- post I/O to JDB.
+;		- return CCB.
+;		- clear multicast status bit on CDB.
+;		- If CCB's exist on pending multicast queue, queue for xmit.
+;	* "System multicast setup request"
+;		- return CCB.
+;		- clear multicast status bit on CDB.
+;		- If CCB's exist on pending multicast queue, queue for xmit.
+;	* "System MOP function"
+;		- return buffers to receive free pool.
+;	* "Individual controller System ID request"
+;		- return MOP buffer to rcv pending queue.
+;		- clear flag bits.
+;		- Start any pending sysid CCBs on any sysid queue.
+;	* "System wide System ID request"
+;		- pass the CCB to next controller in list if system.
+;		- return CCB (if finished)
+;		- clear flag bits.
+;		- Start any pending sysid CCBs on any sysid queue.
+;
+;	R0 ->	message
+;	R2 =	number of buffers in message
+;	R3 ->	CDB
+;
+;	CALL	XMTPST
+;
+;	R0-R5	random
+;
+;-
+	.ENABL	LSB
+
+XMTCCB:	.WORD	10$		;<nothing>
+	.WORD	10$		;FC$RD	- User read
+	.WORD	USRWR$		;FC$WRT	- User write
+	.WORD	SYSXM$		;FC$XMT	- System job transmit
+	.WORD	10$		;FC$BUF	- System job buffer supply
+	.WORD	USRMC$		;QC$UMC	- User multicast setup request
+	.WORD	SYSMC$		;QC$SMC	- System multicast setup request
+	.WORD	XMOP$		;QC$MOP	- System mop function
+	.WORD	SYSID$		;QC$SID	- Individual System ID message
+	.WORD	SYSWD$		;QC$SIS	- System wide System ID message
+
+L.XMTCCB	= <.-XMTCCB>-2	;last function
+.ASSUME	L.XMTCCB EQ QC$SIS
+
+XMTPST:	MOVB	CC.FC(R0),R1		;;get the function code
+	BIT	#<^C<QC$MSK>!BIT0>,R1	;; clear out unwanted bits	;002
+	BNE	10$			;;crash if unknown function code ;002
+	JMP	@XMTCCB(R1)		;;dispatch to action routine
+
+10$:	CRASH				;;should never happen
+
+;
+; * "User write"
+;
+USRWR$:
+;
+; - post I/O to JDB.
+;
+	PUSH	R0			;; save reg that will be munged
+	MOV	CC.DDB(R0),R4		;;Get PDB pointer
+	MOVB	EPJBNO(R4),R4		;;Get job number
+	CALL	CKERR$			;;check for errors
+	MOV	R4,R0			;;get copy for UNLOCK
+	CALLX	UNLOCK			;;unlock the job
+	CALLX	IOFIN4,R5,JS.SY		;;post completion to user
+	POP	R0
+;
+; - return CCB.
+;
+	CALLR	RTCCB$			;;return the CCB		;002
+;
+; * "System job xmit"
+;
+SYSXM$:
+;
+; - find system job number.
+;
+	MOV	CC.DDB(R0),R4		;;Get PDB pointer
+	CALL	UNPAD			;;Unpad the message if necessary
+	MOVB	EPJBNO(R4),R1		;;get job number (5=TRNJOB) (etc.)
+;
+; - decrement xmit outstanding count.
+;
+	DEC	EP.XMO(R4)		;;show one less xmit outstanding
+	BNE	15$			;;If more are left
+	BIT	#EP$MDL,EP.STS(R4)	;;Is this portal marked for deletion
+	BEQ	15$			;;no, just idle
+	CALL	RETPDB			;;yes, delete it.
+;
+; - find completion status.
+;
+15$:	MOV	#FC$XCP,R4		;;assume the transmit completed OK
+	BITB	#DF.ERR,CC.DFL(R0)	;;was there an error?
+	BEQ	20$			;;No, assumption is OK
+	MOV	#FC$XER,R4		;;Set error in transmit
+	MOV	#DATERR,CC.SEC(R0)	;;tell sysjob some data error occured
+20$:	MOVB	R4,CC.FC(R0)		;;set completion status in CCB
+;
+; - enqueue on to L3Q.
+;
+	MOV	R0,R5			;;switch register for call
+	CALLR	PSTSYS			;;post status (buffers) to sysjob ;002
+;
+; * "User multicast setup request"
+;
+USRMC$:
+;
+; - If system job, post completion CCB to system job.
+;
+	MOV	CC.DDB(R0),R4		;;Get PDB pointer
+	MOVB	EPJBNO(R4),R1		;;set up PSTSYS
+	BITB	#BIT0,R1		;;System job?
+	BEQ	40$			;;no, it's a real job
+	CLR	CC.SEC(R0)		;;make sure error variable is zero
+	MOVB	#FC$MUL,CC.FC(R0)	;;assume operation is multicast
+	BIT	#EP$PHY,EP.STS(R4)	;;was it really set physical address?
+	BEQ	30$			;;no, assumption is correct
+	BIC	#EP$PHY,EP.STS(R4)	;;show phys address is set
+	MOVB	#FC$PHY,CC.FC(R0)	;;set operation completed is phys addr
+30$:	MOV	R0,R5			;;switch register for call
+     	CLR	CC.BUF+BF.MMU(R5)	;;zero bf.mmu for tracing	;006
+	CALL	PSTSYS			;;post status (buffers) to sysjob
+	BR	60$			;;send any remaining multicast setups
+;
+; - post I/O to JDB.
+;
+40$:	MOV	R1,R4			;;Get job number in calling format
+	PUSH	R0			;; save reg that will be munged
+	CALL	CKERR$			;;check for errors
+	CALLX	IOFIN4,R5,JS.XH		;;release the .SPEC call
+	POP	R0			;; restore munged regs
+	.BR	50$			;;join common
+;
+; * "System multicast setup request"
+;
+SYSMC$:
+;
+; - return CCB.
+;
+50$:	CALL	RTCCB$			;;return the system multicast CCB.
+;
+; - clear multicast status bit on CDB.
+;
+60$:	BIC	#EF$MUL,E.STS(R3)	;;clear out multicast pending flag.
+;
+; - If CCB's exist on pending multicast queue, queue for xmit.
+;
+	MOV	E.QMUL(R3),R5		;;yes, get first one off queue.
+	BEQ	130$			;;no, we're done.
+	MOV	(R5),E.QMUL(R3)		;;update queue pointer
+	BIS	#EF$MUL,E.STS(R3)	;;set multicast in progress bit.
+	CALLR	LOADXP			;;load it up for pending xmit	;002
+;
+; * "System MOP function"
+;
+XMOP$:
+;
+; - return buffers to receive free pool.
+;
+	MOV	R0,R5			;;get pointer for count
+70$:	INCB	E.MOPB(R3)		;;count our posession
+	MOV	(R5),R5			;;Get next one
+	BNE	70$			;;count it
+	MOV	R0,R5			;;get pointer for call
+	CALLR	LOADR			;;return bufs to receive pool	;002
+;
+; * "Individual controller System ID request"
+;
+SYSID$:
+;
+; - clear flag bits.
+;
+	BIC	#EF$SID,E.STS(R3)	;;indcate no more sysid action here.
+	MOV	R0,R5			;;Get copy of CCB
+	ADD	#CC.SEC,R5		;;make pointer to SECondary buffer
+	MOV	#4,R4			;;get number of words in buffer area
+75$:	MOV	(R5),<CC.BUF-CC.SEC>(R5);;copy words out of secondary area
+	CLR	(R5)+			;;Clear out the old value
+	SOB	R4,75$			;;for all words
+	MOV	R0,R5			;;get pointer for call
+	CALL	LOADR			;;return bufs to receive pool
+	BR	85$			;;join common
+;
+; * "System wide System ID request"
+;
+SYSWD$:
+;
+; - pass the CCB to next controller in list if system.
+;
+	CALL	PASTOK			;;pass the token SYSID CCB
+	BCC	130$			;;if there are more controllers to do
+;
+; - return CCB.
+;
+	CALL	RTCCB$			;;return the sysid pointer
+;
+; - clear flag bits.
+;
+85$:	BIC	#XH$SID,@#XHDATA+XHINIT ;;clear ownership of sysid buffer
+;
+; - Start any pending sysid CCBs on any sysid queue.
+;
+	PUSH	R3			;;save orginal CDB pointer
+	MOV	@#XHDATA+XHACT,R3	;;get first active CDB
+	BR	95$			;;start of controller loop	;002
+
+90$:	MOV	E.LNK(R3),R3		;;any active controllers?	;002
+	BEQ	120$			;;no. exit			;002
+95$:	TST	E.QSID(R3)		;;does it have SIDs to be sent?	;002
+	BEQ	90$			;;no.  go get next controller	;002
+
+100$:	BIS	#XH$SID,@#XHDATA+XHINIT	;;signal system id in progress.
+	MOV	E.QSID(R3),R5		;;get copy of SYSID CCB.
+	MOV	(R5),E.QSID(R3)		;;unlink from list
+	CMPB	#QC$SID,CC.FC(R5)	;;is this an individual sysid?
+	BEQ	110$			;;yes, mark as such
+	BIS	#EF$SIS,E.STS(R3)	;;no, make it a system ID.
+	BR	115$			;;and continue
+
+110$:	BIS	#EF$SID,E.STS(R3)	;;assume individual sysid.
+115$:	CALL	LODSID			;;set up the system ID buffer.
+	CALL	LOADXP			;;load this sysid on pending queue.
+120$:	POP	R3			;;restore original CDB pointer.
+
+130$:	RETURN
+
+;									;002
+; * "Common error checking for table functions"				;002
+;									;002
+CKERR$:	BITB	#DF.ERR,CC.DFL(R0)	;;An error occur?
+	BEQ	140$			;;no, continue
+	MOV	JOBTBL(R4),R2		;;get pointer to JDB
+	MOVB	#DATERR,JDIOST(R2)	;;assume error was data error
+	TST	E.STAT(R3)		;;Controller running?
+.ASSUME	E$RUN EQ 0
+	BEQ	140$			;;yes, assumption is correct
+	MOVB	#HNGDEV,JDIOST(R2)	;;device is no longer runable
+140$:	RETURN
+
+;									;002
+; * "Return the CCB to the system"					;002
+;									;002
+RTCCB$:	MOV	R0,R4			;;get copy of buffer for routine
+	BUFFER	RETSML			;;return the CCB
+	RETURN
+
+	GLOBAL	<XHDATA,JS.XH,JOBTBL,HNGDEV,DATERR>
+
+
+
+
+.SBTTL	PASTOK	INT$XH	XMTINT	Pass SYSID token to next controller
+
+;+
+;
+; Passes SYSID CCB to next controller on list.  This is used for the periodic
+; SYSID message.  C is set on exit to signal whether or not it was passed to
+; another controller.
+;
+;	This routine must be called at PR5.
+;
+;	Control flow,
+;	* Clear SYSID flag in current CDB.
+;	* Find next CDB, exit if none.
+;	* Copy phyical address into buffer.
+;	* Load onto pending and ring queues of new controller.
+;
+;	R0 ->	SYSID CCB
+;	R3 ->	CDB that last received the SYSID message
+;
+;	CALL	PASTOK
+;
+;	R4-R5	random
+;
+;	C=0 if passed to next controller.
+;	C=1 if no more controllers to pass message to.
+;
+;-
+	.ENABL	LSB
+
+PASTOK:
+;
+; * Clear SYSID flag in current CDB.
+;
+	BIC	#EF$SIS,E.STS(R3)	;;Clear the flag
+;
+; * Find next CDB, exit if none.
+;
+	PUSH	R3			;;save old CDB pointer		;002
+	MOV	E.LNK(R3),R3		;;get pointer to next		;002
+	BEQ	30$			;;we're done
+	BIS	#EF$SIS,E.STS(R3)	;;signal that this controller has it
+;
+; * Copy phyical address into buffer.
+;
+	MOV	R0,R5			;;get copy of CCB for CALL
+	CALL	LODSID			;;load up the sysid parameters
+;
+; * Load onto pending and ring queues of new controller.
+;
+	CALL	LOADX			;;load the xmit queues.
+	TST	(PC)+			;;success
+30$:	SEC				;;failure
+	POP	R3			;;restore old CDB pointer	;002
+	RETURN
+
+
+
+
+.SBTTL	LODSID	INT$XH	XMTINT	PASTOK	Load system ID buffer
+
+;+
+;
+; Loads system ID buffer with attributes from the passed CDB.  Runs at PR5.
+;
+; If the CCB that is passed indicates that this is an "Individual Sysid", the
+; desination address is loaded from the source address of the message pointed
+; to by the buffer in CC.SEC.  The receipt number is also transfered from the
+; secondary buffer.  This type of CCB is created from a REQUEST ID MOP command.
+;
+;	R3 ->	CDB
+;	R5 ->	CCB
+;
+;	CALL	LODSID
+;
+;-
+	.ENABL	LSB
+
+LODSID:	REGSCR
+	MOV	@#XHDATA+XHIDBF,R4	;;get pointer to sysid buffer
+.ASSUME	SID.DA EQ 0
+	MOVB	#5.,SID.CD(R4)		;;default to device type of QNA	;012
+	CMP	QNALQA(R3),#^RQNA	;;is this a QNA?		;012
+	BEQ	5$			;;yes, we were right		;012
+	MOVB	#37.,SID.CD(R4)		;;no, say it is an LQA		;012
+5$:	MOV	#REMCON,R1		;;get pointer to Remote console address
+	MOV	(R1)+,(R4)+		;;  copy remote console address
+	MOV	(R1)+,(R4)+		;;    over to the
+	MOV	(R1),(R4)+		;;      sysid buffer
+	MOV	R3,R1			;;get copy of CDB pointer
+	ADD	#E.PHYS,R1		;;make pointer to physical address
+	MOV	(R1)+,(R4)+		;;  copy physical address
+	MOV	(R1)+,(R4)+		;;    over to the
+	MOV	(R1),(R4)+		;;      sysid buffer
+	CLR	<SID.RN-SID.TY>(R4)	;;clear out the receipt number
+	ADD	#<SID.HA-SID.TY>,R4	;;make pointer to the hardware address
+	MOVB	E.UNT(R3),R0		;;get unit of CDB
+	MOV	CSR.XH(R0),R0		;;get pointer to CSR
+	ADD	#QNA.AD,R0		;;offset to start of hardware address
+	MOV	#QADR$L,R2		;;set byte count of multicast address
+10$:	MOV	(R0)+,R1		;;read word of address
+	MOVB	R1,(R4)+		;;  copy to byte location
+	SOB	R2,10$			;;for all bytes in address
+	CMPB	#QC$SID,CC.FC(R5)	;;is this an individual controller system ID?
+	BNE	30$			;;no, buffer is set up right
+	MOV	@DPAR6,R2		;;save current mapping
+	MAP	CC.SEC+BF.MMU(R5),APR=6,DATA ;;map the secondary buffer
+	MOV	CC.SEC+BF.VIR(R5),R0	;;get pointer to buffer
+	ADD	BF.OFF(R0),R0		;;get to start of data
+	ADD	#PK.SRC+6,R0		;;get to bottom of source address
+	MOV	-(R0),-(SP)		;;save source address word 3
+	MOV	-(R0),-(SP)		;;  word 2
+	MOV	-(R0),-(SP)		;;    word 1
+	MOV	<SID.RN-PK.SRC>(R0),-(SP) ;;save receipt number		;012
+	MOV	R2,@DPAR6		;;restore previous mapping
+	MOV	@#XHDATA+XHIDBF,R4	;;get pointer to sysid buffer
+	MOV	(SP)+,SID.RN(R4)	;;place in new receipt value	;012
+.ASSUME	PK.DST EQ 0
+	MOV	(SP)+,(R4)+		;;restore as destination address word 1
+	MOV	(SP)+,(R4)+		;;  word 2
+	MOV	(SP)+,(R4)+		;;word 3
+30$:	RETURN
+
+	GLOBAL	<XHDATA,CSR.XH>
+
+
+
+
+.SBTTL	PSTSYS	INT$XH	Post completion status to system job
+
+;+
+;
+; "Posts" a completed I/O request to a system job (most commonly DECnet/E)
+;
+;	Format of SJBQUE table,			Format of xxxBLK table,
+;	SJBQUE::.WORD 0      ;sysjob 1		xxxBLK::.WORD 0   ;Head
+;	        .WORD NSPBLK ;sysjob 3		        .WORD .-2 ;Tail
+;	        .WORD TRNJOB ;sysjob 5		        .L3Q Qxxx ;L3 queue
+;	SJBEND == <.-SJBQUE>
+;
+;	Called at PR5
+;
+;	Ethernet region mapped
+;
+;	R1 =	job num to receive CCB.
+;	R5 ->	CCB (chain)
+;
+;	CALL	PSTSYS
+;
+;	R1,R5	random
+;
+;	CCB (chain) is no longer in our possesion.
+;
+;-
+	.ENABL	LSB
+
+PSTSYS:	PUSH	R0
+	MOV	CC.DDB(R5),R0		;;get PDB pointer
+	MOV	EP.CDB(R0),R0		;;get PDB's CDB pointer
+	MOVB	E.UNT(R0),R0		;;get CDB's unit number
+	MOV	DEV.XH(R0),CC.DDB(R5)	;;get CDB's DDB pointer
+	POP	R0
+	DEC	R1			;;make job num into table offset
+	CMP	R1,#SJBEND		;;is it greater than known values?
+	BHI	30$			;;yes, something is wrong here
+	MOV	SJBQUE(R1),R1		;;Get pointer to queue block area
+	TST	4(R1)			;;entry active? (L3Q bits defined)
+	BEQ	30$			;;no, this shouldn't happen
+	PUSH	<R2,R3>			;;save regs for L3Q manipulation
+	MOVB	4(R1),R2		;;\\				;003
+	MOVB	5(R1),R3		;; \\  Manually execute L3QSET.	;003
+	ADD	#L3QUE,R3		;; //  ========================
+	BISB	R2,(R3)			;;//
+	POP	<R3,R2>			;;restore regs
+	MOV	R5,@2(R1)		;;insert CCB (chain) at tail of queue
+10$:	BITB	#DF.CNT,CC.DFL(R5)	;;Are we done conditionally?
+	BEQ	20$			;;Yes, exit
+	MOV	(R5),R5			;;make pointer to next
+	BR	10$			;;and try it out
+
+20$:	MOV	R5,2(R1)		;;store new tail of queue
+	RETURN
+
+30$:	CRASH
+
+	GLOBAL	<SJBQUE,SJBEND,DEV.XH>
+
+
+
+
+.SBTTL	GETMSG	INT$XH	Get a message off of a ring
+
+;+
+;
+; "Message in a bottle (neck)."  This routine pulls a message off of the ring,
+; and returns all vital data in regs 0-2 (detailed below).
+;
+; If the message is not complete, it is put back on the queue.  On the
+; interrupt, there should be at least one message on the rings done.
+;
+; The general flow of this routine is,
+;
+;	* Get first buffer descriptor from ring queue, starting ring entry.
+;	* Extract CCBs off of ring queue until a ring entry is found
+;	  that the QNA is not using or end of message signaled.
+;	* Ensure message is really ready.
+;		- Put CCBs back on ring queue if message isn't ready.
+;	* Terminate the message for returning.
+;
+;	R3 ->	CDB ring control sub-block.  (either transmit or receive)
+;
+;	C = 1 for xmit rings
+;	C = 0 for receive rings
+;
+;	CALL	GETMSG
+;
+;	R0 ->	Message chain
+;	R1 ->	Last ring entry in chain
+;	R2 =	Number of buffers in chain
+;	R4 =	Number of bytes in buffer chain (data field)		;005
+;	R5	random
+;
+;	C = 0 Message returned.
+;	C = 1 Nomessage was ready.
+;
+;-
+	.ENABL	LSB
+
+GETMSG:	ROR	-(SP)			;;save the ring type flag (in C)
+	CLR	-(SP)			;;zero a word for length count	;005
+;
+; * Get first buffer descriptor from ring queue, starting ring entry.
+;
+	MOV	E.EMP(R3),R1		;;get start of rings
+	MOV	(R3),R4			;;get pointer to first entry
+.ASSUME	E.RNG EQ 0
+	BEQ	80$			;;fail if there aren't any
+	MOV	R4,R0			;;set start of message
+	CLR	R2			;;clear buffer counter
+;
+; * Extract CCBs off of ring queue until a ring entry is found
+;   that the QNA is not using or end of message signaled.
+;
+10$:	MOV	(R4),(R3)		;;update ring queue pointer
+.ASSUME	CC.LNK EQ 0
+.ASSUME	E.RNG  EQ 0
+	BNE	20$			;;if no tail adjustment needed
+	MOV	R3,E.RNGT(R3)		;;update the tail pointer
+.ASSUME	E.RNG  EQ 0
+20$:	BISB	#DF.CNT,CC.DFL(R4)	;;assume CCB is part of chain
+	INC	R2			;;count one (another) buffer in message
+	BIT	#QF$USE,(R1)		;;Has this entry been used?
+.ASSUME	QBD.FL EQ 0
+	BEQ	50$			;;No, reject this message
+	MOV	QBD.S1(R1),R5		;;get copy of status word 1
+	CMP	#Q1$INI,R5		;;Has this BDL really been used?
+	BEQ	50$			;;no, it's still initialized
+	TST	2(SP)			;;is this a receive operation	;005
+	BPL	27$			;;yes, skip adding xmit cntrs	;005
+	MOV	R2,-(SP)		;;save the buffer count		;005
+	MOV	QBD.LN(R1),R2		;;get the length of the message	;005
+	NEG	R2			;;make it positive		;005
+	ASL	R2			;;make it into bytes		;005
+	BIT	#QA$L,QBD.AD(R1)	;;was buffer length odd		;005
+	BEQ	25$			;;no				;005
+	INC	R2			;;yes, add one to length	;005
+25$:	ADD	R2,2(SP)		;;add to total length		;005
+	MOV	(SP)+,R2		;;restore buffer count		;005
+27$:	BIC	#^C<Q1$LAS>,R5		;;clear out unwanted bits	;005
+	CMP	#Q1$LAS,R5		;;End of message?
+	BNE	30$			;;yes, see if device is done
+	TST	(R3)			;;anything left on queue?
+	BEQ	50$			;;no, put partial message back on
+	MOV	(R3),R4			;;get pointer to next ring queue entry
+.ASSUME	E.RNG EQ 0
+	ADD	#QBD$LN,R1		;;add offset to get next ring entry
+	CMP	R1,E.BOT(R3)		;;did we go past the last entry?
+	BLO	10$			;;no, it's good
+	MOV	E.TOP(R3),R1		;;set entry pointer to top
+	BR	10$			;;and find next part of message
+
+;
+; * Ensure message is really ready.
+;
+30$:	TST	2(SP)			;;restore type flag		;005
+	BPL	40$			;; do recv final test
+	TST	QBD.S2(R1)		;;Is Xmit really done? (TDR defined)
+	BNE	70$			;;yes finish it
+	BR	50$			;;no, another interrupt will get this
+
+40$:	CMPB	QBD.S2+1(R1),QBD.S2(R1)	;;Is Receive really done? (2 RBL equal?)
+	BNE	50$			;;no, put CCB's back on ring	;005
+	BISB	QBD.S1+1(R1),(SP)	;;get bits <10:08> of msg	;005
+	SWAB	(SP)			;;put in proper position	;005
+	BISB	QBD.S2(R1),(SP)		;;get bits <00:07> of msg	;005
+	BIC	#^C<Q1R$RB!Q2R$RB>,(SP)	;;clear out unwanted bits	;005
+	ADD	#60.,(SP)		;;add needed extra byte count	;005
+	BR	70$			;;yes, finish off receive	;005
+
+;
+; - Put CCBs back on ring queue if message isn't ready.
+;
+50$:	MOV	(R3),(R4)		;;Make tail of message point to head
+.ASSUME	E.RNG  EQ 0
+.ASSUME	CC.LNK EQ 0
+	BNE	60$			;;If there was a queue
+	MOV	R4,E.RNGT(R3)		;;  otherwise adjust the tail pointer
+60$:	MOV	R0,(R3)			;;restore original ring queue
+.ASSUME	E.RNG EQ 0
+	BR 	80$			;;and fail
+
+;
+; * Terminate the message for returning
+;
+70$:	BICB	#DF.CNT,CC.DFL(R4)	;;Mark CCB as end
+	CLR	(R4)			;;Get rid of link entry
+.ASSUME	CC.LNK EQ 0
+	TST	(PC)+			;;success (C cleared)
+80$:	SEC				;;failure (C set)
+	MOV	(SP)+,R4		;;get the total buffer length	;005
+	POP	R5			;;take type flag off stack (C preserved)
+	RETURN
+
+
+
+
+.SBTTL	LOADR/LOADX UTILTY Load receive or xmit pending queue and rings
+
+;+
+;
+; Puts the passed message onto the pending queue, and loads the rings to start
+; the process rolling.
+;
+;	R3 ->	CDB
+;	R5 ->	CCB (or chain of)
+;
+;	CALL	LOADR
+;	CALL	LOADX
+;
+;	R0-R5	random
+;
+;-
+	.ENABL	LSB
+
+LOADR:	PUSH	@#PS			;save current pr level
+	SPLC	5			;;ensure PR5
+	CALL	LOADRP			;;load the pending queue
+	CALL	LOADRR			;;load the rings
+	BR	10$			;;join common
+
+LOADX:	PUSH	@#PS			;save current pr level
+	SPLC	5			;;ensure PR5
+	CALL	LOADXP			;;load the pending queue
+	CALL	LOADXR			;;load the rings
+10$:	POP	@#PS			;restore pr level
+	RETURN
+
+
+
+
+.SBTTL	LOADRP/LOADXP	UTILTY	Load receive or xmit pending queue
+
+;+
+;
+; These routines load a CCB (or chain of CCBs representing one packet) onto
+; the pending xmit or receive queue.
+;
+; A chained buffer may be passed as follows,
+;
+;		CCB0 (DF.CNT set) -> ... -> CCBn (DF.CNT cleared)
+;
+; The chain is also terminated by a zero link word.
+;
+; For loading the rcv pending list, if E.XTRA is set in the CDB, the buffers
+; are returned to the system free pool until E.XTRA is zero.
+;
+;	THESE ROUTINES MUST BE CALLED AT PR5
+;
+;	R3 ->	CDB
+;	R5 ->	CCB (or CCB chain) to load on queue
+;
+;	CALL	LOADRP
+;	CALL	LOADXP
+;
+;	R0	random
+;	R5 ->	last CCB in chain
+;
+;-
+	.ENABL	LSB
+
+LOADRP:	TST	E.XTRA(R3)		;;any buffers to return?
+	BEQ	40$			;;no, continue
+	TST	R5			;;anything to deallocate?
+	BEQ	90$			;;no, what a waste
+10$:	MOV	(R5),R0			;;make pointer to next buffer.
+.ASSUME	CC.LNK EQ 0			;;make sure link is where it is
+	BITB	#DF.CNT,CC.DFL(R5)	;;Is this the end of the message?
+	BNE	20$			;;No, there are additional ones
+	CLR	R0			;;yes, signal end of message.
+20$:	CLR	(R5)			;;clear out old link word
+	CALL	DALOBF			;;deallocate that buffer
+	DEC	E.XTRA(R3)		;;show one more gone back to free pool
+	BEQ	30$			;;If done freeing up buffers
+	MOV	R0,R5			;;make pointer to next buffer to deallo
+	BNE	10$			;;get rid of it if it's there
+	BR	90$			;;we dealloed all bufs, but not enough
+
+30$:	MOV	R0,R5			;;queue remaining buffs to pending queue
+40$:	MOV	#E.RRB,R0		;;Set offset to Xmt Ring Sub-block
+	BR	50$			;;join common
+
+LOADXP:	MOV	#E.XRB,R0		;;Set offset to Rcv Ring Sub-block
+	.BR	50$			;;join common
+
+50$:	TST	R5			;;anything to queue?
+	BEQ	90$			;;no, this was easy.
+	ADD	R3,R0			;;add CDB addr to make ptr to Sub-block
+	MOV	R5,@E.PNDT(R0)		;;Set new tail in buffer queue.
+60$:	BITB	#DF.CNT,CC.DFL(R5)	;;Is this the end of the message?
+	BEQ	80$			;;Yes, message is saved.
+	TST	(R5)			;;No, Is there a pointer to next?
+.ASSUME	CC.LNK EQ 0			;;make sure link is where it is
+	BEQ	70$			;;No next, this chain is illegal.
+	MOV	(R5),R5			;;get pointer to next CCB in chain
+	BR	60$			;; and try it out
+
+70$:	BICB	#DF.CNT,CC.DFL(R5)	;;Incidate that last CCB was last.
+80$:	CLR	(R5)			;;Ensure tail is zero
+	MOV	R5,E.PNDT(R0)		;;Update tail pointer
+90$:	RETURN
+
+
+
+
+.SBTTL	LOADRR	UTILTY	Load recieve rings from pending queue
+
+;+
+;
+; This routine loads the rcv rings for the QNA from the pending buffer queue.
+;
+; Loading is stopped when there is no more room left on the rings, or when
+; there are no more buffers in the pending queue.
+;
+; Must leave an empty entry on the ring to account for infinite loop problem
+; on the DEQNA.
+;
+; The general flow for the routine is:
+;	* If interrupts are not enabled, don't load anything on rings.
+;	* While there is room on the rings and buffers exist to put on.
+;		- Dequeue next free rcv buffer (quit if none).
+;		- Enqueue into rcv ring buffer queue.
+;		- Calculate size of and phys addr of buffer.
+;		- Load Rcv Ring Entry.
+;	* Validate Rcv list (If necessary).
+;
+;	THIS ROUTINE MUST BE CALLED AT PR5
+;
+;	Ethernet region is mapped
+;
+;	R3 ->	CDB	(preserved)
+;
+;	CALL	LOADRR
+;
+;	R0-R2	random
+;	R4-R5	random
+;
+;	At least MOP buffers on rings, RCV list enabled.
+;
+;-
+	.ENABL	LSB
+
+LOADRR:
+;
+; * If interrupts are not enabled, don't load anything on rings.
+;
+	MOVB	E.UNT(R3),R5		;;get unit number of controller.
+	BIT	#QNA$IE,@CSR.XH(R5)	;;are interrupts enabled?
+	BEQ	60$			;;no, don't do anything
+	ADD	#E.RRB,R3		;;make pointer to receive sub-block
+;
+; * While there is room on the rings and buffers exist to put on.
+;
+10$:	MOV	E.FIL(R3),R4		;;get copy of fill address
+	ADD	#QBD$LN,R4		;;make into next available entry
+;
+;  checks for empty slot on rings					;002
+;
+	CMP	R4,E.BOT(R3)		;;does it need to be adjusted
+	BLO	20$			;;no, it's within bounds
+	MOV	E.TOP(R3),R4		;;yes, make it go to the top
+20$:	CMP	R4,E.EMP(R3)		;;Any room on the rings?
+	BEQ	50$			;;Full.  so exit.
+;
+; - Dequeue next free rcv buffer (quit if none).
+;
+30$:	MOV	E.PND(R3),R5		;;Get next free RCV buffer
+	BEQ	50$			;;None left, so exit
+	MOV	(R5),E.PND(R3) 		;;Remove it from pending list
+	BNE	40$			;;Still more out there, go ahead
+	MOV	R3,E.PNDT(R3)		;;No more, update pending tail
+	ADD	#E.PND,E.PNDT(R3)	;;to point to head (list empty)
+;
+; - Enqueue into rcv ring buffer queue.
+;
+40$:	CLR	(R5)			;;Clear CCB link word
+.ASSUME	CC.LNK EQ 0 			; make sure CCB link is link
+	MOV	R5,@E.RNGT(R3)		;;place CCB on ring queue
+	MOV	R5,E.RNGT(R3)		;;..and update the tail
+;
+; - Calculate size of and phys addr of buffer.
+;
+	CLR	R0			;;clear reg for 32 bit conversion
+	MOV	BF.MMU+CC.BUF(R5),R1	;;get copy of buffer's MMU address
+	MAP	R1,APR=6,DATA		;;map the buffer
+	ASHC	#6,R0			;;convert MMU address to physical
+	MOV	BF.VIR+CC.BUF(R5),R2	;;Get virtual address of buffer
+	MOV	(R2),R5			;;get size of buffer
+.ASSUME	BF.SIZ EQ 0
+	SUB	BF.OFF(R2),R5		;;subtract offset to data (to get count)
+	MOV	R5,BF.CNT(R2)		;;store new count (keep in R5)
+	ASR	R5			;;  convert to word value
+	NEG	R5			;;  convert to two's complement
+	ADD	BF.OFF(R2),R1		;;add offset to data to phys addr
+	ADC	R0			;; not forgetting the carry
+	CALL	MPENT2			;; remap the Ethernet Region	;003
+;
+; - Load Rcv Ring Entry.
+;
+	MOV	E.FIL(R3),R2		;;Get first available descriptor ring
+	MOV	#QF$INI,(R2)+		;;Mark Flag word as initialized
+.ASSUME	QBD.FL EQ 0
+	MOV	R0,(R2)+		;;Set High Order address
+.ASSUME	QBD.HO EQ QBD.FL+2
+	MOV	R1,(R2)+		;;Set Low Order address
+.ASSUME	QBD.LO EQ QBD.HO+2
+	MOV	R5,(R2)+		;;Set Buffer length
+.ASSUME	QBD.LN EQ QBD.LO+2
+	MOV	#Q1$INI,(R2)+		;;Initialize Status Word 1
+.ASSUME	QBD.S1 EQ QBD.LN+2
+	MOV	#Q2R$RB,(R2)		;;Make Status Word 2 have uneven bytes
+.ASSUME	QBD.S2 EQ QBD.S1+2
+	BIS	#QA$VAL,<QBD.AD-QBD.S2>(R2) ;;Set the Valid bit (MUST BE LAST!)
+.ASSUME	QBD.AD EQ 2
+	MOV	R4,E.FIL(R3) 		;;Update the fill pointer to next
+	BR	10$			;;and try putting another buffer rings
+
+;
+; * Validate Rcv list (If necessary).
+;
+50$:	SUB	#E.RRB,R3		;;Restore CDB pointer
+	MOVB	E.UNT(R3),R2		;;Get unit number
+	MOV	CSR.XH(R2),R2		;;get pointer to CSR
+	BIT	#QNA$RL,(R2)		;;Is Receive list invalid?
+	BEQ	60$			;;No, it's already been set
+	CLR	R0			;;clear for 32 bit conversion
+	MOV	@#XHDATA+XHDPA6,R1	;;load MMU address
+	ASHC	#6,R0			;;convert to 22 bit address
+	MOV	E.EMPR(R3),R5		;;Get virtual address of first rcv entry
+;
+; The following section finds the first valid entry in the ring to validate.
+;
+56$:	BIT	#QF$USE,(R5)		;;Has this entry been used by the QNA?
+.ASSUME	QBD.FL EQ 0
+	BEQ	58$			;;no, use this entry
+	ADD	#QBD$LN,R5		;;yes, get pointer to next entry
+	CMP	R5,E.BOTR(R3)		;;has it gone past the bottom
+	BLO	57$			;;no, no adjustment necessary
+	MOV	E.TOPR(R3),R5		;;yes, adjust the pointer to the top
+57$:	CMP	R5,E.EMPR(R3)		;;have we gone around in a circle?
+	BNE	56$			;;no, continue
+	BR	60$			;;yes, exit
+
+58$:	BIC	#170000,R5		;;Convert to offset
+	ADD	R5,R1			;;Add offset to low order
+	ADC	R0			;;  make sure the carry is carried
+	MOV	R1,QNA.RB(R2)		;;Set receive BDL Start Addr low order
+	MOV	R0,QNA.RB+2(R2)		;;Set recieve BDL Start Addr high order
+60$:	RETURN
+
+	GLOBAL	<CSR.XH,XHDATA>
+
+
+
+
+.SBTTL	LOADXR	UTILTY	Load xmit rings from pending queue
+
+;+
+;
+; This routine loads the xmt rings for the QNA from the pending buffer queue.
+;
+; Loading is stopped when there is no more room left on the rings, or when
+; there are no more buffers in the pending queue.
+;
+; The general flow for the routine is:
+;	* If interrupts are not enabled, don't load anything on rings.
+;	* While there is room for the first message on the rings and buffers
+;	  exist to put on.
+;		- Dequeue next xmt buffer in message.
+;		- Enqueue into xmt ring buffer queue.
+;		- If system job request,
+;			- Calculate physical address of buffer.
+;		- Else,
+;			- Get physical address from CCB.
+;		- Load Xmt Ring Entry.
+;	* Validate Xmt list (If necessary).
+;
+;	THIS ROUTINE MUST BE CALLED AT PR5
+;
+;	Ethernet region is mapped
+;
+;	R3 ->	CDB	(preserved)
+;
+;	CALL	LOADXR
+;
+;	R0-R2	random
+;	R4-R5	random
+;
+;-
+	.ENABL	LSB
+
+LOADXR:
+;
+; * If interrupts are not enabled, don't load anything on rings.
+;
+	MOVB	E.UNT(R3),R5		;;get unit number of controller.
+	BIT	#QNA$IE,@CSR.XH(R5)	;;are interrupts enabled?
+	BEQ	10$			;;no, don't do anything
+	ADD	#E.XRB,R3		;;make pointer to xmit sub-block
+	MOV	E.PND(R3),R5		;;Get first time pending CCB
+	BNE	30$			;;if there are any
+	SUB	#E.XRB,R3		;;restore CDB pointer
+10$:	RETURN				;;and exit			;002
+;
+; * While there is room for the first message on the rings and buffers exist
+;   to put on.
+;
+20$:	MOV	E.PND(R3),R5		;;Get a pending message CCB
+	BEQ	140$			;;Exit if there are none
+30$:	MOV	E.FIL(R3),R2		;;Get First available ring slot
+40$:	ADD	#QBD$LN,R2		;;make pointer to next entry.
+	CMP	R2,E.BOT(R3)		;;Need to reset current entry pointer?
+	BLO	50$			;;no, it's a valid entry address
+	MOV	E.TOP(R3),R2		;;yes, set entry to top
+50$:	CMP	R2,E.EMP(R3)		;;is there room on the rings?
+	BEQ	140$			;;full, stop loading.
+60$:	BITB	#DF.CNT,CC.DFL(R5)	;;Is this message complete?
+	BEQ	70$			;;Yes, packet will fit, load it.
+	MOV	(R5),R5			;;Get the next CCB in message
+	BNE	40$			;;verify that complete message fit
+	CRASH
+;
+; - Dequeue next free xmt buffer in message.
+;
+70$:	MOV	E.PND(R3),R5		;;Get next (part of) message XMT buffer
+	MOV	(R5),E.PND(R3) 		;;Remove it from pending list
+	BNE	80$			;;Still more out there, go ahead
+	MOV	R3,E.PNDT(R3)		;;No more, update pending tail
+	ADD	#E.PND,E.PNDT(R3)	;;to point to head (list empty)
+	.BR	80$
+;
+; - Enqueue into xmt ring buffer queue.
+;
+80$:	CLR	(R5)			;;Clear CCB link word
+.ASSUME	CC.LNK EQ 0
+	MOV	R5,@E.RNGT(R3)		;;place CCB on ring queue
+	MOV	R5,E.RNGT(R3)		;;  and update the tail
+;
+; - If system job request, Calculate physical address.
+;
+	TST	CC.BUF+BF.VIR(R5)	;;Is this a system request?
+	BEQ	100$			;;no, some other request.
+	CLR	R0			;;clear reg for 32 bit conversion
+	MOV	CC.BUF+BF.MMU(R5),R1	;;get copy of buffer's MMU address
+	MAP	R1,APR=6,DATA		;;map the buffer
+	ASHC	#6,R0			;;convert MMU address to physical
+	MOV	CC.BUF+BF.VIR(R5),R2	;;Get virtual address of buffer
+	MOV	BF.CNT(R2),R4		;;get byte count of data to transmit
+	ASR	R4			;;make into word count
+	BCC	90$			;;if not ending on odd boundary
+	BIS	#QA$L,R0		;;ends on odd boundary, signal so
+	INC	R4			;;account for odd byte
+90$:	NEG	R4			;;make two's compliment word size
+	ADD	BF.OFF(R2),R1		;;add offset to data to phys addr
+	ADC	R0			;; not forgetting the carry
+	CALL	MPENT2			;; remap the Ethernet Region	;003
+	BR	110$			;; load entry on ring
+
+;
+; - Else, Get physical address from CCB.
+;
+100$:	MOV	CC.BUF+BF.ADR(R5),R0	;;Load in high order phys addr
+	MOV	CC.BUF+BF.MMU(R5),R1	;;Load in low order phys addr
+	MOV	CC.BUF+MS.SIZ(R5),R4	;;Load in size of data
+	.BR	110$
+;
+; - Load Xmt Ring Entry.
+;
+110$:	MOV	E.FIL(R3),R2		;;Get first available descriptor ring
+	MOV	#QF$INI,(R2)+		;;Mark Flag word as initialized
+	MOV	R0,(R2)+		;;Set High Order address
+	MOV	R1,(R2)+		;;Set Low Order address
+	MOV	R4,(R2)+		;;Set Buffer length
+	MOV	#Q1$INI,(R2)+		;;Initialize Status Word 1
+	CLR	(R2)+			;;Make Status Word 2 zero
+	BITB	#DF.CNT,CC.DFL(R5)	;;is this the end of message?
+	BNE	120$			;;no, don't set eom
+	BIS	#QA$E,<QBD.AD-QBD.S2-2>(R2) ;;set end of message
+120$:	BIS	#QA$V,<QBD.AD-QBD.S2-2>(R2) ;;Finally, set the Valid bit
+	MOV	R2,E.FIL(R3)		;;update fill pointer
+	CMP	R2,E.BOT(R3)		;;is it past the bottom of rings?
+	BLO	130$			;;no, it's good
+	MOV	E.TOP(R3),E.FIL(R3) 	;;Bottom, get to top
+130$:	BITB	#DF.CNT,CC.DFL(R5)	;;is this the end of message?
+	BNE	70$			;;no, try next CCB in message
+	BR	20$			;;try loading next message
+
+.ASSUME	QBD.HO EQ 2			;;assumptions about BDL offsets
+.ASSUME	QBD.AD EQ 2
+.ASSUME	QBD.LO EQ 4
+.ASSUME	QBD.LN EQ 6
+.ASSUME	QBD.S1 EQ 10
+.ASSUME	QBD.S2 EQ 12
+.ASSUME	QBD.AD LT QBD.S2
+;
+; * Validate Xmt list (If necessary).
+;
+140$:	SUB	#E.XRB,R3		;;Restore CDB pointer
+	MOV	#2,E.TMR(R3)		;;Set timer for transmit completion
+	MOVB	E.UNT(R3),R2		;;Get unit number
+	MOV	CSR.XH(R2),R2		;;get pointer to CSR
+	BIT	#QNA$XL,(R2)		;;Is Xmit list invalid?
+	BEQ	150$			;;No, it's already been set
+	CLR	R0			;;clear for 32 bit conversion
+	MOV	@#XHDATA+XHDPA6,R1	;;load MMU address
+	ASHC	#6,R0			;;convert to 22 bit address
+	MOV	E.EMPX(R3),R5		;;Get virtual address of first xmt entry
+	SUB	#140000,R5		;;Convert it to offset
+	ADD	R5,R1			;;Add offset to low order
+	ADC	R0			;;  make sure the carry is carried
+	MOV	R1,QNA.XB(R2)		;;Set xmit BDL Start Addr low order
+	MOV	R0,QNA.XB+2(R2)		;;Set xmit BDL Start Addr high order
+150$:	RETURN
+
+	GLOBAL	<CSR.XH,XHDATA>
+
+
+
+
+.SBTTL	RESRNG	UTILTY	Reset the rings
+
+;+
+;
+; Resets the rings of a given controller.  Called for disabling the
+; controller, hardware failure reset, and startup initialization.
+;
+; Called at either PR3 or PR5, Ethernet region mapped.  The only PR3 call is
+; done from DEA$XH (contrler startup).  Every other call requires PR5.
+;
+;	R3 ->	CDB
+;
+;	CALL	RESRNG
+;
+;	Rings inited, all regs preserved.
+;
+;-
+	.ENABL	LSB
+
+RESRNG:	REGSCR
+	MOVB	E.UNT(R3),R1		;;Get unit number of controller
+	MOV	XHDATA+XHRING(R1),R1	;;Get number of rings (rcv low, xmt hi)
+				;Rcv ring entries
+	ADD	#E.RRB,R3		;;Make ptr to rcv buf cntrl sub-region
+	CALL	10$			;;reset the rcv rings
+				;Xmt ring entries
+	ADD	#<E.XRB-E.RRB>,R3	;;Make ptr to xmt buf cntrl sub-region
+.ASSUME	E.XRB GT E.RRB
+	SWAB	R1			;;put number of xmt rings in low byte
+
+10$:	MOV	E.TOP(R3),R0		;;Get top of ring pointer
+	MOVB	R1,R2			;;get number of ring entries
+	MOV	R0,E.EMP(R3)		;;set empty rcv ring ptr to top
+	MOV	R0,E.FIL(R3)		;;set fill rcv ring ptr to top
+	CALL	CLRRNG,R5,0		;;clear 'em
+				;Chain pointer physical address calculation
+	CLR	R4			;;Clear reg for address translation
+	MOV	@#XHDATA+XHDPA6,R5	;;Get MMU address of Ethernet region
+	ASHC	#6,R4			;;convert to 22 bit physical address
+				;Do chain pointers
+	MOV	E.BOT(R3),R2		;;get pointer to bottom of xmt ring
+	MOV	#QF$INI,(R2)+		;;QBD.FL - initialize flag word
+	BIS	#QA$VDA,R4		;;QBD.AD - valid descriptor addr (chain) ;002
+	MOV	R4,(R2)+		;;QBD.HO - load high order phys addr ;002
+	MOV	E.TOP(R3),(R2)		;;QBD.LO - load low order phys addr
+	BIC	#170000,(R2)		;;  subtract virt addr to get offset
+	ADD	R5,(R2)+		;;add low order phys addr
+	ADC	-4(R2)			;;make sure the 32 bit value makes it
+	CLR	(R2)+			;;\
+	CLR	(R2)+			;; > Clear out for DEQNA bug work around
+	CLR	(R2)			;;/
+	RETURN
+
+
+
+
+.SBTTL	CLRRNG	UTILTY	Clear out/initialize a message's ring entry(s)
+
+;+
+;
+; This routine initializes the specified numbers of entries in the passed ring
+; control structure.  All the queue pointers will be updated correspondingly.
+;
+;	R2 =	number of entries to clear
+;	R3 ->	CDB (or subblock if offset is zero)
+;	R5 ->	offset to subblock
+;
+;	CALL	CLRRNG,R5,<offset>
+;
+;	R4	random
+;
+;	Ring queue updated, ring entries re-inited
+;
+;-
+	.ENABL	LSB
+
+CLRRNG:	PUSH	R3			;;save CDB
+	ADD	(R5)+,R3		;;make pointer to subblock
+	PUSH	R2			;;save number of entries to clear
+	BEQ	40$			;;exit if requested to do nothing
+10$:	MOV	E.EMP(R3),R4		;;Get pointer to ring entry to init
+	CMP	R4,E.TOP(R3)		;;Are we clearing the top?
+	BNE	20$			;;no, chain entry not used yet.
+	MOV	#QF$INI,@E.BOT(R3)	;;initialize chain pointer
+.ASSUME	QBD.FL EQ 0
+20$:	MOV	#QF$INI,(R4)+		;;QBD.FL - initialize flag word
+	CLR	(R4)+			;;QBD.AD-QDB.HO - addr flgs and hi order
+	CLR	(R4)+			;;QBD.LO - low order
+	CLR	(R4)+			;;QBD.LN - buffer length
+	MOV	#Q1$INI,(R4)+		;;QBD.S1 - status word 1
+	CLR	(R4)+			;;QBD.S2 - status word 2
+	MOV	R4,E.EMP(R3)		;;add offset to next entry
+	CMP	R4,E.BOT(R3)		;;Do we need to adjust empty ptr?
+	BLO	30$			;;no, it's still in bounds
+	MOV	E.TOP(R3),E.EMP(R3)	;;yes, set it to the top
+30$:	SOB	R2,10$			;;do for all entries
+40$:	POP	<R2,R3>
+	RETURN	R5
+
+
+
+
+.SBTTL	SAVRNG	UTILTY	Save ring queues onto pending queue
+
+;+
+;
+; Saves the buffers from the ring queues back on to the pending queue.
+; Most common occurance for need of doing this is from the device hanging.
+;
+;	R3 ->	CDB
+;
+;	CALL	SAVRNG
+;
+;-
+	.ENABL	LSB
+
+SAVRNG:	MOV	E.RRB(R3),@E.RFRT(R3)	;;Rcv rngs first - ins rng ents at tail
+	BEQ	10$			;;skip if none on ring
+	MOV	E.RRBT(R3),E.RFRT(R3)	;;Update free tail ptr
+	CLR	E.RRB(R3)		;;clear out rcv rng queue
+10$:	MOV	R3,E.RRBT(R3)		;;get copy of CDB ptr into tail ptr
+	ADD	#E.RRB,E.RRBT(R3)	;;make tail point to head
+	TST	E.XRB(R3)		;;Xmt rngs next - is there any on ring?
+	BEQ	30$			;;skip if none on ring (there should be)
+	MOV	E.XPB(R3),@E.XRBT(R3)	;;make tail xmt rng goto pending
+	BNE	20$			;;if tail doesn't need updating
+	MOV	E.XRBT(R3),E.XPBT(R3)	;;update tail
+20$:	MOV	E.XRB(R3),E.XPB(R3)	;;update pending head ptr
+	CLR	E.XRB(R3)		;;clear out xmt rng queue
+30$:	MOV	R3,E.XRBT(R3)		;;get copy of CDB ptr into tail ptr
+	ADD	#E.XRB,E.XRBT(R3)	;;make tail point to head
+	RETURN
+
+
+
+
+.SBTTL	COUNTx	UTILTY	Add counter update routines
+.SBTTL	INCx	UTILTY	Increment counter update routines
+;+
+;
+; Update 1 or 2 word counters in either a PDB (circuit counters) or CDB
+; (line counters).
+;
+; If the counter overflows (i.e., gets greater than 65536 or 2^32), the
+; counter is flagged with a -1.
+;
+; It only makes sense to call this routine at PR5, but can be called at PR3.
+;
+;	R1 =	Number to add (for the COUNTx routines only)
+;	R5 ->	buffer (inline parmeter offset is added to buffer)
+;
+;	CALL	INC1,R3,offset
+;	CALL	COUNT1,R3,offset
+;	CALL	INC2,R3,offset
+;	CALL	COUNT2,R3,offset
+;
+;	R5 ->	somewhere in counter region (not reliable)
+;
+;-
+	.ENABL	LSB
+
+INC1:	ADD	(R3)+,R5		;make buffer pointer to counter offset
+	ADD	#1,(R5)			;Increment by one
+	BR	10$			;do overflow tests
+
+COUNT1:	ADD	(R3)+,R5		;make buffer pointer to counter offset
+	ADD	R1,(R5)			;Update 16 bit counter
+10$:	BCC	40$			;success
+	BR	30$			;Indicate overflow on counter
+
+INC2:	ADD	(R3)+,R5		;make buffer pointer to counter offset
+	ADD	#1,(R5)+		;Increment low word by one
+	BR	20$			;take care of high word
+
+COUNT2:	ADD	(R3)+,R5		;make buffer pointer to counter offset
+	ADD	R1,(R5)+		;add low order 16 bit value
+20$:	ADC	(R5)			;make sure high order isn't forgotten
+	BCC	40$			;success, no overflow
+	MOV	#-1,-2(R5)		;counter overflowed, mark high order
+30$:	MOV	#-1,(R5)		;mark low order word as overflowed
+40$:	RTS	R3
+
+
+
+
+.SBTTL	PAD	UTILTY	Pad a packet for transmission
+
+;+
+;
+; Pad the passed buffer to the minimum length (60. bytes) (The actual minimum
+; packet length for Ethernet packets is 64. bytes, but 4 of those are added
+; automatically for the CRC).
+;
+;	THIS WILL NOT HANDLE CHAINED MESSAGES PROPERLY SINCE BF.CNT
+;	CONTAINS LENGTH FOR ONLY ONE BUFFER.
+;
+;	R0 ->	XRBC or BF.CNT (contains number of bytes to send)
+;	R4 ->	PDB
+;	R5 ->	message at start
+;
+;	CALL	PAD
+;
+;-
+	.ENABL	LSB
+
+PAD:	TSTB	EP.STS(R4)		;padding enabled?		;002
+	BMI	20$			;no, this was unnecessary overhead
+	MOV	(R0),PK.LEN(R5)		;set in length of message
+	SUB	#PK.PAD,PK.LEN(R5)	;decrease for dst+src+prot_typ+len
+	CMP	(R0),#60.		;padding required?
+	BHIS	20$			;no, we're done
+	PUSH	<R5,R2>			;save some regs
+	ADD	(R0),R5			;make pointer past valid data
+	MOV	#60.,R2			;get size of minimum packet
+	SUB	(R0),R2			;make number of bytes to clear
+	ADD	R2,(R0)			;make new message size be 60.
+10$:	CLRB	(R5)+			;clear a byte
+	SOB	R2,10$			;for all bytes to clear
+	POP	<R2,R5>			;restore some regs
+20$:	RETURN				;done
+
+
+
+
+.SBTTL	UNPAD	UTILTY	"UN"Pad a packet
+
+;+
+;
+; This updates BF.CNT of the XBUF buffer segment to reflect the real
+; "Unpadded" message length.
+;
+;	R0 ->	CCB (possible chain)
+;	R2 =	Number of buffers in the chain
+;	R4 ->	PDB
+;
+;	CALL	UNPAD
+;
+;	R1	random
+;	R5	random
+;
+;	C = 0, Good packet.
+;	C = 1, Framing error in packet.
+;
+;-
+	.ENABL	LSB
+
+	; 010
+	; This code has some problems that can't be corrected at this time.
+	; According to Paul Koning, the correct algorithm should be as follows:
+	; 1) Is the length from the header (PK.PAD) greater than the actual
+	;    frame size? If yes, then this is a framing error.
+	; 2) Is the packet minimum length (actual frame size = 64.)? If yes,
+	;    then accept it. If no, then:
+	;	Is the length from the header (PK.PAD) equal to the actual
+	;	frame size ? If not, then bad packet (padded in error,
+	;	framing error).
+	; 3) Use length from header (PK.PAD) as the data size.
+	; However we can avoid including garbage on borderline message sizes
+	; by using the header supplied packet length.	
+
+UNPAD:	TSTB	EP.STS(R4)			;;padded portal?	;002
+	BMI	40$				;;no (C cleared by TST)
+	MAP	PUSH,APR=6,DATA			;;save current mapping
+	CMP	#1,R2				;;Is there only one buffer?
+	BNE	20$				;;no, more (not really padded)
+	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA	;;map the first (and only) buff
+	MOV	CC.BUF+BF.VIR(R0),R1		;;get the virtual address
+	MOV	R1,R5				;;get a copy of the virtual addr
+	ADD	BF.OFF(R1),R5			;;make pointer to start of data
+	MOV	PK.LEN(R5),R5			;;get the padded length of msg
+	ADD	#PK.PAD,R5			;;add header info length
+	CMP	#65.,R5				;;Pad len  >= 65 bytes? ;15
+						;;Includes (4-byte CRC field)
+	BLOS	10$				;;yes, verify framing
+	CMP	R5,BF.CNT(R1)			;;Pad len > actual
+	BGT	30$				;;yes, framing error
+	MOV	R5,BF.CNT(R1)			;;no, save pad length as actual
+10$:	CMP	BF.CNT(R1),R5			;;Is actual len = pad?
+	BLO	30$				;;no, framing error	;010
+20$:	TST	(PC)+				;;success
+30$:	SEC					;;failure
+	MAP	POP,APR=6,DATA			;;restore previous mapping
+40$:	RETURN
+
+
+
+
+.SBTTL	SETSRC	UTILTY	Load physical address of CDB into message
+
+;+
+;
+; Takes current CDB pointer and loads it's physical address into the message
+; which first buffer is pointed to by R5.
+;
+;	Ethernet region mapped
+;
+;	R3 ->	CDB
+;	R4 =	Protocol type
+;	R5 ->	CCB (first CCB if chain)
+;
+;	CALL	SETSRC
+;
+;-
+	.ENABL	LSB
+
+SETSRC:	PUSH	<@#PS,R5>
+	SPLC	5
+	PUSH	E.PHYS+4(R3)		;;save all
+	PUSH	E.PHYS+2(R3)		;;  words in station
+	PUSH	E.PHYS(R3)		;;    source address
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ;; map the message buffer
+	MOV	CC.BUF+BF.VIR(R5),R5	;;      make pointer to buffer header
+	ADD	BF.OFF(R5),R5		;;      make pointer to real message
+	ADD	#PK.SRC,R5		;;      make pointer to source addr
+	POP	(R5)+			;;    Put station
+	POP	(R5)+			;;  source address into
+	POP	(R5)+			;;packet's source address
+	MOV	R4,(R5)+		;;store portal's protocol type
+	CALL	MPENT2			;;map the Ethernet region	;003
+	POP	<R5,@#PS>
+	RETURN
+
+
+
+
+.SBTTL	SETQUE	UTILTY	Queue CDB for L3 processing
+.SBTTL	SETQ2T	UTILTY	Queue CDB for L3 processing (Q2 entry)
+;+
+;
+; Queues CDB for L3 processing.  There are two varieties of this routine.  One
+; is the reqular queue, the other is the WAIT2T (wait two ticks) variety.
+;
+; This routine is envoked by using the SETFUN macro.
+;
+;	R3 ->	CDB
+;	R5 ->	Bit(s) to set
+;
+;	CALL	SETQUE,R5
+;	CALL	SETQ2T,R5
+;
+;-
+	.ENABL	LSB
+
+SETQUE:	TST	(PC)+			;skip next to indicate routine	;002
+SETQ2T:	SEC				;indicate Q2 entry		;002
+	PUSH	<R4,@#PS>		;save reg and current status	;002
+	SPLC	5			;;set priority to 5		;002
+	MOV	R3,R4			;;get copy of CDB pointer
+	TST	-(R3)			;;Offset CDB pointer to E.DSP
+.ASSUME	E.DSP EQ -2
+	BIS	(R5)+,(R3)		;;Set the requested functions
+	TST	(R3)			;;Is this CDB currently queued?
+.ASSUME	$$QUED EQ BIT15
+	BMI	10$			;;yes, we shouldn't queue it again ;002
+	BIS	#$$QUED,(R3)		;;no, say it is now
+	BIT	#1,(SP)			;;check for entry type		;002
+	BNE	5$			;;do Q2 processing if carry set	;002
+	CALLX	QUEL3Q			;;Reqular L3Q request
+	BR	10$			;;join common
+
+5$:	CALLX	QUEUER,R5,XHCONQ	;;Queue the CDB			;002
+	L3QSET	QXHCON,WAIT2T		;;Wait for two ticks
+10$:	POP	<@#PS,R4>		;;restore stuff			;002
+	TST	(R3)+			; restore real CDB pointer
+	RTS	R5			; and return to caller
+
+
+
+
+.SBTTL	PDBTIM	UTILTY	Update counter's date/time in PDB
+.SBTTL	CDBTIM	UTILTY	Update counter's date/time in CDB
+
+;+
+;
+; KCG - This code uses UPDZTM (from NSP1.MAC)
+;
+;	R4 ->	PDB
+;
+;	CALL	PDBTIM
+;
+;
+;	R3 ->	CDB
+;
+;	CALL	CDBTIM
+;
+;-
+	.ENABL	LSB
+
+PDBTIM:	PUSH	R4		;Save PDB pointer
+	ADD	#EP.DTZ,R4	;make pointer to date/time area
+	BR	10$		;join common
+
+CDBTIM:	PUSH	R4		;save whatever is in R4
+	MOV	R3,R4		;get copy of CDB pointer
+	ADD	#E.DTZR,R4	;make into pointer to date/time area
+10$:	CALLM	UPDZTM,GENAP5	;update the time
+	POP	R4		;restore PDB pointer or whatever
+	RETURN
+
+
+
+
+.SBTTL	MPENET	UTILTY	Map the Ethernet region and save current
+.SBTTL	MPENT2	UTILTY	Map the Ethernet region
+
+;+
+;
+; Stolen from XEDVR, 02-Jun-86, KCG.  All credits to JHC.
+; Sole purpose is to save words in the driver.
+;
+; MPENET pushes current APR6 mapping onto the stack and maps the
+; ethernet region in APR6.
+;
+; MPENT2 just maps the ethernet region and returns.
+;
+;	SP ->	return address
+;
+;	CALL	MPENET
+;
+;	SP-> return address
+;	2(SP) = pushed DPAR6
+;
+;------------------------------
+;
+;	SP ->	return address
+;
+;	CALL	MPENT2
+;
+;-
+
+MPENET:	MOV	(SP),-(SP)	; make a copy of the return address	;002
+	MOV	@DPAR6,2(SP)	; stick current DPAR6 under return address
+MPENT2:	MAP	@#XHDATA+XHDPA6,APR=6,DATA ; map Ethernet region	;003
+	RETURN			; normal return.
+				; DPAR6 on top of stack to be restored
+
+
+	.END

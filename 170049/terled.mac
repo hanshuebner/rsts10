@@ -1,0 +1,1420 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+TITLE	TERLED,<Line Editing Subroutines>,0H,20-DEC-91,KPH/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	TERLED EDIT HISTORY
+
+;+
+;			[RSTS/E V9.7]
+;  000  KPH  14-May-87	Creation - they said it couldn't be done, so what
+;			choice did I have?
+;
+;			[RSTS/E V10.0]
+;  001  JFM  18-Apr-89	Add escape sequence parsing
+;  002	JFM  31-Aug-89	Location of insert editing bit changed
+;  003	JFM  14-Sep-89	Moved line editing routines from TERINC to here 
+;  004	JFM  06-Oct-89	Fixed bug in character storage routine
+;			Changed call to TTGET from CALLX to CALL
+;  005	JFM  26-Oct-89	Adjust DDHORZ when going forward or backwards.
+;			Honor escape sequence mode  Don't allow line editing 
+;			on non-ANSI terminals.
+;  006	JFM  30-Oct-89	Location of bits in DDB moved
+;  007	JFM  14-Nov-89	Undid changes of 006 due to PPC (product planning 
+;			committee) recommendation.  Added EDTDW routine.
+;  008	JFM  12-Dec-89	Added delete word support, made TOGMOD faster
+;			Line editing and recall allowed even if .TTNCH (NOECHO)
+;			CURFWD and CURBCK keep horizontal position sane.
+;			EDTUP and EDTDWN call recall routines directly.
+;  009	JFM  02-Jan-90	Save/restore horitonal position on delete word
+;  010	JFM  10-Jan-90	Don't allow left arrow if at left margin
+;			Levels in CURLVL are bits now
+;  011	JFM  08-Feb-90	Get rid of code in DECIPT (thanks to echo on read).
+;			Added CHRSIZ routine to determine a characters "size".
+;			Left arrow handles control characters (uses CHRSIZ).
+;			Fixed bug using CURLVL (forgot one place for 010)
+;  012	JFM  13-Feb-90	Fixed RETYPE routines to use current horizontal 
+;			position as reference point, not number of characters
+;			Added .ENABL/.DSABL LSBs
+;			Fixed RETYPE routines to use current horizontal 
+;  013	JFM  15-Feb-90	New EDTEOL routine, just display all characters.
+;			Set insertion pointer to end if line escape sequence
+;			 not a line editing or recall one.
+;			New GETPOS routine to compute position from left margin.
+;			Re-wrote delete word routine.
+;  014	JFM  16-Feb-90	Don't insert characters if no room on current line
+;  015	JFM  18-Feb-90	DDFLG3 is now TTFLG3, CURLVL is now TTRFLG.  Clean up
+;			use of ATEND, ATEND is now in TTRFLG.
+;			Fix bug in CURFWD, DDHORZ is 2 at right margin
+;			Rewrote the RETYPE and RETCUR routines
+;  016	JFM  20-Feb-90	Handle tabs in CHRSIZ routine
+;  017	JFM  23-Feb-90	Add OUTRM, output character then check for right margin
+;			Removed EDTLM routine, put it right in EDTUP/DWN.
+;			Set TYPPEN if overstriking a control character
+;  018	JFM  24-Feb-90	Fix minor bug in command line recall (+EP -> +FP)
+;			Preserve R4 in DELEOL
+;			Check for end of line in retype routine
+;			Did some renumbering of local labels (xx$:)
+;			Set retype pending if storing a control character
+;			 (which is not at end of line)
+;			Don't DELEOL if at EOL already in RETCUR routine
+;			Made CURFWD global for use by LMARG routine in TERINC
+;  019	JFM  14-Mar-90	Lower priority when doing a recall 
+;			Allow delete word to cross multi-line command
+;			Add a new entry point for retype, used by CTRL/T and now
+;			 by broadcast.  Handle case where term wid < normal
+;			 by displaying CR then moving cursor FORWARD.
+;  020	JFM  17-Apr-90	Implement code review comments
+;			Check for 0 space forward move before calling RETCUR
+;			Don't output anything if NOECHO in EDTUP/DWN
+;  021	JFM  16-May-90	Restore code from pre-code review comments in EDTBOL
+;  			No need for special check in RETYPE for left margin
+;  022	JFM  25-May-90	Check binary mode before retyping command on terminal
+;  023	JFM  30-May-90	Check for left margin before calling CURFWD in RETCUR
+;
+;			[RSTS/E V10.1]
+;  024	JFM  26-Jul-91	Fix TAB handling by going into NOTAB mode for retypes
+;  025	DRP  27-Aug-91	Change overflow quota value used in STRCHR from -2 to
+;			-10.
+;			Modify STRCHR to check to see if all of the last over-
+;			flow buffer is used before tossing the data.
+;  026	JFM  16-Nov-91	Change CALLX LINEUP to CALL LINEUP in EDTUP/DWN.
+;  027	JFM  25-Nov-91	Fix recall on hardcopy terminals that are set /ANSI.
+;-
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	TERLED		;Our code goes here
+
+.SBTTL	Character code definitions
+
+TAB	=:	11		;ASCII value for Tab			;008
+LF	=:	12		;ASCII value for Line Feed		;005
+CR	=:	15		;ASCII value for Carriage Return	;005
+ESC	=:	33		;ASCII value for Escape character
+SPACE	=:	40		;ASCII value for Space			;008
+CSI	=:	233		;ASCII value for CSI character
+
+.SBTTL	STRCHR	Store an input character
+
+;+
+; STRCHR - Store an input character
+;
+;	R1 -> DDB
+;	R2 =  Character to store
+;
+;	CALL	STRCHR
+;
+;	R3 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;               
+;	If C = 0 then store was successful
+;	If C = 1 then store wasn't successful
+;-
+.ENABL	LSB
+
+STRCHR::CMP	TTINPT+BC(R1),#-10. ;;Exceeded the buffer quota?	;025
+	BLT	140$		;;Yes, don't allow them to store anything ;025
+	BGT	5$		;;No, haven't reached the last one either ;025
+	BIT	#40-1,TTINPT+FP(R1) ;;Still room in this last buffer?	;025
+	BEQ	140$		;;No, don't allow them to store anything ;025
+
+; First, we'll check for overstrike editing. If we are doing overstrike
+; editing, we can simply add a new character at the current editing
+; position. If we have to do insertion, we have a lot more work to do
+; as we need to possibly extend the buffer chain.
+
+5$:	MOV	TTINPT+FP(R1),R4 ;;Get pointer to end of chain		;025
+	MOV	R4,R5		;;In two places
+	MOV	TTIPTR(R1),R3	;;Get current editing pointer
+	TSTB	TTESCC(R1)	;;Processing an escape seqence?		;001
+	BEQ	10$		;;No, use insertion pointer		;001
+	MOV	R4,R3		;;Yes, put escape sequence at end	;001
+10$:	CMP	R3,R4		;;Are we inserting at the end?		;001
+	BEQ	40$		;;Yes, so no special overstrike edit
+	CMPB	R2,#SPACE	;;Is character a control character?	;018
+	BHIS	15$		;;No, not this time			;018
+	BISB	#TYPPEN,TTRFLG(R1) ;;Yes, set that a retype is pending	;018
+15$:	TSTB	TTFLG3(R1) 	;;Doing insert editing?			;018
+.ASSUME	TTEMOD	EQ 200		;;					;006
+	BMI	30$		;;Yes, extend the chain			;015
+	BIT	#40-1,R3	;;Pointing at buffer end?
+	BNE	20$		;;No, not this time
+	MOV	-40(R3),R3	;;Yes, point to next buffer          
+20$:	CMPB	(R3),#SPACE	;;Overstriking a control character?	;017
+	BHIS	120$		;;No, go load the character		;017
+	BISB	#TYPPEN,TTRFLG(R1) ;;Yes, set that a retype is pending	;017
+	BR	120$		;;And load the character
+
+; We've determined that we are inserting a new character, so we will
+; see if it is necessary to add a new buffer to the chain.
+;
+; R2 =  Character to store
+; R3 -> Just past editing point 
+; R4 -> Just past last character in buffer chain 
+; R5 -> Just past last character in buffer chain 
+;
+; If there is room in the current buffer chain for the new character,
+; we will simply update the fill pointer. Otherwise, we'll allocate
+; a new small buffer and update the chain.
+
+30$:	TSTB	TTRFLG(R1)	;;Any more room on current line?	;015
+.ASSUME	ATEND	EQ 200							;015
+	BMI	140$		;;No, we're at the end, so drop char	;015
+40$:	BIT	#40-1,R4	;;Pointing at the end of the buffer? 
+	BNE	60$		;;No, don't need to get another one
+	BUFFER	GETSML,0	;;Get another buffer (nothing cleared)
+	BVS	140$		;;Failed to get a buffer, punt
+	DEC	TTINPT+BC(R1)	;;Got a buffer, update buffer count
+	CLR	(R4)+		;;Clear link to next in new buffer
+	MOV	R5,(R4)+	;;Set up initial link to previous
+	BNE	50$		;;We had one, don't start chain
+	MOV	R4,TTIPTR(R1)	;;Set up the insertion pointer		;001
+	MOV	R4,R5		;;And copy it here			;001
+	MOV	R4,TTINPT+EP(R1) ;;Set the empty pointer up
+	MOV	R4,R3		;;And the input pointer
+	BR	60$		;;And join up
+    
+50$:	MOV	R4,-40(R5)	;;Set previous link to next
+
+; We have extended the buffer chain if necessary, so there is now
+; room for the new character. If we are inserting at the end, then
+; we simply move the character into place. Otherwise, we have to
+; move some number of characters in the buffer chain.
+;
+; R2 =  Character to store
+; R3 -> Just past editing point 
+; R4 -> Just past last character in buffer (or new buffer pointer)
+; R5 -> Just past last character in buffer chain 
+
+60$:	INC	R4		;;Point to the destination
+	MOV	R4,TTINPT+FP(R1) ;;Set the new buffer end pointer
+	CMP	R3,R5		;;Are we inserting at the end of command?
+	BNE	80$		;;No, not this time
+	TSTB	TTESCC(R1)	;;Processing an escape seqence?		;001
+	BNE	70$		;;Yes, don't update insertion pointer	;001
+	MOV	R4,TTIPTR(R1)	;;Update insertion pointer
+70$:	MOVB	R2,-(R4)	;;Store the character			;001
+    	BR	130$		;;And get out
+                                                            
+; We've determined that we need to move characters, so we'll do it
+; here. Since we are inserting characters in the middle of the
+; buffer chain, we start at the end of the chain and move backwards.
+; In order to do this, we use auto-decrement instructions to move
+; the characters, and base our doneness checks on buffer start
+; instead of buffer end (since the end might be at the beginning of
+; the buffer chain).
+;
+; R2 =  Character to store
+; R3 -> Just past editing pointer (but always pointing at a character,
+;       never at end of buffer chain).
+; R4 -> Destination of buffer move +1 (always pointing just past a character)
+;	R4 is currently the updated TTINPT+FP(R1), which is the destination of
+;	the last character plus 1.
+                                  
+80$:	DEC	R4		;;Back up to point to destination	;004
+	BIT	#40-1,R3	;;Is editing pointer at buffer end?
+	BNE	90$		;;No, not this time			;004
+	MOV	-40(R3),R3	;;Yes, point to next buffer
+
+	; R3 is adjusted if necessary, and R4 points to destination.
+	; Start moving characters until R4 equals R3.
+
+90$:	BIT	#40-5,R4	;;Pointing at buffer start?
+	BNE	100$		;;No, not this time
+	MOV	-(R4),R4	;;Yes, point to previous buffer
+	MOVB	-(R4),@-<40-1>(R4) ;;And move the character
+	BR	110$		;;And join up
+
+100$:	MOVB	-(R4),1(R4)	;;Move a character
+110$:	CMP	R3,R4		;;Have we moved the last character?	
+	BNE	90$		;;No, loop
+
+; At this point, we can actually insert the character. We get here for
+; overstrike editing or for inserting in the middle of the chain. The
+; case of inserting at the end is handled seperately.
+                
+120$:	MOVB	R2,(R3)+	;;Store the character in the buffer chain
+	MOV	R3,TTIPTR(R1)	;;And update the insert pointer
+130$:	TST	(PC)+		;;Indicate goodness
+140$:	 SEC			;;Indicate failure to store character
+	RETURN			;;And exit
+
+.DSABL	LSB
+
+.SBTTL	TTGET	Remove character preceeding input pointer
+
+;+
+; TTGET - Remove character preceeding input pointer
+;   
+;	R1 -> DDB
+;
+;	CALL TTGET
+;
+; 	C=0 if input pointer is just after a normal character:
+;		R2 =  Character just before input pointer
+;		R3 =  Undefined
+;		R4 =  Undefined
+;
+; 	C=1 if the input pointer is at the beginning of the input buffer chain:
+;		R2 =  Undefined
+;		R4 =  Undefined
+;-
+.ENABL	LSB
+
+TTGET::	CALL	DECIPT		;;Try to decrement input pointer	
+	BCS	70$		;;Can't, forget it			
+	BIT	#40-1,R4	;;Pointing at buffer end?
+	BNE	10$		;;No, nothing special to do		
+	MOV	-40(R4),R4	;;Yes, get the next buffer		
+10$:	MOV	R4,R3		;;Copy address in input buffer		
+	INC	R4		;;Now point to character to move into place 
+20$:	CMP	TTINPT+FP(R1),R4 ;;Are we done moving characters?	
+	BEQ	40$		;;Yes, go update counts now		
+	BIT	#40-1,R4	;;At buffer end?
+	BNE	30$		;;No, not yet				
+	MOV	-40(R4),R4	;;Yes, get pointer to next
+	MOVB	(R4)+,(R3)+	;;Copy the first byte in this buffer	
+	MOV	-40(R3),R3	;;And update destination pointer	
+	BR	20$		;;Now loop for this buffer		
+
+30$:	MOVB	(R4)+,(R3)+	;;Copy a byte				
+	BR	20$		;;And loop				
+
+40$:	MOV	R3,TTINPT+FP(R1) ;;Update end pointer			
+	BIT	#TTECTL,TTMODE(R1) ;;Terminal open for echo control?
+	BEQ	50$		;;No, don't adjust field size
+	INCB	EKOCTW(R1)	;;We removed a character - update field size
+50$:	BIT	#40-5,R3	;;Is fill pointer at buffer beginning?	
+	BNE	60$		;;No, we're all set			
+	CMP	TTINPT+EP(R1),R3 ;;Does empty pointer match fill pointer? 
+	BEQ	60$		;;Yes, chain is empty, all done		
+	MOV	R3,R4		;;No, copy pointer to this buffer	
+	MOV	-(R3),R3	;;And get address of previous buffer	
+	MOV	R3,TTINPT+FP(R1) ;;And update the end pointer		
+	CLR	-40(R3)		;;Indicate no link to next anymore	
+	CMP	-(R4),-(R4)	;;Point to the start of the buffer
+    	BUFFER	RETSML		;; And release it
+	INC	TTINPT+BC(R1)	;;Add one more buffers worth of credit	
+60$:	CLC			;;Indicate success			
+70$:	RETURN			;;And we're done			
+
+.DSABL	LSB
+
+.SBTTL	DECIPT	Decrement input pointer if possible
+    
+;+  
+; DECIPT - Decrement input pointer if possible
+;
+; Inputs:
+;	R1 -> DDB
+;
+;	CALL	DECIPT
+;   
+; Outputs:
+;	C  =  0 if input pointer was backed up and:
+;		R2 =  Character just before old input pointer
+;		R4 =  New input pointer value
+;		TTIPTR set to point just past previous character
+;
+;	C  =  1 if input pointer could not be backed up (because it was
+;		   at the beginning of the input buffer chain) and:
+;		R2 =  Undefined
+;		R4 =  Undefined
+;-
+.ENABL	LSB
+
+DECIPT::MOV	TTIPTR(R1),R4	;;Get current input pointer
+	BEQ	20$		;;None, tell our caller
+	CMP	TTINPT+EP(R1),R4 ;;Any characters before pointer?
+	BEQ	20$		;;No, tell our caller
+	MOVB	-(R4),R2	;;Get character and update pointer	;011
+	CMP	R4,TTINPT+EP(R1) ;;Are we pointing at buffer chain start?
+	BEQ	10$		;;Yes, all done
+	BIT	#40-5,R4	;;Are we pointing at buffer start?
+	BNE	10$		;;No, so all done
+	MOV	-(R4),R4	;;Yes, get link to previous buffer
+10$:	MOV	R4,TTIPTR(R1)	;;And set the pointer
+	TST	(PC)+		;;Indicate we backed up a character	;011
+20$:	 SEC			;;Indicate we could not back up		;011
+	RETURN			;;Now exit
+
+.DSABL	LSB
+
+.SBTTL	LEDESC	Line editing escape sequence parsing
+
+;+									;003+
+; LEDESC - Line editing escape sequence parsing
+;
+; Inputs:
+;	R0 = Unit # * 2
+;	R1 -> DDB
+;
+;	CALL	LEDESC
+;
+; Outputs:
+;	C=0 if this is a line editing (recall) escape sequence, and
+;		line editing (recall) is enabled via both open modes and
+;		the terminal characteristic.  The escquence was processed
+;	C=1 if sequence was not processed.  Pass this on to the user.
+;
+;	R3 = undefined
+;	R4 = undefined
+;	R5 = undefined
+;
+;-
+.ENABL	LSB
+
+; Recall functions get ORed with 1 as a flag to escape dispatcher
+;
+; The arrow keys
+
+ARROW:	.WORD	EDTUP!1		;;(^) Get previous command
+	.WORD	EDTDWN!1	;;(v) Get next command
+	.WORD	EDTRT		;;(>) Move right a character
+	.WORD	EDTLFT		;;(<) Move left a character
+
+; The function keys
+
+FUNCTN:	.WORD	EDTBOL		;;(F12) Go to beginning of line
+	.WORD	EDTDW		;;(F13) Delete a "word"
+	.WORD	TOGMOD		;;(F14) Toggle insertion/overstrike mode
+
+FUNMIN	=:	24.		;;Minimum supported function <ESC>[24~ = F12
+FUNMAX	=:	26.		;;Maximum supported function <ESC>[26~ = F14
+
+TENTBL:	.WORD	1,10.		;;Powers of ten, to calculate function values
+	.WORD	0		;;End of ten table
+
+LEDESC::MOV	TTIPTR(R1),-(SP) ;;Save insertion pointer
+	BIT	#TTESEQ,TTMODE(R1) ;;Term open in escape seqeunce mode?	;020
+	BNE	50$		;;Yes, can't be line editing or recall	;020
+	MOV	TTINPT+FP(R1),TTIPTR(R1) ;;Make end pointer insertion
+	CALL	DECIPT		;;Get last character
+	;
+	; Check for the arrow keys, which look like this:
+	;	<ESC>[A = UP ARROW
+	;	<ESC>[B = DOWN ARROW
+	;	<ESC>[C = RIGHT ARROW
+	;	<ESC>[D = LEFT ARROW
+	;
+	CMPB	R2,#'A		;;Is character A-D?
+	BLO	60$		;;Not this time  (BLO=BCS so C=1)	;020
+.ASSUME	'A	LT '~		;;Don't check functions, this ain't one	;020
+	CMPB	R2,#'D		;;Is it A-D?
+	BHI	10$		;;No, try the function keys
+	MOV	R2,R3		;;Save last character for later
+	CALL	ENDESC		;;Check for end of sequence
+	BCS	60$		;;Wasn't right, quit			;020
+	SUB	#'A,R3		;;Get value of key character
+	ASL	R3		;;Make it an offset
+	ADD	#ARROW,R3	;;Get address of routine
+	BR	40$		;;Go do it
+
+10$:	;
+	; Check for the function keys, which look like this:
+	;	<ESC>[24~ = F12
+	;	<ESC>[25~ = F13
+	;	<ESC>[26~ = F14
+	;
+	BIT	#TTSCOP,TTCHAR(R1) ;; Terminal set /SCOPE?		;027
+	BEQ	50$		;;No, don't allow the function keys	;027
+	CMPB	R2,#'~		;;Is it a tilde character
+	BNE	50$		;;No, we don't know this seq
+	MOV	#TENTBL,R5	;;Get table of powers of ten
+	CLR	R3		;;Clear a spot for function value
+20$:	CALL	DECIPT		;;Get a character
+	BCS	60$		;;None, get out				;020
+	TST	(R5)		;;At end of ten table?
+	BEQ	30$		;;Yes, check for end of escape sequence
+	CMPB	R2,#'0		;;Is character a digit?
+	BLO	30$		;;Not a digit, check for end
+	CMPB	R2,#'9		;;Maybe
+	BHI	30$		;;No, check for end
+	SUB	#'0,R2		;;Convert character to digit
+	MOV	R3,-(SP)	;;Save current value
+	MOV	R2,R3		;;Set up for multiply
+	MUL	(R5)+,R3	;;Multiply by correct power of ten
+	ADD	(SP)+,R3	;;Add stored value
+	BR	20$		;;Do next character
+
+30$:	CALL	ENDES2		;;Are we at the end of the sequence?
+	BCS	60$		;;No, get out				;020
+	CMP	R3,#FUNMAX	;;Is function within valid range?
+	BHI	50$		;;No, ignore this one
+	SUB	#FUNMIN,R3	;;Is it?
+	BMI	50$		;;No, ignore this one
+	ASL	R3		;;Make it an offset into the table
+	ADD	#FUNCTN,R3	;;Get address of routine
+	.BR	40$		;;Go do it
+
+	;
+	; R3 -> Table entry of the routine to perform
+	;
+	; Get rid of the escape sequence and free any buffers that were
+	; added to hold it.  Then execute the routine.  Upon return clear 
+	; the C bit to indicate the escape sequence was processed and return.
+	;
+40$:	MOV	(SP),R2		;;R2 = insertion pointer
+	MOV	(R3),R3		;;Get routine address to run
+	CALL	ESCDSP		;;Dispatch to associated function
+	BCC	70$		;;Worked!  Leave insert pointer alone	;013
+50$:	SEC			;;Indicate failure			;020
+60$:	MOV	TTINPT+FP(R1),TTIPTR(R1) ;;Point at end of esc sequence	;020
+70$:	INC	(SP)+		;;Pop stack (don't affect carry)	;020
+	RETURN			;;And return
+
+.DSABL	LSB								;003-
+
+.SBTTL	ENDESC	Finish up the escape sequence parsing
+;+
+;	R1 -> DDB
+;	R2 =  character (ENDES2 only)
+;	
+;	CALL ENDESC (or CALL ENDES2)
+;
+; 	C=0 if this is the valid end of the escape sequence
+;	C=1 if any other characters appear, or not enough characters in buffer.
+;
+;-
+.ENABL	LSB
+
+ENDESC:	CALL	DECIPT		;;Get previous character
+	BCS	20$		;;None, get out
+ENDES2:	CMPB	R2,#'[		;;Is it a bracket?
+	BNE	10$		;;No, don't care about this sequence
+	CALL	DECIPT		;;Get previous character
+	BCS	20$		;;None, get out
+	CMPB	R2,#200		;;At start of the escape sequence?
+	BNE	10$		;;No, don't care about this sequence
+	TST	(PC)+		;;Indicate end was okay
+10$:	SEC			;;Indicate end was wrong
+20$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	ESCDSP	Dispatch to editing/recall routine if allowed
+;+
+; ESCDSP - Dispatch to editing/recall routine if allowed		;003+
+;
+; Inputs:
+;	R1  -> DDB
+;	R3  = Address to call, odd if recall function, even otherwise
+;     2(SP) = Insertion pointer upon entry to LEDESC (use this as input to call
+;	     to line editing/recall command)
+;
+;	CALL	ESCDSP
+;
+;	C=0 if editing/recall allowed
+;		Escape sequence stripped from end of command
+;		Editing/recall function performed
+;	C=1 if editing/recall NOT allowed, 
+;		Escape sequence left untouched
+;		No editing/recall function performed
+;-
+.ENABL	LSB
+
+ESCDSP:	ROR	R3		;Is this a line editing function?	;020
+	BCC	10$		;Yes, handle that			;020
+	CALL	RECOK		;Is recall allowed?			;020
+	BR	20$		;Join up
+
+10$:	CALL	EDTOK		;Is line edting allowed?		;020
+20$:	BCS	40$		;No, get out 
+	ROL	R3		;Undo effects of ROR above		;020
+	MOV	R3,-(SP)	;Save ROUTINE address
+	MOV	TTIPTR(R1),R5	;Get pointer to end of command
+	MOV	TTINPT+FP(R1),TTIPTR(R1) ;Point at end of escape sequence
+30$:	CALL	TTGET		;Remove the last character (R5 untouched) ;004
+	CMP	TTIPTR(R1),R5	;Finished stripping escape sequence?
+	BNE	30$		;No, continue
+	MOV	4(SP),TTIPTR(R1);Restore original input pointer 	;020
+	CALL	@(SP)+		;Call ROUTINE
+	CLC			;Indicate success
+40$:	RETURN			;And that's all
+
+.DSABL	LSB								;003-
+
+.SBTTL	EDTOK	Check if Line editing is allowed now
+.SBTTL	RECOK	Check if command recall is allowed now
+;+
+; EDTOK, RECOK - Check if Line editing (command recall) is allowed now	;003+
+;
+; Inputs:
+;	R1 -> DDB
+;	
+; 	CALL RECOK or CALL EDTOK
+;
+; Outputs:
+;	C=0 if recall or editing allowed
+;	C=1 otherwise
+;
+; Description:
+;
+;  The EDTOK and RECOK entry points are entered from TERINC if a line editing 
+;  or recall CONTROL CHAR is entered.  
+;
+;  The RECOK routine is also called from the RECALL code (RECINI in TERREC.MAC)
+;  in the KBD phase to determine if recall is allowed, in which case characters
+;  will be stored in the user's buffer.  
+;-
+.ENABL	LSB
+
+RECOK::	MOV	#TTREC,-(SP)	;;Check out the RECALL attribute	;020
+	BIT	#DDCONS,DDCNT(R1) ;;Is this the console terminal?	;007
+	BR	10$		;;Join up and see!
+
+EDTOK::	MOV	#TTLEDT,-(SP)	;;Check out the LINE EDITING attribute	;020
+	BIT	#TTANSI,TTCAPB(R1) ;;Terminal support ANSI escape seq?	;005
+10$:	BEQ	30$		;;No, indicate failure			;020
+	BITB	#CUILVL!DCLLVL!RTSLVL,TTRFLG(R1) ;;CUI, RTS, or DCL level? ;015
+	BNE	20$		;;Yes, don't worry about attribute bit	;020
+	BITB	(SP),TCHAR2(R1) ;;This feature allowed?			;020
+	BEQ	30$		;;No, indicate failure			;020
+20$:	BIT	#TTBIN!TTTECO!TTECTL,TTMODE(R1) ;; Bin, Teco, Echo ctl?	;020
+	BNE	30$		;;Not allowed if any of these modes set	;003
+	BIT	#TTDDT,DDFLAG(R1) ;;DDT submode or .TTNCH?		;008
+	BNE	30$		;;Yes, don't process this now		;003
+	TST	(PC)+		;;No, indicate edit or recall allowed	;003
+30$:	 SEC			;;Indicate not allowed			;003
+	INC	(SP)+		;;Pop flag off stack			;020
+	RETURN			;;All done				;003
+
+.DSABL	LSB								;003
+
+.SBTTL	TOGMOD	Toggle overstrike/insert mode
+
+;+
+; TOGMOD  - Handle toggle overstrike/insert mode
+;
+;	R1 -> DDB
+;
+;	CALL	TOGMOD
+;
+;	TTEMOD bit in TTFLG3 is toggled
+;-
+.ENABL	LSB
+    
+TOGMOD::ADD	#TTEMOD*400,TTFLG3-1(R1) ;;Toggle high bit in high byte	;015
+	RETURN			;;And that's it!
+
+.ASSUME	TTEMOD	EQ 200		;; Editing Mode is high bit		;008
+.ASSUME	TTFLG3&1 EQ 1		;; DDFLG3 is a high byte flag		;015
+
+.DSABL	LSB
+
+.SBTTL	EDTRT	Handle Edit pointer right
+
+;+
+; EDTRT  - Edit pointer right
+;
+;	R1 -> DDB
+;
+;	CALL	EDTRT
+;
+;	R2 =  Undefined
+;	R4 =  Undefined
+;-
+.ENABL	LSB
+
+EDTRT::	MOV	TTIPTR(R1),R4	;;Get current input pointer
+	CMP	R4,TTINPT+FP(R1) ;;Pointing at the end of the buffer?
+	BEQ	20$		;;Yes, do nothing
+	BIT	#40-1,R4	;;Pointing at the end of the buffer?
+	BNE	5$		;;No, not this time
+	MOV	-40(R4),R4	;;Yes, point to start of next buffer
+5$:	MOVB	(R4)+,R2	;;Get character at current position
+	MOV	R4,TTIPTR(R1)	;;And update insertion position
+	BIT	#TAPE!NOECHO,DDFLAG(R1) ;;Need to display this?
+	BNE	20$		;;No, get out quietly
+	CALLR	OUTRM		;;Display character, and check if 	;017
+				;;  at right margin (output CRLF if so)	;017
+
+.SBTTL	EDTLFT	Handle edit pointer left
+    
+;+
+; EDTLFT - Handle edit pointer left
+;
+;	R0 =  unit # * 2
+;	R1 -> DDB
+;
+;	CALL	EDTLFT
+;   
+;	R2 =  Undefined
+;	R4 =  Undefined
+;-
+
+EDTLFT::CMPB	DDHORZ(R1),DDHORC(R1) ;;Is cursor at left margin?	;010
+	BEQ	20$		;;Yes, ignore the character		;010
+	CALL	DECIPT		;;Decrement the input pointer
+	BCS	20$		;;Can't back up, ignore character
+	BIT	#TAPE!NOECHO,DDFLAG(R1) ;;Anything to display?
+	BNE	20$		;;No, get out quietly
+	MOV	R5,-(SP)	;;Get a work register
+	CALL	CHRSIZ		;;Get number of positions to go left	;011
+	BEQ	10$		;;No where to move, all done!		;011
+	CALL	CURBCK		;;And go left that many positions	;011
+10$:	MOV	(SP)+,R5	;;Restore work register
+20$:	RETURN			;;Now exit
+
+.DSABL	LSB
+
+.SBTTL	EDTBOL	Handle go to line beginning
+
+;+
+; EDTBOL - Go to line beginning
+;
+;	R0 =  unit # * 2
+;	R1 -> DDB
+;   
+;	CALL	EDTBOL
+;
+;	R2 =  Undefined
+;	R4 =  Undefined
+;
+; This routine goes to the beginning of the command line.  If the command
+; line does not wrap, i.e. it is not a "multi-line command", then it is
+; the same as saying that it goes to the beginning of the command.  On
+; multi-line commands, we go the the beginning of the last line.  In order
+; to determine where that is, we start with the end of the line, and count
+; character "sizes" backwards from the current terminal horizontal position.
+;
+; We must back up DDHORZ as we go, since CHRSIZ uses this in its computations
+; of the size of a TAB.
+;-
+.ENABL	LSB
+
+EDTBOL::BIT	#TAPE!NOECHO,DDFLAG(R1) ;;Are we echoing?		;012
+	BEQ	10$		;;Yes, then do lots of work		;018
+	MOV	TTINPT+EP(R1),TTIPTR(R1) ;;Just go to beginning of cmd	;018
+	RETURN			;;All done				;018
+
+10$:	MOV	R5,-(SP)	;;Save a register			;018
+	MOV	R3,-(SP)	;;Save another register			;018
+	MOVB	DDHORZ(R1),-(SP);;Save current horizontal position	;018
+	CLR	R3		;;Initialize our counter		;018
+20$:	CMPB	DDHORZ(R1),DDHORC(R1) ;;At (computed) left margin?	;021
+	BHIS	30$		;;Yes, don't go any further.		;020
+				;; Note: BEQ works here, but to be safe ...
+	CALL	DECIPT		;;Decrement the input pointer
+	BCS	30$		;;Can't, we're done
+	CALL	CHRSIZ		;;Get "size" of character		;012
+	ADD	R5,R3		;;Add it to number of spaces to back up	;012
+	ADD	R5,DDHORZ(R1)	;;And to computed horizontal position	;021
+.ASSUME	DDHORZ&1 EQ 0		;;DDHORZ is even, so the ADD is possible;021
+	BR	20$		;;And loop				;018
+
+30$:	MOVB	(SP)+,DDHORZ(R1);;Restore the saved horizontal position	;021
+	MOV	R3,R5		;;R5 = number of spaces to move back	;012
+	BEQ	40$		;;None, nothing to do
+	CALL	CURBCK		;;Now go move the cursor R5 spaces back	;018
+40$:	MOV	(SP)+,R3	;;Restore work register			;012
+	MOV	(SP)+,R5	;;Restore work register
+	RETURN			;;All done
+
+.DSABL	LSB
+
+.SBTTL	EDTEOL	Handle go to line end
+
+;+
+; EDTEOL - Handle go to line end
+;
+;	R1 -> DDB
+;   
+;	CALL	EDTEOL
+;
+;	Cursor moved to end of line, TTIPTR set up at end
+;-
+.ENABL	LSB
+
+EDTEOL::BIT	#TAPE!NOECHO,DDFLAG(R1) ;;Are we echoing?		;013
+	BNE	10$		;;No, then just set end pointer		;013
+	MOV	TTIPTR(R1),R5	;;Get current input pointer
+	CALL	RETYPE		;;Retype the command from here on	;013
+	CALL	CHKRM		;;Output a CRLF if at right margin	;013
+10$:	MOV	TTINPT+FP(R1),TTIPTR(R1) ;;Set input pointer to end	;013
+	RETURN			;;Now exit
+
+.DSABL	LSB
+
+.SBTTL	EDTUP, EDTDWN	Handle recall previous or next line on input
+
+;+
+; EDTUP - Handle recall previous line on input
+; EDTDWN - Handle recall next line on input
+;
+;	R1 -> DDB
+;   
+;	CALL	EDTUP
+;	CALL	EDTDWN
+;
+; This routine recalls the next or previous command typed by the user.
+;
+; In order for this routine to work properly, we have to be JOB!  To
+; ensure that, we check JOB against what's in our DDB.  Note that we
+; aren't called if this terminal is not our console (see EDTOK). So,
+; if we are job we can call RECALL immediately. Otherwise, we put a
+; CTRL/B or CTRL/N in the type ahead buffer and make ourselves runnable.
+; Making ourselves runnable goes through IOREDO, which eventually calls
+; the PROTYP routine in KBDVR.MAC, at which time we are JOB.  PROTYP calls
+; ECHOIN, which processes the character at PR5, and we'll get called.
+;
+; One more thing to note: It would be type ahead, and not immediate, if the 
+; user hits an up or down arrow when a read is not taking place.  Thus we'll 
+; come through here via PROTYP, and we're job.  In other words, the only time 
+; this routine will put the ^N or ^B in the type ahead buffer is if there is 
+; nothing else there.  
+;
+; If any new characters are entered while the recall is being processed, 
+; the TYPAHD routine in TERINC will put the characters into the type ahead
+; buffer.
+; 
+;-
+
+.ENABL	LSB
+
+EDTUP::	MOV	#'B-100,R2	;;Set up to recall previous command	;008
+	BR	10$		;;And join up				;008
+    
+EDTDWN::MOV	#'N-100,R2	;;Set up to recall next command		;008
+10$:	CMPB	DDJBNO(R1),JOB	;;Am I JOB?				;008
+	BEQ	20$		;;Yes, so do the recall now		;008
+	CALLX	STOREY		;;Store char (R2) in type ahead buffer	;008
+	CALLRX	TTIJSB		;;Make the JOB runnable	and get out!	;008
+	
+20$:	MOV	R2,-(SP)	;;Save our up/down flag			;017
+	BIT	#TAPE!NOECHO,DDFLAG(R1) ;;Are we echoing?		;020
+	BNE	50$		;;No, then don't do any output 		;027
+	BITB	#TTANSI,TTCAPB(R1) ;;Terminal support ANSI sequences?	;017
+	BEQ	40$		;;No, do it the hard way		;017
+	BIT	#TTSCOP,TTCHAR(R1) ;;Is this a scope terminal?		;027
+	BEQ	40$		;;No, hardcopy, just print CRLF		;027
+
+	; Recall handler for ANSI Scope terminals
+
+	CALL	EDTBOL		;;Get to beginning of line		;017
+	CALL	DELEOL		;;Delete to the end of the line		;017
+	CALL	LINEUP		;;Line up with prompt (might be NOP)	;026
+	BR	50$		;;Get rid of current line and do recall	;027
+
+	; Recall handler for NOANSI or Hardcopy terminals
+
+40$:	CMPB	DDHORZ(R1),DDHORC(R1) ;;At left margin?			;027
+	BEQ	50$		;;Yes, then don't print CRLF		;027
+	CALL	OUTCHR,R5	;;No, then output a CRLF		;027
+	 .BYTE	CR,LF		;; 					;027
+	.BR	50$		;;Get rid of current line and do recall	;027
+
+50$:	MOV	TTINPT+FP(R1),TTIPTR(R1) ;;Point to end of line		;027
+	CALL	TTGET		;;Delete the command character by 	;017
+	BCC	50$		;; character until no more 		;017
+	MOV	(SP)+,R2	;;Restore register			;017
+	BISB	#TTRECP,TTFLG3(R1) ;;A recall is pending		;019
+	SPLC	3		;Lower priority, enabling interrupts	;019
+	CALLMI	RECALL,KBDAP5	;Recall command (R2 is up/down flag)	;017
+	SPLC	5		;;Don't allow interrupts at this point	;019
+	BICB	#TTRECP,TTFLG3(R1) ;;No longer a recall pending		;019
+	RETURN			;;All done				;008
+
+.DSABL	LSB
+
+.SBTTL	EDTDW	Delete the word to the left of the cursor
+
+;+
+; EDTDW  - Delete the word to the left of the cursor
+;
+;	R0 =  unit # * 2
+;	R1 -> DDB
+;
+;	CALL	EDTDW
+;
+;	R2 = undefined
+;	R4 = undefined
+;	R5 = undefined
+;
+;	TTIPTR(R1) -> new postion in command
+;	Word deleted from input buffer
+;
+; This routine deletes a word.  Deleting a word means (1) all continuous 
+; spaces immediately to the left of the cursor are deleted, then (2) all
+; alphanumerics are deleted, and finally (3) if no alphanumerics were deleted,
+; a single character is deleted.
+;
+; This routine will span a command line if the cursor is at the left margin
+; and there are no character to the left of the cursor. 
+;
+; //Check: any alpha-numberics > 300?
+;-
+.ENABL	LSB
+
+EDTDW::	MOV	#^B100,R5	;;Initialize state flag			;013
+
+	; State flag is in low byte of R5:
+	; 	Bit 2 (^B100) means we're deleting spaces
+	;	Bit 1 (^B 10) means we're deleting alphas
+	;	Bit 0 (^B  1) means we're deleting a single character
+	;	Bit 15		set if we deleted any alphas
+
+10$:	MOV	TTIPTR(R1),-(SP);;Save current input pointer position	;013
+	CALL	DECIPT		;;Decrement position, (R2 = new char)	;013
+	MOV	(SP)+,TTIPTR(R1);;Restore input pointer, C=status	;013
+	BCS	70$		;;No more characters, all done		;013
+
+	; Beginning state: SPACES
+
+	BIT	#^B100,R5	;;Deleting spaces?			;013
+	BEQ	20$		;;No, try next state			;013
+	CMPB	R2,#SPACE 	;;Is character a space?			;013
+	BEQ	60$		;;Yes, go delete it			;013
+	CMPB	R2,#TAB		;;Is character a tab?			;013
+	BEQ	60$		;;Yes, go delete it			;013
+	ASRB	R5		;;No, advance to next state		;013
+
+	; Beginning state: APHANUMERICS
+
+20$:	BITB	#^B10,R5	;;Deleting aplhanumerics?		;013
+	BEQ	40$		;;No, try next state			;013
+	CMPB	R2,#'0		;;Is character a number?		;008
+	BLO	30$		;;No, it's not even an alphabetic	;008
+	CMPB	R2,#'9		;;Is it a number?			;008
+	BLOS	50$		;;Yes, get rid of it			;008
+	CMPB	R2,#300		;;Is it 8-bit alphabetic?		;008
+	BHI	50$		;;Yes, delete it			;008
+	BIC	#40,R2		;;We don't care about upper/lower case 	;008
+	CMPB	R2,#'A		;;Is it alphabetic?			;008
+	BLO	30$		;;No, get out				;008
+	CMPB	R2,#'Z		;;Is it alphabetic?			;008
+	BLOS	50$		;;Yes, delete it			;013
+30$:	ASRB	R5		;;Advance to next state			;013
+
+40$:	TST	R5		;;Did we delete any alphanumerics?	;013
+	BMI	70$		;;Yes, so don't delete a single char	;013
+50$:	BIS	#100000,R5	;;Indicate we deleted a key character	;013
+60$:	MOV	R5,-(SP)	;;Save our state flag			;013
+	CALLX	TI$RUB		;;Delete a character			;013
+	MOV	(SP)+,R5	;;Restore our state flag		;013
+	BITB	#^B1,R5		;;In state: special character deletion?	;020
+	BNE	70$		;;Yes, don't do any more processing	;020
+	CMPB	DDHORZ(R1),DDHORC(R1) ;;At left margin?			;019
+	BNE	10$		;;No, then loop				;019
+70$:	RETURN			;;All done				;013
+
+.DSABL	LSB
+
+.SBTTL	RETCUR	Retype input buffer from current position onwards
+
+;+
+; RETCUR - Retype input buffer from current position onwards
+;
+;	R0 =  unit # * 2
+;	R1 -> DDB
+;	R5 -> character to start the redisplay with (RETCU1 only)
+;	Priority is PR5
+;
+;	CALL	RETCUR
+;
+;	R2 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;
+; Retypes the curent line, if we are echoing, starting with the current insert
+; character (where the cursor is normally), or, in the case of RETCU1, at
+; any point supplied in R5.
+;
+; RETCUR is called after a character is echoed if we are in insert mode
+; and not at the beginning of the command (TTINER in TERINC.MAC).  It is
+; also called after a delete from the middle of the line (TI$RUB in TERINC),
+; and lastly after a ^U if there are characters after the cursor (TI$CU in
+; TERINC.MAC).  
+;
+; RETCU1 is called after a CTRL/R, to redisplay the command.  It puts
+; the place to start redisplaying at the beginning of the command, as opposed
+; to the insertion point.  That way the whole command gets redisplayed.
+;
+; RETCU2 is called after the display of a CTRL/T mini-systat, or after a 
+; succsesfull broadcast to the terminal, to redisplay the command line.  This
+; entry point first lines up the command with the previous prompt, and then 
+; redisplays the entire command from the beginning.
+;-
+.ENABL	LSB
+
+RETCU2::BITB	#PREAD,TTRFLG(R1) ;;Is a read pending?			;019
+	BEQ	30$		;;No, then don't bother with retype	;019
+	BIT	#TTSCOP,TTCHAR(R1) ;;Is terminal a scope?		;019
+	BEQ	30$		;;No, then don't bother with retype	;019
+	BIT	#TTANSI,TTCAPB(R1) ;;Does terminal support ansi?	;019
+	BEQ	30$		;;No, then don't bother with retype	;019
+	BIT	#TTBIN,TTMODE(R1) ;;Is terminal open in binary mode?	;022
+	BNE	30$		;;Yes, then it isn't echoing		;022
+	CALLX	LINEUP		;;All set.  Line up with the prompt	;019
+	MOV	TTINPT+EP(R1),R5 ;;Retype from beginning of command	;019
+	BR	RETCU1		;;Now go and do the retype		;019
+
+RETCUR::MOV	TTIPTR(R1),R5	;;Start redisplaying from insert point	;015
+RETCU1::BIT	#TAPE!NOECHO,DDFLAG(R1) ;;Are we echoing?
+	BNE	30$		;;No, get out quietly			;012
+	CALL	RETYPE		;;Now retype the command line 		;017
+	CALL	CHKEOL		;;Set ATEND if now at right margin	;015
+.ASSUME	ATEND	EQ 200		;; (ATEND can be tested with BMI/BPL)	;018
+	BMI	10$		;;We are at EOL, don't delete to EOL	;018
+	CALL	DELEOL		;;Delete to the end of the line		;017
+10$:	CMPB	R4,DDHORZ(R1)	;;Are we where we're supposed to be?	;019
+	BNE	20$		;;No, we must move cursor		;019
+	CALL	CHKRM		;;Yes, see if we're at right margin,	;017
+				;;  print CRLF if so			;017
+	BR	30$		;;All done				;019
+
+20$:	MOV	R4,-(SP)	;;Save our cursor destination		;019
+	CALL	OUTCHR,R5,CR	;;Output a carriage return		;019
+	MOV	DDHORZ(R1),R5	;;Get terminal width (=DDHORZ after CR)	;019
+	MOV	(SP)+,R4	;;Restore the cursor destination	;023
+	CMPB	R4,#1		;;Was destination left margin?		;023
+	BEQ	30$		;;Yes, the CR put us there		;023
+	SUB	R4,R5		;;Compute number places to move forward	;023
+	BEQ	30$		;;None at all!				;020
+	CALL	CURFWD		;;And go forward R5 places		;019
+30$:	BICB	#TYPPEN,TTRFLG(R1) ;;No longer a retype pending		;019
+	RETURN			;;All done				;012
+
+
+.SBTTL	RETYPE	Retype the command line 
+
+;+
+;	R1 -> DDB
+;	R5 -> Start position in input buffer 
+;
+;	CALL	RETYPE
+;
+;	R2 =  Undefined
+;	R4 =  DDHORZ at the point where R5 = TTIPTR
+;	R5 -> TTINPT+FP, the end of the input buffer
+;
+;
+; RETYPE is called from RETCUR (RETCU1) above, and also by the CTRL/R 
+; routine (TI$CR in TERINC.MAC) for redisplaying lines on hardcopy 
+; terminals.
+;
+; RETYPE is also called from the EDTEOL routine, to display the end
+; of the command.  That's a nice way of getting to the end of the
+; command, without caring what "size" characters are in the input buffer.
+;-
+
+RETYPE::MOV	DDHORZ(R1),R4	;;Initialize R4 at our current position	;015
+.ASSUME	DDHORZ&1 EQ 0
+.ASSUME	DDHORC	EQ DDHORZ+1
+	MOV	TTCHAR(R1),-(SP) ;;Save current characteristics		;024
+	BIC	#TTTAB,TTCHAR(R1) ;;Output spaces for any tabs		;024
+40$:	CMP	R5,TTINPT+FP(R1) ;;More characters?			;015
+	BEQ	70$		;;No, all done, exit			;024
+	BIT	R5,#40-1	;;Are we pointing into the buffer?
+	BNE	50$		;;Yes, we still are
+	MOV	-40(R5),R5	;;No, get link to next buffer
+50$:	MOVB	(R5)+,R2	;;Get the character to display
+	BIT	#140,R2		;;Is character part of escape sequence?
+	BNE	60$		;;No, nothing to do to it
+	BIC	#^C<177>,R2	;;Yes, make it into a C0 control
+60$:	MOV	R4,-(SP)	;;Save our horizontal position		;015
+	CALL	CHOUTE		;;Output the character			;015
+	MOV	(SP)+,R4	;;Restore horizontal position		;015
+	CMP	R5,TTIPTR(R1)	;;Are we now at insertion point?	;015
+	BNE	40$		;;No, loop				;015
+	MOV	DDHORZ(R1),R4	;;Yes, store current horizontal position;015
+	BR	40$		;;And loop
+
+70$:	MOV	(SP)+,TTCHAR(R1) ;;Restore TTTAB setting		;024
+	BR	30$		;;And get out				;024
+
+.DSABL	LSB
+
+.SBTTL	CURBCK	Move cursor backward
+
+;+
+; CURBCK - Move cursor backward
+;   
+;	R0 =  unit # * 2
+;	R5 =  Number of positions to move backward, R5 <> 0.
+;
+;	CALL	CURBCK
+;
+;	R2 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;-
+.ENABL	LSB
+
+CURBCK:	CMP	R5,#3		;;Shall we do this with an escape sequence?
+	BHI	20$		;;Yes, go for it
+10$:	CALL	OUTCHR,R5,<'H-100> ;;Output a backspace
+	SOB	R5,10$		;;And loop for all of them
+	RETURN			;;And get out				;020
+
+20$:	MOVB	DDHORZ(R1),-(SP) ;;Save horizontal position 		;005
+	ADD	R5,(SP)		;;Adjust for backward cursor movement	;005
+	CMPB	DDHORC(R1),(SP)	;;Are we attempting to go back too far?	;008
+	BHIS	30$		;;No, we're alright			;008
+	MOVB	DDHORC(R1),(SP)	;;Yes, correct horizontal position	;008
+30$:	CALL	OUTCSI		;;Output a CSI
+	CALL	DECOUT		;;Now output a decimal number
+	CALL	OUTCHR,R5,<'D>	;;Now the terminating 'D' for the sequence
+	BR	50$		;;Join up with CURFWD			;008
+
+.SBTTL	CURFWD 	Move cursor forward
+
+;+
+; CURFWD - Move cursor forward
+;
+;	R1 -> User's DDB
+;	R5 =  Number of positions to move forward
+;
+;	CALL	CURFWD
+;
+;	R2 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;-
+
+CURFWD::MOVB	DDHORZ(R1),-(SP) ;;Save horizontal position 		;018
+	SUB	R5,(SP)		;;Adjust for forward cursor movement	;005
+	CMPB	DDHORZ(R1),R5	;;Request to go forward too far?	;008
+	BHI	40$		;;No, we're all right			;008
+	MOV	#2,(SP)		;;Yes, fix horizontal position		;015
+40$:	CALL	OUTCSI		;;Output a CSI				;008
+	CALL	DECOUT		;;Now output a decimal number
+	CALL	OUTCHR,R5,<'C>	;;Now the terminating 'C' for the sequence
+50$:	MOVB	(SP)+,DDHORZ(R1) ;;Restore updated horizontal position	;005
+60$:	RETURN			;;And exit
+
+.DSABL	LSB
+
+.SBTTL	DELEOL	Delete to the end of the line
+
+;+
+; DELEOL - Delete to the end of the line
+;
+;	R1 -> DDB
+;
+;	CALL	DELEOL
+;
+;	R2 =  Undefined
+;	R4 =  preserved
+;-
+.ENABL	LSB
+        
+DELEOL::MOVB	DDHORZ(R1),-(SP) ;;Save current horizontal position	;009
+	MOV	R4,-(SP)	;;Save a register			;018
+	CALL	OUTCSI		;;First, send a CSI
+	CALL	OUTCHR,R5,<'K>	;;Now end the sequence with a "K"
+	MOV	(SP)+,R4	;;Restore the register			;018
+	MOVB	(SP)+,DDHORZ(R1) ;;Restore horizontal position		;009
+	RETURN			;;And we're done
+
+.DSABL	LSB
+
+.SBTTL	CHKEOL	Indicate if we are now at right margin
+
+;+
+; CHKEOL - Indicate if we are now at right margin
+; 
+;
+; 	R1 -> DDB
+;
+;	CALL	CHKEOL
+;
+;	ATEND is set in TTRFLG if DDHORZ = 1
+;
+;	N=1 if "tail" of command is at the end of the command.  This condition
+;	    may be tested via a "BMI at-end".
+;
+; 	N=0 if "tail" of command is NOT at end
+;
+; CHKEOL is called after a character from a command line is printed, to
+; see if the character just echoed at the right margin (in TERINC.MAC).  
+; If we are in a situation where there are characters after the cursor, then 
+; this routine is also used to see if the last character is at the right
+; margin (in the RETCUR and RETCU1 routines in this module).  
+;
+; This routine relies on the fact that ATEND is the high bit in the byte,
+; and that DDHORZ=1 is the right margin.  Note that DDHORZ cannot be 0.
+;-
+.ENABL	LSB
+
+.ASSUME	ATEND	EQ 200		;;Bit is the high bit in the byte	;015
+
+CHKEOL::ASLB	TTRFLG(R1)	;;Get rid of ATEND			;015
+	CMPB	DDHORZ(R1),#2	;;Are we before the right margin?	;015
+	RORB	TTRFLG(R1)	;;BLO=BCS, so set ATEND if DDHORZ=1	;015
+	RETURN			;;All done
+
+.DSABL	LSB
+
+.SBTTL	CHRSIZ	Get a characters "size"
+
+;+
+; CHRSIZ - Get a characters "size"
+;
+;	R1 -> DDB
+;	R2 = character
+;
+;	CALL	CHRSIZ
+;
+;	R2 = character
+;	R4 = undefined
+;	R5 = "size" of character, as it is displayed
+;
+;	Z=0 if R5 <> 0, Z=1 otherwise.  Thus, the length of the character
+;	    may be tested upon exit with "BEQ zer-len-char".
+;
+; This routine finds out how many positions the character before the cursor
+; takes up.  It is used in the DELETE code in TERINC, and also by the left
+; arrow code in this module to determine how many places to "clear" or back up.
+;
+; It is also called by the EDTBOL routine to back up to beginning of line.
+; This routine is used as opposed to going directly to PMTPOS(R1), because 
+; EDTBOL must only go to the beginning of the current line, which may have 
+; wrapped.
+;
+; This routine is only used going BACKWARD, at least if there is a possiblity
+; the character is a TAB.  Other characters will work either way!
+;
+; //Check: any 8-bit weird (not 1-space) characters exist? //
+;-
+.ENABL	LSB
+
+CHRSIZ::MOV	#1,R5		;;Assume normal character, size = 1 	;011
+	CMPB	R2,#SPACE	;;Control character?			;011
+	BHIS	10$		;;No, nothing special to do		;011
+	DEC	R5		;;Yes, start out with size of 0		;011
+	BIT	#TTUPAR,TTCHAR(R1) ;;Uparrow for controls mode?		;011
+	BEQ	10$		;;No, then get out			;011
+	CMPB	R2,#'G-100	;;Bell character (CTRL/G)? 		;011
+	BEQ	10$		;;Yes, nothing more to do		;011
+	CMPB	R2,#'I-100	;;Tab character (CTRL/I)? 		;011
+	BEQ	20$		;;Yes, do something VERY special	;011
+	TST	(R5)+		;;No, then size is 2 (normal control)	;011
+10$:	TST	R5		;;Exit testing field size (Z bit)	;011
+	RETURN			;;All done
+
+	; Tab character, very special handling!
+
+20$:	;CLR	R5		;;R5 is already clear from above	;016
+	BISB	PMTPOS(R1),R5	;;Get prompt position 			;016
+	MOV	TTINPT+EP(R1),R4 ;;Get pointer to start of the command	;016
+30$:	CMP	R4,TTIPTR(R1)	;;Are we up to the desired position?	;016
+	BEQ	70$		;;Yes, get out				;016
+	BIT	#40-1,R4	;;No, pointing at the buffer end?	;016
+	BNE	40$		;;No, not this time			;016
+	MOV	-40(R4),R4	;;Yes, point to start of next buffer	;016
+40$:	MOVB	(R4)+,R2	;;Get character				;016
+	CMPB	R2,#'I-100	;;Another blasted TAB character?	;016
+	BNE	50$		;;No, nothing special to do		;016
+
+
+	; There is a TAB before this TAB which we are deleting.  Compute
+	; position of next tab stop to get new horizontal position.  This
+	; is a stripped down (and faster) version of the TABSET routine in 
+	; SUB.MAC.  TABSET is used in the class driver when printing a TAB.
+	
+	MOV	R4,-(SP)	;;Save a register			;016
+	MOVB	DDHORC(R1),R4	;;Get terminal width + 1		;016
+	SUB	R5,R4		;;Compute position relative to 0	;016
+	COM	R4		;;Get number of spaces to next tab stop	;016
+	BIC	#^C<7>,R4	;; by taking result modulo 8		;016
+	INC	R4		;;  from that position			;016
+	SUB	R4,R5		;;New position = Old - <spaces til new>	;016
+	MOV	(SP)+,R4	;;Restore the register			;016
+	BR	60$		;;Join up				;016
+
+50$:	MOV	R5,-(SP)	;;Save cumulative cursor position	;016
+	CALL	CHRSIZ		;;Get size of character			;016
+	SUB	(SP)+,R5	;;Subtract it from horizontal position	;016
+	NEG	R5		;;Adjust for "backwards" subtraction	;016
+60$:	CMP	R5,#1		;;At right margin? 			;016
+	BHI	30$		;;No, loop!				;016
+	CLR	R5		;;Initialize horizontal position	;016
+	BISB	DDHORC(R1),R5	;;We're now at left margin		;016
+	BR	30$		;;And now we can loop			;016
+
+70$:	CLR	R4		;;Clear a cell				;016
+	BISB	DDHORZ(R1),R4	;;Get current horizontal position	;016
+	CMPB	DDHORC(R1),R4	;;Is cursor at left margin?		;016
+	BNE	80$		;;No, just do subtraction		;016
+	MOV	#1,R4		;;Fake current position to be at right	;016
+
+80$:	SUB	R4,R5		;;Subtract current position from	;016
+				;; position of tab to get number of	;016
+				;; places this tab took 		;016
+	BPL	90$		;;Should be positive, otherwise bad	;017
+	CLR	R5		;; calculation.  Should CRASH, but 	;017
+				;; for now, just make it zero		;017
+				;; (Since things like broadcasts can 	;017
+				;;  screw things up at this point)	;017
+90$:	RETURN			;;Return with Z bit as test of R5	;016
+
+.DSABL	LSB
+
+.SBTTL	OUTCSI	Output CSI based on terminal type
+
+;+      
+; OUTCSI - Output CSI based on terminal type
+;
+;	R1 -> DDB
+;
+;	CALL	OUTCSI
+;
+;	R2 =  Undefined
+;	R4 =  Undefined
+;-
+.ENABL	LSB
+
+OUTCSI::BITB	#TT8BIT,TTFCNT(R1) ;;Can we send CSI to this terminal?
+	BEQ	10$		;;No, not this time
+	CALL	OUTCHR,R5,<CSI>	;;Yes, output the CSI character
+	RETURN			;;ANd get out				;020
+
+10$:	CALL	OUTCHR,R5	;;Call output routine
+	 .BYTE	ESC,'[		;;Output Escape [
+20$:	RETURN			;;All done
+
+.DSABL	LSB
+
+.SBTTL	OUTCHR	Output characters passed inline
+        
+;+
+; OUTCHR - Output characters passed inline
+;
+;	CALL	OUTCHR,R5
+;	 .BYTE	BYTE1,BYTE2	(BYTE2 not printed if 0)
+;
+;	R2 =  Undefined
+;	R4 =  Undefined
+;-
+.ENABL	LSB
+
+OUTCHR::MOVB	(R5)+,R2	;;Get first character
+	CALL	CHOTTE		;;Now output it
+	MOVB	(R5)+,R2	;;Get second character (if any)
+	BEQ	10$		;;None, just get out
+	CALL	CHOTTE		;;Output it
+10$:	RETURN	R5		;;All done
+
+.DSABL	LSB
+
+.SBTTL	DECOUT	Output decimal number
+
+;+
+; DECOUT - Output decimal number
+;
+;	R5 =  Number to output
+;
+;	CALL	DECOUT
+;
+;	R4 =  Undefined
+;	R5 =  Undefined
+;-
+.ENABL	LSB
+
+DECOUT::CLR	-(SP)		;;Make a marker on the stack
+10$:	CLR	R4		;;Clear MSB for divide
+	DIV	#10.,R4		;;Get a digit
+	ADD	#'0,R5		;;And convert it to ASCII
+	MOV	R5,-(SP)	;;Save it to be printed later
+	MOV	R4,R5		;;Now get quotient for next time
+	BNE	10$		;;And loop until we're done
+20$:	MOV	(SP)+,R2	;;Get a character to display
+	BEQ	30$		;;Hit the marker, we're done
+	CALL	CHOTTE		;;Got one, display it
+	BR	20$		;;And loop
+        
+30$:	RETURN			;;All done
+
+.DSABL	LSB
+
+.SBTTL	OUTRM	Output a character, then check to see if at right margin
+
+;+
+; OUTRM - Output a character, then check to see if at right margin
+;
+;	R1 -> DDB
+;	R2 = character
+;
+;	CALL OUTRM
+;
+;	Output a character, then if at right margin, output a CRLF
+;-
+.ENABL	LSB
+
+OUTRM::	CALLX	CHOUTE		;;Display the character			;017
+	.CALLR	CHKRM		;;Output CRLF if at right margin	;017
+
+.DSABL	LSB
+
+.SBTTL	CHKRM	Output CRLF if at right margin
+
+;+
+; CHKRM - Output CRLF if at right margin
+;
+;	R1 -> DDB
+;	R2 = character
+;
+;	CALL CHKRM
+;
+;	If at left margin, and if we can display a CRLF, then do so
+;-
+.ENABL	LSB
+
+CHKRM:	CMPB	DDHORZ(R1),#1	;;At right margin?			;017
+	BNE	10$		;;No, all done				;017	
+	BIT	#TTECTL!TTCRLF,TTMODE(R1) ;;Echo ctl or supress crlf mode? ;017
+	BNE	10$		;;Yes, then don't display the CRLF	;017
+	CALLX	ASCOUT,R5,CRLF.0 ;;Display a CRLF to get to left margin	;017
+10$:	RETURN			;;And get out
+	
+GLOBAL	<CRLF.0>
+
+.DSABL	LSB
+
+.SBTTL	CHOTTE	Output a character, transparent controls
+
+;+
+; CHOTTE - Output a character using echo checks, transparent control
+;       
+;	R1 -> DDB
+;	R2 =  Character
+;
+;	CALL	CHOTTE
+;
+;	R3 =  Undefined
+;	R4 =  Undefined
+.ENABL	LSB
+
+CHOTTE::CALLX	CHKFRE		;;Are there free buffers?
+	BCC	10$		;;Yes, do the output
+	CMP	DDBUFC+BC(R1),#-2. ;;No, are we really far over quota?
+	BLT	20$		;;Yes, don't do the output
+10$:	CALLRX	CHOUTC		;;Output the character
+        
+20$:	RETURN			;;No buffers, forget it
+
+.DSABL	LSB
+
+.END

@@ -1,0 +1,3663 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:FLDEF/
+.INCLUDE /CMN:LATDEF/
+.INCLUDE /CMN:KBDEF/							;002
+.LIBRARY /CMN:NETDEF.SML/						;001
+TITLE	LTU,<Start/Modify the LAT Software>,0A,10-MAY-91,DWF/KPH/JFM/DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for LTU
+
+;+						   
+;			[RSTS/E V9.6]
+;  000  KPH  23-Dec-87	Creation from SRC and DWF's efforts
+;  001  JFM  26-Jan-88	Added shell for LAT software control subroutines
+;  002	JFM  11-Feb-88	Added LAT subroutine code
+;  003	JFM  18-Feb-88	Fixed bug, wrong test of LATAP5
+;  004	JFM  22-Feb-88	Fixed bug in server name checker routines
+;  005	JFM  14-Mar-88	Check for node block before starting LAT.
+;			Error with NOTOPN if node block not present.
+;			Take advantage of fact that L.ACT is 0 (using .ASSUMEs).
+;  			Fix bug in TTMODM lookup.
+;			Save/restore unit number*2 in Ethernet counters routine.
+;			Use XOR to toggle bit in multicast flag byte.
+;			Combined two overlays, LTU5 and LTU6 (temporary)
+;			Allow user to specify zero length ident string
+;  006	JFM  11-Apr-88	Initialize counter time when node block created.
+;  007	JFM  12-Apr-88	Return NOTOPN in SHOW NODE COUNTERS if no node block 
+;  008	JFM  12-Apr-88	Add STOP LINE directive.
+;  009	DWF  22-Apr-88	Add receive buffer quota per datalink
+;  010	JFM  05-May-88	Add code review comments, rename conflicting symbols
+;			as changed in LATDEF, moved name checker into LATAP5.
+;  011	JFM  18-May-88	Fix SHOW COUNTER/DEVICE bug.
+;  012	JFM  25-May-88	Fix mapping problem in STOP/LAT.
+;  			Add entry to stop LAT on all lines
+;
+;			[RSTS/E V9.7]
+;  013	JFM  17-Aug-88	Fix COPY routine bugs where input length is 0
+;  014	DRP  28-Oct-88	Change check for job residency on return from
+;			FNDJOB from BCS to BEQ.
+;  015	KCG  22-Nov-88	Change overlays to run in OV2 phase (Change FQFSRT
+;			to F2FSRT, FQFEND to F2FEND, FCALL to F2CALL, and
+;			FJMP to F2JMP).
+;
+;			[RSTS/E V10.0]
+;  016	DRP  09-Oct-89	Add LAT directives CREATE PORT, DELETE PORT,
+;					   SET PORT and SHOW PORT.
+;  017	DRP  28-Oct-89	Allocate the Solicitation Block from XBUF.
+;  018	DRP  07-Nov-89	Modified NETCRP to set application terminal
+;			bit in DDCNT.
+;  019	DRP  12-Nov-89	Don't preset the request id (SO.RID) field
+;			Change location of application terminal bit
+;			to DDSTS.
+;			Moved GETSTS to another overlay to make room.
+;			Preset default to queued access and made several
+;			changes due to chanegs in Solicit Block layout
+;			Store local port name in Solicit Block.
+;			Break SET PORT into three subfunctions - assign,
+;			deassign and set.
+;  020	DRP  25-Jan-90	Make code review changes.
+;			Add /[NO]ABORT support to NETDLP.
+;			Return dialup flag in NETSHP.
+;			Remove Set Local LAT Port subfunction.
+;  021	DRP  13-Mar-90	Return the QUEUE setting in GETSTS.
+;			Return indicator if there's an active session when
+;			deleting the port.
+;			Check for connection in progress in NETDLP.
+;  022	DRP  22-May-90	Make suggestion code saving changes.
+;			Preserve and update the destination address when
+;			calling MOVMEM.
+;-
+
+.SBTTL	Call any needed MACROs
+
+.MCALL	NETFUN
+
+.ENABL	MCL
+
+	$NOB			;Node block definitions
+	$LATDEF			;LAT directive bit definitions
+	$OVLFUN			;Network overlay internal function codes
+
+.DSABL	MCL
+
+
+.SBTTL	Directive dispatching
+
+F2FSRT	LTU				; This is the start of LTU0
+
+;+
+; NETLIN (SR$LSH,SF$LIN) - Show Ethernet lines status (Enabled/Disabled)
+;
+; INPUTS:
+;	R4	   -->	FIRQB
+;	XRB+XRLEN   =	Length of user's buffer
+;	XRB+XRBC    =	0
+;	XRB+XRLOC   =	Address of user's buffer 
+;
+; OUTPUTS:
+;	XRB+XRLEN   =	(unchanged)
+;	XRB+XRBC    =	Actual character count of returned information
+;	XRB+XRLOC   =	(unchanged)
+;
+; ERRORS:
+;	None
+;-
+
+.ENABL	LSB
+
+NETFUN	LIN,<Show LAT Ethernet lines status>
+
+	NOP				; NOP for debugging purposes
+	CALL	MAPUS0			; Map the user's XRB
+					; (R0 = buffer length, R5 --> Buffer)
+	MOV	#LATCTL+L.EDDB,R1	; Get the address of the DDB table
+	MOV	#LATLIN,R2		; Get maximum number of lines
+	MOV	R5,-(SP)		; Save address of user's buffer
+	ASR	R0			; Get number of words in users buffer
+	BEQ	30$			; None there, get out.
+	;
+	; Insert number of active lines
+	;
+	MOVB	@#LATCTL+L.ACT,(R5)+	; Insert number of active lines
+	INC	R5			; Skip past line count and reserved byte
+	DEC	R0			; Account for # lines and reserved
+	BEQ	30$			; Can't fit any lines, that's all 
+
+	MOV	#LATLIN,R2		; Get maximum number of LAT lines
+10$:	MOV	(R1)+,R3		; Get DDB pointer
+	BEQ	20$			; Try next pointer if none here
+	SUB	#2,R0			; Can we fit a device and unit?
+	BLO	30$			; Branch if we can't
+.ASSUME	DDIDX	EQ 0
+	MOVB	(R3),R4			; Get device handler index
+	MOV	DEVNAM+DEVOKB-2(R4),(R5)+; Insert device designator
+	MOVB	DDUNT(R3),(R5)+ 	; Insert device unit number
+	MOVB	#255.,(R5)+		; Insert unit number real flag
+20$:	SOB	R2,10$			; Try next line position
+
+30$:	SUB	(SP)+,R5		; Calculate number of characters
+	MOV	R5,-(SP)		; Save number of characters in buffer
+	CALL	MAPLO0			; Map user's low core
+	MOV	(SP)+,@#140000+XRB+XRBC ; Report character count
+	CALLR	FREJB0			; Unlock the job and exit
+
+.DSABL	LSB
+
+GLOBAL	<LATCTL,DEVNAM.DEVOKB>
+
+
+;+
+; NETSES (SR$LSH,SF$SES) - Show LAT session information
+;
+; INPUTS:
+;	R4	   -->	FIRQB
+;	FIRQB+FQPPN   = Index for session to return
+;	FIRQB+FQPPN+1 = Server name length or 0 if none
+;	FIRQB+FQNAM1  = KB number to return session info
+;	FIRQB+FQNAM2  = Server name, if FQPPN+1 is non-zero.
+;
+;	XRB+XRLEN   =	Length of user's buffer
+;	XRB+XRBC    =	0
+;	XRB+XRLOC   =	Address of user's buffer 
+;
+; OUTPUTS:
+;	XRB+XRLEN   =	(unchanged)
+;	XRB+XRBC    =	Actual character count of returned information
+;	XRB+XRLOC   =	(unchanged)  // Should XRLOC be address of next byte? //
+;
+; ERRORS:
+;	NOSUCH	No server matches the server name at FQNAM2 (returned by CKSVR0)
+;	BADFUO	The server name length was not in range 1-16. 
+;	NODEVC	The keyboard number was not a valid RSTS keyboard number
+;	NOTAVL	There was no session matching the specified index
+;	INTLCK	The keyboard number was valid, but it wasn't a LAT session
+;-
+
+.ENABL	LSB
+
+;+
+; Error handlers for Show LAT Ethernet Lines directive
+;-
+10$:	CALL	FREJB0			; Unlock the job
+	ERROR	NOTAVL			; ?Device not available.  There was 
+					;   no session matching the specified 
+					;   index.
+
+20$:	CALL	FREJB0			; Unlock the job
+	ERROR	INTLCK			; ?Disk pack not interlocked.  The 
+					;   keyboard was a valid RSTS KB, but 
+					;   it cannot be a LAT line.  (It's 
+					;   not a dynamic KB)
+
+30$:	CALL	FREJB0			; Unlock the job
+	ERROR	NODEVC			; ?Not a valid device.  The keyboard 
+					;   number specified in FIRQB+FQNAM1 
+					;   is invalid (it is invalid only if 
+					;   it is greater than 128 decimal).
+
+40$:	CALL	FREJB0			; Unlock the job
+	ERROR	BADFUO			; ?Illegal SYS() usage.  The server 
+					;   name length is > maximum allowed, 
+					;   S.NMAX = 16.
+
+
+	NETFUN	SES,<Show LAT Session Information>
+
+	NOP				; NOP for debugging purposes
+	MOVB	FQPPN(R4),R3		; Get the session index.
+	BEQ	110$			; Must be by keyboard number
+	MOVB	FQPPN+1(R4),R0		; Server name specified (R0=length)? 
+	BEQ	70$			; Across all servers if not
+
+	;+
+	; Get the server matching the specified name
+	;
+	; INPUTS:
+	;	R0 	   = server name length, 
+	;	FQNAM2(R4) = server name to match
+	;-
+	CMP	R0,#S.NMAX		; Is server name length too big?
+	BHI	40$			; Error if so
+	PUSH	<R3>			; Save session index
+	CALL	CKSVR0			; Get matching server, error if none
+	POP	<R3>			; Restore session index
+
+	;+
+	; We have got the VCB matching the server name, now get 
+	; the session based on INDEX FOR THIS SERVER ONLY.
+	;
+	; Set up by CKSVR0, at this point:
+	; 	R1 --> VCB, Virtual Circuit Block 
+	;	       which matches the server name
+	; 	R3 =   Session index (cannot equal zero)
+	;-
+	MOV	C.SESQ(R1),R1		; Point to first session block
+	BEQ	10$			; Branch if no session exists
+	BR	60$			; Go into SOB loop
+
+.ASSUME S.LNK EQ 0
+50$:	MOV	(R1),R1			; Get pointer to next session block
+	BEQ	10$			; Error if no more sessions
+60$:	SOB	R3,50$			; Branch if not the right index
+	BR	RETSES			; Got it, return session information
+
+70$:	;+
+	; Get session based on INDEX ACROSS ALL SERVERS
+	;
+	; At this point:
+	;	R3 = server index number
+	;-
+
+	MOV	#LATCTL+L.AVCB,R2 	; Point to first server table
+.ASSUME C.LNK 	EQ 0
+80$:	MOV	(R2),R2			; Point to (next) VCB
+	BEQ	10$			; No more servers, so no match
+	MOV	C.SESQ(R2),R1		; Point at session block
+	BEQ	80$			; No sessions there, try next server
+	BR	100$			; Got a session, count it.
+
+.ASSUME S.LNK 	EQ 0
+90$:	MOV	(R1),R1			; Point to next session block
+	BEQ	80$			; Branch if no more sessions on server
+100$:	SOB	R3,90$			; Decrement index.  Loop if not it.
+	BR	RETSES			; Got it, return session information
+
+110$:	;+
+	;
+	; Get session based on KEYBOARD NUMBER.
+	;
+	; At this point:
+	;	FIRQB+FQNAM1 = keyboard number
+	;-
+
+	CLR	R2			; Clear keyboard number
+	BISB	FQNAM1(R4),R2		; Get keyboard number
+	CMP	R2,#CNT.KB		; Is keyboard number valid?
+	BHIS	30$			; Error if not
+	ASL	R2			; Make it kb # times 2
+	SPLC	5			; Bump to priority 5
+	MOV	DEV.KB(R2),R1		;; Get pointer to the terminal DDB
+	CMP	R1,#FAKDDB 		;; Is this a fake DDB?
+	BEQ	10$			;; Yes, return LAT session not present
+	CMPB	TTINTF(R1),#TTLT11 	;; Is this a LAT line interface?
+	BNE	20$			;; No?  Return "not a LAT line" error
+	SPLC	3			;; Back to priority 3
+	MOV	CSR.KB(R2),R1		; DDB extention is stored here,
+	.BR	RETSES			;  which is pointer to session block.
+
+GLOBAL	<CNT.KB>
+
+RETSES:	;+
+	;
+	; We have a session block for the session we were looking for,
+	; return the data in the users buffer.
+	;
+	; R1 --> Session block
+	;-
+	CALL	MAPUS0			; Map the user's buffer
+					; (R0 = buffer length, R5--> buffer)
+	MOV	R5,-(SP)		; Store users buffer address
+	TST	R0			; Buffer have any length?
+	BEQ	130$			; Just finish if not
+
+	; Insert KB number
+
+	MOVB	S.LSID(R1),(R5)+	; Insert KB# into users buffer
+	DEC	R0			; Can we fit any more?
+	BEQ	130$			; If we can't we can't
+
+	; Insert port bitmask
+
+	CLRB	(R5)+			; Assume not a dialup line
+	PUSH	<R1>			; Save register
+	SUB	#KBDDBS,R1		; Subtract KB DDB size
+	SUB	@#KBDDBX,R1		; Subtract size of DDB extention
+	SUB	@#KBDDBX,R1		; Again. KBDDBX is in words	;005
+	BIT	#TTMODM,TTINTF(R1)	; Is this a dialup?
+	BEQ	120$			; Branch if not
+	BISB	#200,-1(R5)		; Indicate this is a dialup
+120$:	POP	<R1>			; Restore register
+	DEC	R0			; Can we fit any more?
+	BEQ	130$			; If we can't we can't
+
+	; Insert port name and length 
+
+	MOV	R1,R3			; Get copy of session block pointer
+	ADD	#S.PLEN,R3		; Point to port name length
+.ASSUME	S.PORT	EQ S.PLEN+1		; Port length immediately precedes name
+	CALL	COPY0			; Copy port name into users buffer
+	BEQ	130$			; User's buffer is full, quit
+
+
+	; Insert server name and length (taken from virtual circuit block)
+
+	MOV	S.CIR(R1),R3		; Get pointer to VCB (circuit block)
+	ADD	#C.NAML,R3		; Point to server name length
+.ASSUME	C.NAM	EQ C.NAML+1		; Server name length precedes name
+	CALL	COPY0			; Copy data into buffer
+	BEQ	130$			; Branch if buffer filled up
+
+	; Insert service name and length
+
+	MOV	R1,R3			; Get copy of session block pointer
+	ADD	#S.SLEN,R3		; Point to service name length
+.ASSUME	S.SRVC	EQ S.SLEN+1		; Service length precedes name
+	CALL	COPY0			; Copy service name into users buffer
+130$:	SUB	(SP)+,R5		; Calculate number of characters
+	MOV	R5,-(SP)		; Save number of characters in buffer
+	CALL	MAPLO0			; Map user's low core
+	MOV	(SP)+,@#140000+XRB+XRBC ; Report character count
+	.CALLR	FREJB0			; Unlock the job and exit
+
+.DSABL	LSB
+
+GLOBAL	<CSR.KB,DEV.KB,FAKDDB,KBDDBX>
+
+.SBTTL	.....FREJB0	Unlock the job and map FIPPOL
+;
+; Map FIPPOL and release the job
+;
+
+FREJB0:	MAP	FIPPOL			; Be sure FIP pool is mapped
+	MOVB	@#FIJOB,R0		; Get caller's job number
+	CALLRX	UNLOCK			; Release the job
+
+
+.SBTTL	.....COPY0	Copy data into the users buffer
+;+
+; Inputs:
+;	R0 =  # bytes left in users buffer
+;	R3 -> ASCIC string containing data to move
+;	R5 -> Users buffer
+;
+; Outputs:
+;	Z=1 indicates no bytes left in users buffer
+;	Z=0 indicates there's still room in users buffer
+;
+;	R0 =  # bytes left in users buffer (updated)
+;	R2 =  0 if all characters copied, number of uncopied characters if not
+;	R3 -> Byte following last byte copied from
+;	R5 -> next free byte in users buffer
+;-
+.ENABL	LSB
+
+COPY0:	MOVB	(R3),(R5)+		; Store length of data to move	;013
+	DEC	R0			; Account for the byte count
+	BEQ	20$			; No more room in buffer, quit
+	MOVB	(R3)+,R2		; Copy the byte count		;013
+	BEQ	15$			; None, done			;013
+
+10$:	MOVB	(R3)+,(R5)+		; Copy a character
+	DEC	R0			; Account for the character
+	BEQ	20$			; No more chars will fit, quit (Z=1)
+	SOB	R2,10$			; Do another character until done
+15$:	CLZ				; There's room in buffer (Z=0)	;013
+20$:	RETURN				; Return with Z bit indicating status
+	
+.DSABL	LSB
+
+
+.SBTTL	.....MAPUS0	map a user's buffer
+;+
+; MAPUS0 - check a user's buffer and map it
+;
+; This MAPUS0 is basically used for a "SHOW" because it moves into R0 the
+; user's buffer length from XRLEN.  In the SHOW calls, the XRBC has to be
+; zero.  
+;
+; EXIT:
+;	R0 =	User's buffer length (XRLEN) -- 0 if no buffer
+;	R5 ->	User buffer via APR 6
+;-
+
+MAPUS0:	CALL	MAPLO0			; Map user's lowcore
+	MOV	XRB+XRLEN(R5),-(SP) 	; Save user's buffer length
+	BEQ	10$			; Branch if no buffer
+	MOV	XRB+XRLOC(R5),R5 	; Get buffer address
+	BIT	#1,R5			; Odd address?
+	BNE	20$			; Yes, error
+	CALL	LDUSR0			; Go map buffer
+10$:	MOV	(SP)+,R0		; Return user's buffer length
+	RETURN
+
+20$:	CALL	FREJB0			; Let go of job, and restore fip mapping
+	ERROR	BADCNT			; Bad buffer parms
+
+.SBTTL	.....MAPLO0	Map a user's low core
+.SBTTL	.....LDUSR0	Load and map a user buffer
+;+
+; ENTRY:
+;	R5 ->	user buffer (virtual), LDUSR0 only
+;
+; EXIT:
+;	R0,2,3	munged
+;	R5 ->	user buffer via apr6
+;-
+
+MAPLO0:	CLR	R5			; Map user's virtual zero
+LDUSR0:	MOV	@#FIJBDA,R0		; Get job's JDB address
+	BITB	#^C<LCK>,JDMCTL+M.CTRL(R0) ;Job should be locked and that's all
+	BNE	20$			; No?  Very strange
+	SUB	#MC.LCK*400,JDMCTL+M.CTRL-1(R0) ;Take off one lock
+	BCS	20$			; Die on underflow
+	MOVB	@#FIJOB,R0		; Get job number *2
+	CLR	R3			; Dummy L3Q bit to use
+	CALLX	FNDJOB			; Try to map the user
+	 BR	10$			; Load error, die
+	BEQ	20$			; Job wasn't resident, what gives? ;014
+	RETURN				; Done!
+
+10$:	MAP	FIPPOL			; Restore fip mapping
+	JMPX	FIEXIT			; Abort the operation, user will die 
+					;  (swap err)
+
+20$:	CRASH				; Something went wrong
+
+GLOBAL	<FIJOB,FIJBDA>
+
+.SBTTL	.....CKSVR0	Check for a match in server names
+;+
+; CKSVR0 - Check for a match in server names
+;
+; INPUTS:
+;	R0 	   =    The server name length
+;	FQNAM2(R4) ->   Start of server name in the FIRQB
+;
+; OUTPUTS:
+;	ERROR with NOSUCH if not found (and routine doesn't return)
+;
+;	-else-
+;		R0 =    unchanged (the server name length)
+;		R1 ->	VCB matching this server name
+;		R2,R3,R4   Random
+;-
+.ENABL	LSB
+
+CKSVR0:	NOP				; NOP for debugging purposes
+	MOV	R4,R2			; Get pointer to FIRQB
+	ADD	#FQNAM2,R2		; Point to server name in FIRQB
+	;
+	; First check all servers on active list
+	;
+	MOV	#LATCTL+L.AVCB,R1 	; Point to active VCB list
+	CALL	CKLST0			; Check list of active servers
+	BCC	10$			; Found it, get out.
+	;
+	; Then check all servers on idle list
+	;
+	MOV	#LATCTL+L.IVCB,R1	; Point to idle VCB list
+	CALL	CKLST0			; Check list of idle servers
+	BCS	40$			; Didn't find it, error
+10$:	RETURN				; Return, R1 -> matching server
+
+
+CKLST0:
+20$:	SEC				; Assume there will be no match
+	MOV	(R1),R1			; Get (next) VCB
+.ASSUME	C.LNK	EQ 0			; Link is first word in VCB
+	BEQ	30$			; Return with C set if no match
+	MOV	R1,R3			; Copy VCB pointer
+	ADD	#C.NAML,R3		; Point to name length
+	CMPB	(R3)+,R0		; Are lengths the same?
+	BNE	20$			; Try next VCB if not
+	CALLM	CKNAME,LATAP5		; Check to see if names match
+	BCS	20$			; Try next if no match
+30$:	RETURN				; Return with C indicating status
+
+40$:	CALL	FREJB0			; Unlock the job (stack clears itself)
+	ERROR	NOSUCH			; ?Can't find file or account.  There 
+					;   was no server matching the server 
+					;   name specifed in the FIRQB.  This 
+					;   could mean the name contained some 
+					;   invalid character too.
+.DSABL	LSB
+
+F2FEND
+
+F2FSRT					; This is the start of LTU1
+
+;+
+; NETCOU (SR$LSH,SF$COU) - Show LAT counters
+;
+; INPUTS:
+;	XRB+XRLEN   =	Length of user's buffer
+;	XRB+XRBC    =	0
+;	XRB+XRLOC   =	Address of user's buffer 
+;
+;	R4	   -->	FIRQB
+;	FIRQB+FQPPN   = 0 for Node, 1 for Device, 2 for Server counters
+;	FIRQB+FQPPN+1 = bitmask:  Currently only bit 7 used:  Dialup if set
+;	FIRQB+FQDEV   = The Ethernet device to show counters for (type 1 only)
+;	FIRQB+FQDEVN  = The unit number and real flag for the above device
+;	FIRQB+FQNAM1  = Server index (type 2 only)
+;	FIRQB+FQNAM1+1= Server name length (type 2 only)
+;	FIRQB+FQNAM2  = Server name (type 2 only)
+;
+; OUTPUTS:
+;	XRB+XRLEN   =	(unchanged)
+;	XRB+XRBC    =	Actual character count of returned information
+;	XRB+XRLOC   =	(unchanged)
+;
+;	FIRQB+FQPPN   = server name length (for type 2 only)
+;	FIRQB+FQNAM2  = Server name, as reported by server in the start message
+;
+; ERRORS:
+;	BADFUO	The counter type was not 0,1 or 2
+;	NOSUCH	No server matching that specified in FIRQB (returned by CKSVR1)
+;		*ALSO USED FOR!* No server matching the index
+;	NODEVC	The Ethernet device was invalid
+;	NOTOPN	LAT is not started on the Ethernet device specified
+;	??????	Other errors could be returned by driver  
+;-
+
+.ENABL	LSB
+
+NETFUN	COU,<Show LAT counters>
+
+	NOP				; NOP for debugging purposes
+.ASSUME LF.ZER	EQ BIT07		; (Bit 7 is reset bit, so just TSTB)
+	TSTB	FQPPN+1(R4)		; Request to reset?
+	BPL	10$			; No, skip check
+	TSTPRV	SWCTL,@#FIPRVM		; Does the user have SWCTL?	
+	BNE	10$			; User has SWCTL, no problem
+	CALL	FREJB1			; Unlock the job
+	ERROR	PRVIOL			; Return ?Protection viloation
+
+10$:	MOVB	FQPPN(R4),R1		; Get counter type
+	CMP	R1,#LCMAX		; Bigger than max type?
+	BHI	90$			; Error if so.
+	ASL	R1			; Make it *2
+	ADD	R1,PC			; Get to correct type
+	 BR	LCNODE			;  TYPE 0, Node counters
+	 BR	LCETHR			;  TYPE 1, Ethernet counters
+	.BR	LCSRVR			;  TYPE 2, Server counters
+LCMAX	=: 2				; Maximum type code
+
+GLOBAL	<FIPRVM>
+
+LCSRVR:	;***************************************************
+	;**                                               **
+	;**              Server Counters                  **
+	;**                                               **
+	;***************************************************
+
+
+	MOVB	FQNAM1(R4),R2		; Get user's index
+	BEQ	50$			; Branch if none specified
+
+	;
+	; Get server based on index.  First look at active servers ...
+	;
+	MOV	#LATCTL+L.AVCB,R1 	; Get first active VCB (server table)
+.ASSUME C.LNK EQ 0
+20$:	MOV	(R1),R1			; Get pointer to next VCB
+	BEQ	30$			; Try the idle list next
+	SOB	R2,20$			; Branch if not the right index
+	BR	60$			; Join common code
+
+30$:	;
+	;  ... then fall right into the idle servers.
+	;
+	MOV	#LATCTL+L.IVCB,R1 	; Get first idle VCB (server table)
+.ASSUME C.LNK EQ 0
+40$:	MOV	(R1),R1			; Get pointer to next VCB
+	BEQ	100$			; Error if no more servers
+	SOB	R2,40$			; Branch if not the right index
+	BR	60$			; Found it, join common code
+
+50$:	;
+	; Find server based on name supplied in the FIRQB
+	;
+	MOVB	FQNAM1+1(R4),R0 	; Get name length
+	BEQ	90$			; No name length?  Error
+	CMPB	R0,#C.NMAX		; Server name too big?
+	BHI	90$			; That's an error too
+	CALL	CKSVR1			; Get matching server, error if none
+					; (otherwise R1->virtual circuit block)
+
+60$:	;+
+	; R1 --> Virtual Circuit Block (aka Server Table)
+	;	which matches the server name
+	;-
+	CALL	MAPUS1			; Map users buffer
+					; (R0 = buffer length, R5--> buffer)
+	MOVB	C.NAML(R1),R2		; Get length of server name
+	MOVB	R2,FQPPN(R4)		; Put length into FIRQB
+	BEQ	80$			; No char in server name, strange but ok
+	PUSH	<R1,R4>			; Save VCB pointer and FIRQB pointer
+	ADD	#C.NAM,R1		; Point to server name inside VCB
+	ADD	#FQNAM2,R4		; Point to server name
+70$:	MOVB	(R1)+,(R4)+		; Copy server name into FIRQB
+	SOB	R2,70$			; ... until all copied
+	POP	<R4,R1>			; Restore pointers to FIRQB and VCB
+
+80$:	ADD	#C.ZTIM,R1		; Point to beginning of counters
+	MOV	#C.CLNG+4,R2		; Get length of counters (plus date)
+	BR	RETCOU			; Join code with node counters
+
+;+
+; Error handlers for SHOW COUNTERS
+;-
+90$:	CALL	FREJB1			; Unlock the job
+	ERROR	BADFUO			; ?Illegal SYS() usage
+
+100$:	CALL	FREJB1			; Unlock the job
+	ERROR	NOSUCH			; ?Can't find file or account
+
+130$:	CALL	FREJB1			; Unlock the job
+	ERROR	NOTOPN			; ?I/O channel not open.  Line is valid,
+					;   although LAT isn't started on that
+					;   line.
+
+LCETHR:	;***************************************************
+	;**                                               **
+	;**             Ethernet Counters                 **
+	;**                                               **
+	;***************************************************
+
+	F2JMP	ETHCOU			; Jump to handle Ethernet counter
+					;  handler
+
+
+LCNODE:	;***************************************************
+	;**                                               **
+	;**           LAT Host Node Counters              **
+	;**                                               **
+	;***************************************************
+
+	TST	@#LATCTL+L.NODE		; Has a node block been set up?	;007
+	BEQ	130$			; Error if it hasn't		;007
+
+	CALL	MAPUS1			; Map users buffer
+					; (R0 = buffer length, R5--> buffer)
+	MOV	#LATCTL+L.ZTME,R1 	; Start of counters
+	MOV	#L.CLNG+4,R2		; Get length of counters+4
+	.BR	RETCOU			; Join common code
+
+RETCOU:	;+
+	; At this point,
+	;	R0  =  users buffer count
+	;	R1  -> start of counters to copy
+	;	R2  =  length of counters + 4 bytes for current date
+	;	R3  =  -1 if Reset the counters, 0 otherwise
+	;	R4  -> FIRQB
+	;	R5  -> first byte in users buffer
+	;-
+
+	PUSH	<R1,R2>			; Save pointer to counters and length
+	CMP	R2,R0			; Enough room for counters?
+	BLOS	140$			; Branch if so
+	MOV	R0,R2			; Move only as many as will fit
+140$:	MOV	R2,R0			; R0 = Actual length of counters (bytes)
+	ASR	R2			; R2 = Number of words to copy
+
+	;+
+	; Now, 
+	;	R0   =  buffer count to report later to user (in XRBC)
+	;	R2   =  length of counters in words including the current 
+	;		date field, or as much as will fit in the user's buffer.
+	;-
+
+	; Insert current date and time (time format: (seconds until midnight)/2)
+	;   and insert date and time last zeroed, in same format 
+
+	SUB	#4,R2			; Enough room to put dates and times?
+	BLO	160$			; No?  Don't bother then
+	PUSH	<R4>			; Save FIRQB pointer
+	MOV	R5,R4			; Insert current date/time 
+	CALLM	UPDZTM,GENAP5		; Get the current date/time
+	POP	<R4>			; Restore FIRQB pointer
+	CMP	(R5)+,(R5)+		; Skip past the date and time
+	MOV	(R1)+,(R5)+		; Put date last zeroed into users buffer
+	MOV	(R1)+,(R5)+		; Put time last zeroed into users buffer
+	
+	; Insert entire counter field (or up to user's buffer length)
+
+	TST	R2			; Can we fit more counters?
+	BEQ	160$			; Branch if not
+150$:	MOV	(R1)+,(R5)+		; Insert counter
+	SOB	R2,150$			; ... until all counters done
+
+	; If requested, zero the counters
+
+160$:	POP	<R2,R1>			; Restore registers
+	TSTB	FQPPN+1(R4)		; Should we reset counters?
+	BPL	180$			; No, go on
+	MOV	R1,R4			; Copy pointer to counter to zero	
+	CALLM	UPDZTM,GENAP5		; Set current date/time 
+	CMP	(R1)+,(R1)+		; Skip past date/time
+	SUB	#8.,R2			; Account for current date, time,
+					;   and date/time last zeroed
+170$:	CLRB	(R1)+			; Zero all of the counters
+	SOB	R2,170$			;   ... until no more to do
+
+180$:	MOV	R0,-(SP)		; Save byte count
+	CALL	MAPLO1			; Map user's low core
+	MOV	(SP)+,@#140000+XRB+XRBC ; Size of buffer used (in bytes)
+	.CALLR	FREJB1			; Unlock the job and exit
+
+.DSABL	LSB
+
+
+.SBTTL	.....FREJB1	Unlock the job and map FIPPOL
+;
+; Map FIPPOL and release the job
+;
+
+FREJB1:	MAP	FIPPOL			; Be sure FIP pool is mapped
+	MOVB	@#FIJOB,R0		; Get caller's job number
+	CALLRX	UNLOCK			; Release the job
+
+.SBTTL	.....MAPUS1	Map a user's buffer
+;+
+; MAPUS1 - Check a user's buffer and map it
+;
+; EXIT:
+;	R0 =	User's buffer length (XRLEN) -- 0 if no buffer
+;	R5 ->	user buffer via APR 6
+;-
+
+MAPUS1:	CALL	MAPLO1			; Map user's lowcore
+	MOV	XRB+XRLEN(R5),-(SP) 	; Save user's data count
+	BEQ	10$			; Branch if no buffer
+	MOV	XRB+XRLOC(R5),R5 	; Get buffer address
+	BIT	#1,R5			; Odd address?
+	BNE	20$			; Yes, error
+	CALL	LDUSR1			; Go map buffer
+10$:	MOV	(SP)+,R0		; Return user's byte count
+	RETURN
+
+20$:	CALL	FREJB1			; Let go of the job, restore fip mapping
+	ERROR	BADCNT			; Bad buffer parms
+
+
+
+.SBTTL	.....MAPLO1	Map a user's low core
+.SBTTL	.....LDUSR1	Load and map a user
+;+
+; ENTRY:
+;	R5 ->	user buffer (virtual), LDUSR1 only
+;
+; EXIT:
+;	R0,2,3	munged
+;	R5 ->	user buffer via APR 6
+;-
+
+MAPLO1:	CLR	R5			; Map user's virtual zero
+LDUSR1:	MOV	@#FIJBDA,R0		; Get job's JDB address
+	BITB	#^C<LCK>,JDMCTL+M.CTRL(R0) ; Job should be locked and that's all
+	BNE	20$			; No?  Very strange
+	SUB	#MC.LCK*400,JDMCTL+M.CTRL-1(R0) ; Take off one lock
+	BCS	20$			; Die on underflow
+	MOVB	@#FIJOB,R0		; Get job number *2
+	CLR	R3			; Dummy L3Q bit to use
+	CALLX	FNDJOB			; Try to map the user
+	 BR	10$			; Load error, die
+	BEQ	20$			; Job wasn't resident, what gives? ;014
+	RETURN				; Done!
+
+10$:	MAP	FIPPOL			; Restore fip mapping
+	JMPX	FIEXIT			; Abort the operation, user will 
+					;  die (swap err)
+
+20$:	CRASH				; Something went wrong
+
+GLOBAL	<FIJOB,FIJBDA>
+
+.SBTTL	.....CKSVR1	Check for a match in server names
+;+
+; CKSVR1 - Check for a match in server names
+;
+; INPUTS:
+;	R0 	   =    The server name length
+;	FQNAM2(R4) ->   Start of server name in the FIRQB
+;
+; OUTPUTS:
+;	ERROR with NOSUCH if not found (and routine doesn't return)
+;
+;	-else-
+;		R0 =    unchanged (the server name length)
+;		R1 ->	VCB matching this server name
+;		R2,R3,R4   Random
+;-
+.ENABL	LSB
+
+CKSVR1:	NOP				; NOP for debugging purposes
+	MOV	R4,R2			; Get pointer to FIRQB
+	ADD	#FQNAM2,R2		; Point to server name in FIRQB
+	;
+	; First check all servers on active list
+	;
+	MOV	#LATCTL+L.AVCB,R1 	; Point to active VCB list
+	CALL	CKLST1			; Check list of active servers
+	BCC	10$			; Found it, get out.
+	;
+	; Then check all servers on idle list
+	;
+	MOV	#LATCTL+L.IVCB,R1	; Point to idle VCB list
+	CALL	CKLST1			; Check list of idle servers
+	BCS	40$			; Didn't find it, error
+10$:	RETURN				; Return, R1 -> matching server
+
+
+CKLST1:
+20$:	SEC				; Assume there will be no match
+	MOV	(R1),R1			; Get (next) VCB
+.ASSUME	C.LNK	EQ 0			; Link is first word in VCB
+	BEQ	30$			; Return with C set if no match
+	MOV	R1,R3			; Copy VCB pointer
+	ADD	#C.NAML,R3		; Point to name length
+	CMPB	(R3)+,R0		; Are lengths the same?
+	BNE	20$			; Try next VCB if not
+	CALLM	CKNAME,LATAP5		; Check to see if names match
+	BCS	20$			; Try next if no match
+30$:	RETURN				; Return with C indicating status
+
+40$:	CALL	FREJB1			; Unlock the job (stack clears itself)
+	ERROR	NOSUCH			; ?Can't find file or account.  There 
+					;   was no server matching the server 
+					;   name specifed in the FIRQB.  This 
+					;   could mean the name contained some 
+					;   invalid character too.
+.DSABL	LSB
+
+F2FEND
+
+F2FSRT					; This is the start of LTU2
+;+
+; NETNOD (SR$LSH,SF$NOD) - Show LAT node information
+;
+; INPUTS:
+;	R4	   -->	FIRQB
+;	XRB+XRLEN   =	Length of user's buffer
+;	XRB+XRBC    =	0
+;	XRB+XRLOC   =	Address of user's buffer 
+;
+; OUTPUTS:
+;	XRB+XRLEN   =	(unchanged)
+;	XRB+XRBC    =	Actual character count of returned information
+;	XRB+XRLOC   =	(unchanged)
+;
+; ERRORS:
+;	NOTOPN	No node block to return info, thus there was never a SET NODE.
+;-
+
+.ENABL	LSB
+
+NETFUN	NOD,<Show LAT Node Information>
+
+	NOP				; Nop for debugging purposes
+	CALL	MAPUS2			; Map the user's buffer
+	MOV	R5,-(SP)		; Save address of user's buffer
+	TST	R0			; Is there any room in user's buffer?
+	BEQ	10$			; Branch if none
+	
+	MOV	@#LATCTL+L.NODE,R1 	; Point to node block
+	BEQ	20$			; No node block?  Can't return info
+
+	; Insert multicast timer
+
+	MOVB	@#MCTMSG+M.MCTV,(R5)+	; Set multicast timer
+	DEC	R0			; Account for multicast timer
+	BEQ	10$			; Branch if that's all that will fit
+
+	; Insert group code bitmask (put length of bitmask in reserved byte)
+
+.ASSUME	N.GRP	EQ N.GRPL+1		; Group code immediately follows that
+	CALL	COPY2,R4,N.GRPL		; Copy the group code bitmask
+	BEQ	10$			; Branch if no more characters will fit
+
+	; Insert node name and length
+
+.ASSUME	N.NNAM	EQ N.NAML+1		; Node name immediately follows length
+	CALL	COPY2,R4,N.NAML		; Copy the node name
+	BEQ	10$			; Branch if no more characters will fit
+	
+	; Insert node description and length
+
+.ASSUME	N.DESC	EQ N.DESL+1		; Node description follows length
+	CALL	COPY2,R4,N.DESL		; Copy the node identification string
+
+10$:	SUB	(SP)+,R5		; Calculate number of characters
+	MOV	R5,-(SP)		; Save number of characters in buffer
+	CALL	MAPLO2			; Map user's low core
+	MOV	(SP)+,@#140000+XRB+XRBC ; Report character count
+	CALLR	FREJB2			; Unlock the job and exit
+
+;
+; Error handlers for SHOW NODE
+;
+
+20$:	CALL	FREJB2			; Unlock the job
+	ERROR	NOTOPN			; ?I/O Channel not open.  No Node block
+					;   to return data in.
+.DSABL	LSB
+
+;+
+; NETSVC (SR$LSH,SF$SVC) - Show LAT service information
+;
+; INPUTS:
+;	R4	   -->	FIRQB
+;	FIRQB+FQPPN   = Service index, or zero for a specific service name
+;	FIRQB+FQPPN+1 = Service name length, if FQPPN is 0.
+;	FIRQB+FQNAM2  = Service name, if FQPPN is 0.
+;
+;	XRB+XRLEN   =	Length of user's buffer
+;	XRB+XRBC    =	0
+;	XRB+XRLOC   =	Address of user's buffer 
+;
+; OUTPUTS:
+;	XRB+XRLEN   =	(unchanged)
+;	XRB+XRBC    =	Actual character count of returned information
+;	XRB+XRLOC   =	(unchanged)
+;
+; ERRORS:
+;	BADFUO	The service name length was not in range 1-16.
+;	NOSUCH	No service matching that specified in FIRQB 
+;		*ALSO USED FOR!* No service matching the index
+;	BADNAM	Service name contained invalid characters (returned by CHKSVC)
+;-
+
+.ENABL	LSB
+
+;
+; Error handlers for SHOW SERVICE
+;
+10$:	CALL	FREJB2			; Unlock the job
+	ERROR	NOSUCH			; ?Can't find file or account.  There 
+					;   was no service matching this index 
+					;   or name.
+
+20$:	CALL	FREJB2			; Unlock the job
+	ERROR	BADFUO			; ?Illegal SYS() usage.  The name 
+					;   length was not in the range 1-16.
+
+NETFUN	SVC,<Show LAT service Information>
+
+	NOP				; Nop for debugging purposes
+	MOVB	FQPPN(R4),R3		; Get service based on index?
+	BEQ	40$			; Branch if not
+	MOV	#LATCTL+L.SRVC,R1 	; Get address of service list
+.ASSUME	S.SLNK	EQ 0			; Service link word is first in block
+30$:	MOV	(R1),R1			; Point to service block
+	BEQ	10$			; None there?  Return NOSUCH
+	SOB	R3,30$			; Loop until service found
+	BR	50$			; Found it, join common code 
+
+40$:	MOVB	FQPPN+1(R4),R3		; Get length of service name
+	BEQ	20$			; No length?  That's an error
+	F2CALL	CHKSVC			; Check for matching service name
+	BCS	10$			; No match, return NOSUCH
+
+50$:	; Found match, R1 -> service block
+	CALL	MAPUS2			; Map the user's buffer
+	MOV	R5,-(SP)		; Save address of user's buffer
+	
+	; Insert service rating and bitmask
+
+	SUB	#2,R0			; Account for rating and bitmask
+	BLO	60$			; Quit if it won't fit
+	MOV	R1,R3			; R3  -> service block
+	ADD	#S.RATE,R3		; Point at service rating
+	MOVB	(R3)+,(R5)+		; Insert service rating
+	CLRB	(R5)+			; BITMASK says "Not dynamic" //yet//
+
+	; Insert service name
+
+.ASSUME	S.NAME	EQ S.NAML+1		; The service name follows the length
+	CALL	COPY2,R4,S.NAML		; Copy the service name 
+	BEQ	60$			; Branch if no more characters will fit
+
+	; Insert service ID and length
+
+.ASSUME	S.DESC	EQ S.DESL+1		; Service ID immediately follows length
+	CALL	COPY2,R4,S.DESL		; Copy the service identification string
+
+60$:	SUB	(SP)+,R5		; Calculate number of characters
+	MOV	R5,-(SP)		; Save number of characters in buffer
+	CALL	MAPLO2			; Map user's low core
+	MOV	(SP)+,@#140000+XRB+XRBC 	; Report character count
+	.CALLR	FREJB2			; Unlock the job and exit
+
+.DSABL	LSB
+
+.SBTTL	.....FREJB2	Unlock the job and map FIPPOL
+;
+; Map FIPPOL and release the job
+;
+
+FREJB2:	MAP	FIPPOL			; Be sure FIP pool is mapped
+	MOVB	@#FIJOB,R0		; Get caller's job number
+	CALLRX	UNLOCK			; Release the job
+
+
+.SBTTL	.....COPY2	Copy data into the users buffer
+;+
+; Inputs:
+;	R0 =  # bytes left in users buffer
+;	R1 -> Block where info is coming from
+;	R5 -> Users buffer
+;
+;	CALL	COPY2,R4,offset		; where 'offset' is offset into block
+;
+; Outputs:
+;	Z=1 indicates no bytes left in users buffer
+;	 =0 indicates there's still room in users buffer
+;
+;	R0 =  # bytes left in users buffer (updated)
+;	R2 =  0 if all characters copied, number of uncopied characters if not
+;	R3    random
+;	R5 -> next free byte in users buffer
+;-
+.ENABL	LSB
+
+COPY2:	MOV	R1,R3			; Copy pointer to block
+	ADD	(R4)+,R3		; Add in offset
+	MOVB	(R3),(R5)+		; Store the byte count		;013
+	DEC	R0			; Account for the byte count
+	BEQ	20$			; No more room in buffer, quit
+	MOVB	(R3)+,R2		; Get char count for SOB loop	;013
+	BEQ	15$			; None, done			;013
+
+10$:	MOVB	(R3)+,(R5)+		; Copy a character
+	DEC	R0			; Account for the character
+	BEQ	20$			; No more room in buffer, quit
+	SOB	R2,10$			; Loop until all copied
+15$:	CLZ				; Clear Z bit, there's room in buffer
+20$:	RETURN	R4			; Return with Z bit indicating status
+	
+.DSABL	LSB
+
+.SBTTL	.....MAPUS2	Map a user's buffer
+;+
+; MAPUS2 - Check a user's buffer and map it
+;
+; This MAPUS2 is basically used for a "SHOW" because it moves into R0 the
+; user's buffer length from XRLEN.  In the SHOW calls, the XRBC has to be
+; zero.  
+;
+; EXIT:
+;	R0 =	USER'S BUFFER LENGTH (XRBC) -- 0 IF NO BUFFER
+;	R5 ->	USER BUFFER VIA APR 6
+;-
+
+MAPUS2:	CALL	MAPLO2			; Map user's lowcore
+	MOV	XRB+XRLEN(R5),-(SP) 	; Save user's data count
+	BEQ	10$			; Branch if no buffer
+	MOV	XRB+XRLOC(R5),R5 	; Get buffer address
+	BIT	#1,R5			; Odd address?
+	BNE	20$			; Yes, error
+	CALL	LDUSR2			; Go map buffer
+10$:	MOV	(SP)+,R0		; Return user's byte count
+	RETURN
+
+20$:	CALL	FREJB2			; Let go of the job, restore fip mapping
+	ERROR	BADCNT			; Bad buffer parms
+
+.SBTTL	.....MAPLO2	Map a user's low core
+.SBTTL	.....LDUSR2	Load and map a user buffer
+;+
+; ENTRY:
+;	R5 ->	User buffer (virtual), LDUSR2 only
+;
+; EXIT:
+;	R0,2,3	Munged
+;	R5 ->	User buffer via APR 6
+;-
+
+MAPLO2:	CLR	R5			; Map user's virtual zero
+LDUSR2:	MOV	@#FIJBDA,R0		; Get job's JDB address
+	BITB	#^C<LCK>,JDMCTL+M.CTRL(R0) ;Job should be locked and that's all
+	BNE	20$			; No?  Very strange
+	SUB	#MC.LCK*400,JDMCTL+M.CTRL-1(R0) ;Take off one lock
+	BCS	20$			; Die on underflow
+	MOVB	@#FIJOB,R0		; Get job number *2
+	CLR	R3			; Dummy L3Q bit to use
+	CALLX	FNDJOB			; Try to map the user
+	 BR	10$			; Load error, die
+	BEQ	20$			; Job wasn't resident, what gives? ;014
+	RETURN				; Done!
+
+10$:	MAP	FIPPOL			; Restore fip mapping
+	JMPX	FIEXIT			; Abort the operation, user will die 
+					;   (swap err)
+
+20$:	CRASH				; Something went wrong
+
+GLOBAL	<FIJOB,FIJBDA>
+
+;+									;016
+; NETDLP (SR$LSE,SF$DLP) - Delete a Local LAT Port			;020
+;
+; INPUTS:
+;	R4 -> FIRQB
+;	FIRQB+FQPPN    = Flag (bit mask)
+;			 0 - Abort active sessions			;020
+;	FIRQB+FQDEV    = "KB"
+;	FIRQB+FQDEVN   = Unit number
+;	FIRQB+FQDEVN+1 = Unit real flag
+;
+; OUTPUTS:
+;	R4 -> FIRQB							;021
+;	FIRQB+FQPPN    = Flag byte (bit mask)				;021
+;			 0 - Port is currently in use			;021
+;
+; The first thing we do is call CHKPRT to verify that the		;020
+; port-name specified by the caller is a valid Local LAT		;020
+; port for outbound connections. If it is a valid port, we		;020
+; then need to check and see if the port currently has a		;020
+; session going by checking to see if there's a virtual			;020
+; circuit. If there is no active session, then the port is		;020
+; deleted immediately. Otherwise, we set the "pending delete"		;020
+; flag and then check to see if the user requested us to abort		;020
+; any active sessions. If the user requested us to abort any		;020
+; active sessions then we call on LAT to stop the session now.		;020
+; Otherwise, we let the session complete normally. In either		;020
+; case the port is deleted when the session is terminated.		;020
+;-									;016
+
+.ENABL	LSB
+
+10$:	ERROR	NODEVC			; Invalid port-name specified	;016
+
+20$:	ERROR	BADFUO			; No port-name specified	;016
+
+NETFUN	DLP,<Delete a Local LAT Port>					;020
+
+	NOP				; NOP for debugging purposes	;016
+	MOV	FQDEV(R4),R1		; Get the port-name		;016
+	BEQ	20$			; None, that's an error		;016
+	F2CALL	CHKPRT			; Valid LAT port?		;017
+	BCS	10$			; No				;016
+
+	;+								;016
+	; On return from CHKPRT:
+	;	R0 =  Unit # * 2
+	;	R1 -> DDB
+	;	R3 -> Session block
+	;	R4 -> FIRQB
+	;-								;016
+
+	MOV	R4,R5			; Copy the FIRQB ->		;021
+	MOV	S.SOLB(R3),R4		; Get Solicitation Block ->	;017
+	BEQ	10$			; None, not outbound LAT port	;017
+	MOVB	FQPPN(R5),-(SP)		; Save the flag byte		;021
+	CLRB	FQPPN(R5)		; Assume no active session	;021
+	MOV	R3,-(SP)		; Save the Ses. Block ->	;021
+	CALLX	MAPBUF			; Map the Solicitation Block	;021
+	BISB	#SOF.PD,SO.FLG(R3)	; Mark as pending delete 	;021
+	MOVB	SO.STS(R3),R2		;  and save port status		;021
+	BEQ	25$			; Not busy, no flag to set	;021
+	INCB	FQPPN(R5)		; Busy, let user know		;022
+25$:	MOV	(SP)+,R3		; Restore the Ses. Block ->	;021
+	MOV	S.CIR(R3),R1		; Get VCB for this session	;020
+	BEQ	30$			; None, no active session	;022
+	ASR	(SP)			; Requested abort sessions?	;021
+	BCC	40$			; No, let session complete	;020
+	MOV	#ER.URD,R2		; Reason code = "User requested	;016
+					;                disconnect"	;016
+	CALLM	STPSES,LATAP5		; Go stop the session		;016
+	BR	40$			;  and finish up.		;020
+
+30$:	TSTB	R2			; Solicit in progress?		;021
+	BEQ	35$			; No, go delete the port now	;021
+	ASR	(SP)			; Yes, requesting abort session? ;021
+	BCC	40$			; No, let session complete	;021
+	MOV	DEV.KB(R0),R1		; Yes, get the DDB ->		;021
+	MOV	R4,-(SP)		; Save the Solicit Block ->	;021
+	CALLMI	DETJOB,KBDAP5		; Go detach this device		;021
+	MOV	(SP)+,R4		; Restore the Solicit Block ->	;021
+	CALLM	KILSOL,LATAP5		;  and kill the solicit		;021
+					;  (KILSOL will delete the port) ;021
+	BR	40$			; Go finish up			;021
+
+35$:	CALLM	DELPRT,LATAP5		; Inactive, go delete the port.	;020
+40$:	TST	(SP)+			; Junk the saved flag byte	;021
+	MAP	FIPPOL			; Make sure fip pool is mapped.	;020
+	RETURN				;  and exit.			;016
+
+.DSABL	LSB
+F2FEND
+
+F2FSRT					; This is the start of LTU3
+;+
+; NETNDM (SR$LSE,SF$NDM) - Set LAT node information
+;
+; INPUTS:
+;	R4	   -->	FIRQB
+;
+;	User's lowcore is not mapped on entry.
+;
+;	XRB+XRLEN   =	Length of user's buffer
+;	XRB+XRBC    =	Number of meaningful bytes in buffer
+;	XRB+XRLOC   =	Address of user's buffer 
+;
+; OUTPUTS:
+;	None
+;
+; ERRORS:
+;	BADFUO	The multicast timer was not in range 10 to 255.
+;		The type in the buffer was not 1,2 or 3.
+;		The node identification length was greater than 64.
+;	BADCNT	The length field in buffer would overflow actual buffer length.
+;	BADNAM	The node identification contained invalid characters
+;	NORTS	This is the first SET NODE and DECNET is not running
+;-
+
+.ENABL	LSB
+
+NETFUN	NDM,<Set LAT Node Information>
+
+	NOP				; NOP for debugging purposes
+	MOVB	@#MCTMSG+M.CFLG,-(SP)	; Remember current change flag 
+	MOV	@#LATCTL+L.NODE,R1	; Get pointer to node block
+	BNE	40$			; Branch if a node block already exists
+
+	;
+	; This is the first time issuing the SET NODE directive.  Make sure 
+	; we can get to the node name
+	;
+	MOV	@#NODLST,R2		; Point to executor node block
+	BEQ	10$			; Error - DECnet not enabled
+	ADD	#N.NAME,R2		; Point to the node name field
+	TSTB	(R2)			; Is node name there?
+	BNE	20$			; Yes, go on
+10$:	CALL	FREJB3			; No, Unlock the job
+	ERROR	NORTS			; Error with ?No runtime-system
+
+	;
+	; Start counters.  Initialize last time they were zeroed = right now.
+	;
+20$:	MOV	#LATCTL+L.ZTME,R4	; R4 -> Time plock to set	;010
+	CALLM	UPDZTM,GENAP5		; Update the date time block	;010
+
+	;
+	; Define location of node block.  
+	; // The node block will eventually be located in XBUF. //
+	;
+	MOV	#NODBLK,R1		; Get pointer to node block.
+	MOV	R1,@#LATCTL+L.NODE	; Set pointer into LAT control region
+	MOVB	@#TIMSEC,@#MCTMSG+M.MINC; Set random multicast incarnation
+
+	;
+	; Set default group code bitmask
+	;
+.ASSUME	N.GRPL	EQ 0
+	MOVB	#N.GMAX,(R1)		; Length of default group code bitmask	
+.ASSUME	N.GRP	EQ N.GRPL+1
+	MOVB	#1,1(R1)		; Set group code 0 by default	
+
+	;
+	; Set node name
+	;
+	MOV	R1,R5			; Set up for copy
+	ADD	#N.NAML,R5		; Copy node name, up to 6 characters
+.ASSUME	N.NNAM	EQ N.NAML+1		; Node name immediately follows length
+	CLRB	(R5)+			; Preset length to zero
+	MOV	#6,R3			; Get the maximum length of node name
+30$:	TSTB	(R2)			; Are we at the end?
+	BEQ	40$			; Yes, all done
+	MOVB	(R2)+,(R5)+		; Copy a byte
+	INCB	N.NAML(R1)		; And count it			;010
+	SOB	R3,30$			; Loop for the whole thing
+	.BR	40$			; Now go act like a modify
+
+GLOBAL	<LATCTL,NODLST,LATCTL>
+
+40$:	; 
+	; Modify or set anything the user wants
+	;
+	CALL	MAPUS3			; Map the users buffer
+
+	;
+	; Check for new multicast timer value
+	;
+	CMPB	(R5),#1			; Are we looking at type code 1?
+	BNE	50$			; Branch if not
+	SUB	#2,R0			; Account for multicast timer and type
+	BLO	ERRBC3			; Buffer doesn't have this info?  Error
+	TSTB	(R5)+			; Skip past type code
+	CMPB	(R5),#MINMCV		; Is timer less than minimum allowed?
+	BLO	150$			; Error if it is
+	MOVB	(R5)+,@#MCTMSG+M.MCTV	; Store multicast timer value
+
+50$:	;
+	; Check for new group code bitmask
+	;
+	TST	R0			; Are we at the end of the buffer?
+	BEQ	130$			; Quit if we are
+	CMPB	(R5),#2			; Are we looking at type 2?
+	BNE	70$			; Branch if not
+	SUB	#N.GMAX+2,R0		; Account for bitmask, rsv'd & type 
+	BLO	ERRBC3			; Buffer doesn't have all bytes? Error
+	CMPB	(R5)+,(R5)+		; Skip past type code and reserved
+	MOV	#N.GMAX,R3		; Number of bytes in group code
+	PUSH	<R1>			; Save pointer to node block
+.ASSUME	N.GRPL	EQ 0
+	MOVB	R3,(R1)+		; Insert count into node block
+.ASSUME	N.GRP	EQ N.GRPL+1		; Group codes follow group code length
+60$:	MOVB	(R5)+,(R1)+		; Insert bitmask from users buffer	
+	SOB	R3,60$			;  ... until bitmask copied
+
+.ASSUME	<M.CFLG&1> EQ 1							;005
+	MOV	#MC.GRP*400,R1		; Get bit to toggle in flag	;005
+	XOR	R1,@#MCTMSG+M.CFLG-1	; Toggle the bit		;005
+	POP	<R1>			; Restore pointer to node block
+
+70$:	;
+	; Check for new node identification string
+	;
+	TST	R0			; Are we at the end of the buffer?
+	BEQ	130$			; Quit if we are
+	CMPB	(R5)+,#3		; Is type code Node ID?
+	BNE	150$			; No, was something bogus, error.
+	SUB	#2,R0			; Account for the type and length
+	BLO	ERRBC3			; Error if not all in buffer
+	MOVB	(R5)+,R3		; Get number of bytes in node id
+	BEQ	100$			; Branch if no bytes in node id
+	SUB	R3,R0			; Account for the node id
+	BLO	ERRBC3			; Error if not all in buffer
+	CMP	R3,#N.DMAX		; Id string too long?
+	BHI	150$			; Error if so
+
+	PUSH	<R5,R3>			; Save registers		;010
+80$:	CMPB	(R5),#32.		; Check each character for range
+	BLO	160$			;  32-126 (decimal) or 
+	CMPB	(R5),#126.		;  170-253 (decimal)
+	BLOS	90$			;  error if any of them are not
+	CMPB	(R5),#170.		;  in the proper range.
+	BLO	160$			;  ...
+	CMPB	(R5),#253.		;  ...
+	BHI	160$			;  ...
+90$:	INC	R5			;  Go on to next character
+	SOB	R3,80$			;  Loop until done
+	POP	<R3,R5>			; Restore registers
+
+.ASSUME	<M.CFLG&1> EQ 1							;005
+100$:	MOV	#MC.NDS*400,R4		; Get bit to toggle in flag	;005
+	XOR	R4,@#MCTMSG+M.CFLG-1	; Toggle the bit		;005
+
+	; R5 -> node id
+	; R3 = length
+	; R1 -> node descriptor block
+	
+	ADD	#N.DESL,R1		; Point to node id length
+	MOVB	R3,(R1)+		; Insert length into node block
+	BEQ	120$			; No characters to copy? That's ok
+.ASSUME	N.DESC	EQ N.DESL+1		; Node ID immediately follows length
+
+110$:	MOVB	(R5)+,(R1)+		; Copy all characters
+	SOB	R3,110$			; ... until entire node id copied
+	
+120$:	TST	R0			; Still characters in user's buffer?
+	BNE	150$			; Error if so
+130$:	CMPB	(SP)+,@#MCTMSG+M.CFLG	; Has anything changed in multicast?
+	BEQ	140$			; No?  Then nothing to do
+	INCB	@#MCTMSG+M.MINC		; Set next incarnation
+	CALLM	UPDMCT,LATAP5		; Go send a multicast immediately
+140$:	.CALLR	FREJB3			; Unlock the job and return
+
+GLOBAL	<MCTMSG,NODLST,NODBLK>
+
+.SBTTL	.....FREJB3	Unlock the job and map FIPPOL
+;
+; Map FIPPOL and release the job
+;
+
+FREJB3:	MAP	FIPPOL			; Be sure FIP pool is mapped
+	MOVB	@#FIJOB,R0		; Get caller's job number
+	CALLRX	UNLOCK			; Release the job
+
+
+.SBTTL	.....Error handlers for SET NODE directive
+;
+; Error handlers for SET NODE directive
+;
+
+150$:	CALL	FREJB3			; Unlock the job
+	ERROR	BADFUO			; ?Illegal SYS() usage. (a) The type 
+					;   code is not valid, (b) the multicast
+					;   timer was not 10-255., (c) the 
+					;   node id string longer than 64.
+
+ERRBC3:	CALL	FREJB3			; Unlock the job
+	ERROR	BADCNT			; ?Illegal byte count for I/O.  (a) The 
+					;   buffer count passed in XRBC is not 
+					;   big enough for the data fields in 
+					;   buffer. (b) User's buffer begins
+					;   on odd boundry
+
+160$:	CALL	FREJB3			; Unlock the job
+	ERROR	BADNAM			; ?Illegal file name.  The node id
+					;   contained an invalid character
+
+.DSABL	LSB
+
+.SBTTL	.....MAPUS3	Map a user's buffer
+;+
+; MAPUS3 - Check a user's buffer and map it
+;
+; EXIT:
+;	Z set if no bytes in user's buffer
+;	Z clear otherwise
+;
+;	R0 =	User's buffer length (XRBC) -- 0 if no buffer
+;	R5 ->	User buffer via APR 6
+;	R2,R3	Destroyed
+;-
+.ENABL	LSB
+
+MAPUS3:	CALL	MAPLO3			; Map user's lowcore
+	MOV	XRB+XRBC(R5),-(SP) 	; Save user's data count
+	BEQ	10$			; Branch if no buffer
+	MOV	XRB+XRLOC(R5),R5 	; Get buffer address
+	BIT	#1,R5			; Odd address?
+	BNE	ERRBC3			; Yes, error with BAD count
+	CALL	LDUSR3			; Go map buffer
+10$:	MOV	(SP)+,R0		; Return user's byte count
+	RETURN
+
+.DSABL	LSB
+
+
+.SBTTL	.....MAPLO3	Map a user's low core
+.SBTTL	.....LDUSR3	Load and map a user
+;+
+; ENTRY:
+;	R5 ->	User buffer (virtual), LDUSR3 only
+;
+; EXIT:
+;	R0,2,3	Munged
+;	R5 ->	User buffer via APR 6
+;-
+
+MAPLO3:	CLR	R5			; Map user's virtual zero
+LDUSR3:	MOV	@#FIJBDA,R0		; Get job's JDB address
+	BITB	#^C<LCK>,JDMCTL+M.CTRL(R0) ;Job should be locked and that's all
+	BNE	20$			; No?  Very strange
+	SUB	#MC.LCK*400,JDMCTL+M.CTRL-1(R0) ; Take off one lock
+	BCS	20$			; Die on underflow
+	MOVB	@#FIJOB,R0		; Get job number *2
+	CLR	R3			; Dummy L3Q bit to use
+	CALLX	FNDJOB			; Try to map the user
+	 BR	10$			; Load error, die
+	BEQ	20$			; Job wasn't resident, what gives? ;014
+	RETURN				; Done!
+
+10$:	MAP	FIPPOL			; Restore fip mapping
+	JMPX	FIEXIT			; Abort the operation, user will die 
+					;  (swap err)
+
+20$:	CRASH				; Something went wrong
+
+GLOBAL	<FIJOB,FIJBDA>
+
+F2FEND
+
+F2FSRT					; This is the start of LTU4
+
+;+
+; NETSCM (SR$LSE,SF$SCM) - Set LAT service information
+;
+; INPUTS:
+;
+;	User's lowcore is not mapped on entry.
+;
+;	XRB+XRLEN   =	Length of user's buffer
+;	XRB+XRBC    =	Number of meaningful bytes in buffer
+;	XRB+XRLOC   =	Address of user's buffer 
+;
+;	R4	   -->	FIRQB
+;	FIRQB+FQPPN =	Service name length (cannot be zero!)
+;	FIRQB+FQPPN+1 = Operation code.  0=create, 1=modify, 2=delete
+;	FIRQB+FQNAM2  = Start of service name
+;
+; OUTPUTS:
+;	None 
+;
+; ERRORS:
+;	BADFUO	The operation code in the buffer was not 0, 1,or 2.
+;		The service name length was greater than 16.
+;		The service identification length was greater than 64.
+;	BADCNT	The length field in buffer would overflow actual buffer length.
+;	BADNAM	The service name or identification contained invalid characters
+;	NOROOM	There was no more room to create another service
+;	FIEXST	The service to create already exists
+;	NOSUCH	The service to delete or modify does not exist
+;	NOBUFS	There was insufficient buffer space to create service block.
+;-
+
+.ENABL	LSB
+
+NETFUN	SCM,<Set LAT Service Information>
+
+	NOP				; NOP for debugging purposes
+	MOVB	@#MCTMSG+M.CFLG,-(SP)	; Save multicast change flag
+	MOVB	FQPPN(R4),R3		; Get length of service name
+	BEQ	50$			; Error if length zero
+	CMP	R3,#S.SMAX		; Is name too long?
+	BHI	50$			; Error if it is too long
+	MOVB	FQPPN+1(R4),R0		; Get operation code
+	CMP	R0,#OPRMAX		; Is operation code legal?
+	BHI	50$			; Return an error if not
+	ASL	R0			; Make it * 2 for dispatcher
+	ADD	R0,PC			; Dispatch to correct operation
+	 BR	CRESVC			;  OPERATION 0 = Create service
+	 BR	MODSVC			;  OPERATION 1 = Modify service
+	.BR	DELSVC			;  OPERATION 2 = Delete service 
+OPRMAX	=: 2				; All other operation codes reserved
+
+
+;+
+;
+; DELETE a service, return buffer to system
+;
+;-
+
+DELSVC:	F2CALL	CHKSVC			; Find the matching service
+	BCS	60$			; No match?  Error with no such service 
+
+	;Otherwise:
+	; R1 -> Matching service
+	; R5 -> Service block which points to the matching service
+	
+.ASSUME	<M.CFLG&1> EQ 1							;005
+	MOV	#MC.SNM*400,R4		; Get bit to toggle in flag	;005
+	XOR	R4,@#MCTMSG+M.CFLG-1	; Toggle the bit		;005
+
+	MOV	(R1),(R5)		; Delink this service
+	BNE	10$			; Branch if that wasn't the last service
+	MOV	R5,@#LATCTL+L.SRVC+2	; Make the previous one last
+10$:	DECB	@#LATCTL+L.NSVC		; Decrement count of services offered
+	MOV	R1,R4			; Make R4 point to service block
+	MOV	#<S.LENG+37>&^C<37>,(R4); Get size we allocated, rounded up
+	BUFFER	RETURN			; Return buffer to MONPOL.
+	JMP	180$			; And exit
+
+;+
+;
+; CREATE a service
+; 
+;-
+
+CRESVC:	F2CALL	CHKSVC			; Does the service already exist?
+	BCC	70$			; Error if service already exists
+	CMPB	@#LATCTL+L.NSVC,#M.NSER	; Are we at maximum service count?
+	BEQ	90$			; Can't add any more if we are
+
+	PUSH	<R4>			; Save pointer to FIRQB
+	BUFFER	GETLRG,S.LENG,60.,MONPOL ; Allocate a buffer
+	BCS	80$			; None, return NOBUFS
+	MOV	R4,R1			; Copy pointer to new service block
+	MOV	#S.LENG/2,R0		; Get length of block to clear in words
+20$:	CLR	(R4)+			; Clear entire buffer
+	SOB	R0,20$			; Until entire buffer cleared
+
+	MOV	@#LATCTL+L.SRVC+2,R0	; Get pointer to last service
+	BEQ	40$			; Sanity check: Crash if nothing
+	MOV	R1,(R0)			; Point what used to be the last
+					; ... service at the new service
+	MOV	R1,@#LATCTL+L.SRVC+2	; Make this new service last
+	INCB	@#LATCTL+L.NSVC		; Increment count of services offered
+	MOVB	#377,S.RATE(R1)		; Default to "dynamic" service rating
+
+.ASSUME	<M.CFLG&1> EQ 1							;005
+	MOV	#MC.SNM*400,R4		; Get bit to toggle in flag	;005
+	XOR	R4,@#MCTMSG+M.CFLG-1	; Toggle the bit		;005
+	
+	;
+	; Set name into service block
+	;  R1 -> service block
+	;  R3 =  service name length (NON-ZERO)
+	;  R4 -> FIRQB, with name starting at FQNAM2(R4)
+	;
+	MOV	(SP),R4			; Get pointer to FIRQB
+	ADD	#FQNAM2,R4		; Point to service name
+	MOV	R1,R5			; Get pointer to service block
+	ADD	#S.NAML,R5		; Point to name length
+	MOVB	R3,(R5)+		; Set service name length into block
+.ASSUME	S.NAME	EQ S.NAML+1
+
+30$:	MOVB	(R4)+,(R5)+		; Insert the name into the service
+	SOB	R3,30$			;  ... block until all characters copied
+	POP	<R4>			; Restore register to FIRQB
+	BR	110$			; Join code as if this were a modify.
+					;  R1 -> service block with name and
+					;        default rating inserted.
+
+40$:	CRASH				; Service name pointer messed up
+
+; 
+; Erorr handlers for the SET SERVICES directive  
+;  (Placed here to make branches reach)
+;
+
+50$:	CALL	FREJB4			; Unlock the job
+	ERROR	BADFUO			; ?Illegal SYS() usage. (a) The service
+					;   name not in range 1-N.NMAX, or (b) 
+					;   the operation type was invalid.
+
+60$:	CALL	FREJB4			; Unlock the job
+	ERROR	NOSUCH			; ?Can't find file or account.  The 
+					;   service name does not exist, and 
+					;   an attempt has been made to delete 
+					;   or modify it.
+
+70$:	CALL	FREJB4			; Unlock the job
+	ERROR	FIEXST			; ?Name or account now exists.  An 
+					;   attempt has been made to create a 
+					;   service that already exists.
+
+80$:	CALL	FREJB4			; Unlock the job
+	ERROR	NOBUFS			; ?No buffer space available.   We can 
+					;   not get enough buffer space to 
+					;   create the internal service block.
+
+90$:	CALL	FREJB4			; Unlock the job
+	ERROR	NOROOM			; ?No room for user on device.  We are
+					;   at the maximum number of services
+					;   and an attempt is made to add
+					;   another one.
+
+ERRBC4:	CALL	FREJB4			; Unlock the job
+	ERROR	BADCNT			; ?Illegal byte count for I/O.  (a) The 
+					;   buffer claims to have a field in it,
+					;   but the field isn't entirely there,
+					;   because it won't fit. (b) The 
+					;   user's buffer address starts on
+					;   an odd boundry.
+
+100$:	CALL	FREJB4			; Unlock the job
+	ERROR	BADNAM			; ?Illegal file name.  The service id 
+					;   contained an invalid character
+
+;
+; MODIFY a service
+;
+
+MODSVC:	F2CALL	CHKSVC			; Does the service already exist?
+	BCS	60$			; Service does not exist?  Error
+110$:	CALL	MAPUS4			; Map the users buffer
+	;
+	; Check to see if user wants us to set service rating
+	;
+	CMPB	(R5),#1			; TYPE=1 -> Service rating
+	BNE	120$			; Nope, try next code
+	SUB	#4,R0			; Account for type, rsv'd, rating, flag
+	BLO	ERRBC4			; Not all in buffer?  Exit
+
+.ASSUME	<M.CFLG&1> EQ 1							;005
+	MOV	#MC.SRT*400,R3		; Get bit to toggle in flag	;005
+	XOR	R3,@#MCTMSG+M.CFLG-1	; Toggle the bit		;005
+
+	CMPB	(R5)+,(R5)+		; Skip past type code and reserved
+	MOVB	(R5)+,S.RATE(R1)	; Set service rating
+	BITB	#1,(R5)+		; Service rating dynamic?
+	;BEQ	120$			; If bit not set, just branch
+	;MOVB	<dynamic>,S.RATE(R1)	; Set the "dynamic" rating.  // This 
+					;   is not currently possible, so skip//
+
+120$:	;
+	; Check to see if user want us to set service id
+	;
+	TST	R0			; Are we at the end of the buffer?
+	BEQ	180$			; Quit if we are
+	CMPB	(R5)+,#2		; TYPE=2 -> Service id (skip past code)
+	BNE	170$			; Not that type?  All done
+	SUB	#2,R0			; Account for type and length fields
+	BLO	ERRBC4			; Not enough room?  Error
+	MOVB	(R5)+,R3		; Get number of bytes in id string
+	BEQ	150$			; Not much to do if no length
+	SUB	R3,R0			; Account for service ID string
+	BLO	ERRBC4			; Not enough room?  Error
+	CMP	R3,#S.DMAX		; Length bigger than max?
+	BHI	50$			; Error if it is
+
+	PUSH	<R5,R3>			; Save registers
+130$:	CMPB	(R5),#32.		; Check each character for range
+	BLO	100$			;  32-126 (decimal) 
+	CMPB	(R5),#126.		;  or 170-253 (decimal)
+	BLOS	140$			;  error if any of them are not
+	CMPB	(R5),#170.		;  in the proper range.
+	BLO	100$			;  ...
+	CMPB	(R5),#253.		;  ...
+	BHI	100$			;  ...
+140$:	INC	R5			;  Go on to next character
+	SOB	R3,130$			;  Loop until done
+	POP	<R3,R5>			; Restore registers
+
+.ASSUME	<M.CFLG&1> EQ 1							;005
+150$:	MOV	#MC.SDS*400,R4		; Get bit to toggle in flag	;005
+	XOR	R4,@#MCTMSG+M.CFLG-1	; Toggle the bit		;005
+	ADD	#S.DESL,R1		; Point to service id length
+	MOVB	R3,(R1)+		; Set service id length
+	BEQ	170$			; No length, that's okay.  Get out
+160$:	MOVB	(R5)+,(R1)+		; Copy characters into service block
+	SOB	R3,160$			;  ... until all copied
+
+170$:	TST	R0			; All characters scanned in buffer?
+	BNE	50$			; Wrong syntax
+180$:	CMPB	(SP)+,@#MCTMSG+M.CFLG	; Any change to multicast message?
+	BEQ	190$			; Branch if not
+	INCB	@#MCTMSG+M.MINC		; Set next incarnation
+	CALLM	UPDMCT,LATAP5		; Send multicast message immediately
+190$:	.CALLR	FREJB4			; Unlock the job and exit with success
+
+.DSABL	LSB
+
+.SBTTL	.....FREJB4	Unlock the job and map FIPPOL
+;
+; Map FIPPOL and release the job
+;
+
+FREJB4:	MAP	FIPPOL			; Be sure FIP pool is mapped
+	MOVB	@#FIJOB,R0		; Get caller's job number
+	CALLRX	UNLOCK			; Release the job
+
+
+.SBTTL	.....MAPUS4	Map a user's buffer
+;+
+; MAPUS4 - Check a user's buffer and map it
+;
+; EXIT:
+;	Z set if no bytes in user's buffer
+;	Z clear otherwise
+;
+;	R0 =	User's buffer length (XRBC) -- 0 if no buffer
+;	R5 ->	User buffer via APR 6
+;	R2,R3	Destroyed
+;-
+
+MAPUS4:	CALL	MAPLO4			; Map user's lowcore
+	MOV	XRB+XRBC(R5),-(SP) 	; Save user's data count
+	BEQ	10$			; Branch if no buffer
+	MOV	XRB+XRLOC(R5),R5 	; Get buffer address
+	BIT	#1,R5			; Odd address?
+	BNE	ERRBC4			; Yes, error with BADCNT
+	CALL	LDUSR4			; Go map buffer
+10$:	MOV	(SP)+,R0		; Return user's byte count
+	RETURN
+
+
+.SBTTL	.....MAPLO4	Map a user's low core
+.SBTTL	.....LDUSR4	Load and map a user
+;+
+; ENTRY:
+;	R5 ->	User buffer (virtual), LDUSR4 only
+;
+; EXIT:
+;	R0,2,3	Munged
+;	R5 ->	User buffer via APR 6
+;-
+
+MAPLO4:	CLR	R5			; Map user's virtual zero
+LDUSR4:	MOV	@#FIJBDA,R0		; Get job's JDB address
+	BITB	#^C<LCK>,JDMCTL+M.CTRL(R0) ;Job should be locked and that's all
+	BNE	20$			; No?  Very strange
+	SUB	#MC.LCK*400,JDMCTL+M.CTRL-1(R0) ;Take off one lock
+	BCS	20$			; Die on underflow
+	MOVB	@#FIJOB,R0		; Get job number *2
+	CLR	R3			; Dummy L3Q bit to use
+	CALLX	FNDJOB			; Try to map the user
+	 BR	10$			; Load error, die
+	BEQ	20$			; Job wasn't resident, what gives? ;014
+	RETURN				; Done!
+
+10$:	MAP	FIPPOL			; Restore fip mapping
+	JMPX	FIEXIT			; Abort the operation, user will 
+					;  die (swap err)
+
+20$:	CRASH				; Something went wrong
+
+GLOBAL	<FIJOB,FIJBDA>
+
+F2FEND
+
+F2FSRT				; This is the start of LTU5
+
+;+
+; NETLNM (SR$LSE,SF$LNM) - Set LAT Lines information
+;
+; INPUTS:
+;	R4	   -->	FIRQB
+;	FIRQB+FQPPN  =  0 to enable LAT on a single line, 		;012
+;			1 to disable LAT on a single line,		;012
+;			2 to disable LAT on all active lines		;012
+;			All others reserved, results in error 		;012
+;	FIRQB+FQDEV  =  The Ethernet device to enable/disable LAT on
+;	FIRQB+FQDEVN =  The unit number and real flag for the above device
+;
+; OUTPUTS:
+;	None 
+;
+; ERRORS:
+;	BADFUO	The code at FQPPN was not 0, 1, or 2.			;012
+;	DTOOOF	LAT is already enabled on the maximum number of lines
+;	NOROOM	Attempt to start LAT on a line (returned by driver?)
+;	NOTOPN	No node block set up, can't start LAT
+;	NODEVC	The device at FQDEV(N) was not a valid Ethernet device
+;	HNGDEV	The device is disabled or inoperative
+;-
+
+.ENABL	LSB
+
+	BR	LATDIE			;Hook for direct FCALLing...
+
+NETFUN	LNM,<Set LAT Lines Information>
+
+	NOP				; NOP for debugging purposes
+	MOVB	FQPPN(R4),R1		; Get line operation code
+	CMP	R1,#LINMAX		; Is it bigger than max line operation?
+	BLOS	10$			; Proceed if it's in range	;008
+	ERROR	BADFUO			; ?Illegal SYS() usage.  Line 	;008
+					;   operation code not valid.	;008
+
+10$:	ASL	R1			; Make code * 2 for dispatch	;010
+	ADD	R1,PC			; Branch into dispatch table
+	 BR	LINEON			;  OPERATION 0=Enable a line	;012
+	 BR	LINOFF			;  OPERATION 1=Disable a line	;012
+	.BR	LATDIE			;  OPERATION 2=Disable all lines;012
+LINMAX	=: 2				; All others are invalid
+
+
+;+
+; LATDIE - Loop through all active LAT lines and turn LAT off on each	;012
+;
+;	No inputs required.  It should have already been determined that
+;	LAT support is in the monitor by testing LATAP5 for positive.
+;
+;	F2CALL	LATDIE
+;
+;	Effect:  LAT turned off all lines.
+;	No errors are possible (unless the deassign fails).
+;	
+;	All registers DESTROYED
+;-
+
+LATDIE:	MOV	#LATLIN,R2		; Get max number of LAT lines	;012
+	MOV	#LATCTL+L.EDDB,R3	; Get address of DDB table	;012
+15$:	TST	(R3)+			; Is there a line here?		;012
+	BEQ	17$			; Branch if not			;012
+	PUSH	<R2,R3>			; Save count, DDB table pointer	;012
+	CALL	ONEOFF			; Turn LAT off on this line	;012
+	POP	<R3,R2>			; Restore registers		;012
+17$:	SOB	R2,15$			; Loop through all lines	;012
+	BR	35$			; And get out			;012
+
+
+;
+; LINOFF - Turn LAT off on the device specified in the FIRQB		;012
+;
+LINOFF:	CALL	FNDDEV			; Find the device in monitor.	;008
+	MOV	#LATLIN,R2		; Get max number of LAT lines	;008
+	MOV	#LATCTL+L.EDDB,R3	; Get address of DDB table	;008
+
+20$:	CMP	R1,(R3)+		; Is the device open for LAT?	;008
+	BEQ	30$			; Yes, proceed			;008
+	SOB	R2,20$			; Try next one			;008
+	BR	80$			; No matches!  Return error.	;008
+
+30$:	CALL	ONEOFF			; Turn off this DDB		;012
+35$:	MAP	FIP,CODE,DATA		; Map both I and D space FIP	;012
+	RETURN				; Return			;008
+
+
+ONEOFF:	; Send "last gasp" multicast indicating we are shutting down.	;012
+	; We do this by setting "no more sessions on circuit" (MS.SES)	;008
+	; in the node status field of the multicast message.  Then 	;008
+	; because we changed something in the multicast message, we 	;008
+	; indicate the change (M.MINC) and set the appropriate bit 	;008
+	; (MC.OTH) in the change flag byte (M.MINC).  Then send the 	;008
+	; multicast message.  Afterwards, we clear the "no more 	;008
+	; sessions" bit and have to set the change and incarnation	;008
+	; flags once again.  						;008
+	; 
+	; R3 -> DDB for device to which we will send this multicast 	;008
+	;	message.						;008
+
+	TST	-(R3)			; Point to DDB for MCTDDB	;010
+	BISB	#MS.SES,@#MCTMSG+M.NSTS	; Not accepting more sessions	;008
+.ASSUME	<M.CFLG&1> EQ 1							;008
+	MOV	#MC.OTH*400,R2		; Get bit to toggle in flag	;008
+	XOR	R2,@#MCTMSG+M.CFLG-1	; Toggle the bit		;008
+	INCB	@#MCTMSG+M.MINC		; Indicate change.  Increment	;008
+					;   the incarnation flag.	;008
+	CALLM	MCTDDB,LATAP5		; Send multicast to this device	;008
+	BICB	#MS.SES,@#MCTMSG+M.NSTS	; Now we will accept sessions	;008
+	;MOV	#MC.OTH*400,R2		; (R2 still contains bit to set);008
+	XOR	R2,@#MCTMSG+M.CFLG-1	; Toggle the bit		;008
+	INCB	@#MCTMSG+M.MINC		; Indicate change.  Increment	;008
+					;   the incarnation flag.	;008
+
+	; For each VCB whose PDB matches the one to disable, stop the 	;008
+	; circuit.  Note that STPCIR delinks the VCB and puts it into	;008
+	; the idle circuit list, so we have to keep around a pointer to	;008
+	; the NEXT circuit block before calling STPCIR.			;008
+
+	SUB	#LATCTL+L.EDDB,R3	; Compute offset into DDB table	;009
+	MOV	R3,R2			; Put offset into R2		;009
+	PUSH	<R2>			; Save the offset		;010
+	MOV	@#LATCTL+L.AVCB,R1	; Point to first VCB		;008
+	BEQ	60$			; No more?  Done.		;008
+.ASSUME	C.LNK	EQ 0							;008
+40$:	MOV	(R1),-(SP)		; Save pointer to NEXT VCB	;008
+	CMP	C.DOFF(R1),R2		; This circuit on the datalink?	;009
+	BNE	50$			; Skip this one if not		;008
+	MOV	#ER.USR,R3		; Indicate "VC_halt from user"	;008
+	CALLM	STPCIR,LATAP5		; Stop sessions on this circuit	;008
+50$:	MOV	(SP)+,R1		; Restore pointer to next VCB	;008
+	BNE	40$			; Branch if there's another VCB	;008
+
+60$:	MOV	(SP),R2			; Get offset into the tables	;010
+	MOV	LATCTL+L.EDDB(R2),R0	; Get DDB 			;008
+	MOVB	DDUNT(R0),R0		; Get unit number 		;008
+	ASL	R0			; Make it unit number * 2 	;008
+	MOV	LATCTL+L.EPDB(R2),R1	; Get PDB for call to driver	;009
+	MOV	R1,R5			; Copy PDB for call to driver	;008
+	MOV	#LATJOB,R3		; Get the LAT job number	;008
+	CALLX	DVRDSP,R4,$CLSTBL 	; Call the driver at close entry;008
+	POP	<R2>			; Restore offset into tables	;010
+;									;008
+; 	The DEASSIGN is commented out.  				;008
+; 	It is a NOP for LATJOB and space is tight.			;008
+;									;008
+;;	MOV	#LATJOB,R0		; Get LAT system job number	;008
+;;	MOV	LATCTL+L.EDDB(R2),R1	; Get DDB for deassign		;010
+;;	CALLX	DVRDSP,R4,$DEATBL 	; Call driver at deassign entry	;008
+;;	BCS	90$			; Deassign failed, do something	;008
+
+	CLR	LATCTL+L.EDDB(R2)	; Clear PDB entry in LATCTL	;009
+	CLR	LATCTL+L.EPDB(R2)	; Clear DDB entry also		;009
+	CLR	LATCTL+L.NRCV(R2)	; Clear receive buffer entry too;009
+.ASSUME	R.NUM	EQ 0							;009
+.ASSUME	R.QTA	EQ R.NUM+1						;009
+	DECB	@#LATCTL+L.ACT		; Indicate one less active line	;008
+	RETURN				; And return			;012
+
+;
+; Error handlers for SET LINES
+;
+
+70$:	ERROR	DTOOOF			; ?Too many open files on unit.  LAT
+					;   Already enabled on maximum # lines.
+
+80$:	ERROR	NOTOPN			; ?I/O channel not open.  Attempt ;005
+					;   to start LAT before issuing a ;005
+					;    SET NODE directive.	  ;005
+
+90$:	JMPX	ERROR			; Device errors, including 
+					;  ?Device hung or write locked.  
+					;   Openning  the device failed 
+					;   unexpectedly.  It is either disabled
+					;   or inoperative. -- or -- 
+					;  ?No room for user on device.  This
+					;   will happen if LAT is *already* on
+					;   this line.  
+
+
+LINEON:	;
+	; Enable a LAT line
+	;
+
+	MOV	#LATCTL,R2		; Get pointer to LAT control region
+.ASSUME	L.ACT EQ 0                                                      ;005
+	CMPB	(R2),#LATLIN 		; Already at the line maximum?	;005
+	BEQ	70$			; Yes,  tell the user "No more!"	
+	TST	L.NODE(R2)		; Did node block get created?	;005
+	BEQ	80$			; Error if it didn't		;005
+	CALL	FNDDEV			; Find the device in monitor.	;008
+					; Returns R1 -> DDB		;010
+;									;008
+; 	The ASSIGN is commented out.  					;008
+; 	It is a NOP for LATJOB and space is tight.			;008
+;									;008
+;;	MOV	#LATJOB,R0		; Get LAT system job number	;008	
+;;	CALLX	DVRDSP,R4,$ASNTBL 	; Call driver at assign entry	;008
+;;	BCS	90$			; Assign failed, do something	;008
+
+	MOVB	DDUNT(R1),R0		; Get unit number			
+	ASL	R0			; Times two (for the driver)		
+	MOV	R1,-(SP)		;  and save the DDB pointer		
+	MOV	#LATJOB,R3		; Get LAT system job number again	
+	MOV	#2140,FQNENT(R4)	; Set protocol type for LAT		
+					; // Allow user to supply this? //
+	MOV	#100000!200,FQMODE(R4)	; Set it for unpadded protocol	
+	MOVB	#4,FQCLUS(R4)		; Set the number of buffers to get
+	CALLX	DVRDSP,R4,$OPNTBL 	; Call the driver at Open entry	
+	MOV	(SP)+,R2		; Restore the DDB pointer we passed	
+	BCS	90$			; The open failed; do something about it
+	INCB	@#LATCTL+L.ACT		; No, count one more circuit active
+
+;+
+;	   At this point, the Ethernet Driver returned R1 as a Portal 
+;	Descriptor Block (PDB) address, and not the actual Device Descriptor 
+;	Block (DDB) address for the controller.  PDB's are used when calling 
+;	the driver for service.
+;
+;	   Unfortunately, the driver will store the DDB address in CCB's queued
+;	up for us, instead of the PDB.  So, LAT will have to remember the PDB
+;	address for each Ethernet device LAT has open.
+;
+;	   To do this, two tables are maintained within the LAT control region -
+;	L.EDDB and L.EPDB.  To translate one address to the other, the same 
+;	offset is used in both tables.
+;-
+				
+	MOV	#LATLIN,R3		; Get the max # of LAT lines		
+	MOV	#LATCTL+L.EDDB,R5 	; Point to DDB save area
+100$:	TST	(R5)+			; Is this an empty entry?		
+	BEQ	110$			; Yes it is, move on		;009
+	SOB	R3,100$			; Check the next entry			
+	CRASH				; Table is full?!			
+						
+110$:	MOV	R2,-(R5)		; Found one - put the DDB address here	
+	MOV	R1,L.EPDB-L.EDDB(R5)	; Put the PDB address in the PDB table	
+	MOV	#<4*400+4>,L.NRCV-L.EDDB(R5); Store receive buffer 	;009
+.ASSUME	R.NUM	EQ 0			; quote and current count	;009
+.ASSUME	R.QTA	EQ R.NUM+1						;009
+
+	;BIS	#DDUTIL!1,DDCNT(R1) 	; Mark unit assigned and open once	
+	;// Should send this to only the one device, using MCTDDB, not UPDMCT.
+	CALLM	UPDMCT,LATAP5		; Update and send the multicast message
+	MAP	FIPPOL			; Map Fip pool, good comment, huh?
+	RETURN				; Return 
+		
+GLOBAL	<DEVOKB,DEVPTR,$OPNTBL,$FLGTBL,$ASNTB,$DEATBL,$CLSTBL>
+
+.DSABL	LSB
+
+.SBTTL	.....FNDDEV	Find the device in the monitor
+;+
+; FNDDEV	Find the device in the monitor
+;
+; Inputs:
+;		R4   ->	FIRQB
+;	FIRQB+FQDEV  =  The Ethernet device to enable/disable LAT on
+;	FIRQB+FQDEVN =  The unit number and real flag for the above device
+;
+; Outputs:
+;	R1 = DDB
+;
+; Errors:
+;	NODEVC if the device is not a valid, Ethernet device.
+;-
+.ENABL	LSB
+
+FNDDEV:	CALLX	GUNSUB,R5		; Try to find the device in the monitor	
+10$:	 ERROR	NODEVC			; Not there.  Error.
+	CMP	R0,#DEVOKB		; Is unit a disk?
+	BLO	10$			; Yes, that's an error
+	ASL	R2			; Make the unit number a word offset	
+	ADD	DEVPTR(R0),R2		; Point to the DEVTBL entry		
+	MOV	(R2),R1			; Point to the DDB			
+	MOVB	(R1),R5			; Pick up the handler index
+.ASSUME	DDIDX	EQ	0 
+	CMPB	$FLGTBL(R5),#ETHHND 	; Is this an ethernet device?
+	BNE	10$			; No, forget this
+	RETURN				; Everything is okay, return
+
+.DSABL	LSB
+
+.SBTTL	.....CHKSVC	Check service name for errors and find match
+;+
+; CHKSVC  Check service name for errors and find match
+;
+; INPUTS:
+;	R3 =  number of characters in service name (NON-ZERO)
+;	R4 -> FIRQB, in which the service name starts at FQNAM2
+;
+; OUTPUTS:
+;	Error with BADMAN if any of the characters are not in this 
+;	set: (values are decimal)
+; 		36($) 		45(-) 		46(.) 		48-57(0-9)
+;		65-90(A-Z) 	95(_)		97-122(a-z)	192-253(8-bit)
+;
+;	C=1 	If service name in the FIRQB does not match any in the list
+;	  R1,R2,R5  random
+;	  R3,R4     unchanged
+;
+;	C=0	If service name matches existing service
+;	  R1   ->   service block
+;	  R5   ->   previous block (for delinking purposes)
+;	  R3,R4     unchanged
+;	  R2 	    random
+;
+;	Note: There is another table identical to this one in another
+;	      overlay in this module. Any changes made here must also
+;	      be made in that table as well.
+;-
+
+CHRTBL:					;*** 7-bit characters ***
+	.WORD	^B<0000000000000000>	;  0-15  (none)
+	.WORD	^B<0000000000000000>	; 16-31  (none)
+	.WORD	^B<0110000000010000>	; 32-47  (dollar,hyphen,period)
+	.WORD	^B<0000001111111111>	; 48-63  (zero-nine)
+	.WORD	^B<1111111111111110>	; 64-79  (A-O)
+	.WORD	^B<1000011111111111>	; 80-95  (N-Z,underscore)
+	.WORD	^B<1111111111111110>	; 96-111 (a-o)
+	.WORD	^B<0000011111111111>	;112-127 (n-z)
+					;*** 8-bit characters ***
+	.WORD	^B<0000000000000000>	;128-143 (none)
+	.WORD	^B<0000000000000000>	;144-159 (none)
+	.WORD	^B<0000000000000000>	;160-175 (none)
+	.WORD	^B<0000000000000000>	;176-191 (none)
+	.WORD	^B<1111111111111111>	;192-207 (various)
+	.WORD	^B<1111111111111111>	;208-223 (various)
+	.WORD	^B<1111111111111111>	;224-239 (various)
+	.WORD	^B<0011111111111111>	;240-255 (various)
+	.ASSUME	.-CHRTBL EQ 40		;So division will not overreach
+
+CHKSVC:	NOP				; NOP for debugging purposes
+	MOV	R3,-(SP)		; Save # bytes in service name
+	MOV	R4,R2			; R2 -> FIRQB
+	ADD	#FQNAM2,R2		; R2 -> Service name
+
+10$:	CLR	R0			; Set up for division
+	CLR	R1			; Set up for division
+	BISB	(R2)+,R1		; Get character to check
+	DIV	#10,R0			; Get byte offset and bit (remainder)
+	MOVPIC	#CHRTBL,R5		; Get address of CHRTBL
+	ADD	R0,R5			; Point to correct byte in table
+	BITB	BITBYT(R1),(R5)		; Check if character is legal
+	BEQ	40$			; Bit not set => bad name	
+	SOB	R3,10$			; Check next bit
+	MOV	(SP),R0			; Get #bytes in service name
+
+	;
+	; The service name contains legal characters, now check to find
+	; a match.
+	;
+	MOV	R4,R2			; Get pointer to FIRQB
+	ADD	#FQNAM2,R2		; Point to service name in FIRQB
+	MOV	#LATCTL+L.SRVC,R1 	; Point to service list header
+
+20$:	SEC				; Assume there will be no match
+	MOV	R1,R5			; Save this (previous) VCB
+	MOV	(R1),R1			; Get (next) VCB
+.ASSUME	C.LNK	EQ 0			; Link is first word in VCB
+	BEQ	30$			; Return with C set if no match
+	MOV	R1,R3			; Copy VCB pointer
+	ADD	#S.NAML,R3		; Point to name length
+	CMPB	(R3)+,R0		; Are lengths the same?
+	BNE	20$			; Try next VCB if not
+	CALLM	CKNAME,LATAP5		; Check to see if names match
+	BCS	20$			; Try next if no match
+30$:	MOV	(SP)+,R3		; Restore # bytes in service name
+	RETURN				; Return with C indicating status
+
+40$:	;MAP	FIPPOL			; Since it took an F2CALL to get here,
+					;  FIPPOL is known to be mapped.
+	MOVB	@#FIJOB,R0		; Get caller's job number
+	CALLX	UNLOCK			; Release the job
+	ERROR	BADNAM			; ?Illegal file name.  The service name
+					;   contained an invalid character.
+
+GLOBAL	<BITBYT>
+
+F2FEND
+
+F2FSRT					; This is the start of LTU6
+
+;+
+; NETSVR (SR$LSH,SF$SVR) - Show LAT Server information
+;
+; INPUTS:
+;	R4	   -->	FIRQB
+;	XRB+XRLEN   =	Length of user's buffer
+;	XRB+XRBC    =	0
+;	XRB+XRLOC   =	Address of user's buffer 
+;
+;	FIRQB+FQPPN   = Server index, or zero for a specific server name
+;	FIRQB+FQPPN+1 = Server name length, if FQPPN is 0.
+;	FIRQB+FQNAM2  = Server name, if FQPPN is 0.
+;
+; OUTPUTS:
+;	XRB+XRLEN   =	(unchanged)
+;	XRB+XRBC    =	Actual character count of returned information
+;	XRB+XRLOC   =	(unchanged)
+;
+;	FIRQB+FQPPM  =  Server name length
+;	FIRQB+FQNAM2 =	Server name, as reported by the server in START message
+
+;
+; ERRORS:
+;	BADFUO	The server name length was not in range 1-16.
+;	NOSUCH	No server matching that specified in FIRQB (returned by CKSVR6)
+;		-or- No server matching the index
+;-
+
+.ENABL	LSB
+
+;
+; Error handler for SHOW SERVER
+;
+110$:	CALL	FREJB6			; Unlock the job
+	ERROR	BADFUO			; ?Illegal SYS() usage.  The server 
+					;   name length was not in the range 
+					;   1-16.
+
+120$:	CALL	FREJB6			; Unlock the job
+	ERROR	NOSUCH			; ?Can't find file or account.  There 
+					;   was no server matching the index
+					;   -or- the server name specified in 
+					;   the FIRQB.
+
+NETFUN	SVR,<Show LAT Server Information>
+
+	NOP				; Nop for debugging purposes
+	MOVB	FQPPN(R4),R2		; Get user's index
+	BEQ	40$			; Branch if none specified
+
+	;
+	; Get server based on index.  First look at active servers ...
+	;
+	MOV	#LATCTL+L.AVCB,R1 	; Get first active VCB (server table)
+.ASSUME C.LNK EQ 0
+10$:	MOV	(R1),R1			; Get pointer to next VCB
+	BEQ	20$			; Error if no more servers
+	SOB	R2,10$			; Branch if not the right index
+	BR	50$			; Join common code
+
+20$:	;
+	;  ... then fall right into the idle servers.
+	;
+	MOV	#LATCTL+L.IVCB,R1 	; Get first idle VCB (server table)
+
+.ASSUME C.LNK EQ 0
+30$:	MOV	(R1),R1			; Get pointer to next VCB
+	BEQ	120$			; Error if no more servers
+	SOB	R2,30$			; Branch if not the right index
+	BR	50$			; Found it, join common code
+	
+40$:	;
+	; Find server based on name supplied in the FIRQB
+	;
+	MOVB	FQPPN+1(R4),R0		; Get name length
+	BEQ	110$			; No name length?  Error
+	CMPB	R0,#C.NMAX		; Server name too big?
+	BHI	110$			; That's an error too
+	CALL	CKSVR6			; Get matching server, error if none
+					; (otherwise R1->virtual circuit block)
+
+50$:	;+
+	; R1 --> Virtual Circuit Block (aka Server Table)
+	;	which matches the server name
+	;-
+	CALL	MAPUS6			; Map users buffer
+					; (R0 = buffer length, R5--> buffer)
+	MOV	R5,-(SP)		; Save users's buffer address
+
+	MOVB	C.NAML(R1),R2		; Get length of server name
+	MOVB	R2,FQPPN+1(R4)		; Put length into FIRQB
+	BEQ	70$			; No chars in name, strange but ok
+	PUSH	<R1>			; Save VCB pointer and FIRQB pointer
+	ADD	#C.NAM,R1		; Point to server name inside VCB
+	ADD	#FQNAM2,R4		; Point to to user supplied server name
+60$:	MOVB	(R1)+,(R4)+		; Copy server name into FIRQB
+	SOB	R2,60$			; ... until all copied
+	POP	<R1>			; Restore pointers to FIRQB and VCB
+
+70$:	SUB	#6,R0			; Can we fit entire Ethernet address?
+	BLO	100$			; Just finish up if we can't
+.ASSUME	<C.SADD&1> EQ 0			; Ethernet addr starts on word boundry
+	MOV	C.SADD(R1),(R5)+	; Insert first word of Ethernet address
+	MOV	C.SADD+2(R1),(R5)+	; Insert second word of Ethernet address
+	MOV	C.SADD+4(R1),(R5)+	; Insert third word of Ethernet address
+
+	SUB	#2,R0			; Room for the version?
+	BLO	100$			; Finish up if not
+.ASSUME	<C.VERS&1> EQ 0			; Ensure Version is on word boundry
+.ASSUME	C.ECO	EQ C.VERS+1		; Then comes ECO level
+	MOV	C.VERS(R1),(R5)+  	; Insert protocol version and ECO
+
+	SUB	#2,R0			; Room for the number of sessions?
+	BLO	100$			; Finish up if not
+	CLR	R4			; Initial value: none
+	MOV	R1,R2			; Save pointer to VCB
+	ADD	#C.SESQ,R2		; Get session pointer
+.ASSUME	S.LNK	EQ 0			; Sessions link is first word 
+80$:	MOV	(R2),R2			; Get session block
+	BEQ	90$			; Get out of loop if no more session
+	INC	R4			; Count another session
+	BR	80$			; And continue loop
+
+90$:	MOV	R4,(R5)+		; Insert number of sessions
+	SUB	#2,R0			; Room for the keepalive timer?
+	BLO	100$			; Finish up if not
+	;CLR	R2			; Set up for divide (0 from SOB loop)
+	MOV	C.CTIM(R1),R3 		; Get the keepalive timer * 3
+	DIV	#3,R2			; Divide keepalive timer by 3
+	MOV	R2,(R5)+		; Insert timer into buffer
+
+	SUB	#2,R0			; Room for the buffer size?
+	BLO	100$			; Finish up if not
+	MOV	C.BSIZ(R1),(R5)+	; Insert the buffer size
+
+100$:	SUB	(SP)+,R5		; Get number of chars used in buffer
+	MOV	R5,-(SP)		; Save number of characters in nuffer
+	CALL	MAPLO6			; Map the user's lowcore
+	MOV	(SP)+,@#140000+XRB+XRBC	; Insert count into XRB for user
+	CALLR	FREJB6			; Unlock the job and return
+
+.DSABL	LSB
+
+.SBTTL	Ethernet counters
+;
+;
+;
+.ENABL	LSB
+
+110$:	CALL	FREJB6			; Unlock the job
+	ERROR	NODEVC			; ?Not a valid device
+
+120$:	CALL	FREJB6			; Unlock the job
+	JMPX	ERROR			; Return a general error
+
+130$:	CALL	FREJB6			; Unlock the job
+	ERROR	NOTOPN			; ?I/O channel not open.  Line is valid,
+					;   although LAT isn't started on that
+					;   line.
+
+ETHCOU:
+	CALLX	GUNSUB,R5		; Try to find the device in the monitor
+	 BR	110$			; No there, complain
+					; (Otherwise R2 = unit number)
+	CMP	R0,#DEVOKB		; Is unit a disk?
+	BLO	110$			; Yes, that's an error
+	ASL	R2			; Make the unit number a word offset	
+	MOV	R2,-(SP)		; Save unit number * 2		;005
+	ADD	DEVPTR(R0),R2		; Point to the DEVTBL entry		
+	MOV	(R2),R1			; Point to the DDB			
+	MOVB	(R1),R5			; Pick up the hander index
+.ASSUME	DDIDX	EQ	0 
+	CMPB	$FLGTBL(R5),#ETHHND 	; Is this an ethernet device?
+	BNE	110$			; No, forget this
+	MOV	#LATLIN,R0		; Get number of LAT lines
+	MOV	#LATCTL+L.EDDB,R2	; Get pointer to DDB table
+190$:	CMP	R1,(R2)+		; Is LAT started on this line?
+	BEQ	200$			; Yes! Get associated PDB
+	SOB	R0,190$			; Try next line
+	BR	130$			; No lines matched.  Error.
+
+200$:	MOV	L.EPDB-<L.EDDB+2>(R2),R1; Get PBD
+
+	;
+	; The call to the driver requires an XRB be set up, but we can't
+	; use it, so we'll just use the stack instead.  We'll start out
+	; by putting things on the stack backwards, and then call the
+	; driver with R3 -> Stack, i.e. the fake XRB.
+	;
+
+	CALL	MAPUS6			; Map the user's buffer
+	MOV	(SP)+,R2		; Restore unit number * 2	;011
+
+	;
+	; At this point:
+	;	R0 =  user's buffer count (from MAPUS1)
+	;	R1 =  PDB
+	;	R2 =  unit number * 2
+	;	R4 -> FIRQB (with FQPPN+1 the "zero counters" flag)
+	;	R5 -> User's buffer (from MAPUS1)
+	;
+	; Note:  We are building the fake XRB backwards here!
+	;
+
+	CLR	-(SP)			; FAKE XRB: Zero counters flag
+	BISB	FQPPN+1(R4),(SP)	; 	    Indicate if counters zeroed
+	CLR	-(SP)			; FAKE XRB: Not used
+	MOV	R5,-(SP)		; FAKE XRB: Address of user's buffer
+	MOV	R0,-(SP)		; FAKE XRB: User's buffer length
+	MOV	#1,-(SP)		; FAKE XRB: Function code
+
+	MOV	R2,R0			; DRIVER CALL: R0 =  unit # * 2
+					; DRIVER CALL: R1 =  PDB
+	MOV	#1,R2			; DRIVER CALL: R2 =  function code
+	MOV	SP,R3			; DRIVER CALL: R3 -> Fake XRB	
+	MOV	#LATJOB,R4		; DRIVER CALL: R4 =  7, Lat job number
+					; DRIVER CALL: R5 -> User's buffer
+
+	CALLX	DVRDSP,R4,$SPCTBL	; Call the driver at assign entry	
+	BCS	120$			; Something went wrong, report error
+	
+	MOV	XRBC(R3),R4		; Get byte count as returned by driver
+	ADD	#5*2,SP			; Restore stack the way it was
+	CALL	MAPLO6			; MAP the user's low core
+	MOVB	R4,@#140000+XRB+XRBC 	; Set byte count into user's XRB
+	.CALLR	FREJB6			; Unlock the user's job and return
+
+GLOBAL	<$SPCTBL>
+
+.DSABL	LSB
+
+.SBTTL	.....FREJB6	Unlock the job and map FIPPOL
+;
+; Map FIPPOL and release the job
+;
+
+FREJB6:	MAP	FIPPOL			; Be sure FIP pool is mapped
+	MOVB	@#FIJOB,R0		; Get caller's job number
+	CALLRX	UNLOCK			; Release the job
+
+
+.SBTTL	.....MAPUS6	Map a user's buffer
+;+
+; MAPUS6 - Check a user's buffer and map it
+;
+; This MAPUS6 is basically used for a "SHOW" because it moves into R0 the
+; user's buffer length from XRLEN.  In the SHOW calls, the XRBC has to be
+; zero.  
+;
+; EXIT:
+;	R0 =	USER'S BUFFER LENGTH (XRBC) -- 0 IF NO BUFFER
+;	R5 ->	USER BUFFER VIA APR 6
+;-
+
+MAPUS6:	CALL	MAPLO6			; Map user's lowcore
+	MOV	XRB+XRLEN(R5),-(SP) 	; Save user's data count
+	BEQ	10$			; Branch if no buffer
+	MOV	XRB+XRLOC(R5),R5 	; Get buffer address
+	BIT	#1,R5			; Odd address?
+	BNE	20$			; Yes, error
+	CALL	LDUSR6			; Go map buffer
+10$:	MOV	(SP)+,R0		; Return user's byte count
+	RETURN
+
+20$:	CALL	FREJB6			; Let go of the job, restore fip mapping
+	ERROR	BADCNT			; Bad buffer parms
+
+.SBTTL	.....MAPLO6	Map a user's low core
+.SBTTL	.....LDUSR6	Load and map a user buffer
+;+
+; ENTRY:
+;	R5 ->	User buffer (virtual), LDUSR6 only
+;
+; EXIT:
+;	R0,2,3	Munged
+;	R5 ->	User buffer via APR 6
+;-
+
+MAPLO6:	CLR	R5			; Map user's virtual zero
+LDUSR6:	MOV	@#FIJBDA,R0		; Get job's JDB address
+	BITB	#^C<LCK>,JDMCTL+M.CTRL(R0) ;Job should be locked and that's all
+	BNE	20$			; No?  Very strange
+	SUB	#MC.LCK*400,JDMCTL+M.CTRL-1(R0) ;Take off one lock
+	BCS	20$			; Die on underflow
+	MOVB	@#FIJOB,R0		; Get job number *2
+	CLR	R3			; Dummy L3Q bit to use
+	CALLX	FNDJOB			; Try to map the user
+	 BR	10$			; Load error, die
+	BEQ	20$			; Job wasn't resident, what gives? ;014
+	RETURN				; Done!
+
+10$:	MAP	FIPPOL			; Restore fip mapping
+	JMPX	FIEXIT			; Abort the operation, user will die 
+					;   (swap err)
+
+20$:	CRASH				; Something went wrong
+
+GLOBAL	<FIJOB,FIJBDA>
+
+.SBTTL	.....CKSVR6	Check for a match in server names
+;+
+; CKSVR6 - Check for a match in server names
+;
+; INPUTS:
+;	R0 	   =    The server name length
+;	FQNAM2(R4) ->   Start of server name in the FIRQB
+;
+; OUTPUTS:
+;	ERROR with NOSUCH if not found (and routine doesn't return)
+;
+;	-else-
+;		R0 =    unchanged (the server name length)
+;		R1 ->	VCB matching this server name
+;		R2,R3,R4   Random
+;-
+.ENABL	LSB
+
+CKSVR6:	NOP				; NOP for debugging purposes
+	MOV	R4,R2			; Get pointer to FIRQB
+	ADD	#FQNAM2,R2		; Point to server name in FIRQB
+	;
+	; First check all servers on active list
+	;
+	MOV	#LATCTL+L.AVCB,R1 	; Point to active VCB list
+	CALL	CKLST6			; Check list of active servers
+	BCC	10$			; Found it, get out.
+	;
+	; Then check all servers on idle list
+	;
+	MOV	#LATCTL+L.IVCB,R1	; Point to idle VCB list
+	CALL	CKLST6			; Check list of idle servers
+	BCS	40$			; Didn't find it, error
+10$:	RETURN				; Return, R1 -> matching server
+
+
+CKLST6:
+20$:	SEC				; Assume there will be no match
+	MOV	(R1),R1			; Get (next) VCB
+.ASSUME	C.LNK	EQ 0			; Link is first word in VCB
+	BEQ	30$			; Return with C set if no match
+	MOV	R1,R3			; Copy VCB pointer
+	ADD	#C.NAML,R3		; Point to name length
+	CMPB	(R3)+,R0		; Are lengths the same?
+	BNE	20$			; Try next VCB if not
+	CALLM	CKNAME,LATAP5		; Check to see if names match
+	BCS	20$			; Try next if no match
+30$:	RETURN				; Return with C indicating status
+
+40$:	CALL	FREJB6			; Unlock the job (stack clears itself)
+	ERROR	NOSUCH			; ?Can't find file or account.  There 
+					;   was no server matching the server 
+					;   name specifed in the FIRQB.  This 
+					;   could mean the name contained some 
+					;   invalid character too.
+.DSABL	LSB
+
+F2FEND
+
+F2FSRT					; This is the start of LTU7	;016
+;+									;016
+; NETSTP (SR$LSE,SF$STP) - Assign/Deassign Local LAT Port Characteristics ;020
+;
+; INPUTS:
+;	R4 -> FIRQB
+;	FIRQB+FQPPN    = Subfunction code
+;			   0 = Assign
+;			   1 = Deassign
+;	FIRQB+FQNAM1   = Default settings to be cleared
+;			 200 = Non-queued access
+;	FIRQB+FQNAM1+1 = Default settings to be set
+;			 200 = Queued access
+;	FIRQB+FQDEV    = "KB"
+;	FIRQB+FQDEVN   = Unit number
+;	FIRQB+FQDEVN+1 = Unit real flag
+;
+;	The XRB is required for the assign subfunction. The
+;	user's low core is not mapped on entry
+;
+;	XRB+XRLEN      = Length of user's buffer
+;	XRB+XRBC       = Number of bytes used in buffer
+;	XRB+XRLOC      = Address of user's buffer
+;
+; OUTPUTS:
+;	None
+;
+; ERRORS:
+;	NODEVC	- The port-name specified is not a dynamic KB.
+;	BADCNT	- The length of the fields specified in the user's
+;		  exceeds the length of the buffer indicated in XRLEN.
+;		- The buffer address was not on a word boundary.
+;	BADFUO	- No local port-name specified.
+;		- An invalid type code was encountered.
+;		- Length of node, service or port name no in the
+;		  range of 1 to 16 characters.
+;		- No remote node, service and/or port name specified.
+;	BADNAM	- Invalid characters encountered in node, service
+;		  or port name.
+;	INUSE   - The device is currently in use.
+;
+; This Assign subfunction is used to define the remote Node (Server name),
+; Service and Port names of the server we want to map the specified local
+; port to. This information is stored in the Solicitation block and are
+; required when soliciting a connection to the server. The Node name is
+; required along with the Service and/or Port name.
+;
+; The Deassign subfunction is used to set the local port to it's initial
+; state which is not mapped to any server. To do this we will clear out
+; the lengths of each of the remote data fields.
+;-									;016
+
+.ENABL	LSB
+
+; Errors for Set Port Directive.					;016
+
+
+10$:	CALL	FREJB7			; Unlock the job		;016
+	ERROR	NODEVC			; Invalid port-name specified	;016
+
+20$:	CALL	FREJB7			; Unlock the job		;016
+	ERROR	BADFUO			; No port-name specified	;016
+
+30$:	CALL	FREJB7			; Unlock the job		;019
+	ERROR	INUSE			; Device is in use		;019
+
+NETFUN	STP,<Assign/Deassign Local LAT Port Characteristics>		;020
+
+	NOP				; NOP for debugging purposes	;016
+	MOV	FQDEV(R4),R1		; Get the port-name		;016
+	BEQ	20$			; None, that's an error		;016
+	F2CALL	CHKPRT			; Valid LAT port?		;019
+	BCS	10$			; No
+
+	;+								;016
+	; On return from CHKPRT:
+	;	R0 =  Unit # * 2
+	;	R1 -> DDB
+	;	R3 -> Session block
+	;	R4 -> FIRQB
+	;-								;016
+
+	TSTB	DDJBNO(R1)		; Any one own this device?	;019
+	BNE	30$			; Yes, don't allow anything	;019
+	MOVB	FQPPN(R4),R5		; Pick up the subfunction code	;022
+	BEQ	ASNPRT			; Subfun code 0 - Assign	;020
+	DEC	R5			; Legal code?			;022
+	BNE	20$			; No, return an error		;022	
+	.BR	DSNPRT			; Subfun code 1 - Deassign	;020
+
+	;+								;019
+	; Deassign a Local Port.					;020
+	;
+	; On entry we expect:
+	;
+	;	R3 -> Session Block
+	;-								;019
+
+DSNPRT:	MOV	S.SOLB(R3),R4		; R4 -> Solicit Block		;019
+	BEQ	10$			; None, not outbound port	;020
+	CALLX	MAPBUF			; Map it			;019
+	MOVB	#SOD.QD,SO.DEF(R3)	; Set default to queued access	;019
+	CALL	IFLDS			; Initialize remote fields	;022
+	BR	FREJB7			;  and go finish up		;022
+
+IFLDS:	ADD	#SO.NAD,R3		; Point to the remote fields	;022
+	MOV	#SO.RDL,R1		; Get length of remote fields	;019
+50$:	CLRB	(R3)+			; Clear a byte			;020
+	SOB	R1,50$			; Continue until done		;020
+	RETURN				; Return to caller		;022
+
+	;+								;019
+	; Assign a Local LAT Port's Characteristics			;020
+	;
+	; On entry we expect:
+	;
+	;	R3 -> Session Block
+	;	R4 -> Firqb
+	;-								;019
+
+ASNPRT:	MOV	R3,-(SP)		; Save the Session Blk. ->	;020
+	CALL	MAPUS7			; Map the user's buffer		;016
+	BEQ	20$			; Assign issued with no data	;020
+	CALL	VALDAT			; Go validate the data		;020
+	MOV	(SP)+,R3		; Restore the Session Blk. ->	;022
+	ASR	R1			; Server name specified?	;020
+	BCC	20$			; No, illegal assign		;020
+	;TST	R1			; Only the server name?		;022
+	BEQ	20$			; Yes, that's illegal too	;020
+	MOV	R4,R1			; Copy the FIRQB ->		;020
+	MOV	S.SOLB(R3),R4		; Get the Solicit Blk ->	;020
+	BEQ	10$			; None, not outbound port	;020
+	MAP	PUSH,APR=6,DATA,PIC	; Save user's buffer mapping	;020
+	CALLX	MAPBUF			; Map the Solicitation Block	;020
+	BICB	FQNAM1(R1),SO.DEF(R3)	; Clear defaults to be cleared	;020
+	BISB	FQNAM1+1(R1),SO.DEF(R3)	;  and set the ones to be set	;020
+	CALL	IFLDS			; Initialize the remote fields	;022
+	MAP	POP,APR=6,DATA,PIC,R=R1 ; Restore user's buffer mapping	;020
+
+	;+								;016
+	; At this point we've validated all the data. Now all that
+	; is left is to actually move it into the Solicit Block.	;020
+	; We're expecting:						;020
+	;
+	;	R0   = Total byte count					;020
+	;	R4  -> Solicit Block					;020
+	;	R5  -> User's buffer					;020
+	;-								;016
+
+80$:	MOVB	(R5)+,R1		; Get a type code		;016
+	BNE	90$			; Not type 0			;016
+	CALL	CPY2SB,R5,SO.RNL	; Type = 0, copy node name	;017
+.ASSUME	SO.RNL+1 EQ	SO.RNM
+	BR	110$			;  and check for more		;016
+
+90$:	ASR	R1			; Type code = 1?		;016
+	BCC	100$			; No, must be 2			;016
+	CALL	CPY2SB,R5,SO.RSL	; Yes, copy service name	;017
+.ASSUME SO.RSL+1 EQ	SO.RSN
+	BR	110$			;  and check for more		;016
+
+100$:	CALL	CPY2SB,R5,SO.RPL	; Copy port name		;017
+.ASSUME	SO.RPL+1 EQ	SO.RPN
+110$:	DEC	R0			; Account for type field	;016
+	BNE	80$			; Continue if more data to move	;016
+	.CALLR	FREJB7			; We're done, unlock the job	;016
+
+.DSABL	LSB
+
+.SBTTL	.....FREJB7	Unlock the job and map FIPPOL
+;+									;016
+; Map FIPPOL and release the job
+;-									;016
+
+FREJB7:	MAP	FIPPOL			; Be sure FIP pool is mapped	;016
+	MOVB	@#FIJOB,R0		; Get caller's job number	;016
+	CALLRX	UNLOCK			; Release the job		;016
+
+
+.SBTTL	.....MAPUS7	Map a user's buffer
+;+									;016
+; MAPUS7 - Check a user's buffer and map it
+;
+; EXIT:
+;	Z set if no bytes in user's buffer
+;	Z clear otherwise
+;
+;	R0 =	User's buffer length (XRBC) -- 0 if no buffer
+;	R5 ->	User buffer via APR 6
+;	R2,R3	Destroyed
+;-									;016
+
+.ENABL	LSB
+
+MAPUS7:	CALL	MAPLO7			; Map user's lowcore		;016
+	MOV	XRB+XRBC(R5),-(SP) 	; Save user's data count	;016
+	BEQ	10$			; Branch if no buffer		;016
+	MOV	XRB+XRLOC(R5),R5 	; Get buffer address		;016
+	BIT	#1,R5			; Odd address?			;016
+	BNE	ERRBC7			; Yes, error with BADCNT	;016
+	CALL	LDUSR7			; Go map buffer			;016
+10$:	MOV	(SP)+,R0		; Return user's byte count	;016
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	.....MAPLO7	Map a user's low core
+.SBTTL	.....LDUSR7	Load and map a user
+;+									;016
+; ENTRY:
+;	R5 ->	User buffer (virtual), LDUSR7 only
+;
+; EXIT:
+;	R0,2,3	Munged
+;	R5 ->	User buffer via APR 6
+;-									;016
+
+.ENABL	LSB
+
+MAPLO7:	CLR	R5			; Map user's virtual zero	;016
+LDUSR7:	MOV	@#FIJBDA,R0		; Get job's JDB address		;016
+	BITB	#^C<LCK>,JDMCTL+M.CTRL(R0) ;Job should only be locked	;016
+	BNE	20$			; No?  Very strange		;016
+	SUB	#MC.LCK*400,JDMCTL+M.CTRL-1(R0) ;Take off one lock	;016
+	BCS	20$			; Die on underflow		;016
+	MOVB	@#FIJOB,R0		; Get job number *2		;016
+	CLR	R3			; Dummy L3Q bit to use		;016
+	CALLX	FNDJOB			; Try to map the user		;016
+	 BR	10$			; Load error, die		;016
+	BEQ	20$			; Job wasn't resident, what gives? ;016
+	RETURN				; Done!				;016
+
+10$:	MAP	FIPPOL			; Restore fip mapping		;016
+	JMPX	FIEXIT			; Abort the operation, user will ;016
+					;  die (swap err)		;016
+
+20$:	CRASH				; Something went wrong		;016
+
+GLOBAL	<FIJOB,FIJBDA>
+
+
+.DSABL	LSB
+.SBTTL	....VALDAT	Validate User Supplied Data
+;+									;020
+; VALDAT - Validate the User Supplied Data
+;
+; Inputs:
+;	R0  = Total byte count
+;	R5 -> User's buffer (mapped to APR 6)
+;
+; Outputs:
+;	R0  = Preserved
+;	R1  = Type code bit mask
+;		Bit 0 = Server name present if set
+;		Bit 1 = Service name present if set
+;		Bit 2 = Port name present if set
+;	R2  = Preserved
+;	R3  = Destroyed
+;	R5  = Preserved
+;-									;020
+
+.ENABL	LSB
+
+10$:	CALL	FREJB7			; Unlock the job		;020
+	ERROR	BADFUO			; Missing data			;020
+
+20$:	CALL	FREJB7			; Unlock the job		;020
+	ERROR	BADNAM			; Illegal name specified	;020
+
+ERRBC7:	CALL	FREJB7			; Unlock the job		;020
+	ERROR	BADCNT			; (a) The total length greater	;020
+					;     than byte count.		;020
+					; (b) The buffer address is not	;020
+					;     on a word boundary.	;020
+
+VALDAT:	PUSH	<R0,R2,R5>		; Save some registers		;022
+	CLR	R1			; Clear mask - nothing found yet ;020
+30$:	MOVB	(R5)+,R3		; Get a type code		;020
+	BISB	BITBYT(R3),R1		; Indicate this type specified	;020
+	DEC	R0			; Adjust count for type field	;017
+	BEQ	10$			; Error, type field with no data ;020
+	MOVB	(R5)+,R2		; Get the data length		;016
+	BEQ	10$			; Zero length is not valid	;020
+	DEC	R0			; Adjust count for length field	;020
+	BEQ	10$			; Error, no data provided	;020
+	CMP	R3,#2			; Legal type code (0,1,2) ?	;022
+	BHI	10$			; No, return an error		;022
+	CMPB	R2,#S.NMAX		; Valid name lenght ?		;022
+.ASSUME	C.NMAX	EQ	S.NMAX						;022
+	BHI	10$			; Yes, that's illegal		;020
+	SUB	R2,R0			; Is data length > byte count?	;022
+	BLT	ERRBC7			; Yes, more than we really have ;022
+	CALL	CHKNAM			; Valid name ?			;022
+	BCS	20$			; No, return an error		;022
+	TST	R0			; Still more data to check?	;022
+	BNE	30$			; Yes, then continue		;020
+	POP	<R5,R2,R0>		; Restore the saved registers	;022
+	RETURN				; Return to our caller		;020
+
+.DSABL	LSB
+
+.SBTTL	.....CHKNAM	Check Node, Service and Port name for errors
+;+									;016
+; CHKNAM  Check Node, Service and Port name for illegal characters
+;
+; INPUTS:
+;	R2 =  Number of characters in the name
+;	R5 -> User's buffer (mapped)
+;
+; OUTPUTS:
+;	R0 =  Preserved
+;	R1 =  Preserved
+;	R2 =  Destroyed
+;	R3 =  Preserved
+;	R5 =  Character after name					;022
+;	C  =  0 - Name is valid
+;	C  =  1 - Name contains invalid characters
+;
+;	Note: There is another table identical to this one in another
+;	      overlay in this module. Any changes made here must also
+;	      be made in that table as well.
+;-									;016
+
+CHRTB2:					;*** 7-bit characters ***	;016
+	.WORD	^B<0000000000000000>	;  0-15  (none)			;016
+	.WORD	^B<0000000000000000>	; 16-31  (none)			;016
+	.WORD	^B<0110000000010000>	; 32-47  (dollar,hyphen,period)	;016
+	.WORD	^B<0000001111111111>	; 48-63  (zero-nine)		;016
+	.WORD	^B<1111111111111110>	; 64-79  (A-O)			;016
+	.WORD	^B<1000011111111111>	; 80-95  (N-Z,underscore)	;016
+	.WORD	^B<1111111111111110>	; 96-111 (a-o)			;016
+	.WORD	^B<0000011111111111>	;112-127 (n-z)			;016
+					;*** 8-bit characters ***	;016
+	.WORD	^B<0000000000000000>	;128-143 (none)			;016
+	.WORD	^B<0000000000000000>	;144-159 (none)			;016
+	.WORD	^B<0000000000000000>	;160-175 (none)			;016
+	.WORD	^B<0000000000000000>	;176-191 (none)			;016
+	.WORD	^B<1111111111111111>	;192-207 (various)		;016
+	.WORD	^B<1111111111111111>	;208-223 (various)		;016
+	.WORD	^B<1111111111111111>	;224-239 (various)		;016
+	.WORD	^B<0011111111111111>	;240-255 (various)		;016
+	.ASSUME	.-CHRTB2 EQ 40		;So division will not overreach	;016
+
+.ENABL	LSB
+
+CHKNAM:	PUSH	<R0,R1,R3>		; Get some scratch registers	;016
+10$:	CLR	R0			; Set up for division		;016
+	CLR	R1			; Set up for division		;016
+	BISB	(R5)+,R1		; Get character to check	;016
+	DIV	#10,R0			; Get byte offset and bit (remainder) ;016
+	MOVPIC	#CHRTB2,R3		; Get address of CHRTBL		;016
+	ADD	R0,R3			; Point to correct byte in table ;016
+	BITB	BITBYT(R1),(R3)		; Check if character is legal	;016
+	BEQ	20$			; Bit not set => bad name	;016
+	SOB	R2,10$			; Check next bit		;016
+	TST	(PC)+			; Name is valid (C=0)		;016
+20$:	SEC				; Invalid character found	;016
+	POP	<R3,R1,R0>		; Restore our scratch registers	;016
+	RETURN				; Return to our caller		;016
+
+.DSABL	LSB
+
+.SBTTL	.....CPY2SB	Copy Information into the Solicitation Block
+;+									;016
+; CPY2SB Copy Information into the Solicitation Block
+;
+; INPUTS:
+;	R0   = Total byte count
+;	R4  -> Solicitation Block (contorted address)
+;	R5  -> Offset value into Solicitation Block
+;	(SP) = -> to user's buffer @ name length (mapped APR 6)
+;
+; OUTPUTS:
+;	R0   = Adjusted byte count
+;	R1   = Random
+;	R2   = Random
+;	R3   = Random
+;	R4  -> Solicitation Block
+;	R5   = Return address
+;	(SP) = Updated pointer to user's buffer
+;-									;016
+
+.ENABL	LSB
+
+CPY2SB:	MOV	(SP),R1			; Get -> to user's buffer	;017
+	MOVB	(R1),R2			; Get name length		;017
+	INC	R2			; Account for length field too	;017
+	SUB	R2,R0			; Adjust byte count by that amount ;020
+	ADD	R2,(SP)			; Update the user's buffer -> to ;017
+					;  point beyond the data moved	;020
+	MOV	R0,-(SP)		; Save the byte count		;017
+	MAP	PUSH,APR=6,DATA,PIC	;  and mapping to user's buffer	;017
+	MOV	(SP),R0			; R0 = saved mapping value	;017
+	SUB	#20000,R1		; Make user buffer -> an APR 5	;017
+					;  value for MOVMEM		;017
+	CALLX	MAPBUF			; Map the Sol. Blk through APR 6 ;017
+	ADD	(R5)+,R3		; R3 -> target fields in Sol. Blk ;017
+	CALLX	MOVMEM			; Copy the data			;017
+	MAP	POP,APR=6,DATA,PIC,R=R0	; Remap the user's buffer	;017
+	MOV	(SP)+,R0		; Restore the updated byte count ;017
+	RETURN	R5			;  and return to our caller	;017
+
+.DSABL	LSB
+F2FEND
+
+F2FSRT					; This is the start of LTU8	;016
+;+									;016
+; NETSHP (SR$LSH,SF$SHP) - Return Local LAT Port Status/Characteristics	;020
+;
+; INPUTS:
+;
+;	Return Status:
+;
+;	R4 -> FIRQB
+;	FIRQB+FQPPN    = 0 (No lookup by index)
+;	FIRQB+FQPPN+1  = 1 (Return Status op-code)
+;	FIRQB+FQDEV    = "KB"
+;	FIRQB+FQDEVN   = Unit number
+;	FIRQB+FQDEVN+1 = Unit real flag
+;
+;	Return Characteristics:
+;
+;	R4 -> FIRQB
+;	FIRQB+FQPPN    = index # or 0 if lookup by device
+;	FIRQB+FQPPN+1  = 0 (Return Characteristics op-code)
+;	FIRQB+FQNAM1   = Port Type Code
+;                         1 = Application
+;	                  2 = Interactive
+;	FIRQB+FQDEV    = "KB" (If index = 0)
+;	FIRQB+FQDEVN   = Unit number (If index = 0)
+;	FIRQB+FQDEVN+1 = Unit real flag (If index = 0)
+;
+;	User's low core is not mapped on entry
+;
+;	XRB+XRLEN      = Length of user's buffer
+;	XRB+XRBC       = 0
+;	XRB+XRLOC      = Address of user's buffer
+;
+; OUTPUTS:
+;
+;	For both Return Status and Characteristics:
+;
+;	FIRQB+FQPPN    = Port Type Code (bit mask)			;020
+;			 0 - Application port				;020
+;			 1 - Interactive port				;020
+;			 7 - Dial-up					;020
+;	FIRQB+FQPPN+1  = Solicit Status (bit mask)			;020
+;			 0 - Connected					;020
+;			 1 - Connection failed				;020
+;			 2 - Connection in progress			;020
+;	FIRQB+FQNAM1   = Queue position or 0
+;	FIRQB+FQNAM1+2 = Error code
+;	FIRQB+FQNAM1+3 = Reject reason code
+;	FIRQB+FQEXT    = Owning job #
+;	FIRQB+FQDEV    = "KB"
+;	FIRQB+FQDEVN   = Unit number
+;	FIRQB+FQDEVN+1 = Unit real flag
+;
+;	Return Characteristics only:
+;
+;	XRB+XRBC       = Number of bytes used in buffer
+;	User's Buffer  = Returned data
+;
+; ERRORS:
+;	NODEVC	- The port-name specified is not a dynamic KB.
+;	BADCNT	- The length of the user's buffer is zero and
+;		  "Return Local LAT Port Characteristics" is requested.
+;		- The buffer address was not on a word boundary.
+;	BADFUO	- No local port-name specified.
+;		- An invalid port type code was specified.
+;		- An invalid operation code was specified.
+;	NOTAVL	- No match for index specified.
+;-									;016
+
+.ENABL	LSB
+
+; Errors for Show Port Directive.					;016
+
+10$:	CALL	FREJB8			; Unlock the job		;016
+	ERROR	NODEVC			; Invalid port-name specified	;016
+
+20$:	CALL	FREJB8			; Unlock the job		;016
+	ERROR	BADFUO			; (a) No local port-name	;016
+					; (b) Invalid port type code	;016
+					; (c) Invalid op-code		;016
+
+30$:	CALL	FREJB8			; Unlock the job		;016
+	ERROR	NOTAVL			; No match for index		;016
+
+NETFUN	SHP,<Return Local LAT Port Status/Characteristics>		;020
+
+	NOP				; NOP for debugging purposes	;016
+	MOVB	FQPPN+1(R4),R0		; Get the op-code		;016
+	BEQ	GETNFO			; 0 = Return Characteristics	;020
+	ASR	R0			; Return Status (op-code 1)?	;020
+	BCC	20$			; No, op-code <> 1		;016
+	BNE	20$			; No, op-code >  1		;016
+	MOV	FQDEV(R4),R1		; Specified a port-name		;016
+	BEQ	20$			; No, that's an error		;016
+	CALL	CHKPRT			; Valid port-name?		;019
+	BCS	10$			; No				;016
+	F2CALL	GETSTS			; Get status flag and port-name	;019
+	JMP	FREJB8			; Go free up the job		;016
+
+GETNFO:	MOVB	FQPPN(R4),R0		; Look up by index?		;016
+	BNE	50$			; Yes				;016
+	MOV	FQDEV(R4),R1		; Specified a port-name?	;016
+	BEQ	20$			; No, that's an error		;016
+	CALL	CHKPRT			; Valid port-name?		;019
+	BCS	10$			; No				;016
+	BR	110$			; Go return the data		;016
+
+	;+								;016
+	; Lookup will be done by index. First we need to determine
+	; if the user wants application port n or interactive port
+	; n.
+	;-								;016
+
+50$:	MOV	FQNAM1(R4),R1		; Get specified port type	;016
+	BEQ	20$			; None, a must if by index	;016
+	CMP	#2,R1			; Interactive port lookup?	;016
+	BEQ	70$			; Yes, go look on that list	;016
+
+	;+								;016
+	; Look for application port n.
+	;-								;016
+
+	MOV	R4,-(SP)		; Preserve the FIRQB ->		;017
+	MOV	#LATCTL+L.SOBL,R3	; Get -> to Sol. Blk list	;017
+60$:	MOV	(R3),R4			; Get a Solicitation Block	;017
+	BEQ	30$			; None, didn't find it		;016
+	CALLX	MAPBUF			; Found it, now map it		;017
+	ADD	#SO.LNK,R3		;  and -> at the link word	;017
+	SOB	R0,60$			; Loop if not the right index	;016
+	MOV	SO.SES-SO.LNK(R3),R3	; Get the Session Block ->	;017
+	MOV	(SP)+,R4		; Restore the saved FIRQB ->	;017
+	MAP	FIPPOL			; Remap FIPPOL			;020
+	BR	110$			;  and go return the data	;017
+
+	;+								;016
+	; Look for interactive port n across all servers.
+	;-								;016
+
+70$:	MOV	#LATCTL+L.AVCB,R2 	; Point to first server table	;016
+.ASSUME C.LNK 	EQ 0
+80$:	MOV	(R2),R2			; Point to (next) VCB		;016
+	BEQ	30$			; No more servers, so no match	;016
+	MOV	C.SESQ(R2),R3		; Point at session block	;016
+	BEQ	80$			; No sessions, try next server	;016
+	BR	100$			; Got a session, count it.	;016
+
+.ASSUME S.LNK 	EQ 0
+90$:	MOV	(R3),R3			; Point to next session block	;016
+	BEQ	80$			; Branch if no more sessions	;016
+100$:	TST	S.SOLB(R3)		; Active outbound LAT port?	;017
+	BNE	90$			; Yes, don't count that one	;016
+	SOB	R0,90$			; Decrement index.  Loop if not it. ;016
+
+	;+								;016
+	; At this point we expect:
+	;	R3 -> Session block
+	;	R4 -> FIRQB
+	;-								;016
+
+110$:	MOV	R3,R1			; Copy the session block ->	;016
+	SUB	@#KBDDBX,R1		; Calculate DDB ->		;016
+	SUB	@#KBDDBX,R1		; ...				;016
+	SUB	#KBDDBS,R1		; ...				;016
+	F2CALL	GETSTS			; Get status and port-name	;019
+
+	; Preserve Session block -> and map user's low core		;016
+
+	MOV	R3,-(SP)		; Save the session block ->	;016
+	CALL	MAPUS8			; Map user's buffer		;016
+	MOV	(SP),R3			; Restore the session block ->	;016
+	MOV	R5,(SP)			; Save the start of the buffer	;017
+
+	; If application port, return remote node name in user's buffer	;016
+	; Note: Solicitation Block data will have a type code with the	;017
+	;	sign bit set.
+
+	MOV	S.SOLB(R3),R4		; Get Solicitation Block ->	;017
+	BEQ	120$			; None, Interactive port	;017
+	CALL	CPY2UB,R5,<SO.RNL,100001> ; Copy specified node name	;017
+.ASSUME	SO.RNL+1 EQ	SO.RNM
+	BCS	130$			; No more room left		;016
+
+	; Now the remote service name to the user's buffer		;016
+
+	CALL	CPY2UB,R5,<SO.RSL,100002> ; Copy specified service name	;017
+.ASSUME	SO.RSL+1 EQ	SO.RSN
+	BCS	130$			; No more room left		;016
+
+	; Copy the remote port name to the user's buffer		;016
+
+	CALL	CPY2UB,R5,<SO.RPL,100003> ; Copy specified port name	;017
+.ASSUME	SO.RPL+1 EQ	SO.RPN
+	BCS	130$			; No more room left		;016
+
+	; If a session is active, copy the actual server name		;016
+	; from the Circuit block to the user's buffer			;016
+
+120$:	MOV	S.CIR(R3),R4		; R4 -> Virtual Circuit block	;017
+	BEQ	130$			; None, nothing more to do	;016
+	CALL	CPY2UB,R5,<C.NAML,4>	; Copy actual server name	;017
+.ASSUME	C.NAML+1 EQ	C.NAM
+	BCS	130$			; No more room left		;016
+
+	; Now get the Session -> back and copy the actual port		;016
+	; name from to the user's buffer				;016
+
+	MOV	R3,R4			; Copy the Session Block ->	;017
+	CALL	CPY2UB,R5,<S.PLEN,5>	; Copy actual port name		;017
+
+	; Finished data transfer, update the byte count in the XRB	;016
+
+130$:	SUB	(SP),R5			; Compute # of bytes of data	;017
+	MOV	R5,(SP)			; Save it from MAPLO8		;016
+	CALL	MAPLO8			; Map user's low core		;016
+	MOV	(SP)+,@#140000+XRB+XRBC	; Return count in the XRB	;016
+	.CALLR	FREJB8							;016
+
+.DSABL	LSB
+
+.SBTTL	.....FREJB8	Unlock the job and map FIPPOL
+;									;016
+; Map FIPPOL and release the job
+;									;016
+
+FREJB8:	MAP	FIPPOL			; Be sure FIP pool is mapped	;016
+	MOVB	@#FIJOB,R0		; Get caller's job number	;016
+	CALLRX	UNLOCK			; Release the job		;016
+
+
+.SBTTL	.....MAPUS8	Map a user's buffer
+;+									;016
+; MAPUS8 - Check a user's buffer and map it
+;
+; EXIT:
+;	Z set if no bytes in user's buffer
+;	Z clear otherwise
+;
+;	R0 =	User's buffer length (XRLEN) -- 0 if no buffer
+;	R5 ->	User buffer via APR 6
+;	R2,R3	Destroyed
+;-									;016
+
+MAPUS8:	CALL	MAPLO8			; Map user's lowcore		;016
+	MOV	XRB+XRLEN(R5),-(SP) 	; Save user's data count	;016
+	BEQ	10$			; Branch if no buffer		;016
+	MOV	XRB+XRLOC(R5),R5 	; Get buffer address		;016
+	BIT	#1,R5			; Odd address?			;016
+	BNE	20$			; Yes, error with BADCNT	;016
+	CALL	LDUSR8			; Go map buffer			;016
+10$:	MOV	(SP)+,R0		; Return user's byte count	;016
+	RETURN								;016
+
+20$:	CALL	FREJB8			; Unlock the job		;016
+	ERROR	BADCNT			; Buffer address is not on	;016
+					;     a word boundary.		;016
+
+.SBTTL	.....MAPLO8	Map a user's low core
+.SBTTL	.....LDUSR8	Load and map a user
+;+									;016
+; ENTRY:
+;	R5 ->	User buffer (virtual), LDUSR8 only
+;
+; EXIT:
+;	R0,2,3	Munged
+;	R5 ->	User buffer via APR 6
+;-									;016
+
+MAPLO8:	CLR	R5			; Map user's virtual zero	;016
+LDUSR8:	MOV	@#FIJBDA,R0		; Get job's JDB address		;016
+	BITB	#^C<LCK>,JDMCTL+M.CTRL(R0) ;Job should only be locked	;016
+	BNE	20$			; No?  Very strange		;016
+	SUB	#MC.LCK*400,JDMCTL+M.CTRL-1(R0) ;Take off one lock	;016
+	BCS	20$			; Die on underflow		;016
+	MOVB	@#FIJOB,R0		; Get job number *2		;016
+	CLR	R3			; Dummy L3Q bit to use		;016
+	CALLX	FNDJOB			; Try to map the user		;016
+	 BR	10$			; Load error, die		;016
+	BEQ	20$			; Job wasn't resident, what gives? ;016
+	RETURN				; Done!				;016
+
+10$:	MAP	FIPPOL			; Restore fip mapping		;016
+	JMPX	FIEXIT			; Abort the operation, user will ;016
+					;  die (swap err)		;016
+
+20$:	CRASH				; Something went wrong		;016
+
+GLOBAL	<FIJOB,FIJBDA>							;016
+
+;+									;016
+; CHKPRT - Validate the port-name
+;
+; INPUTS:
+;	R1 =  Device name
+;	R4 -> FIRQB
+;
+; OUTPUTS:
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> Session Block
+;	R4 -> FIRQB
+;
+;	C  =  0 - Valid LAT port
+;	C  =  1 - Not a LAT port
+;-									;016
+
+.ENABL	LSB
+
+CHKPRT:	CMP	#"KB,R1			; Valid device name?		;016
+	BNE	10$			; No, that's an error		;016
+	TSTB	FQDEVN+1(R4)		; Unit number specified?	;016
+	BEQ	10$			; No, that's an error too	;016
+	MOVB	FQDEVN(R4),R0		; Get the unit number		;016
+	CMP	R0,#CNT.KB		; Valid keyboard number?	;016
+	BHIS	10$			; No, that's an error		;016
+	ASL	R0			; Valid, make it unit # * 2	;016
+	MOV	DEV.KB(R0),R1		; R1 -> DDB			;016
+	CMP	R1,#FAKDDB		; Is this the fake DDB?		;016
+	BEQ	10$			; Yes, the device doesn't exist	;016
+	CMPB	TTINTF(R1),#TTLT11	; Is it a LAT port?		;016
+	BNE	10$			; No, needs to be LAT		;016
+	MOV	CSR.KB(R0),R3		; R3 -> Session block		;016
+	TST	(PC)+			; Valid outbound port-name (C=0) ;016
+10$:	SEC				; Invalid port-name		;016
+	RETURN				; Return to our caller		;016
+
+GLOBAL	<DEV.KB,FAKDDB,KBDDBX>						;016
+
+.DSABL	LSB
+
+.SBTTL	.....CPY2UB	Copy Information into the User's Buffer
+;+									;016
+; CPY2UB Copy Information into the User's Buffer
+;
+; INPUTS:
+;	R0   = # of bytes left in the user's buffer
+;	R4  -> Circuit, Solicitation or Session block
+;	R5  -> Offset into R3 of data to be copied
+;	       Data type code (  < 0 = Solicitation data)
+;			      ( >= 0 = Circuit or Session data)
+;	(SP) = Pointer to user's buffer mapped through APR 6
+;
+; OUTPUTS:
+;	R0   = # of bytes left (updated)
+;	R1   = Random
+;	R2   = Random
+;	R3   = Preserved
+;	R4   = Preserved
+;	R5   = Return address
+;	(SP) = Updated pointer to user's buffer
+;
+;	C  =  0 Indicate still room left in the user's buffer
+;	C  =  1 User's buffer is used up
+;-									;016
+
+CPY2UB:	MOV	R3,-(SP)		; Get a scratch register	;017
+	MOV	R4,-(SP)		;  and save our block ->	;017
+	MOV	(R5)+,R1		; Pick up the offset value	;017
+	TST	(R5)			; Solicitation Block data	;017
+	BPL	10$			; No, positive type code	;017
+	MAP	PUSH,APR=6,DATA,PIC	; Yes, save user's mapping	;017
+	CALLX	MAPBUF			; Map the Solicitation Block	;017
+	ADD	R3,R1			; R1 -> target data @ name length ;017
+	MOVB	(R1),R2			; Get the name length		;017
+	MOV	@#DPAR6,R4		; Get -> to Sol. Blk's MMU value ;017
+	MOV	(R4),R4			; Get the MMU value for MOVMEM	;017
+	MAP	POP,APR=6,DATA,PIC,R=R3	; Remap the user's buffer	;017
+	SUB	#20000,R1		; Make R1 and APR 5 value	;017
+	BR	20$			;  and join up			;017
+
+	;+								;017
+	; At this point the Stack is as follows:
+	;	(SP) = Saved block ->
+	;	 +2    Saved R3
+	;	 +4    User's buffer ->
+	;-								;017
+
+10$:	ADD	R4,R1			; R1 -> target data @ name length ;017
+	MOVB	(R1),R2			; Get name length		;017
+20$:	TST	R2			; Any data to move? (C=0)	;017
+	BEQ	50$			; No, nothing to do		;017
+	INC	R2			; Yes, account for length field	;017
+	MOV	4(SP),R3		; Get -> to user's buffer	;017
+	MOVB	(R5),(R3)+		; Set the type code in the buffer ;017
+	DEC	R0			; Adjust the byter count for it	;017
+	BEQ	40$			; No more room left		;017
+	CMP	R2,R0			; More data than we have room for? ;017
+	BLE	30$			; No, good than it will all fit	;017
+	MOV	R0,R2			; Yes, Give as much as we can	;017
+30$:	SUB	R2,R0			; Update the byte count		;017
+	MOV	R0,-(SP)		;  and save it			;017
+	MOV	R4,R0			; Put block -> in R0 for MOVMEM	;017
+	MOV	R2,-(SP)		; Save length of data to move	;022
+	MOV	R3,-(SP)		;  along with the start address	;022
+	CALLX	MOVMEM			; Now go move the data		;022
+	MOV	(SP)+,R3		; Restore the start address	;022
+	ADD	(SP)+,R3		;  and add in the amount moved	;022
+	MOV	(SP)+,R0		; Restore the byte count	;017
+40$:	MOV	R3,4(SP)		; Return the updated ->		;022
+	TST	R0			; Still more room left? (C=0)	;017
+	BNE	50$			; Yes
+	SEC				; User's buffer is full		;016
+50$:	MOV	(R5)+,R4		; R5 -> return address (C saved) ;017
+	MOV	(SP)+,R4		; Restore our block ->		;017
+	MOV	(SP)+,R3		; Restore the saved ->		;017
+	RETURN	R5			;  and return to our caller	;017
+
+F2FEND
+
+F2FSRT
+;+									;016
+; NETCRP (SR$LSE,SF$CRP) - Create a Local LAT Port			;020
+;
+; INPUTS:
+;	R4 -> FIRQB
+;	FIRQB+FQDEV    = "KB" or 0 (0 = Select a free port)
+;	FIRQB+FQDEVN   = Unit number
+;	FIRQB+FQDEVN+1 = Unit real flag
+;
+; OUTPUTS:
+;	FIRQB+FQDEV    = "KB"
+;	FIRQB+FQDEVN   = Unit number of port created
+;	FIRQB+FQDEVN+1 = -1
+;
+; ERRORS:
+;	NODEVC = Port-name specified is not a dynamic KB.
+;	INUSE  = Dynamic KB specified is in use.
+;	NOBUFS = Not enough small buffers to create KB.
+;-									;016
+
+.ENABL	LSB
+
+; Errors for Create Port Directive.
+
+10$:	ERROR	NODEVC			; Invalid port-name specified	;016
+
+20$:	ERROR	INUSE			; Port currently in use		;016
+
+30$:	ERROR	NOBUFS			; Not enough small buffers	;016
+
+NETFUN	CRP,<Create a Local LAT Port>					;020
+
+	NOP				; NOP for debugging purposes	;016
+	CLR	R0			; Assume no port-name specified	;016
+	MOV	FQDEV(R4),R1		; Port-name specified?		;016
+	BEQ	50$			; No, then let CREKBD pick one	;016
+	CMP	#"KB,R1			; Is the device name "KB"?	;016
+	BNE	10$			; No, then that's an error	;016
+	TSTB	FQDEVN+1(R4)		; Unit specified?		;016
+	BEQ	10$			; No, needs to have one		;016
+	MOVB	FQDEVN(R4),R0		; Get the unit number		;016
+	BMI	10$			; It's illegal ( > 127. )	;016
+	ASL	R0			; Make it unit # * 2		;016
+	CMP	R0,@#DYNKBN		; Is it a static KB #?		;016
+	BLT	10$			; Yes, then that's illegal too	;016
+	CMP	DEV.KB(R0),#FAKDDB	; Is it in use?			;016
+	BNE	20$			; Yes, then it's not available	;016
+
+	;+								;016
+	; We have a valid port-name, now create the port. We need
+	; to specify the amount to extend the DDB by so the Session
+	; and Solicitation blocks are allocated at the same time.
+	;
+	; If no port-name was specified we call CREKBD with:
+	;	R1 = Extend length
+	;
+	; If a port-name was specified we call CREKB2 with:
+	;	R0 = Unit # * 2
+	;	R1 = Extend length
+	;-								;016
+
+50$:	MOV	#S.LEN,R1		; Get length of Session block	;016
+	MOV	R4,-(SP)		; Save the FIRQB ->		;016
+	TST	R0			; Port-name specified		;016
+	BNE	60$			; Yes				;016
+	CALLM	CREKBD,KBDAP5		; No, create one letting TTDVR	;016
+					;  pick the first free one	;016
+	BR	70$							;016
+
+60$:	CALLM	CREKB2,KBDAP5		; Create the port requested	;016
+70$:	BCS	30$			; Error if create failed	;016
+
+	;+								;016
+	; On return from the CREKBx routines we have:
+	;	R0 =  Unit # * 2
+	;	R1 -> DDB
+	;	R4 -> Session block
+	;	SP =  FIRQB ->
+	;-								;016
+
+	MOV	#TTLT11,TTINTF(R1)	; Say it's a LAT port		;016
+	BIS	#DDAPLT,(R1)		;  and an application terminal	;019
+.ASSUME DDIDX	EQ	0						;020
+.ASSUME	DDSTS	EQ	DDIDX+1
+	MOV	#S.LEN,R3		; Get the extension length	;017
+	ASR	R3			;  and make it words		;016
+	MOV	R4,-(SP)		; Save the Session block ->	;017
+80$:	CLR	(R4)+			; Clear a word in the extend area ;016
+	SOB	R3,80$			; Continue until it's all zeroed ;016
+
+	; Now try and allocate the Solicitation Block from XBUF		;017
+
+	MOV	R1,-(SP)		; Save the DDB ->		;017
+	CLR	R0			; Set the cache inhibit flag	;017
+	MOV	#SO.LEN,R1		; Get size of Solicitation Block ;017
+	MOV	#-1,R2			; Never use MONPOL		;017
+	CALLX	BUFFER,R5,EXTPOL	; Now try to create one		;017
+	BCC	90$			; Got one			;017
+	MOV	(SP)+,R1		; Failed, get back the DDB ->	;017
+	CALLM	REMKBD,KBDAP5		;  and return it		;017
+	BR	30$			; Return allocation error	;017
+
+	;+								;017
+	; At this point we've succeeded in creating a Solicitation Block.
+	; We expect the registers to be as follows:
+	;
+	;	R1  = Buffer length allocated (in bytes)
+	;	R4 -> Solicitation Block (contorted address)
+	;	SP  = DDB ->
+	;	      Session Block ->
+	;	      FIRQB ->
+	;-								;017
+
+90$:	CALLX	MAPBUF			; Map the Solicitation Block	;017
+	MOV	R3,-(SP)		; Save its virtual address	;017
+	ADD	#SO.LNK,R3		;  and -> beyond header		;017
+	MOV	#<SO.LEN-SO.LNK>,R1	; Get length Solicitation Block	;017
+	ASR	R1			;  and make it a word count	;017
+100$:	CLR	(R3)+			; Clear a word in the block	;017
+	SOB	R1,100$			; Loop until done		;017
+	MOV	(SP)+,R3		; Restore the virtual address	;017
+	MOV	(SP)+,R1		;  along with the DDB ->	;017
+	MOV	(SP)+,R2		;  and Session Block ->		;017
+	MOV	R4,S.SOLB(R2)		; Set Sol. Blk -> in Ses. Blk	;017
+	MOV	R2,SO.SES(R3)		;  and Ses. Blk -> in Sol. Blk	;017
+	BISB	#SOD.QD,SO.DEF(R3)	; Set default of queued access	;019
+	MOVB	DDUNT(R1),R1		; Pick up the unit number	;019
+	MOV	R1,-(SP)		;  and save it away		;019
+	ADD	#SO.LPN,R3		; -> to Local Port Name field	;019
+	MOV	R3,-(SP)		;  Save the virtual address	;019
+	MOVB	#'K,(R3)+		; Now set the name		;019
+	MOVB	#'B,(R3)+		;  ...				;019
+	CALL	200$			; Now do the KB number in ASCII	;020
+	SUB	(SP),R3			; Compute the length		;019
+	MOV	(SP)+,R2		; Get the saved address		;019
+	MOVB	R3,-(R2)		; Store the port name length	;019
+.ASSUME	SO.LPL	EQ	SO.LPN-1
+	MOV	(SP)+,R1		; Get the saved unit number	;019
+
+	; Now link in the Solicitation Block
+
+	MOV	R4,R2			; Copy the Sol. Blk ->		;017
+	MOV	#LATCTL+L.SOBL,R0	; R0 -> Solicitation Block list	;017
+	MOV	2(R0),R4		; Get the tail pointer		;017
+	CMP	R0,R4			; Empty list?			;017
+	BNE	110$			; No				;017
+	MOV	R2,(R0)			; Yes, set head ->		;017
+	BR	120$			; Now do the tail ->		;017
+
+110$:	CALLX	MAPBUF			; Map Sol. Blk from end of list ;017
+	MOV	R2,SO.LNK(R3)		; Link in the new one		;017
+120$:	MOV	R2,2(R0)		; End of the list too		;017
+
+	; Tell the user which port was created				;017
+
+	MOV	(SP)+,R4		; Restore the saved FIRQB ->	;016
+	MOV	#"KB,FQDEV(R4)		; Return the created port name	;016
+	MOVB	R1,FQDEVN(R4)		; Now set the unit #		;019
+	MOVB	#-1,FQDEVN+1(R4)	;  and real flag in the FIRQB	;016
+	MAP	FIPPOL			; Make sure fip pool is mapped	;016
+	RETURN				; and exit			;016
+
+
+	;+								;019
+	; Routine to convert a number into ascii
+	;
+	; Inputs:
+	;	R1 =  Unit Number
+	;	R3 -> Solicit Block @ SO.LPN+3
+	;
+	; Outputs:
+	;	R0 =  Random
+	;	R1 =  Random
+	;	R3 -> Solicit Block updated
+	;-								;019
+
+200$:	CLR	R0		;Set up for divide			;019
+	DIV	#10.,R0		;Divide the number by 10		;019
+	MOV	R1,-(SP)	;Stack the remainder			;019
+	MOV	R0,R1		;Copy the quotient			;019
+	BEQ	210$		;Branch if done				;019
+	CALL	200$		;Not yet, recursively do it again	;019
+210$:	MOV	(SP)+,R1	;Get digit				;019
+	ADD	#'0,R1		;Convert to ASCII			;019
+	MOVB	R1,(R3)+	;Buffer it				;019
+	RETURN			;Exit					;019
+
+GLOBAL	<DYNKBN,FAKDDB,DEV.KB,EXTPOL>					;017
+
+.DSABL	LSB
+
+.SBTTL	.....GETSTS	Return Status Flag and Port-name
+;+									;016
+; GETSTS Return Status Flag and Port-name
+;
+; INPUTS:
+;	R1 -> DDB
+;	R3 -> Session Block
+;	R4 -> FIRQB
+;
+; OUTPUTS:
+;	R1 -> DDB
+;	R2  = Random
+;	R3 -> Session Block
+;	R4 -> FIRQB
+;	FIRQB+FQPPN    = Port Characteristics (bit mask)		;021
+;			 0 - Application port				;020
+;			 1 - Interactive port				;020
+;			 2 - Dial-up					;021
+;			 7 - Port set for QUEUED access			;021
+;	FIRQB+FQPPN+1  = Port Status (bit mask)				;021
+;			 0 - Connected					;020
+;			 1 - Connection failed				;020
+;			 2 - Connection in progress			;020
+;	FIRQB+FQNAM1   = Queue position or 0
+;	FIRQB+FQNAM1+2 = Error code
+;	FIRQB+FQNAM1+3 = Reject reason code
+;	FIRQB+FQEXT    = Owning job #
+;	FIRQB+FQDEV    = "KB"
+;	FIRQB+FQDEVN   = Unit number
+;	FIRQB+FQDEVN+1 = Unit real flag
+;-									;016
+
+.ENABL	LSB
+
+GETSTS:	MOV	R3,-(SP)		; Save the Session Block ->	;016
+	MOV	#2+<1*400>,FQPPN(R4)	; Assume interactive port	;020
+					;  status = connected		;021
+					;  NOQUEUED access		;021
+	BIT	#TTMODM,TTINTF(R1)	; Dialup?			;021
+	BEQ	50$			; No				;020
+	BISB	#4,FQPPN(R4)		; Yes, let caller know		;020
+50$:	CLR	FQNAM1(R4)		; No queue position		;020
+	CLR	FQNAM1+2(R4)		;  or error and reject codes	;019
+	MOV	R4,R2			; Copy the FIRQB ->		;017
+	MOV	S.SOLB(R3),R4		; Get Solicitation Block ->	;017
+	BEQ	70$			; None, good assumption		;020
+	DECB	FQPPN(R2)		; Got one, set application port	;017
+	CALLX	MAPBUF			; Map it			;017
+	MOVB	SO.DEF(R3),-(SP)	; Get the default settings	;021
+	MOVB	SO.STS(R3),R4		;  and the status byte		;021
+	BEQ	55$			; Idle port, use the defaults	;021
+	MOVB	SO.CUR(R3),(SP)		; Active, use current settings	;021
+55$:	BICB	#^C<SOD.QD>,(SP)	; Clear all but access type bit	;021
+	BISB	(SP),FQPPN(R2)		; Return access type setting	;021
+.ASSUME	SOD.QD	EQ	200
+	MOV	R4,(SP)			; Save the status byte		;021
+	BICB	#^C<SOS.CN!SOS.ER>,R4	; Keep connected and error status ;019
+	BITB	#SOS.WI!SOS.WT!SOS.WR!SOS.WS,(SP) ; Waiting on something? ;021
+	BEQ	60$			; No, done with status		;020
+	BISB	#4,R4			; Say connection in progress	;019
+60$:	MOVB	R4,FQPPN+1(R2)		; Return the status byte	;020
+	MOVB	SO.ERR(R3),FQNAM1+2(R2)	; Return the error code		;019
+	MOVB	SO.RJR(R3),FQNAM1+3(R2)	;  and reject reason		;019
+	BITB	#SOS.WS,(SP)+		; Waiting for start slot?	;021
+	BEQ	70$			; No, then no queue data	;020
+	MOV	SO.QUE(R3),FQNAM1(R2)	; Yes, return queue position	;019
+70$:	MOV	R2,R4			; Restore the FIRQB ->		;017
+	MOVB	DDJBNO(R1),R2		; Get the owning job #		;019
+	ASR	R2			; Make it job # * 1		;019
+	MOVB	R2,FQEXT(R4)		;  and return it		;019
+	MOV	#"KB,FQDEV(R4)		; Set the device name		;016
+	MOVB	DDUNT(R1),FQDEVN(R4)	;  unit #			;016
+	MOVB	#-1,FQDEVN+1(R4)	;  and unit real flag		;016
+	MOV	(SP)+,R3		; Restore Session Block ->	;017
+	MAP	FIPPOL			; Make sure fip pool is mapped.	;021
+	RETURN				;  and exit.			;021
+	
+.DSABL	LSB
+F2FEND
+.END

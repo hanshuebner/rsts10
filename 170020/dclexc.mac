@@ -1,0 +1,292 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.LIBRARY	/DCL:DCLMAC.MLB/
+.NLIST
+.INCLUDE	/DCL:DCLPFX.MAC/
+.LIST
+TITLE	DCLEXC,<Exception Handlers>,0C,19-JUL-91,CEK/JFM/BTB
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DCLEXC
+;+
+;
+;  001	CEK  16-APR-82	Added edit history
+;  002	CEK  16-APR-82	Removed @# notation
+;  003	CEK  30-APR-82	Changed ORG statements
+;  004	CEK  30-APR-82	Eliminated reset of channels in EXIT subroutine
+;  005	CEK  15-MAY-82	Moved EXIT subroutine to DCLRTS.MAC.
+;  006	CEK  15-MAY-82	Moved P.STRT and P.CRAS entry points to DCLRTS.MAC.
+;  007	CEK  28-MAY-82	Log error on all software failures.
+;  008	CEK  01-JUN-82	Moved error checker into CUICHK.MAC.
+;  009	CEK  18-Jul-82	Reset open files on CTRL/C.
+;  010	CEK  03-Dec-82	Trap error setting "trouble" flag.
+;  011  JFM  28-Nov-83  Modified code that does CTRL/C handling
+;  012	JFM  08-May-83  Changed U.MSGs to CMESSAGEs
+;  013	JFM  30-Jan-85	Set CTRL/C flag in P..CC.  Read/clear monitor CC flag
+;
+;			[RSTS/E V10.0]
+;  014  BTB  26-Oct-89	Add display of all registers on failures
+;
+;			[RSTS/E V10.1]
+;  015	JFM  12-Jul-91	Change name of variable
+;
+;-
+
+	.PSECT	DCLEXC,RO,REL,CON
+	DEFORG	DCLEXC
+	.MCALL	$CUI,$FAP
+	$CUI	MSG
+
+.SBTTL	Variables
+
+	TMPORG	IMPURE
+TROUBLE::.BLKW			;Recursion flag for exception handling.
+				;Zero if we're not processing an exception.
+				;Non-zero if we are.
+	UNORG
+
+.SBTTL	P..BAD--Handle P.BAD error.
+;+
+; P.BAD--Handler for bad errors.
+;
+; This routine handles the P.BAD entry point.
+;
+; For a synchronous trap, say ?DCL system error.
+; Print PC location at which error occurred
+; Print RSTS error message.
+; Reset the world.  Exit to default KBM.
+;
+; For a stack overflow, say ?DCL system error.
+; Print ?SP stack overflow.
+; Clear out the logical table.
+; Exit to default KBM.
+;
+; For a monitor error (?Memory parity failure or ?Disk error during swap),
+; print RSTS error message.
+; Exit to job KBM.
+;-
+
+.ENABL	LSB
+
+P..BAD::CLR	R0		;Facility is monitor, code is 0.
+	BISB	FIRQB,R0	;Get error code.
+	CMPB	R0,#B.4		;Odd address trap?
+	BEQ	ABORT		;Yes, it's a software error.
+	CMPB	R0,#B.10	;Reserved instruction trap?
+	BEQ	ABORT		;Yes, it's a software error.
+	CMPB	R0,#B.250	;Memory management violation?
+	BEQ	ABORT		;Yes, it's a software error.
+
+; Hardware error or stack overflow.  Nothing in user space is to be trusted.
+
+	MOV	#YES,TROUBLE	;We're in trouble.
+	MOV	#STACK,SP	;Reset stack.
+	CALLX	U$RSTP		;Reset the print buffer.
+	CMP	R0,#B.STAK	;Is it ?SP stack overflow?
+	IFEQ			;If so then
+	JMP	STK.OV		;  Go handle it.
+	ENDIF
+	CMESSAGE R0		;Else print the message.
+	JMPX	EXIT		;Exit to job KBM.
+
+.DSABL	LSB
+GLOBAL	<B.STAK,B.4,B.10,B.250,STACK>
+
+.SBTTL	P..TRAP -- Handle TRAP
+
+;+
+; TRAP - Handle feep calls
+;
+; CALL:
+;	TRAP	'c
+;
+; RESULT:
+;	The letter 'c' is printed on the terminal.
+;	This is a performance monitoring feature.
+;-
+
+.ENABL	LSB
+P..TRAP::
+	CALL	DOTRAP
+	RTI
+
+DOTRAP:	CALL	SAVFQX
+	CALLX	CLRFQX
+	INC	XRB+XRLEN
+	INC	XRB+XRBC
+	MOV	FQBSIZ+XRBSIZ+10(SP),XRB+XRLOC
+	SUB	#2,XRB+XRLOC
+	MOV	#0,XRB+XRMOD
+	.WRITE
+	RETURN
+
+SAVFQX:	PUSH	R5
+	MOV	#FIRQB,R5
+10$:	PUSH	(R5)+
+	CMP	R5,#CORCMN
+	BLO	10$
+	MOV	XRBSIZ+FQBSIZ(SP),R5
+	CALL	@XRBSIZ+FQBSIZ+2(SP)
+	MOV	R5,XRBSIZ+FQBSIZ(SP)
+	MOV	#CORCMN,R5
+20$:	POP	-(R5)
+	CMP	R5,#FIRQB
+	BHI	20$
+	POP	R5
+	TST	(SP)+
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	P..FIS--Handle floating point error.
+.SBTTL	P..FPP--Handle floating point error.
+.SBTTL	P..BPT -- Handle BPT
+.SBTTL	P..IOT -- Handle IOT
+.SBTTL	P..EMT -- Handle EMT
+
+.ENABL	LSB
+
+P..FPP::
+P..FIS::
+P..BPT::
+P..IOT::
+P..EMT::
+	MOV	#B.10,R0	;?Reserved instruction trap.
+	.BR	ABORT		;Report error and PC at which it occurred,
+				;and exit to default KBM.
+.DSABL	LSB
+GLOBAL	<B.10>
+
+.SBTTL	ABORT--Report fatal error and PC value, and die.
+;+
+; ABORT--Report fatal error and PC value, and die.
+;
+; INPUTS:
+;	(SP)	=	address at which error occurred.
+;	R0	=	error code (non-zero)
+;
+; CALLING SEQUENCE:
+;	JMP	ABORT
+;
+; EFFECT:
+;	If the stack has not overflowed, 
+;		We print the following message on channel 0.
+;			?DCL fatal error at <pc>--
+; 		where <pc> is the value on top of the stack.
+;		We print the message indicated in R0.
+;	Else
+;		We print the message
+;			?DCL system error ...
+;			?Stack overflow.
+;	We then exit to system default KBM.
+;-
+
+.ENABL	LSB
+
+ABORT:	.ERLOG			;Log an error.
+	TST	TROUBLE		;Are we already in trouble?
+	BNZ	10$		;Yes.  Just exit fast.
+	CMP	(SP),#SETTRB	;No. Did we get the error while trying
+				;to set the trouble flag?
+	BEQ	10$		;Yes.  Give up.
+	COM	TROUBLE		;No, but now we have trouble.
+SETTRB	=:	.		;(Value of PC if the preceeding instruction
+				;gets a memory management violation.  This
+				;can happen if DCL is linked improperly.)
+	CMP	SP,#STK.BOT	;Have we overflowed stack?
+	BLT	STK.OV		;Yes, go handle stack overflow.
+	CMP	STK.GRD,#STK.GV ;Check stack guard value.
+	BNE	STK.OV		;It's wrong, go handle stack overflow.
+	PUSH	<R1,R2>		;Save registers for output		;014
+	MOV	R0,R2		;Save error code.
+	MOV	2*2(SP),R1	;Get calling address.			;014
+	SUB	#2,R1		;Bump back to address where the problem 
+				;really occurred.
+	MOV	#STACK,SP	;Reset stack, just in case.
+	CMESSAGE #SYS.E		;Print ??Program failure in DCL
+	CMESSAGE R2		;Print the message.
+	POP	<R2,R1>		;Restore registers			;014
+	MOV	(SP),R0		;Save PC				;014
+$FAP <"?R1=!OW  R2=!OW  R3=!OW  R4=!OW  R5=!OW  PC=!OW"<CR><LF>>,<R1,R2,R3,R4,R5,R0>
+				;Say "R1=value  R2=value ... PC=value".	;014
+10$:	.EXIT			;Exit to default KBM.
+		
+.DSABL	LSB
+GLOBAL	<SYS.E,STK.BOT,STACK,STK.GRD,STK.GV>
+
+.SBTTL	P..CC--Handle CTRL/C.
+.SBTTL	P..2CC--Handle double CTRL/C.
+;+
+; P..CC--Handle CTRL/C.
+; P..2CC--Handle double CTRL/C.
+;
+; Set flag indicating we saw a Control C and return inline.  We clear this
+; flag when DCL is initialized and everytime we look at this flag.  We look
+; at this flag before DCL goes away (.RUN and .CCL) and during long outputs
+; (like SHOW SYMBOL/ALL).
+;
+; NOTE:	LASTCC means that the very last thing that happened was the user 
+;	hit a CTRL/C.  We set the CCHIT bit also, which indicates that a 
+;	CTRL/C was hit and we should unnest from within a command file.
+;
+;	CCHIT must be set for the unusual case of guarding against the user
+;	typing a CTRL/C directly after issuing an "@" command.  When the "@"
+;	command starts, we clear the monitor's CTRL/C flag and LASTCC, but
+;	CCHIT is still set so the CTRL/C that the user typed will not be 
+;	ignored.  It will merely EXIT the command procedure.
+;-
+
+.ENABL	LSB
+
+P..2CC::
+P..CC::	MOVB	#CCHIT!LASTCC,DCLFLG	;Flag indicating CTRL/C hit	;015
+	.TTRST				;Reset ^O
+	RTI				;Return inline.
+
+.DSABL	LSB
+
+GLOBAL	<DCLFLG>
+
+.SBTTL	STK.OV -- Handle stack overflow.
+;+
+; STK.OV -- Handle stack overflow.
+;
+; Reset stack, zero logical table, report error, exit to default KBM.
+;-
+
+.ENABL	LSB
+
+STK.OV::MOV	#STACK,SP	;Reset stack.
+	MOV	#USRPPN,R1	;Point at assigned PPN.
+	.ASSUME	USRPRT EQ USRPPN+2 ;Private default protection code ...
+	.ASSUME	USRLOG EQ USRPRT+2 ;and user logicals are adjacent.
+	MOV	#1+1+16.,R2	;Get word count for the table.
+10$:	CLR	(R1)+		;Zero out ...	
+	SOB	R2,10$		; the logicals, PPN, and protection code.
+	CALLX	U$RSTP		;Reset print buffer.
+	CMESSAGE #SYS.E		;Say ??Program failure in DCL
+	CMESSAGE #B.STAK	;Say ?SP stack overflow.
+	CMESSAGE #FUCORE	;Say ?Program lost-Sorry.
+	.EXIT			;Exit to default KBM.
+
+.DSABL	LSB
+GLOBAL	<B.STAK,FUCORE>
+.END

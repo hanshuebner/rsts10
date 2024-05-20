@@ -1,0 +1,260 @@
+1	SUB VMSCMD
+	!
+	!
+	!********************************************************************
+	!
+	!	s u b p r o g r a m   t i t l e
+	!
+	!	  subprogram : VMSCMD
+	!	     version : V10.1
+	!	        edit : A
+	!	   edit date : 10-MAY-91
+	!	   author(s) : DBM
+	!
+	!********************************************************************
+	!
+	!		  C O P Y R I G H T
+	!
+	!
+	!		      Copyright (C) 1984, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.
+	!
+	!
+	! This software is furnished under a license and may be used and
+	! copied  only  in accordance with the terms of such license and
+	! with the  inclusion  of  the  above  copyright  notice.   This
+	! software  or  any  other copies thereof may not be provided or
+	! otherwise made available to any other person.  No title to and
+	! ownership of the software is hereby transferred.
+	!
+	! The information in this software is subject to change  without
+	! notice  and should not be construed as a commitment by Digital
+	! Equipment Corporation.
+	!
+	! DIGITAL assumes no responsibility for the use  or  reliability
+	! of its software on equipment that is not supplied by DIGITAL.
+	!
+	!********************************************************************
+	!
+	!	m o d i f i c a t i o n   h i s t o r y   l o g
+	!
+	! VER/ED	EDIT DATE	REASON
+	!
+	! V10.0-0G	28-Nov-89	(DBM) Creation
+	!
+	!********************************************************************
+	!
+	!	s u b p r o g r a m   d e s c r i p t i o n
+	!
+	!	This subprogram is called by OMSMGR to process the commands:
+	!
+	!		REPLY/DISABLE
+	!		REPLY/ENABLE
+	!		REPLY/STATUS
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	C o m p i l e   O P T I O N s
+	!
+	!********************************************************************
+
+	OPTION	TYPE = EXPLICIT
+
+	!********************************************************************
+	!
+	!	I N C L U D E   r e q u i r e d   M A P s , C O M M O N s
+	!
+	!********************************************************************
+
+	%INCLUDE "CUI:CUICMN.E2S"		! Include CUI data section
+	%INCLUDE "SYSTEM:CMNDEF.B2S"		! Include OMS common defs
+	%INCLUDE "SYSTEM:OMSKEY.B2S"		! Include CUI key definitions
+
+	EXTERNAL WORD CONSTANT	NOSUCH,		! ?Can't find file or account &
+				NODEVC,		! ?Not a valid device	      &
+				PRVIOL,		! ?Protection violation	      &
+				WRGPAK,		! ?Pack IDs don't match	      &
+				EOF		! ?End of file on device
+
+	DECLARE STRING		TEMP, KB	! Local string storage
+
+	DECLARE	WORD CMDLEN, WAIT_TIME, NOTIFY, TIME_OUT, I
+
+	EXTERNAL WORD FUNCTION						      &
+			PRIVED (STRING),	! Function to check for priv  &
+			FORMAT,			! Function to format replies  &
+			MGRSND (WORD, WORD),	! Function to send to OMS     &
+			MGRRCV (STRING, WORD, WORD, STRING) ! FN to rcv OMS ack
+
+	MAP (FMTBUF)	STRING FILL = 160%	! Allocate request header space
+	MAP DYNAMIC (FMTBUF)	STRING REQUEST	! Variable request header text
+
+	EXTERNAL WORD				! Patch points for OMSSUB     &
+				OMS$LO,		!   OMS Local Object Type     &
+				OMS$MM,		!   Message Max for declare   &
+				OMS$PD,		!   Raise privs for declare   &
+				OMS$PS		!   Raise privs for send
+
+	MAP (OMSREQ)	STRING	FILL = 14%,	! Layout parameter buffer     &
+			WORD	OMSCMD,		!   Command sent to OMS	      &
+				FILL(6),	!   Skip to error status word &
+				ERRSTS,		!   Error returned from call  &
+				ERRFLD		!   Error field from call
+
+	MAP (CMDBUF)	STRING	FILL = 260%	! Layout of command buffer:
+	MAP (CMDBUF)	BYTE	FLD.REP,	! Byte for OC$REP	      &
+				FLD.TYP,	! Byte for request type	      &
+				FLD.FAC,	! Byte for OC$FAC	      &
+				FLD.FLEN,	! Byte for facility length    &
+			STRING	FLD.FNAM = 4%,	! String for facility (OMS)   &
+			BYTE	FLD.TXT,	! Byte for OC$TXT	      &
+				FLD.LEN,	! Byte for text length	      &
+			STRING	FLD.REQ = 250%	! String for request text
+
+	!	m a i n   s u b p r o g r a m   l o g i c
+
+	GOTO REPLY_END UNLESS PRIVED(PRIV.OPER)	! Get out now if not an operator
+
+	KB = "_KB" +  NUM1$(KB.NO) + ": "	! Build _KBn: string
+	FQB = SYS(UU.TRM + "1"C + "255"C)	! Get current operator setting
+	CALL FET$CQ (DIS.Q)			! Look for /DISABLE
+	IF U.PRES				! Was it there?
+	THEN
+	  GOTO NON_OPERATOR UNLESS FQFLAG AND ML.ALL
+	  TEMP = "disabled"			! Yes, set text for this action
+	  GOSUB BUILD_REQUEST			!   Notify all operators
+	  FQB = SYS(UU.TRM + "1"C + "255"C +	!   Set terminal char	      &
+			STRING$(15%, 0%) +	!     Skip to right place     &
+			CHR$(ML.ALL))		!     for /OPER=NONE
+	  GOTO REPLY_END			!   All done
+	END IF
+
+	CALL FET$CQ (ENA.Q)			! Look for /ENABLE
+	IF U.PRES				! Was it there?
+	THEN
+	  FQB = SYS(UU.TRM + "1"C + "255"C +	! Yes, set terminal char      &
+			STRING$(14%, 0%) +	!   Skip to right place	      &
+			CHR$(ML.ALL))		!     for /OPER=ALL
+	  TEMP = "enabled"			!   Text for this action
+	  GOSUB BUILD_REQUEST			!   Notify all operators
+	END IF					! Now do a REPLY/STATUS
+
+ REPLY_STATUS:
+	FQB = SYS(UU.TRM + "1"C + "255"C)	! Get current operator setting
+
+	SELECT (FQFLAG AND ML.ALL)		! Select current status
+
+	  CASE	0%
+	    TEMP = "None"
+	  CASE	ML.MSG
+	    TEMP = "Messages"			!   /OPERATOR=MESSAGES
+	  CASE	ML.REQ
+	    TEMP = "Requests"			!   /OPERATOR=REQUESTS
+	  CASE	ML.ALL
+	    TEMP = "Messages, Requests"		!   /OPERATOR=ALL
+
+	END SELECT
+
+	PRINT #OUT.CHNL, CR.LF; "Operator "; KB; "status: "; TEMP
+
+	ON ERROR GOTO OPEN_ERR			! Set local error trap
+	FQB = SYS(REGAIN.PRIVS)			! We may need privs for this...
+
+	OPEN OMS.LOC + OMS.SYS			! Open the work file	      &
+		FOR INPUT AS SYS.CHNL,		!   Must already exist	      &
+		ORGANIZATION VIRTUAL,		!   Open in native mode	      &
+		MAP OMSREQ, MODE 4096%		!   Open in read-regardless mode
+
+	FQB = SYS(DROP.PRIVS)			! Done with the privs
+	CALL GETSYS BY REF (0%, OMSINT)		! Locate the header
+	CAUSE ERROR WRGPAK			! Consistancy checks:	      &
+	  IF (OMS.VER <> PTCL.VER)		!   Version number check      &
+	  OR (OMS.REV <> PTCL.REV)		!   Revision level check
+
+	ON ERROR GOTO GET_ERR			! Change error handler
+	FOR I = 1% WHILE TRUE			! Start looking at slot 1
+
+	  CALL GETSYS BY REF (I, OMSREQ)	! Is there a request here?
+	  IF (REQ.NUM)				! Yes, is it outstanding?
+	  THEN
+	    REMAP (FMTBUF) REQUEST = FORMAT	!   Yes, format the header
+	    PRINT #OUT.CHNL, REQUEST;		!     Display hdr from FMTBUF &
+		  LEFT$(REQ.TXT, REQ.LEN);	!     and request from OMSREQ
+	    PRINT #OUT.CHNL IF CCPOS(OUT.CHNL)	!   Add <cr><lf> if needed
+	  END IF
+
+	NEXT I					! Check out next slot
+
+10000	! Subroutines
+
+ BUILD_REQUEST:
+	FLD.REP = OC$REP			! /REPLY field
+	FLD.TYP = 0%				! We don't want a reply
+
+	FLD.FAC = OC$FAC			! /FACILITY field
+	FLD.FNAM = "OMS" + NL			! Our facility is "OMS"
+	FLD.FLEN = 3%				! (Whose length is 3 bytes)
+
+	FLD.TXT = OC$TXT			! Request text field
+	FLD.REQ = "Operator terminal " + KB	! Store request text	      &
+		+ "has been " + TEMP
+	FLD.LEN = LEN(TRM$(FLD.REQ))		! Set length of request text
+
+						! Set up for OMSSUB calls:
+	OMS$PD = TRUE				! Raise privs for declare
+	OMS$PS = TRUE				! Raise 'em for send (facility)
+	JUNK = CTRLC				! Get out if CTRL/C occurs
+
+	CMDLEN = FLD.LEN + 10%			! Set length of command buffer
+	GOTO REPLY_END				! Quit if		      &
+	  UNLESS MGRSND(OC.REQ, CMDLEN)		!   unable to send cmd packet
+
+	GOTO REPLY_END				! Quit if no confirmation     &
+	  UNLESS MGRRCV(REQ.TXT, 90%, 15%, "acknowledgement")
+
+	JUNK = RCTRLC				! No more need for trap
+	IF ERRSTS				! Any errors are unexpected
+	THEN
+	  PRINT "?Program failure in ";P.NAM	! So this may be a bug
+	  PRINT ERT$(ERRSTS); " in OMSRCV"	!   Display error and module
+	  GOTO REPLY_END			!   Get out now
+	END IF
+
+	RETURN					! Back to caller to finish cmd
+
+19000	! Error handling and/or trapping
+
+ NON_OPERATOR:
+	PRINT "?Terminal "; KB; "is not an operator terminal"
+	GOTO REPLY_END
+
+ OPEN_ERR:
+	FQB = SYS(DROP.PRIVS)			! Ensure privs are dropped
+
+	SELECT ERR
+
+	  CASE	EOF, NOSUCH, NODEVC		! Work file doesn't exist
+	    TEMP = "not running"
+	  CASE	WRGPAK				! Wrong version of file
+	    TEMP = "version mismatch"
+	  CASE	ELSE				! Any others are unexpected
+	    ON ERROR GO BACK
+
+	END SELECT
+
+	PRINT "?Operator/Message Services "; TEMP ! Display selected error text
+	RESUME DISPLAY_END			! Make sure file is closed
+
+ GET_ERR:
+	RESUME DISPLAY_END IF ERR = EOF		! Done with the file
+
+ DISPLAY_END:
+	ON ERROR GO BACK			! Pass unexpected errors back
+	CLOSE SYS.CHNL				! Ensure work file is closed
+
+32767	!
+ REPLY_END:
+	JUNK = RCTRLC				! Ensure ^C trap is off
+	END SUB

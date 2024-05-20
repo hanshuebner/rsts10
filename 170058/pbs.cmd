@@ -1,0 +1,16 @@
+;
+;	PBS.CMD - TKB command file to build PBS.TSK
+;
+;	COPYRIGHT (C) 1983
+;	DIGITAL EQUIPMENT CORP., MAYNARD, MASS.
+;
+;	Task-build using RMS resident library RMSRES
+;
+SYSTEM:PBS/FU,LST:PBS/MA/CR/-SP=SYSTEM:PBS/MP
+TASK=PBS
+UNITS=14
+EXTSCT=PATCH:1000
+LIBR=RMSRES:RO
+;include global symbols
+;@SYSTEM:SYMBOL
+//

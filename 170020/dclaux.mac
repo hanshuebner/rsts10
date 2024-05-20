@@ -1,0 +1,282 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.LIBRARY	/DCL:DCLMAC.MLB/
+.NLIST
+.INCLUDE	/DCL:AUXPFX.MAC/
+.LIST
+TITLE	DCLAUX,<DCL Auxillary Command Processor>,0A,10-MAY-91,GMB/BGN/BTB
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DCLAUX
+
+;+
+;  01  GMB  17-May-85	Created this file from thin air
+;  02  GMB  21-May-85	Added commands from DCLPRG:
+;			LINK, FORTRAN, MACRO, COBOL, DIBOL.
+;  03  GMB  22-May-85	Added some comments.
+;			Check entry line number and exit if not 30500.
+;  04  GMB  10-Mar-86	Added debugging print if line number eq 30501.
+;
+;			[V10.0]
+;  005 BGN  22-Sep-87	Moved BASIC from DCLUSR to DCLAUX
+;  006 BTB  05-Nov-89	Moved MOUNT, DISMOUNT, and INITIALIZE from DCL
+;  007 BTB  31-May-90	Moved BASIC command back to DCL
+;-
+
+	.PSECT	DCLAUX,	RO,I,REL,CON
+	DEFORG	DCLAUX
+
+	.MCALL	$CUI
+
+	$CUI	TABLE
+	$CUI	MSG
+	$CUI	PSECTS
+
+	TMPORG	IMPURE
+
+	$CUI	ALLOC
+
+;
+; Reserve space for variables used by DCLTRN and the DCL code we stole.
+;
+CMDTYP::.BLKW
+OURPPN::.BLKW
+CCLDES::.BLKW
+CMDPOS::.BLKW
+ENT.TY::.BLKW
+
+DBGON:	.BLKB
+	.EVEN
+
+	UNORG
+
+	.PSECT	PATCH,	RW,I,REL,CON
+
+PATCH::	.BLKW	100
+
+	UNORG
+
+
+.SBTTL	MAIN routine
+
+;++
+; The DCLAUX program handles certain large and unwieldy commands for DCL.
+;
+; A command is placed here if
+;	(1) it requires a ridiculously large amount of code to support
+;   or	(2) it is used infrequently
+;   or	(3) it has a relatively long execution time
+;
+; Briefly, DCL sees a command which we handle and runs us. We parse the
+; command and run the program which really does the work.
+;
+; What normally happens:
+;
+;	The DCL user enters a command such a SORT.
+;	DCL parses the command, identifies it as SORT and stops parsing.
+;	DCL looks up the program associated with SORT and finds DCLAUX.
+;	DCL puts the users command in hyperspace (core common or XBUF
+;	depending on it's length).
+;	DCL runs DCLAUX at line 30500.
+;	DCLAUX calls CUI to read the command out of hyperspace.
+;	DCLAUX starts parses the whole command and builds a SORT command in
+;	TRNBUF.
+;	DCLAUX looks up the program associated with SORT and finds SORT$:SRTUTL.
+;	DCLAUX runs SORT$:SRTUTL at line whatever with the SORT command
+;	in core common.
+; 
+; Further information may be found in DCL:DCLAUX.TXT.  This file
+; contains information relative to maintaining DCLAUX and the DCL code
+; it shares.
+;
+;--
+
+.ENABL	LSB
+
+MAIN::
+;
+; Exit immediately if some random user ran us
+;
+	BIC	#100000,FIRQB+FQNENT
+	CMP	FIRQB+FQNENT,#30501.
+				; Is the debugging bit on?
+	IFEQ			; If so then
+	MOVB	#1,DBGON	;   Set debugging flag
+	ELSE			; Else
+	CLRB	DBGON		;   Clear debugging flag
+	CMP	FIRQB+FQNENT,#30500.
+				;   Were we entered as a CCL at line 30500?
+	BNE	20$		;   No, just exit.
+	ENDIF			; Endif
+;
+; Initialize the world
+;
+	MOV	#1,ENT.TY	; Set CUI entry type to 1.
+	CALBX	U.INI <#U.CMN,#ENT.TY>
+				; Initialize Common User Interface.
+	CALLX	INITRN		; Initialize the translation buffer.
+	CALLX	U$USYS		; Do UU.SYS subfunction to .UUO to get user info
+	MOV	FIRQB+26,OURPPN	; Save PPN	
+;
+; Parse the command
+;
+	MOV	#1,CMDPOS	; Set postion of command to 1st char in line
+				; ... (This is for the benefit of the DCL
+				; ... modules which we use.)
+	CALBX	U.DIA		; Parse the commands.
+	TST	R0		; Was there an error in the dialogue?
+	BNE	20$		; Yes, go exit (CUI printed error msg already).
+;
+; Print the line if the debugging flag is set
+;
+	TSTB	DBGON
+	IFNE
+	CMESSAGE #DBG.M <TRNLEN, #TRNBUF>
+	ENDIF
+;
+; Make the command line available to the program
+;
+	MOV	CCLDES,R3	; Point at the CCL descriptor block.
+	MOV	TRNLEN,R1	; Get number of chars in CCL string.
+	CMP	R1,FLCLEN(R3)	; Is the command line longer than the
+				; ... utility accepts?
+	IFHI			; If so then
+	MOV	#U.LONG,R0	;   Say ?Line too long.
+	ELSE			; Else
+	CALL	CMDLN		;   Move the command line
+;
+; Run the program
+;
+	CALBX	U$FSS	<#10.,R3>
+				;   FSS the device logical and prepare the
+				;   ... FIRQB for the .RUN.
+	TST	R0		;   If an error occurred
+	BNE	10$		;   ... go say ?Command not installed.
+	ADD	#10.,R3		;   Bump R3 past the logical name.
+.ASSUME	FLNAM1	EQ FLLOG+10.
+.ASSUME	FLEXT	EQ FLNAM1+4
+.ASSUME	FLNENT	EQ FLEXT+2
+	MOV	(R3)+,FIRQB+FQNAM1
+				;   Move the filename,
+	MOV	(R3)+,FIRQB+FQNAM1+2
+				;   ... extention, and
+	MOV	(R3)+,FIRQB+FQEXT
+				;   ... entry line number
+	MOV	(R3)+,FIRQB+FQNENT
+				;   ... into the FIRQB.
+	.RUN			;   RUN the program.
+;
+; Handle errors if the .RUN failed
+;
+	CLR	R0
+	BISB	FIRQB+0,R0	;   Get the RSTS error code.
+	CMPB	R0,#NOSUCH	;   Was error ?Can't find file or account?
+	IFEQ			;   If so then
+10$:	MOV	#UNAV.E,R0	;     Make it ?Command not installed.
+	ENDIF			;   Endif
+	ENDIF			; Endif
+;
+; Print an error message and exit
+;
+	PUSH	R0		; Save the error code.
+	REPAINT	CMDPOS		; Repaint command line with arrow.
+	POP	R0		; Restore the error code.
+	CMESSAGE R0		; Print out the error message.
+
+20$:	CALLX	CLRFQX		; Clear the FIRQB and XRB
+	.RTS			; Exit to user default keyboard monitor
+	.EXIT			; That failed, so exit to the system default.
+
+	GLOBAL	<TRNLEN,TRNBUF,DBG.M>
+	GLOBAL	<NOSUCH,UNAV.E,U.LONG,LX.ERP>
+.DSABL	LSB
+
+.SBTTL	CMDLN	- Set up command line for program
+
+;+
+; CMDLN - Set up command line for program
+;
+; This routine attempts to move the command line to core
+; common or XBUF via the .CMDLN directive.  If the directive
+; fails (such as no XBUF available) then we sleep 1 second
+; and try again.  We will retry 10 times before giving up and
+; aborting.  //Should not abort but rather issue an error
+; mesage and quit. //
+;
+; Input:
+;	R1  = Number of characters in the command line
+;
+; Call:
+;	CALL	CMDLN
+;
+; Output:
+;	R0  = Random
+;	R1  = Unchanged
+;-
+
+.ENABL	LSB
+
+CMDLN::	MOV	#10.,R0		; We will retry .CMDLN a max of 10. times.
+10$:	CALLX	CLRXRB		; Clear the XRB.
+	MOV	R1,XRB+XRLEN	; Store the buffer length.
+	MOV	R1,XRB+XRBC	; Store the byte count.
+	MOV	#TRNBUF,XRB+XRLOC
+				; Point at translated string
+	.CMDLN			; Move the command line.
+	TSTB	FIRQB+0		; Did an error occur?
+	IFNE			; If so then
+	CALLX	CLRXRB		;   Clear the XRB.
+	MOV	#1,XRB+XRLEN	;   Set sleep time to 1 sec.
+	.SLEEP			;   Sleep for a second.
+	SOB	R0,10$		;   Go back and try again.
+	ENDIF			; Endif
+	CALLX	U$CHKE		; Abort if error
+	RETURN
+
+	GLOBAL	<U$CHKE>
+.DSABL	LSB
+
+.SBTTL	CMDTBL	- CUI Routine to parse the commands
+
+CMDTBL::$THR
+
+	$RDCMD			; Get the command line from DCL.
+
+	$PARKEY
+	$ONKEY	COB.C,COB.CMD	; Parse the COBOL command.
+	$ONKEY	DIB.C,DIB.CMD	; Parse the DIBOL command.
+	$ONKEY	DIS.C,DIS.CMD	; Parse the DISMOUNT command.		;006
+	$ONKEY	FOR.C,FOR.CMD	; Parse the FORTRAN command.
+	$ONKEY	INI.C,INI.CMD	; Parse the INITIALIZE command.		;006
+	$ONKEY	LIN.C,LIN.CMD	; Parse the LINK command.
+	$ONKEY	MAC.C,MAC.CMD	; Parse the MACRO command.
+	$ONKEY	MOU.C,MOU.CMD	; Parse the MOUNT command.		;006
+	$ONKEY	MER.C,MER.CMD	; Parse the MERGE command.
+	$ONKEY	SOR.C,SOR.CMD	; Parse the SORT command.
+	$ENDKEY
+
+	$ENDTHR
+
+	GLOBAL	<SOR.CMD,MER.CMD,COB.CMD,DIB.CMD>
+	GLOBAL	<FOR.CMD,LIN.CMD,MAC.CMD>				;007
+	GLOBAL	<DIS.CMD,INI.CMD,MOU.CMD>				;006
+
+	.END	MAIN

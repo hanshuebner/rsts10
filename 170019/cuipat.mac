@@ -1,0 +1,1567 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.INCLUDE	/CUI:CUIPFX.MAC/
+TITLE	CUIPAT,<CUI Patterns>,0A,10-MAY-91,CEK/JFM/SDL/GMB/BGN/BTB
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR CUIPAT
+;+
+;
+;  001	CEK  08-JUN-82	Created from CUIPAR.MAC
+;  002	CEK  06-Oct-82	Added new names for patterns
+;  003	CEK  25-Oct-82	Removed old names for patterns
+;  004	CEK  25-Oct-82	Changed U$JOB to U$JOBN
+;  005	CEK  25-Oct-82	Added U$LJOB, U$EJOB, and U$NJOB.
+;  006	CEK  25-Oct-82	Added U$ACC.
+;  007	JFM  22-Feb-83	Changed U$LJOB to not allow file extensions.
+;  008	JFM  22-Feb-83	Changed RF.N.W to match a local filespec only if NET
+;			was NO coming into routine.
+;  009	JFM  12-May-83	Added, changed comments.
+;  010	JFM  12-May-83	Removed more old names for patterns.
+;  011  SDL  05-Aug-83  Added U$SYMN routine to check symbol names
+;  012	JFM  21-Sep-83	Fixed bugs in the U$NODE pattern, and DEVPPN error
+;  013	JFM  03-Dec-83	Added U$SGN, signed integer pattern.
+;  014	SDL  10-Jan-84	Added U$CLBL to check command line labels
+;  015	JFM  05-Mar-84	32-bit routine fixes
+;  016	JFM  08-May-84	Unsigned integer patterns accept leading "+" sign
+;  017	JFM  17-Jul-84	U$DEV and now U$DEVN fixed (U$DEVN is new)
+;  018	SDL  25-Jul-84	Made U$SYMN routine work for the INQUIRE command also
+;  019	JFM  29-Aug-84	Took out U$FORM and U$QUE, fixed U$DEV bug
+;  020	JFM  11-Sep-84	Took out U$JOBN, U$NJOB, U$EJOB, and U$LJOB patterns
+;  021	JFM  11-Sep-84	Fixed range check bugs
+;  022	SDL  12-Sep-84	Changed message text of various messages
+;  023	JFM  16-Oct-84	Alphabetized CUI patterns for easy lookup
+;  024	JFM  16-Dec-84	$ logicals in U$DEV finally fixed
+;  025	JFM  13-Jan-85	Fixed comapre bug in integer parterns (RANGE checker)
+;  026  GMB  18-Dec-86  U$DEV & U$DEVN now preserve leading underscores
+;  027  GMB  10-Mar-87	U$DEV[N] temp fix
+;
+;			[RSTS V9.5]
+;
+;  028	JFM  04-Jun-87	Added U$PO2 (Power of two) routine
+;  029	JFM  04-Jun-87	Only once source now ... CUIPAT.  CUIPT2 goes away.
+;  030  BGN   6-Aug-87  Fix "_" bug in U$DEV
+;  031  BGN  21-Aug-87  Allow "-" in u$any
+;
+;			[RSTS/E V9.7]
+;  032	JFM  16-Sep-88	Don't use CALB for LX.EOS.  Don't globalize some things.
+;
+;			[RSTS/E V10.0]
+;  033	BTB  21-Dec-89	Added "_" to allowed chars in logical names (U$LOGNAM)
+;  034	BTB  02-Jan-90	Limit logicals to 15 characters
+;  035	BTB  01-Apr-90	Correct ^ placement for "?Logical too long"
+;  036	BTB  30-Apr-90	Allow _'s in U$DEV
+;  037	BTB  24-May-90	Really correct ^ placement for "?Logical too long"
+;  038	BTB  05-Jul-90	Fix U$DEV to allow 15-char logicals
+;-
+
+;+
+;
+; MODULE DESCRIPTION:
+;
+; CUIPAT -- CUI Patterns
+;
+; This module contains textual pattern-matching routines for 
+; the Common User Interface. These are low-level parsing routines.
+; 
+; Note:  If the symbol $$$DCL is defined (by including CUI:CUIDCL.MAC as 
+; 	 the first module on the MACRO assembly command line), then all 
+; 	 patterns surrounded by .IF NDF $$$DCL ... .ENDC's will *NOT* be 
+; 	 included in the listing.
+;
+; The calling interface is uniform:
+;
+; INPUTS:
+;	CUILEX initialized to parse string
+;	LX.POS	=	position of next character to parse
+;	R1	->	node that will represent this syntax contruct
+;			(see CUITRE for information about nodes)
+;	N.TXTPOS(R1) =	position of next character to parse
+;	N.TXTLEN(R1) =	0
+;	Other fields of node = 0.
+;
+; CALB <pattern>
+;
+; OUTPUTS:
+; C=0 if success.
+;	R0	=	0
+;	LX.POS	=	position of character following this contruct
+;	N.TXTLEN(node) = length of meaningful portion of string matched,
+;			or 0 if entire string is meaningful.  (Some
+;			constructs have to discard noise characters.)
+; C=1 if failure.
+;	R0	=	status
+;-
+
+	.PSECT	CUIPAT,RO,REL,LCL,CON
+  	.MCALL	SUBR,CALB,.ASSERT,$CUI,$FAP
+	DEFORG	CUIPAT
+
+	$CUI	MSG		;Include message facility
+
+	TMPORG	IMPURE
+TWOWRD:	.BLKW	2
+MINADR::.BLKW
+MAXADR::.BLKW
+	UNORG
+
+.NLIST	MEB
+	TMPORG	U$TEXT
+S8L:	.ASCIC	"-128"
+S8H:	.ASCIC	"+127"
+S16L:	.ASCIC	"-32768"
+S16H:	.ASCIC	"+32767"
+S32L:	.ASCIC	"-2147483648"
+S32H:	.ASCIC	"+2147483647"
+U8L:
+U16L:
+U32L:	.ASCIC	"0"
+U8H:	.ASCIC	"255"
+U16H:	.ASCIC	"65535"
+U32H:	.ASCIC	"4294967295"
+	UNORG
+.LIST	MEB
+
+.SBTTL DEVPPN--device and PPN 
+;+
+; DEVPPN--device and PPN
+; 
+; Match a device name, a PPN, or both.  PPN is non-wild.
+; Store the string into CUITRE as unnamed
+; child of current node.  The new node becomes the current node.
+;-
+
+.ENABL	LSB
+
+DEVPPN::SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALB	LOCFIL		;Match a local filespec.
+	MOV	FIRQB+FQPPN,N.LOW(R1)
+				;Assume everything is okay and load N.LOW
+	IFCS			;If an error occured,
+	MOV	#U.IACC,R0	;  Say ?Invalid account
+	BR	20$		;  And exit.
+	ENDIF			;Endif
+
+10$:	BIT	#F2NAM!F2EXT,XRB+10
+				;Does it include a name or type?
+	IFNZ			;If so then
+	MOV	#U.NOFN,R0	;  Say ?No file name or type permitted.
+	BR	20$		;  Quit.
+	ENDIF			;Endif
+
+	BIT	#F2PRJW!F2PRGW,XRB+10
+				;Any wildcards?
+	IFNZ			;If so then
+	MOV	#U.WLD,R0	;  Say ?Wildcards not allowed.
+	ENDIF
+20$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.NOFN,U.WLD,U.IACC>
+
+.SBTTL LF.N--local filespec, name required, no wildcards
+;+
+; LF.N--local filespec, name required, no wildcards
+;
+; Filespec is stored into CUITRE as unnamed child of current node.  The
+; new node becomes the current node.
+;-
+
+.ENABL	LSB
+
+LF.N::	SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALB	LOCNAM		;Parse a local filespec with name.
+	BCS	10$		;That failed.  Quit.
+	BIT	#F2NAMS!F2NAMQ!F2EXTS!F2EXTQ!F2PRJW!F2PRGW,XRB+10
+				;Any wildcards?
+	IFNZ			;If so then
+	MOV	#U.WLD,R0	;  Say ?Wildcards not allowed.
+	ENDIF
+10$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.WLD>
+
+.IF	NDF	$$$DCL		;If this is being assembled for DCL, then
+				; DON'T include this pattern in the assembly.
+
+.SBTTL LF.N.NT--local filespec, name required, wildcard name and type
+;+
+; LF.N.NT--local filespec, explicit name required, wildcard name and type OK
+;
+;
+; Filespec is stored into CUITRE as unnamed child of current node.  The
+; new node becomes the current node.
+;-
+
+.ENABL	LSB
+
+LF.N.NT::SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALB	LOCNAM		;Parse a local filespec with name.
+	BCS	10$		;That failed.  Quit.
+	BIT	#F2PRJW!F2PRGW,XRB+10
+				;Wildcard PPN?
+	IFNZ			;If so then
+	MOV	#U.WLD,R0	;  Say ?Wildcards not allowed.
+	ENDIF
+10$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.WLD>
+
+.ENDC				;This pattern will not be included in the
+				;CUI library built for DCL.
+
+.SBTTL LF.N.W--local filespec, name required, wildcards OK
+.SBTTL	LOCNAM--Local filespec including file name.
+;+
+; LF.N.W--local filespec, name required, wildcards OK
+;
+; Filespec is stored into CUITRE as unnamed child of current node.  The
+; new node becomes the current node.
+;-
+;+
+; LOCNAM--Local filespec including file name.
+; 
+; INPUTS:
+;	CMDBUF	contains input string
+;
+; CALB	LOCNAM
+;
+; OUTPUTS:
+;	R0	=	return status:
+;		0	=	success
+;		Error code if failure
+;	A new node is created.  This node becomes an unnamed child of
+;	the current node.  The new node then becomes the current node.
+;		N.TXTPOS(node) = position of filespec
+;		N.TXTLEN(node) = length of filespec
+;	FIRQB and XRB as returned by .FSS
+;	LX.ERP	= position of proposed filespec if error is returned.
+;-
+
+.ENABL	LSB
+
+LF.N.W::
+LOCNAM:	SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALB	LOCFIL		;Parse a local filespec.
+	BCS	30$		;That failed.  Quit.
+	BIT	#DDNFS,XRB+14	;Is device non-file-structured?
+	IFZE			;If not then
+	BIT	#F2NAM,XRB+10	;  Is the file name there?
+	IFZE			;  If not then
+	MOV	#U.FNND,R0	;    Say ?File name required.
+	MOV	R4,LX.ERP	;    Position of filespec is error position.
+	ENDIF
+	ENDIF
+30$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<LX.ERP,U.FNND>
+
+.SBTTL LF..W--local filespec, wildcards OK
+.SBTTL	LOCFIL--Local filespec.
+;+
+; LF..W--local filespec, wildcards OK
+;
+; A local filespec is accepted.  
+;
+; Filespec is stored into CUITRE as unnamed child of current node.  The
+; new node becomes the current node.
+;-
+;+
+; LOCFIL--Local filespec
+; 
+; INPUTS:
+;	CMDBUF	contains input string
+;
+; CALB	LOCFIL
+;
+; OUTPUTS:
+;	R0	=	return status:
+;		0	=	success
+;		Error code if failure
+;	A new node is created.  This node becomes an unnamed child of
+;	the current node.  The new node then becomes the current node.
+;		N.TXTPOS(node) = position of filespec
+;		N.TXTLEN(node) = length of filespec
+;	FIRQB and XRB as returned by .FSS
+;	LX.ERP	= position of proposed filespec if error is returned.
+;-
+
+; INTERNAL VARIABLES:
+;	R1	->	newly created node
+
+.ENABL	LSB
+
+LF..W::
+LOCFIL:	SUBR	,CHECK		;Check arg count.
+	CALLX	LX.SUP		;Get set up.
+	CALB	U$ANY		;Match anything.
+	BCS	30$		;That failed.  Quit.
+
+; Scan the filespec for validity.
+
+	MOV	#CMDBUF-1,R2	;Compute address
+	ADD	LX.PMAT,R2	;of filespec.
+	CALBX	U$FSS <LX.NMAT,R2>;FSS the filespec that was matched.
+	IFCS			;If an error occurred then
+	CMP	R0,#BADNAM	;  Was it ?Illegal file name?
+	BEQ	15$		;  Yes.  Go make it ?Invalid file spec.
+	BR	20$		;  No.  Quit.
+
+	ENDIF
+	BIT	#F2PRT,XRB+10	;Was a protection code <n> specified?
+	BEQ	30$		;No.  Return.
+15$:	MOV	#U.IFIL,R0	;Yes. Say ?Invalid file specification.
+20$:	MOV	R4,LX.ERP	;Position of filespec is error position.
+30$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<LX.NMAT,LX.PMAT,LX.ERP>
+GLOBAL	<BADNAM,U.IFIL,CMDBUF>
+
+.IF	NDF	$$$DCL		;If this is being assembled for DCL, then
+				; DON'T include this pattern in the assembly.
+
+.SBTTL LF..--local filespec, no wildcards
+;+
+; LF..--local filespec, no wildcards
+;
+; Filespec is stored into CUITRE as unnamed child of current node.  The
+; new node becomes the current node.
+;-
+
+.ENABL	LSB
+
+LF..::	SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALB	LOCFIL		;Parse a local filespec.
+	BCS	10$		;That failed.  Quit.
+	BIT	#F2NAMS!F2NAMQ!F2EXTS!F2EXTQ!F2PRJW!F2PRGW,XRB+10
+				;Any wildcards?
+	IFNZ			;If so then
+	MOV	#U.WLD,R0	;  Say ?Wildcards not allowed.
+	ENDIF
+10$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.WLD>
+
+.ENDC				;This pattern will not be included in the
+				;CUI library built for DCL.
+
+.SBTTL	NODACC--Network node name and accounting info
+;+
+; NODACC--network node name and accounting info
+;
+; Matches a node name.  The syntax of a node name is:
+;
+;	[_]node["accounting"]::
+;
+; <node> is one or more letters and digits.  The quoted string may contain 
+; anything.
+;
+; If a node name is found, does a SETNET to YES.
+;-
+
+.ENABL	LSB
+
+NODACC:	SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALBX	LX.EXAC <#10$>	;Parse an optional underscore.
+	 TMPORG	U$TEXT
+10$:	  .ASCIZ "_"
+12$:	  .ASCIZ "A9."
+	 UNORG			;We don't care if this succeeds or not.
+	CALBX	LX.SKP	<#12$>	;Match a simple name (letters, digits, dot).
+	BCS	40$		;That failed.  Quit.
+	CALBX	LX.DQUOT	;Match an optional quoted string.
+	CMP	R0,#U.NOCQ	;?Missing closing quote?
+	BEQ	40$		;Yes, that's bad.  Quit.
+				;No. Ignore any other error, since 
+				;quoted string is optional.
+	CALBX	LX.EXAC <#20$>	;Match a double colon.
+	 TMPORG	U$TEXT
+20$:	  .ASCIZ "::"
+	 UNORG
+40$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.IFIL,U.NOCQ,LX.ERP>
+
+.SBTTL RF.N.W--remote filespec, name required, wildcards OK
+;+
+; RF.N.W--remote filespec, name required, wildcards OK
+;
+; A remote or local filespec is accepted.  The restriction that an
+; explicit filename is required is only enforced for a local filespec.
+;
+; Filespec is stored into CUITRE as unnamed child of current node.  The
+; new node becomes the current node.
+;-
+
+; This routine has to backtrack.  First it looks for a node name
+; followed by a double colon.  If it finds that, it's happy;
+; it then looks for a remote filespec.  But if it doesn't find the
+; double colon, it backtracks and then tries again to see if it
+; has a local filespec.  This makes it a slightly peculiar routine.
+
+.ENABL	LSB
+
+RF.N.W::SUBR
+	CALLX	LX.SUP		;Get set up.
+	MOV	NET,R2		;Save networkness as we came into routine.
+	CALB	NODACC		;Match a network node name and accounting 
+				;info.
+	IFCC			;If that succeeded then
+	CALLX	SETNET,R5	;  Flag this as a network operation.
+	 .WORD	YES		;
+	BCS	10$		;  That failed. Quit.
+	CALB	U$ANY		;  Match anything.
+	;BCS	10$		;  That failed.  Quit.
+	ELSE			;Else
+	CMP	R0,#U.NOCQ	;  Was error ?Missing closing quote?
+	BEQ	10$		;  Yes. Quit. Anything else we will ignore.
+	CMP	R2,#YES		;  Should we view this as a remote filespec?
+	IFEQ			;  If so then
+	CALB	U$ANY		;    Match anything.
+	ELSE			;  Else
+	CALB	LOCNAM		;    Match a local filespec with a filename.
+	ENDIF			;  End
+	ENDIF			;End
+10$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.NOCQ,NET>
+
+.SBTTL RF..W--remote filespec, wildcards OK
+;+
+; RF..W--remote filespec, wildcards OK
+;
+; A remote or local filespec is accepted.  
+;
+; Filespec is stored into CUITRE as unnamed child of current node.  The
+; new node becomes the current node.
+;-
+
+; See remarks under RF.N.W
+
+.ENABL	LSB
+
+RF..W::	SUBR
+	CALLX	LX.SUP		;Get set up.
+	MOV	NET,R2		;Save networkness as we came into routine.
+	CALB	NODACC		;Match a network node name and accounting 
+				;info.
+	IFCC			;If that succeeded then
+	CALLX	SETNET,R5	;  Flag this as a network operation.
+	 .WORD	YES		;
+	BCS	10$		;  That failed. Quit.
+	CALB	U$ANY		;  Match anything.
+	IFCS			;  If that failed then
+	CMP	R0,#U.NARG	;    Was error ?Argument required?
+	BNE	10$		;    No, something else.  Quit.
+	CLR	R0		;    Yes, ignore it. A node name is enough.
+	ENDIF			
+	ELSE			;Else
+	CMP	R0,#U.NOCQ	;  Was the error ?Missing closing quote?
+	BEQ	10$		;  Yes. Quit.
+	CMP	R2,#YES		;  Should we view this as a remote filespec?
+	IFEQ			;  If so then
+	CALB	U$ANY		;    Match anything.
+	ELSE			;  Else
+	CALB	LOCFIL		;    Match a local filespec.
+	ENDIF			;  End
+	ENDIF
+10$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.NARG,U.NOCQ,YES,NET>
+
+.SBTTL	U$ACC--account
+;+
+; U$ACC--account.  [proj,prog] or a special PPN character.
+;-
+
+.ENABL	LSB
+
+U$ACC::	SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALB	LOCFIL		;Match local file spec, put node into CUITRE.
+	BCS	10$		;That didn't work.
+	BIT	#F2DEV!F2NAM!F2EXT,XRB+10 ;Is there a dev, name, or file type?
+	BEQ	15$		;No.  Looks healthy.  Return.
+10$:	MOV	#U.IACC,R0	;Say ?Invalid account.
+	BR	20$		;Quit
+
+15$:	MOV	FIRQB+FQPPN,N.LOW(R1) 
+				;Load PPN (both bytes) into tree
+20$:	RETURN			;Done
+
+.DSABL	LSB
+
+GLOBAL	<U.IACC>
+
+.IF	NDF	$$$DCL		;If this is being assembled for DCL, then DO NOT
+				;	include this pattern in the assembly.
+				;NOTE:  The PPNNUM routine is also called by 
+				;     	the U$PPN pattern.  Neither is used by
+				;	DCL so both are .IF-ed out.
+
+.SBTTL	U$ACCR -- account or range of accounts
+;+
+; U$ACCR -- account or range of accounts
+; 
+; U$ACCR matches the following "account range":
+;	[proj1-proj2,prog1-prog2] 
+; 
+; It matches any PPN, including special PPN characters, and wildcard 
+; characters.  It will fail if proj1 > proj2 or it prog1 > prog2.
+; 
+; OUTPUTS:
+;     U.LOW = proj1 in low byte, proj2 in high byte
+;     U.HIGH= prog1 in low byte, prog2 in high byte
+;
+; If a range is not specified, but rather a single PPN is used, the values
+; of U.LOW and U.HIGH are the same as they would be in U$ACC
+;-
+
+.ENABL	LSB
+
+	 TMPORG	U$TEXT
+10$:	  .ASCIZ "["
+12$:	  .ASCIZ "*"
+14$:	  .ASCIZ "]"
+16$:	  .ASCIZ "-"
+18$:	  .ASCIZ ","
+	 UNORG	
+
+U$ACCR::SUBR
+	CALLX	LX.SUP		;Get set up.
+	CLR	-(SP)		;Device present flag and range check flag
+	CALB	U$DEVN		;Match an optional device (unit number not req)
+	IFCC			;If it found one then
+	COM	(SP)		;  (SP) = -1 to indicate device present
+	ENDIF			;Endif
+	MOV	CMNADR,R2	;Point at CUI common
+	ADD	#U.LOW,R2	;Point at U.LOW
+	MOV	R1,R4		;Point to node entry
+	ADD	#N.LOW,R4	;Point to N.LOW field
+	CLR	(R4)		;Set [0,0], which assumes no account present
+	CLR	2(R4)		;Clear N.HIGH and N.LOW
+	CALB	U$ACC		;First try this as a regular account type
+	BCC	55$		;It was, no sweat.
+	TSTB	(R4)+		;Point at high byte of N.LOW field
+	.ASSUME	N.HIGH EQ N.LOW+2
+	CALBX	LX.EXAC	<#10$>	;Try to match an open bracket
+	BCC	15$		;Found one
+	TST	(SP)		;Did we find a device?
+	BEQ	50$		;No, and no account either, ?Invalid account
+	CLR	R0		;Set no error
+	BR	55$		;Quit with success
+
+;+
+; (SP) = 100000 if a device was found
+; (SP) = 0 if no device was found
+;
+; This takes two paths.  If (SP) has 0 bit CLEAR it means we're on the first
+; pass, thus doing the project number.  If the 0 bit is SET, we've done the
+; second pass and (SP) > 0 --> a device was not found, (SP) < 0 --> a device 
+; was found.  This info is needed later to disallow the case [0,0], which
+; is an invalid account.
+;-
+
+;+
+; I N T E R N A L     V A R I A B L E S
+;
+; (R2) --> The first byte of U.LOW or U.HIGH, depending on which path this is
+; (R4) --> The first byte of N.LOW or N.HIGH, in the prase tree
+;-
+
+15$:	CLR	(SP)		;Start with a clear slate
+	CALBX	LX.EXAC	<#18$>	;Are we looking at a comma?
+	IFCC			;If so then
+	CALLX	U$USYS		;  Do a UU.SYS call to get the PPN.
+	MOVB	FIRQB+FQPFLG+1,(R4)
+				;  Plug in user's PPN
+	BR	40$		;  Go do next one
+	ENDIF			;Endif
+
+20$:	CALBX	LX.EXAC <#12$>	;Is range "*"?
+	IFCC			;If so then
+	MOVB	#255.,(R4)	;  Indicate 255.
+	ELSE			;Else
+	CALL	PPNNUM		;  Get an integer in range 0-254
+	BCS	50$		;  An error occured
+	MOVB	(R2),(R4)	;  Store number in tree
+	CALBX	LX.EXAC	<#16$>	;  Match a minus sign (hyphen)
+	BCS	30$		;  Not found
+	CALL	PPNNUM		;  Get an integer 0-254
+	BCS	50$		;  An error occured
+	CMPB	(R2),(R4)	;  Don't allow [22-11,33-0]
+	BLO	50$		;  (Range must go small to large numbers)
+	BEQ	30$		;  Only store if numbers aren't equal
+	MOVB	(R2),2(R4)	;  Store next number
+	ENDIF			;Endif
+
+30$:	TST	(SP)		;Have we done both fields yet?
+	IFEQ			;If not then
+	CALBX	LX.EXAC	<#18$>	;  Match a comma
+	BCS	50$		;  Not found, ?Invalid account
+40$:	DEC	R4		;  Point to N.LOW, low byte
+	CALBX	LX.EXAC	<#14$>	;  Match a closing bracket here?
+	IFCC			;  If so then
+	CALLX	U$USYS		;    Do UU.SYS to get user's PPN
+	MOVB	FIRQB+FQPFLG,(R4);   Plug in user's programmer number
+	BR	55$		;    Finished
+	ENDIF			;  Endif
+
+	COM 	(SP)		;  Did the first range check
+	BR	20$		;  Go do same thing again
+	ENDIF			;Endif		
+
+	TST	(R4)		;Test N.LOW (R4 --> N.LOW after second pass)
+	BEQ	50$		;If it's 0 then account was [0,0], error
+	CALBX	LX.EXAC	<#14$>	;Match closing bracket
+	IFCS			;If not found then 
+50$:	CLR	LX.ERP		;  Let LX.SUP figure out error position
+	MOV	#U.IACC,R0	;  ?Invalid account
+	ENDIF			;Endif
+55$:	POP			;Pop stack
+	RETURN
+
+;
+; Subroutine to get an 8-bit integer in the range 0-254.
+; R2 -> U.LOW
+
+PPNNUM:	CALBX	LX.U8		;Get unsigned 8-bit integer (return in U.LOW)
+	BCS	70$		;Failed - indicate error
+	CMP	(R2),#255.	;Did he specify 255?
+	BEQ	65$		;If so then indicate error
+	TST	(PC)+		;Else indicate no error
+65$:	SEC			;Set C-bit if error
+70$:	RETURN			;Return C=0 if okay, C=1 if error
+
+.DSABL	LSB
+
+GLOBAL	<U.IACC>
+
+
+.ENDC				;This pattern will not be included in the
+				;CUI library built for DCL.
+
+.SBTTL	U$ANY--Anything up to next delimiter
+;+
+; U$ANY--Anything up to next delimiter.
+;
+; A generic filespec is a string of one or more characters, terminated by a
+; blank, tab, slash, plus sign, comma, or end-of-string.  The
+; following special characters cannot occur within a filespec, unless enclosed
+; in quotes.
+;
+; /	slash
+; +	plus sign
+; -	hyphen
+; =	equal sign
+; '	apostrophe
+; !	exclamation point
+; ()	parentheses
+;	blank
+;	tab
+;
+; The question mark is allowed, although not DCL compatible.
+;
+; Assumption:  the command string does not contain any non-printable
+; characters or exclamation points, unless enclosed within quotes.
+;
+; If there is a left bracket or angle bracket <[, then there
+; must be a matching right bracket or angle bracket >].  The
+; closing bracket does not need to be of the same type as the opening bracket.
+; Between a left bracket and the next following right bracket, a comma can
+; occur without terminating the filespec.
+;
+; A quoted string can occur at any point.  It has the same significance as
+; a normal character.  Refer to LX.DQUOT.
+;-
+
+	TMPORG	U$TEXT
+SPECIAL:.ASCIZ	<COMMA><SPACE><TAB> ~[(<>)]"'/+=~
+				;031
+				;The above chars have special meaning within
+				;a filespec.
+TERM:	.ASCIZ	<COMMA><SPACE><TAB> ~/+)~
+				;These characters and <EOS> are legal 
+				;filespec terminators.
+	UNORG
+
+.ENABL	LSB
+
+U$ANY::	SUBR	,CHECK
+	CALLX	LX.SUP		;Get set up.
+10$:	CALBX	LX.FND <#SPECIAL>;Scan until we find a special character.
+				;We don't care whether this succeeds or not.
+	CALBX	LX.DQUOT	;Parse a quoted string.
+	BCC	10$		;That succeeded.  Go look for more.
+	CMP	R0,#U.NOCQ	;Was the error ?Missing closing quote?
+	BEQ	60$		;Yes.  Quit.
+	CALBX	LX.MEM <#20$>	;No.  Look for an opening bracket <[.
+	 TMPORG	U$TEXT
+20$:	  .ASCIZ "<["
+	 UNORG
+	BCS	50$		;It's not that, so we must have reached
+				;end of filespec.
+
+; We're inside of brackets.  Match non-special chars, quoted strings,
+; and commas.
+
+	MOV	LX.PMAT,R3	;Save position of bracket we just matched.
+30$:	CALBX	LX.FND <#SPECIAL>;Scan until we find a special character.
+				;We don't care whether this succeeds or not.
+	CALBX	LX.DQUOT	;Look for a quoted string.
+	BCC	30$		;We found one, so look more.
+	CMP	R0,#U.NOCQ	;That failed. Was it ?Missing closing quote?
+	BEQ	60$		;Yes.  Quit.
+	CALBX	LX.EXAC <#40$>	;No, so look for a comma.
+	 TMPORG	U$TEXT
+40$:	  .ASCIZ <COMMA>
+	 UNORG
+	BCC	30$		;We found one, so look more.
+
+; Now look for closing bracket.
+
+	CALBX	LX.MEM <#45$>	;Parse a closing bracket.
+	 TMPORG	U$TEXT
+45$:	  .ASCIZ "]>"
+	 UNORG	 
+	BCC	10$		;We found it, so continue searching.
+	MOV	#U.NOCB,R0	;?Missing closing bracket.
+	MOV	R3,LX.ERP	;Position of left bracket is position of
+				;error.
+	BR	60$		;Quit.
+
+; We've reached end of filespec.
+
+50$:	CALLX	LX.EOS		;Did we stop at EOS?			;032
+	BCC	55$		;Yes. Go check for null filespec.
+	CALBX	LX.MEM <#TERM>	;No. Is the character we stopped on a 
+				;legal filespec terminator?
+	BCS	60$		;No.  Quit with ?Unexpected character.
+	DEC	LX.POS		;Yes.  Back up scan position to before the 
+				;terminator.
+55$:	CMP	LX.POS,R4	;Did we parse any characters?
+	IFEQ			;If not then
+	MOV	#U.NARG,R0	;  Say ?Argument required
+	ENDIF			;Endif
+60$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.NARG,LX.POS,LX.PMAT,LX.ERP,U.NOCB,U.NOCQ>
+
+.IF	NDF	$$$DCL		;If this is being assembled for DCL, then
+				; DON'T include this pattern in the assembly.
+
+.SBTTL	U$CCL--CCL name with abbreviation allowed
+;+
+; U$CCL allows any amount of characters in the set {A-Z,a-z,0-9,*,-}
+; The hyphen cannot be first character
+;-
+.ENABL	LSB
+
+U$CCL::	SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALBX	LX.MEM <#10$>	;Scan to see if first character is special char
+	 TMPORG	U$TEXT
+10$:	  .ASCIZ "@#$%&"
+	 UNORG
+	BCS	15$		;It wasn't, 
+	CALBX	LX.MEM <#20$>   ;If was! check for a trailing hyphen and be off
+	BR	22$		;Indicate no error
+
+15$:	CALBX	LX.MEM <#18$>	;Check for first character being alphabetic
+	 TMPORG	U$TEXT
+18$:	  .ASCIZ "A"
+	 UNORG
+	BCS	25$		;Wasn't special character, wasn't alpha - error
+	CALBX	LX.SKP	<#19$>	;Skip any alphanumerics
+	 TMPORG	U$TEXT
+19$:	  .ASCIZ "A9"
+	 UNORG			;Ignore error if it doesn't find alphanumerics
+	CALBX	LX.MEM <#20$>	;Match a single * or -.
+	 TMPORG	U$TEXT
+20$:	  .ASCIZ "*-"
+	 UNORG
+	BCS	22$		;Indicate no error, we didn't find *-.
+	CALBX	LX.SKP <#19$>	;Skip more alphanumerics
+22$:	CLR	R0		;No error if didn't find any 
+	BR	30$		;
+
+25$:	MOV	#U.ICMD,R0	;?Invalid command
+30$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.ICMD>
+
+.ENDC				;This pattern will not be included in the
+				;CUI library built for DCL.
+
+.SBTTL	U$CLBL--command line label
+;+									
+; U$CLBL - command line label 
+;
+; Check for a valid command line label.  A label consists of 1-255 characters
+; in the character set A-Z, a-z, 0-9, underscore and dollar sign.  The first 
+; character cannot be a dollar sign.  
+;
+; If C = 0, at least one valid label character was found.
+; If C = 1, a valid label character was not found.
+;
+; Errors returned:
+;	  R0 = error code,
+;		   U.ILBL  = "?Invalid label"
+;			       (label began with an invalid character)
+;-
+.ENABL	LSB
+
+U$CLBL::SUBR
+	CALLX	LX.SUP		;Get the set up
+	CALBX	LX$TST <#10$>	;Test 1st char for A-Z,a-z,0-9 or underscore
+	TMPORG	U$TEXT		;
+10$:	.ASCIZ	"A9_"		;Match A-Z, a-z, 0-9, underscore
+	UNORG			;Is it valid ?
+	BCC	20$		;Yes - analyze the remaining characters
+	MOV	LX.POS,LX.ERP	;No, set error position to current position
+	MOV	#U.ILBL,R0	;?Invalid label
+	BR	40$		;Quit
+
+20$:	CALBX	LX.SKP <#30$>	;Skip characters belonging to given set
+	TMPORG	U$TEXT		;
+30$:	.ASCIZ	"A9$_"		;Match A-Z, a-z, 0-9, $, underscore
+	UNORG			;
+40$:	RETURN			;Return to caller
+
+.DSABL	LSB
+GLOBAL	<U.ILBL,LX.POS,LX.ERP>
+
+.SBTTL	U$DATE--parse a date specification
+
+.ENABL	LSB
+
+U$DATE::SUBR
+	CALLX	LX.SUP		;Get set up.
+	.ASSERT	N.TIME(R1) EQ #0;There's no time.
+	ADD	#N.DATE,R1	;Point at N.DATE field of node.
+	CALBX	LX.DATE	<R1>	;Match a date, & save it N.DATE field of node	
+10$:	CALBX	LX$TST	<#20$>	;Match a plus or a minus sign
+	 TMPORG	U$TEXT
+20$:	  .ASCIZ "+-"
+	 UNORG
+	BCS	40$		;No match, done
+	CALBX	LX.S16 <#$NUM>	;Match a 16-bit, signed integer
+	BCS	50$		;No match, quit
+	CALBX	LX.KEY	<#U$DAY>;Match "DAYS"
+	BCS	50$		;No match, quit
+	CALBX	ADDDAY	<R1,$NUM>;Adjust the number of days
+	BCC	10$		;No error, find some more
+40$:	CLR	R0		;Assume no error
+	CMP	R4,LX.POS	;Have we made any headway?
+	IFEQ			;If not then
+50$:	MOV	#U.IDAT,R0	;  ?Invalid date
+	MOV	R4,LX.ERP	;  Point to error position
+	ENDIF			;Endif
+	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<U.IDAT,$NUM,LX.ERP,U$DAY>
+
+.SBTTL U$DEV
+;+
+; U$DEV--Device specification with required unit number and optional colon.
+; U$DEVN--Device specification and optional colon, no unit number required.
+; Colon is not stored into CUITRE.
+;-
+
+.ENABL	LSB
+
+U$DEVN::SUBR
+	CLR	R2		;R2 = 0 indicate unit number NOT required
+	BR	10$		;
+
+U$DEV::	SUBR
+	MOV	#-1,R2		;R2 <> 0 indicates unit number required
+10$:	CALLX	LX.SUP		;Get set up.
+	; //The next line may not be needed as of ;036 //
+	CALBX	LX.EXAC <#15$>	;Look for optional underscore. 
+	 TMPORG	U$TEXT		;(We don't care whether this succeeds or not.)
+12$:	  .ASCIZ "$"
+15$:	  .ASCIZ "_"
+17$:	  .ASCIZ "A9$_"							;036
+	 UNORG
+	CALBX	LX$TST	<#12$>	;Are we starting at a "$"?
+	BCC	18$		;Yes, say ?Not a valid device and quit
+	CALBX	LX.SKP	<#17$>	;Skip all Alpha-numerics, $ signs, and _'s  ;036
+	IFCS			;If that failed then
+18$:	MOV	#NODEVC,R0	;  Error is "?Not a valid device"
+	BR	30$		;  Return.
+	ENDIF			;Endif
+
+	CALB	60$		;FSS the device name.
+	BCS	30$		;That failed. Quit.
+	.ASSUME	DSKHND EQ 0	;The device handler index is 0.
+	MOVB	FIRQB+FQDEVN,N.LOW(R1)
+	MOVB	FIRQB+FQDEVN+1,N.HIGH(R1)
+				;Remember unit number and flag
+	TSTB	XRB+14		;Is the device disk?
+	IFZE			;If so then
+	TST	R2		;  Unit number required?
+	IFNZ			;  If so then
+	TSTB	FIRQB+FQDEVN+1	;    Was a unit number specified?
+	IFZE			;    If not then
+	MOV	#U.UNIT,R0	;      Report error - ?Unit number required
+	BR	30$		;      Return.	
+	ENDIF			;    Endif
+	ENDIF			;  Endif
+	ENDIF			;Endif
+
+	MOV	LX.NMAT,N.TXTLEN(R1)
+	MOV	LX.PMAT,N.TXTPOS(R1)
+				;Save length and position of device name.
+	CALBX	LX.EXAC,<#20$>	;Match an optional colon.
+	 TMPORG	U$TEXT
+20$:	  .ASCIZ ":"
+	 UNORG
+	CLR	R0		;We don't care whether that succeeded or not.
+30$:	RETURN
+
+; FSS the device name.
+; INPUTS:
+;	R4	=	character position of device name
+;	LX.NMAT	=	number of chars in device name
+; CALB	60$
+
+60$:	SUBR
+	SUB	#18.,SP		;Make a 12-character buffer.		;038
+	MOV	SP,R1		;Point to the buffer.
+	MOV	#CMDBUF-1,R2	;Point to 
+	ADD	R4,R2		;the device name.
+	CMPB	(R2),#'_	;Device preceeded by underscore?
+	IFEQ			;If so then
+	INC	LX.NMAT		;  Fix device name length		;030
+	DEC	LX.PMAT		;  Set pointer to "_" character 	;030
+	ENDIF			;Endif
+	MOV	LX.NMAT,R3	;Get number of characters in device name. ;030
+	CMP	R3,#16.		;More than 16.?				;038
+	IFHI			;If so then
+	MOV	#16.,R3		;  Trim it to 16.			;038
+	ENDIF			;Endif
+	MOV	R3,R4		;Copy number of characters.
+	.ASSERT	R3 NE #0	;We have at least one character.
+70$:	MOVB	(R2)+,(R1)+	;Move device name
+	SOB	R3,70$		;into buffer.
+	MOVB	#':,(R1)+	;Add a colon to the end.
+	INC	R4		;Inc number of characters to allow for colon.
+	MOV	SP,R1		;Point to the buffer.
+	CALBX	U$FSS <R4,R1>	;FSS the device name.
+	ADD	#18.,SP		;Deallocate the buffer.			;038
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<NODEVC,U.UNIT>
+
+.SBTTL	U$LBL--magtape label 
+.SBTTL	SMPNAM--simple name
+;+
+; U$LBL--magtape label.  String of letters and/or digits.
+;-
+;+
+; SMPNAM--simple name.  String of letters and/or digits.
+;-
+.ENABL	LSB
+
+U$LBL::
+SMPNAM:	SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALBX	LX.SKP <#10$>	;Scan one or more letters and digits.
+	 TMPORG	U$TEXT
+10$:	  .ASCIZ "A9"
+	 UNORG
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	U$LOGNAM - SYSTEM Logical name, with optional colon.
+.SBTTL	U$ULOG - USER Logical name, with optional colon.
+;+
+; U$LOGNAM - SYSTEM Logical name, with optional colon.
+; U$ULOG - USER Logical name, with optional colon.
+;
+; Note:  The colon is not stored into CUITRE.
+;
+; The set of valid SYSTEM logial name characters is:
+;	{A-Z,a-z,0-9,$,_}
+;
+; The set of valid USER logical name characters is:
+;	{A-Z,a-z,0-9,_}
+;
+; OUTPUTS:
+;
+;	C=0 if no error, CUITRE is set up with logical name.  Colon is not
+;		stored in the tree.
+;	C=1 if error.  Possible errors include U.ILOG or U.IULOG along with
+;		errors sent back from SMPNAM.
+;-
+.ENABL	LSB
+
+	 TMPORG	U$TEXT		;This is TEXT
+10$:	  .ASCIZ "A9_"		;  A-Z,a-z,0-9,_			;033
+15$:	  .ASCIZ "A9$_"		;  A-Z,a-z,0-9,$,_			;033
+20$:	  .ASCIZ ":"		;  Colon
+	 UNORG			;End of text
+
+U$ULOG::SUBR			;Set up for USER LOGICAL NAME pattern
+	CALLX	LX.SUP		;Get set up.
+	CLR	-(SP)		;Flag indicating pattern type = USER
+	BR	5$		;Join common code
+
+U$LOGNAM::SUBR			;Set up for SYSTEM LOGICAL NAME pattern
+	CALLX	LX.SUP		;Get set up.
+	MOV	#-1,-(SP)	;Flag indicating pattern type = SYSTEM
+
+5$:	MOV	LX.POS,R2	;save current position			;037
+	CALB	SMPNAM		;Logicals must start with alphanumeric(s)
+	BCS	25$		;That failed. Quit.
+	MOV	LX.NMAT,N.TXTLEN(R1)
+				;Save length of logical name.
+	CALBX	LX.SKP  <#10$>	;Skip any simple characters or _'s	;033
+	IFCC			;If there were more characters (next char was _) ;033
+	ADD	LX.NMAT,N.TXTLEN(R1)					;033
+				;  Add two length's together		;033
+	ENDIF			;End if					;033
+
+	CALBX	LX.SKP  <#15$>	;Skip any simple characters, _'s or $'s	;033
+	IFCC			;If there were more characters (next char was $)
+	TST	(SP)		;  Test pattern type
+	BEQ	25$		;  Branch if we are looking at a user logical
+	ADD	LX.NMAT,N.TXTLEN(R1)
+				;  Add two length's together
+	ENDIF			;End if
+				
+	CALBX	LX.EXAC,<#20$>	;Match an optional colon.
+	CLR	R0		;We don't care whether that succeeded or not.
+	CMP	N.TXTLEN(R1),#15. ;Is the logical > 15 characters?	;034
+	BLE	35$		;No - we're all set			;034
+	MOV     #U.LLNG,R0      ;Say ?Logical too long			;034
+	BR	30$		;Finish up
+
+25$:	TST	(SP)		;We have an error.  What pattern did we have?
+	IFEQ			;If it was USER LOGICAL
+	MOV	#U.IULOG,R0	;  Say ?Invalid user logical name
+	ELSE			;Else
+	MOV	#U.ILOG,R0	;  Say ?Invalid logical name
+	ENDIF			;End if
+30$:	MOV	R2,LX.ERP	;Set error position			;037
+35$:	MOV	(SP),(SP)+	;Pop stack				;037
+	RETURN
+
+GLOBAL	<U.ILOG,U.IULOG,U.LLNG>
+.DSABL	LSB
+
+.SBTTL U$NODE--nodename 
+;+
+; U$NODE--DECnet/E nodename.
+;
+; With optional underscore and optional double colon.
+;	[_]node["accounting information"][::][additional nodes[::]]
+; The final double colon, if any, is not stored into CUITRE.
+;-
+.ENABL	LSB
+
+; R2 = #characters in this pattern
+; SP = flag for if we have a trailing double colon
+
+U$NODE::SUBR
+	CALLX	LX.SUP			;Get set up.
+	CLR	-(SP)			;Clear a spot on the stack for a flag.
+	CLR	R2			;We haven't parsed any characters yet.
+5$:	CALBX	LX.EXAC <#10$>		;Parse an underscore.
+	 TMPORG	U$TEXT
+10$:	  .ASCIZ "_"
+12$:	  .ASCIZ "A9."
+	 UNORG		
+	BCS	15$			;Did we find one?
+	INC	R2			;Yes, account for this character.
+15$:	CALBX	LX.SKP <#12$>		;Match a simple name (letters, digits).
+	BCS	30$			;That failed.  Quit.
+	ADD	LX.NMAT,R2	 	;We succeeded parsing more characters.
+	CLR	(SP)			;We have not found a double colon yet.
+	CALBX	LX.EXAC <#20$>		;Parse a double colon.
+	 TMPORG	U$TEXT			;  If we find the double colon, then
+20$:	  .ASCIZ "::"			;  we should look for another node name
+	 UNORG				;  name right away.
+	BCS	25$			;
+	COM	(SP)			;Indicate we saw a double colon.
+	ADD	#2.,R2		 	;Account for double colon.
+	BR	5$			;Look for another nodename.
+
+25$:	CLR	R0			;There was no error.
+30$:	TST	(SP)+			;Did we find a trailing double colon?
+	BEQ	40$			;No.
+	SUB	#2.,R2			;Yes.  Subtract those two characters.
+	CLR	R0			;There was no error.
+40$:	MOV	R2,N.TXTLEN(R1)		;Indicate how many characters were in 
+	RETURN				;the node-name parameter, and return.
+.DSABL	LSB
+
+.IF	NDF	$$$DCL		;If this is being assembled for DCL, then
+				; DON'T include this pattern in the assembly.
+
+.SBTTL	U$PPN 	-- A PPN of form a,b or [a,b] or a/b or [a/b]
+;+
+;	This pattern is currently used by the LOGIN command.  It allows
+;	users to log into another account from the current account.  
+;
+;	//Note:  This pattern must be updated to allow the syntax [,2], [],
+;	and valid (translatable) logical names.//
+;
+;-
+.ENABL	LSB
+
+	TMPORG	U$TEXT
+10$:	 .ASCIZ	"["
+20$:	 .ASCIZ	"9"
+30$:	 .ASCIZ	",/"
+40$:	 .ASCIZ	"]"
+50$:	 .ASCIZ	"*"
+	 UNORG
+
+U$PPN::	SUBR
+	CALLX	LX.SUP		;Get set up.
+	CLR	-(SP)		;Clear flag, assume bracket not specified
+	CALBX	LX.EXAC	<#10$>	;Match a left bracket (optional)
+	IFCC			;If found one, 
+	COM	(SP)		;  Remember that we did
+	ENDIF			;Endif
+
+	MOV	CMNADR,R2	;Point to CUI common
+	ADD	#U.LOW,R2	;Point to U.LOW
+	CALBX	LX$TST	<#20$>	;Make sure next thing is integer
+	BCS	70$		;It's not ... ?Invalid account
+	MOV	LX.POS,N.TXTPOS(R1);Set text position
+	CALL	PPNNUM		;Get a PPN number
+	BCS	70$		;An error occured		
+	MOVB	(R2),N.LOW+1(R1);Save PPN in N.LOW
+	CALBX	LX.MEM	<#30$>	;Match a comma or slash
+	BCS	70$		;None found
+	CALBX	LX$TST	<#20$>	;Make sure next thing is integer
+	BCS	70$		;It's not ... ?Invalid account
+	CALL	PPNNUM		;Match second PPN number
+	BCS	70$		;An error occured
+	MOVB	(R2),N.LOW(R1)	;Save PPN in N.LOW
+	MOV	LX.POS,N.TXTLEN(R1)
+	SUB	N.TXTPOS(R1),N.TXTLEN(R1)
+				;Set text LENGTH
+	TST	(SP)		;Did we find an open bracket?
+	BEQ	90$		;No, all done
+	CALBX	LX.EXAC	<#40$>	;Yes, match closing bracket
+	BCC	73$		;Found it, finish successfully
+	MOV	#U.NOCB,R0	;Bot there; ?Missing closing bracket
+	BR	80$		;Point to open bracket and quit
+
+70$:	CALB	LX.EXAC	<#50$>	;Are we looking at a "*"?
+	BCS	75$		;No, ?Invalid account
+	MOV	#U.WLD,R0	;Yes, ?Wildcards not allowed
+	BR	90$		;Point to wildcard and quit
+
+73$:	TST	N.LOW(R1)	;Was account [0,0]
+	BNE	90$		;No, it was fine
+75$:	MOV	#U.IACC,R0	;?Invalid account
+80$:	CLR	LX.ERP		;Let LX.SUP point to beginning of pattern
+90$:	POP			;Give back stack space
+	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<U.IACC,U.NOCB,U.WLD>
+
+.ENDC				;This pattern will not be included in the
+				;CUI library built for DCL.
+
+.SBTTL	U$QUOT -- A quoted string
+;+
+; U$QUOT accepts a quoted string.  The opening and closing quotes are required.
+; The quotation characters are NOT included in the count (U.LEN)
+;-
+.ENABL	LSB
+
+U$QUOT::SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALBX	LX.DQUOT
+	CMP	R0,#SASYNE	;"?Syntax error"?
+	BNE	10$		;No, let it go
+	MOV	#U.QUOT,R0	;Yes, make it "?Quoted string expected"
+10$:	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<U.QUOT,SASYNE>
+
+.SBTTL	U$REST--rest of command line
+
+.ENABL	LSB
+
+U$REST::SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALBX	LX.FND <#10$>	;Search for end-of-string.
+	 TMPORG	U$TEXT
+10$:	  .ASCIZ ""
+	 UNORG
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	U$SYM--global symbol
+;+
+; U$SYM--global symbol
+;
+; Global symbol consists of one or more letters, digits, dollar signs,
+; and periods.
+;-
+
+.ENABL	LSB
+
+U$SYM::	SUBR
+	CALLX	LX.SUP		;Get set up.
+	CALBX	LX.SKP <#10$>
+	 TMPORG	U$TEXT
+10$:	  .ASCIZ "A9$."
+	 UNORG
+	IFCS			;If that failed then
+	MOV	#U.IARG,R0	;  Say ?Invalid argument.
+	ENDIF
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<LX.POS,U.IARG>
+
+.SBTTL	U$SYMN - symbol names
+;+									
+; U$SYMN - symbol name
+;
+; This routine checks for a valid symbol name on the SHOW SYMBOL, DELETE/SYMBOL
+; and INQUIRE commands, but is not to be used for assignment statements.
+; Symbol names consist of 1-255 characters.  
+;
+; For the INQUIRE command, a valid symbol name consists of characters in the
+; set A-Z, a-z, 0-9, dollar sign, underscore, hyphen and asterick.  The first
+; character cannot be in the set 0-9, dollar sign, underscore, hyphen, or
+; asterick, or begin with the reserved prefix characters F$ or f$ (most of 
+; these restrictions are caught in the INQUIRE command code since the symbol 
+; name in an assignment statement follows the same rules).  The INQUIRE command
+; code also needs to check for a symbol name abbreviation point, and only one
+; abbreviation point, which is not allowed on the SHOW SYMBOL or DELETE/SYMBOL
+; commands.
+;
+; For the SHOW SYMBOL or DELETE/SYMBOL command, a valid symbol name consists 
+; of characters in the set A-Z, a-z, 0-9, dollar sign and underscore.  The 
+; first character must be in the set A-Z, a-z, or $ (it cannot be an integer
+; or an underscore).
+;
+; Inputs:
+;	  U.CMDC = command code of caller (INQUIRE, DELETE/SYMBOL, SHOW SYMBOL)
+;
+; Errors returned:
+;	  R0 = error code,
+;		   U.ISYN  = "?Invalid symbol name"
+;			       (symbol name began with an invalid character)
+;		   U.UCHR  = "?Unexpected character"
+;			       (symbol name contained an invalid character)
+;-
+.ENABL	LSB
+
+U$SYMN::SUBR
+	CALLX	LX.SUP		;Get the set up
+
+	 TMPORG	U$TEXT		;
+10$:	 .ASCIZ	"A$"		;Match A-Z, a-z, $
+20$:	 .ASCIZ	"A9$_-*"	;A-Z,a-z,0-9,$, underscore, hyphen, asterick
+30$:	 .ASCIZ	"A9$_"		;Match A-Z, a-z, 0-9, $, underscore
+
+	 UNORG			;
+
+	PUSH	<R1>		;Save R1
+	MOV	#30$,R1		;Assume it's SHOW SYMBOL or DELETE/SYMBOL
+				; (chars after the 1st can be in set A-Z, a-z,
+				;  0-9, $, or underscore)
+	MOV	CMNADR,R4	;Point to CUI common
+	CMP	U.CMDC(R4),#2	;Did the INQUIRE command call this routine ?
+	BNE	40$		;No,40$
+	MOV	#20$,R1		;Chars after the 1st can be in set A-Z, a-z,
+				; 0-9, $, underscore, hyphen, or asterick
+40$:	CALBX	LX$TST <#10$>	;Test 1st character for A-Z, a-z, or $
+				; (allow the $ to go thru for now for INQUIRE)
+				;Is it valid ?
+	BCC	50$		;Yes - analyze the remaining characters
+	MOV	LX.POS,LX.ERP	;No, set error position to current position
+	MOV	#U.ISYN,R0	;"?Invalid symbol name" error
+	BR	60$		;Quit
+
+50$:	CALBX	LX.SKP <R1>	;Skip characters belonging to given set
+60$:	POP	<R1>		;Restore R1
+	RETURN			;Return to caller
+
+.DSABL	LSB
+GLOBAL	<LX.ERP,LX.POS,U.ISYN,U.CMDC>
+
+
+.SBTTL	U$S16 -- Signed 16-bit integer
+;+
+;  U$S16 -- Signed 16-bit integer
+;
+;	This pattern accepts numbers is in the range -32768 to +32767.
+;-
+
+U$S8::	SUBR
+	CALB	DOINT <#S8L,#S8H,#YES>
+	RETURN
+
+U$S16::	SUBR
+	CALB	DOINT <#S16L,#S16H,#YES>
+	RETURN
+
+U$S32::	SUBR
+	CALB	DOINT <#S32L,#S32H,#YES>
+	RETURN
+
+U$U8::	SUBR
+	CALB	DOINT <#U8L,#U8H,#NO>
+	RETURN
+
+U$INT::
+U$U16::	SUBR
+	CALB	DOINT <#U16L,#U16H,#NO>
+	RETURN
+
+U$U32::	SUBR
+	CALB	DOINT <#U32L,#U32H,#NO>
+	RETURN
+
+.ENABL	LSB
+
+DOINT:	SUBR	<MIN,MAX,SIGN>,CHECK
+	TSTB	@MINADR			;Was a minimum value specified?
+	BNE	10$			;Yes.
+	MOV	MIN(R5),MINADR		;No.  Use default 
+10$:	TSTB	@MAXADR			;Was a maximum value specified?
+	BNE	20$			;Yes.
+	MOV	MAX(R5),MAXADR		;No.  Use default 
+20$:	CMP	SIGN(R5),#YES		;Signed integer?
+	BNE	26$			;No	
+	CALBX	LX.S32			;Parse signed 32-bit number 
+					;(even if only working with 8-bits)
+	BCC	25$			;No error, see if number is in range
+	CMP	R0,#U.OUTR		;Was error "?Number not in range"?
+	BEQ	30$			;Yes.  Print error message
+	BR	50$			;No.  Something else.  Quit
+
+25$:	CALB	SRANGE <MINADR,MAXADR> 	;Is number in this signed range?
+	BCC	50$			;No error occured
+	BR	30$			;Print command line, error out.
+
+26$:	CALBX	LX.EXAC <#27$>		;Allow a single plus sign
+	 TMPORG	U$TEXT			;
+27$:	  .ASCIZ "+"			;
+	 UNORG				;
+	CALBX	LX.U32			;Parse unsigned 32-bit number 
+					;(even if only working with 8-bits)
+	BCC	28$			;No error, see if number is in range
+	CMP	R0,#U.OUTR		;Was error "?Number not in range"?
+	BEQ	30$			;Yes.  Print error message
+	BR	50$			;No.  Something else.  Quit
+
+28$:	CALB	URANGE <MINADR,MAXADR> 	;Is number in this signed range?
+	BCC	50$			;No error occured
+	.BR	30$			;Print command line, error out.
+	
+30$:	REPAINT	LX.PMAT			;Repaint command, point at number
+	CMESSAGE #U.OUTR <MINADR,MAXADR>;?Number out of range <min> to <max>
+	MOV	#U.QUIT,R0		;Make sure we quit
+	BR	60$			;Done
+
+50$:	MOV	LX.PMAT,N.TXTPOS(R1)	;Text position
+	MOV	LX.NMAT,N.TXTLEN(R1)	;Number of characters in text
+	MOV	CMNADR,R4		;Point to CUI common
+	ADD	#U.LOW,R4		;Point to low word
+					;(note: $XDT2B puts high word first, so
+					;switch them around now.)
+	MOV	(R4)+,N.HIGH(R1)	;High order word 
+	MOV	(R4),N.LOW(R1)		;Low order word
+60$:	RETURN				;Finished
+
+GLOBAL	<U.OUTR,CMDBUF,U.QUIT>
+
+.DSABL	LSB
+
+.IF	NDF	$$$DCL		;If this is being assembled for DCL, then
+				; DON'T include this pattern in the assembly.
+
+.SBTTL	U$PO2 -- Power of two
+;+
+; U$PO2 -- Power of two
+;
+; This routine accepts integers in the rage 0 to 2147483648 which are powers
+; of two.  Negative integers are first converted to positive.
+;
+;-
+.ENABL	LSB
+
+U$PO2::	SUBR			;
+	CALLX	LX.SUP		;Get set up
+	CALL	U$S32		;Parse a signed 32-bit integer
+	BCS	30$		;Branch if error in 32-bit integer
+	MOV	CMNADR,R4	;Point to CUI common
+	ADD	#U.LOW,R4	;Point to low value of 32-bit result
+	MOV	(R4)+,R3	;R3 = high order
+	MOV	(R4),R4		;R4 = low order
+
+	TST	R3		;Look at R3
+	BGE	10$		;Branch if positive
+	NEG	R4		;Perform double
+	ADC	R3		; ... precision
+	NEG	R3		; ... negate
+
+10$:	CMP	R3,R4		;Compare high and low values
+	IFEQ			;If they are the same then
+	TST	R3		;  Either they are both zero
+	BEQ	30$		;  (which is a power of two)
+	BR	20$		;  Or they both have bits set, 
+				;  (which is not a power of two)
+	ENDIF			;Endif
+
+	BIS	R4,R3		;Combine all bits into R3
+	MOV	R3,-(SP)	;Save a copy of R3
+	DEC	(SP)		;Subtract one
+	BIT	R3,(SP)+	;See how many bits are set in R3	
+	BEQ	30$		;Branch if only one bit is set in R3
+20$:	MOV	#U.PO2,R0	;Error:  ?Number is not a power of two
+30$:	RETURN			;Return
+
+.DSABL	LSB
+
+GLOBAL	<U.PO2>
+
+.ENDC
+
+.IF	NDF	$$$DCL		;If this is being assembled for DCL, then
+				; DON'T include this pattern in the assembly.
+
+.SBTTL	U$TIME--parse a date and time specification
+;+
+; U$TIME--parse a date and time specification
+;
+;-
+.ENABL	LSB
+
+U$TIME::SUBR
+	CALLX	LX.SUP		;Get set up.
+	ADD	#N.DATE,R1	;Point at N.DATE field of node.
+	.ASSUME	N.TIME EQ N.DATE+2;N.TIME field is next field.
+	CALBX	LX.TIME	<R1>	;Match a date and time, and save them into 
+				;N.DATE and N.TIME fields of node.
+10$:	RETURN
+
+.DSABL	LSB
+
+.ENDC				;This pattern will not be included in the
+				;CUI library built for DCL.
+
+.SBTTL	URANGE -- Unsigned integer range checker
+.ENABL	LSB
+URANGE:	SUBR	<MIN,MAX>,CHECK						;032
+	CLR	-(SP)		;(SP) = 0 --> Unsigned
+	BR	5$		;Join common code
+
+SRANGE:	SUBR	<MIN,MAX>,CHECK						;032
+	MOV	#-1,-(SP)	; (SP) =-1 --> Signed 
+5$:	MOV	CMNADR,R4	;Point to CUI common
+	ADD	#U.LOW,R4	;Point to low value of 32-bit result
+	MOV	(R4)+,R3	;R3 = high order
+	MOV	(R4),R4		;R4 = low order
+	MOV	MIN(R5),R0	;R0 ->Point to minimum value
+	MOVB	(R0)+,R2	;R2 = number of characters
+	TST	(SP)		;Signed or unsigned?
+	BEQ	10$		;Unsigned
+	BIS	#100000,R2	;Indicate signed integer is assumed
+10$:	MOV	#TWOWRD,R1	;R1 = location to put value
+	CLR	(R1)		;Clear out location of value
+	CLR	2(R1)		; both words
+	CALLX	$XDT2B		;Convert to binary
+	BCS	58$		;Error?  Program failure, minval not correct
+	TST	R2		;Were all characters looked at?
+	BGE	58$		;No!  Again, MINVAL not correct
+	TST	(SP)		;Signed or unsigned?
+	BEQ	20$		;Unsigned
+	CMP	R3,(R1)+	;Compare high orders, signed
+	BLT	60$		;High order indicates user's number < minval
+	BNE	30$		;Branch if high order dictated compare
+	BEQ	25$		;It didn't, go compare the low order
+20$:	CMP	R3,(R1)+	;Compare high orders, unsigned
+	BLO	60$		;High order indicates user's number < minval
+	BNE	30$		;Branch if high order dictated compare
+25$:	CMP	R4,(R1)		;Compare low orders
+	BLO	60$		;Low order indicates user's number < minval
+30$:	MOV	MAX(R5),R0	;R0 ->Poits to maximum value
+	MOVB	(R0)+,R2	;R2 = number of characters
+	TST	(SP)		;Signed or unsigned?
+	BEQ	40$		;Unsigned
+	BIS	#100000,R2	;Indicate signed integer is assumed
+40$:	CLR	(R1)		;Re-clear value
+	CLR	-(R1)		; both words
+	CALLX	$XDT2B		;Convert to binary
+	BCS	58$		;Error?  Program failure, minval not correct
+	TST	R2		;Were all characters looked at?
+	BGE	58$		;No!  Again, MINVAL not correct
+	TST	(SP)		;Signed or unsigned?
+	BEQ	50$		;Unsigned
+	CMP	R3,(R1)+	;Compare high orders, signed
+	BGT	60$		;High order indicates user's number > maximum
+	BNE	55$		;Branch if high order dictated compare
+	BEQ	53$		;They did not, go compare low orders
+50$:	CMP	R3,(R1)+	;Compare high orders, unsigned
+	BHI	60$		;High order indicates user's number > maximum
+	BNE	55$		;Branch if high order dictated compare
+53$:	CMP	R4,(R1)		;Compare low orders
+	BHI	60$		;Low order indicates user's number > maximum
+55$:	CLR	R0		;Indicate success
+	BR	70$		;Finish up	
+
+58$:				;Display error message if not in debug mode
+.IIF DF $DEBUG 	$FAP 	<"?Program error, MAXVAL or MINVAL incorrect"<CR><LF>>
+60$:	MOV	#-1,R0		;Indicate failure
+70$:	TST	(SP)+		;Clean up stack 
+	RETURN			;Done
+
+GLOBAL	<CMNADR>
+
+.END

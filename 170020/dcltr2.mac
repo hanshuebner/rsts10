@@ -1,0 +1,1127 @@
+;
+;		COPYRIGHT (c) 1974, 1985 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DCLTRN
+;+
+;
+;  001	CEK  15-May-82	Created this module from DCLTHR.
+;  002	CEK  07-Jul-82	Made PUTFIL not change * wildcard into question marks.
+;  003	JFM  27-Oct-82	Added PUTJOB macro
+;  004	JFM  01-Feb-83	Added PUTRFIL macro
+;  005	JFM  21-Feb-83	Changed PUTRFIL to handle accounting info correctly.
+;  006  SDL  18-Aug-83  Added SETFLG macro
+;  007  SDL  04-Nov-83  Made TRNNEX and TRN.BSIZ global
+;  008	JFM  05-Mar-84  Cleaned up PUTFIL, added DOFIL entry point for F$PARSE
+;  009	JFM  08-May-84  Added threaded macros $CHECK, $MOV, ...
+;  010	GMB  25-Jun-84	Added untranslatable logicals to DOFIL.
+;			Added two more plugins to INSERT.
+;  011	JFM  02-Aug-84  Commented out PUTJOB - no longer used
+;  012	JFM  18-Aug-84  Used new, longer, TRN.BSIZ
+;  013  GMB  30-Jan-86  This file is now included by DCLTRN.MAC & AUXTRN.MAC
+;  014  GMB  06-Aug-86  Distinguish SY0: from SY: for RT11 file names
+;  015	GMB  29-Aug-86	Fixed RT11 output PPN translation bug
+;
+;
+;			[RSTS/E V9.7]
+;  016	JFM  20-Sep-88	Unglobalized TRNNEX
+;
+;			[RSTS/E V10.1]
+;  017	DLS  09-Aug-91	Globalized TRNNEX again
+;-
+
+;+
+; DCLTRN -- DCL translator
+;
+; This module contains macros and service routines 
+; to help a threaded command description to generate the following outputs:
+;	TRNBUF contains the translated command string - normally a CCL string.
+;	CMDTYP	=	type of processing for this command.  One of the 
+;			following values:
+;		RUNTYP--a RUN command.  We run a program at line 0, passing 
+;			no information in core common.
+;		CUSPTYP--a "CUSP" type of command.  We run a CUSP, passing 
+;			information to it in core common.  The entry point 
+;			may be non-zero.
+;		CCLTYP--a CCL prefix command.  We issue a .CCL directive.
+;		INLTYP--an "inline" command.  We execute the command inline, 
+;			by issuing SYS calls or whatnot.
+;
+; Each macro creates threads that are interpreted by DCLTHR.MAC.
+; These threads cause a call to one of the service routines for the macro.
+;
+; For the calling interface to the service routines, see CUITHR.MAC.
+;-
+
+	.PSECT	DCLTRN,RO,REL,CON
+	DEFORG	DCLTRN
+	.MCALL	.ASCIC,$FAO
+
+.SBTTL	Constants
+
+TRN.BSIZ ==:	255.		;Size of TRNBUF.  This is the maximum 
+				;length of a CCL string.  The size of core 
+				;common is 127., but with the new .CMDLN
+				;directive we set a new limit of 255.
+	TMPORG	TEXT
+COL.TXT:.ASCIC	":"
+	UNORG
+
+.SBTTL	Variables 
+	TMPORG	IMPURE
+TRNLEN::.BLKW			;Number of chars in use in TRNBUF.
+
+TRNBUF::.BLKB	TRN.BSIZ	;Buffer for output CCL string, filespec,
+	.EVEN			;etc.
+
+TRNNEX::.BLKW			;Address of next free slot in TRNBUF.
+	UNORG
+
+.SBTTL	INITRN -- Initialize TRNBUF buffer
+;+
+; INITRN:: Initialize TRNBUF buffer.  This routine must be called before
+;	the translation begins.  This is a normal call,
+;	not a threaded call.
+;
+; CALL	INITRN
+;-
+
+INITRN::MOV	#TRNBUF,TRNNEX
+	CLR	TRNLEN
+	RETURN
+
+.SBTTL	PUTSTR -- Put a string into TRNBUF
+;+
+; PUTSTR -- Put a string into TRNBUF
+;
+; USAGE (threaded call):
+;	PUTSTR
+;	PUTSTR "literal"
+;	PUTSTR string_address
+;
+; DESCRIPTION:
+;	PUTSTR with no argument -- Copy the parameter or 
+;	argument into TRNBUF.  (This form is used after a successful GETP or
+;	GETA (without argname).)  For example:
+;
+;		$FETP PARM1		;Fetch the filespec.
+;		PUTSTR			;Put it into TRNBUF.
+;
+;	PUTSTR "literal" -- copy the literal string into TRNBUF.
+;
+;	PUTSTR string_address -- copy the counted ASCII (ASCIC) string at 
+;	the specified address into TRNBUF.
+;
+; ERRORS:
+;	U.LONG if TRNBUF overflowed
+;-
+
+.SBTTL	PUTSPA -- Put a space into TRNBUF
+;+
+; PUTSPA -- Put a space into TRNBUF
+;
+; USAGE (threaded call):
+;	PUTSPA
+;
+; DESCRIPTION:
+;	PUTSPA puts a space into TRNBUF.
+;
+; ERRORS:
+;	U.LONG if TRNBUF overflowed
+;-
+
+.MACRO	PUTSTR	STRING=LAST
+	.IF	IDN <STRING>,<LAST>
+	 .WORD	PUTLAST
+	.GLOBL	PUTLAST
+	.IFF
+	.DSABL	CRF
+	.IRPC	C,<STRING>
+	.IF	IDN <C>,<">
+$$$IMM	=	1
+	.IFF
+	.IF	IDN <C>,<'>
+$$$IMM	=	1
+	.IFF
+$$$IMM	=	0
+	.ENDC
+	.ENDC
+	.MEXIT
+	.ENDR
+	.IF	EQ <$$$IMM-1>
+	.ENABL	CRF
+	 .WORD	PUTISTR
+	.GLOBL	PUTISTR
+	.ASCIC	<STRING>
+	.EVEN
+	.IFF
+	.ENABL	CRF
+	 .WORD	PUTSTR
+	.GLOBL	PUTSTR
+	.IRP	S,^'STRING'#
+	 .WORD	S
+	.ENDR
+	.ENDC
+	.ENDC
+	.ENDM	PUTSTR
+
+.MACRO	PUTSPA
+	 .WORD	PUTISTR
+	.GLOBL	PUTISTR
+	.ASCIC	""<SPACE>
+	.EVEN
+	.ENDM	PUTSPA
+
+.MACRO	PUTLINE
+	 .WORD	PUTLINE
+	.GLOBL	PUTLINE
+	.ENDM	PUTLINE
+
+.ENABL	LSB
+	
+PUTLAST::CALLR	MOVSTR
+	;RETURN
+
+PUTSTR::MOV	(R3)+,R4	;Point at string to put into buffer.
+	CALLR	PUTCSTR		;Put it.
+	;RETURN
+
+PUTISTR::MOV	R3,R4		;Point at inline string.
+	CALL	PUTCSTR		;Move it into TRNBUF.
+	BCS	10$		;Error. Quit.
+	MOVB	(R3)+,R4	;Get length of inline string.
+	.ASSERT	R4 GE #0	;It won't exceed 127. (thus no sign extension).
+	ADD	R4,R3		;Point past end of inline string.
+	INC	R3		;Round R3 up to next even address
+	BIC	#1,R3
+10$:	RETURN
+
+PUTLINE::CALL	INITRN		;Initialize TRNBUF
+	MOV	#CMDBUF-1,R4	;Point to command string in CMDBUF
+	ADD	CMDPOS,R4	;Point at command
+	MOV	CMDLEN,R2	;Set up length
+	SUB	CMDPOS,R2	;Subtract any leading labels, $'s, _'s etc.
+	INC	R2		;CMDPOS starts at 1, not 0
+	CALB 	INSERT <#20$,R2,R4>
+	TMPORG	TEXT		;Insert entire command line into TRNBUF
+20$:	.ASCIC	<"!AD">
+	UNORG
+	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<CMDBUF,CMDLEN,CMDPOS>
+
+.SBTTL PUTCCL, PUTIND -- Put a CCL command name into TRNBUF
+;+
+; PUTCCL -- Put a CCL command name into TRNBUF
+; PUTIND -- Put a CCL name, indirectly pointed to, into TRNBUF
+;
+; USAGE (threaded call):
+;	PUTCCL filedescriptor 
+;	PUTIND filepointer
+; 
+; DESCRIPTION:
+;	Indicate that this command is being translated to a CCL;
+;	indicate which file descriptor describes the CUSP to run;
+;	either by direct or indirect pointing, and and copy the 
+;	CCL keyword into TRNBUF.
+;
+; ERRORS:
+;	U.LONG if TRNBUF overflowed
+;-
+
+.MACRO	PUTCCL	CCLNAME
+	 .WORD	PUTCCL,CCLNAME
+	.GLOBL	PUTCCL
+	.ENDM	PUTCCL
+
+.MACRO	PUTIND	CCLPTR
+	 .WORD	PUTIND,CCLPTR
+	.GLOBL	PUTIND
+	.ENDM	PUTIND
+
+.ENABL	LSB
+
+PUTIND::MOV	@(R3)+,R4	;Point at CCL descriptor.
+	BR	10$		;
+
+PUTCCL::MOV	(R3)+,R4	;Point at CCL descriptor.
+10$:	MOV	#CUSPTYP,CMDTYP	;Command type is CUSP
+	MOV	R4,CCLDES	;Save CCL descriptor.
+	ADD	#FLCKEY,R4	;Point at command keyword text.
+	CALLR	PUTZSTR		;Move keyword text into TRNBUF. 
+	;RETURN
+
+.DSABL	LSB
+GLOBAL	<CCLDES>
+
+.SBTTL SETTYP -- Set CMDTYP
+;+
+; SETTYP--Set CMDTYP.
+;
+; USAGE (threaded call):
+;	SETTYP	cmdtype
+;
+;	cmdtype is either INLTYP, RUNTYP, or UNKTYP.
+;
+; DESCRIPTION:
+;	Indicates how we execute this user command.
+;	INLTYP means we execute it inline.
+;	RUNTYP means it is a RUN command, and we will load the
+;		filespec into TRNBUF.
+;	UNKTYP means it is an unrecognized command, but we will try
+;		it as a CCL before giving up.
+;	See also: PUTCCL.
+;
+; ERRORS: None
+;-
+
+.MACRO	SETTYP	CMDTYP
+	 .WORD	SETTYP,CMDTYP
+	.GLOBL	SETTYP
+	.ENDM	SETTYP
+
+.ENABL	LSB
+
+SETTYP::MOV	(R3)+,CMDTYP
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<CMDTYP>
+
+.SBTTL PUTTIME -- Put a date and/or time string into TRNBUF
+;+
+; PUTTIME -- Put a date and/or time string into TRNBUF
+;
+; USAGE (threaded call):
+;	PUTTIME 
+;
+; DESCRIPTION:
+;	The date is put into TRNBUF.  If the user did not specify a date,
+;	today's date is assumed.
+;	If the user specified a time, then it is put into TRNBUF in 24-hour
+;	format, preceeded by a colon.  If the user did not specify a time,
+;	then no time is put into TRNBUF.
+;
+;	(PUTTIME is used after a successful GETP or GETA, where the parameter
+;	or argument was a date or time specification.)
+;
+; ERRORS:
+;	U.LONG if TRNBUF overflowed
+;-
+
+.MACRO	PUTTIME
+	 .WORD	PUTTIME
+	.GLOBL	PUTTIME
+	.ENDM	PUTTIME
+
+.ENABL	LSB
+
+PUTTIME::.ASSERT R0 EQ #0	;Latest fetch succeeded.
+
+; Convert fetched date and time to ASCII, and insert into TRNBUF.
+
+	CALLX	CLRFQB		;Zero FIRQB.
+	MOVB	#UU.CNV,FIRQB+FQFUN;Subfunction is UU.CNV.
+	MOV	U.CMN+U.DATE,FIRQB+4
+	DEC	FIRQB+6		;Use alphabetic month format.
+	MOV	U.CMN+U.TIME,FIRQB+22
+	INC	FIRQB+24	;Use 24-hour time.
+	.UUO			;Do the conversion.
+	.ASSERT	FIRQB EQ #0, BYTE;No error occurred.
+	MOV	#FIRQB+10,R4	;Point at date string.
+	CALL	PUTZSTR		;Move it into TRNBUF.
+	BCS	10$		;Error. Quit.
+	TST	U.CMN+U.TIME	;Did user specify a time?
+	IFNZ			;If so then
+	MOV	#COL.TXT,R4
+	CALL	PUTCSTR		;  Move a colon into TRNBUF.
+	BCS	10$		;  Error. Quit.
+	MOV	#FIRQB+26,R4	;  Point at time string. 
+	CALL	PUTZSTR		;  Move it into TRNBUF.
+	ENDIF
+10$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.CMN>
+
+.SBTTL	PUTDEV -- Put a device name into TRNBUF
+;+
+; PUTDEV -- Put a device name into TRNBUF
+;
+; USAGE (threaded call):
+;	PUTDEV
+;	PUTDEV "device"
+;
+; DESCRIPTION:
+;	PUTDEV with no argument: copy the parameter or argument 
+;	into TRNBUF, followed by a colon. (This form is used
+;	after a successful GETP or GETA (without argname).)
+;
+;	PUTDEV "device": Copy the literal device name into TRNBUF, 
+;	followed by a colon.
+;
+; ERRORS:
+;	U.LONG if TRNBUF overflowed
+;-
+
+.MACRO	PUTDEV	DEV
+	.IF	B DEV
+	 .WORD	PUTDEV
+	.GLOBL	PUTDEV
+	.IFF
+	 .WORD	PUTISTR
+	.GLOBL	PUTISTR
+	.ASCIC	<DEV ":">
+	.EVEN
+	.ENDC
+	.ENDM	PUTDEV
+
+.ENABL	LSB
+
+PUTDEV::.ASSERT R0 EQ #0	;Latest fetch succeeded.
+	CALL	MOVSTR		;Move device name into TRNBUF.
+	BCS	10$		;Error. Quit.
+	MOV	#COL.TXT,R4
+	CALL	PUTCSTR		;Move a colon into TRNBUF.
+10$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	PUTFIL -- Put a local filespec into TRNBUF
+;+
+; PUTFIL -- Put a local filespec into TRNBUF
+;
+; USAGE (threaded call):
+;	PUTFIL	DEFTYP=type,FLAGS=[NOTYPE!RSX!OURDIR!FULL]
+;	(Flags can be in any order.)
+;
+; DESCRIPTION:
+;	PUTFIL puts a local filespec into TRNBUF.  Use PUTFIL after a 
+;	successful FETP or FETA, to copy the filespec parameter or qualifier 
+;	argument into TRNBUF.  Use PUTRFIL, not PUTFIL, for a remote file 
+;	specification.  (You can also use PUTSTR to put a local filespec.  
+;	The difference is that PUTFIL expands logical names and can do other 
+;	massaging on the filespec (as described below), whereas PUTSTR just 
+;	copies the filespec character for character.)
+;
+;	DEFTYP=typ
+;
+;		DEFTYPE=typ means use the specified default filetype IF the 
+;		original filespec did not include a filetype.
+;
+;	FLAGS=	F.NOTYPE
+;		  Don't include a file type, even if the original filespec
+;		  did include one.  This is useful for constructing filespecs:
+;			$FETP	PARM1		;Fetch the input filespec.
+;			PUTFIL	NOTYPE		;Put out the journal filespec.
+;						;(Let EDT default to .JOU.)
+;
+;		F.RSX
+;		  Output a filespec suitable for an RSX-based utility.
+;		  It will include an explicit device name and PPN to override 
+;		  sticky defaults.  The PPN will always be explicit.
+;		
+;		F.RT11
+;		  Output a filespec including ":" to indicate the public
+;		  disk structure.  Explicit PPNs are not required since
+;		  RT11 does not have "sticky PPNs".  Device names are explicit.
+;
+;		F.DEV
+;		  Include an explcit device name in the file spec.  
+;
+;		F.FULL
+;		  Output an explcit everything in the filespec.  This is a 
+;		  combination of F.DEV and F.RSX.  It is used by DCL functions
+;		  which must return entire and explcit filespecs.
+;
+;		F.OURDIR
+;
+;		  The file will be in our (the user's) directory on the 
+;		  public structure, even if the original filespec included 
+;		  a device or PPN.  This is useful for constructing output 
+;		  filespecs.  For example:
+;			$FETP	PARM1	;Fetch the input filespec.
+;			PUTFIL	FLAGS=OURDIR!NOTYPE
+;					;Put out the object filespec.
+;
+;		<none>
+;
+;		  If no flags are specified, PUTFIL outputs an explicit
+;		  device name but not necessarily an explicit PPN, and also
+;		  uses the colon without a device name as equivalent to "_SY:".
+;		  For example, ":FOO.FOO".
+;
+;
+;		FDEFTYP is set automatically by the MACRO if a DEFTYPE=typ
+;		is included with the PUTFIL.
+;
+; SIDE EFFECTS:
+;	FIRQB and XRB munged.
+;
+; ERRORS:
+;	U.LONG if TRNBUF overflowed.
+;-
+
+;+
+; BINARY:
+;	.WORD	PUTFIL
+;	.WORD	flags	-- See above for definitions, DCLPFX has actual bits
+;    If FDEFTYP bit is set in flags then 
+;	.WORD	<default filetype, in RAD50>
+;-
+
+.MACRO	PUTFIL	DEFTYP=-,FLAGS
+	.GLOBL	PUTFIL
+	.IF	DIF 	<DEFTYP>,<->
+	 .WORD	PUTFIL,FLAGS!FDEFTYP
+	.IF	B DEFTYP
+	 .WORD	0
+	.IFF
+	 .RAD50	/DEFTYP/
+	.ENDC
+	.IFF
+	 .WORD	PUTFIL,FLAGS
+	.ENDC
+	.ENDM	PUTFIL
+
+; INTERNAL VARIABLES:
+;	R2	->	XRB+10 (flag word 2)
+;	R3	->	threaded operands
+;	R4	->	filename, type, or PPN field of FIRQB
+;	R5	->	FQDEV or FQDEVN field of FIRQB
+;
+.ENABL	LSB
+
+PUTFIL::.ASSERT	R0 EQ #0	;Latest fetch succeeded.
+	CALBX	U$FSS <U.CMN+U.LEN,#U.CMN+U.STR>
+				;FSS the filespec just fetched.
+	.ASSERT	R0 EQ #0	;It was a valid filespec.
+DOFIL::	MOV	#FIRQB+FQDEV,R5	;Point R5 at FQDEV field.
+	MOV	#FIRQB+FQPPN,R4	;Point R4 at FQPPN field.
+	MOV	#XRB+10,R2	;Point R2 at XRB+10 (flag word 2).
+
+	MOV	(R3)+,-(SP)	;Save flag bits and bump R3 
+	BIT	#F.OURD,(SP)	;Use our (i.e. user's) directory and SY:?
+	IFNZ			;If so then
+	CLR	(R4)		;  Clear PPN, so we get user's directory.
+	BIC	#F2PPN,(R2)	;  Don't output a PPN
+	CLR	(R5)		;  No device name.  Default to _SY:.
+	CLR	FIRQB+FQDEVN	;  Clear unit number and unit real flag.
+	MOV	#FLGRND!DSKHND,XRB+14
+				;  Set device flags for a disk.
+	ENDIF			;Endif
+
+	BIT	#F.RSX,(SP)	;Output a filespec suitable for RSX utility?
+	IFNZ			;If so then
+	BIS	#F2DEV,(R2)	;  Output an explicit device name
+	TST	(R4)		;  Is there an explicit directory?
+	IFZE			;  If not then
+	BIT	#DDNFS,XRB+14	;    Is device non-file-structured?
+	IFZE			;    If not then
+	MOV	OURPPN,(R4)	;      Plug in user's PPN as explicit default.
+	BIS	#F2PPN,(R2)	;      Output a PPN
+	ENDIF			;    Endif
+	ENDIF			;  Endif
+	ENDIF			;Endif
+
+	TST	(R5)		;Is there an explicit device name?
+	IFZE			;If not then
+	MOV	#"SY,(R5)	;  Plug in _SY: as default.
+	BIT	#F.RT11!F.DEV,(SP);Is this an RT11-style filespec or is 
+				;  there an explicit device name?
+	IFNZ			;  If so then
+	BIS	#F2DEV,(R2)	;    A device was specified
+	ENDIF			;  Endif
+	ENDIF			;Endif
+
+	BIT	#F.NOTYP,(SP)	;Suppress filetype?
+	IFNZ			;If so then
+	BIC	#F2EXT,(R2)	;  Flag that it's not there.
+	ENDIF			;Endif
+
+	BIT	#FDEFTYP,(SP)	;Plug in default filetype?
+	IFNZ			;If so then
+	BIT	#F2EXT,(R2)	;  Is there an explicit filetype?
+	IFZE			;  If not then
+	BIT	#DDNFS,XRB+14	;    Is device non-file-structured?
+	IFZE			;    If not then
+	MOV	(R3),FIRQB+FQEXT;      Plug in the default.
+	BIS	#F2EXT,(R2)	;      Flag that it's there.
+	ENDIF			;    Endif
+	ENDIF			;  Endif
+	TST	(R3)+		;  Skip over default filetype.
+	ENDIF			;Endif
+
+
+;+
+; Now the FIRQB and XRB describe the filespec we want to put out.
+; Below is the text used to insert the filespec into TRNBUF
+;-
+
+.NLIST	MEB
+
+	 TMPORG	TEXT		;
+30$:	  .ASCIC <":">		;
+31$:	  .ASCIC <"!RW!RW!RW">	;
+32$:	  .ASCIC <"_!AD">	;
+33$:	  .ASCIC <"!RW!RW">	;
+35$:	  .ASCIC <"[">		;
+36$:	  .ASCIC <"*">		;
+37$:	  .ASCIC <",">		;
+38$:	  .ASCIC <"]">		;
+39$:	  .ASCIC <"!UW">	;
+100$:	  .ASCIC <".*">		;
+110$:	  .ASCIC <".!RW">	;
+	 UNORG			;
+
+.LIST	MEB
+
+;+
+; Do the DEVICE
+;-
+
+	BIT	#F2DEV,(R2)	;Is there a device name?
+	IFNZ			;If so then
+	TST	(R2)		;  Is there untranslatable logical?
+	IFPL			;  If not then
+	BIT	#F.RT11,(SP)	;    Is this an RT11 style file name
+	IFNE			;    If so then
+	TSTB	FIRQB+FQDEVN+1	;      Is there a unit number?
+	IFEQ			;      If not then
+	CMP	(R5),#"SY	;        Is this going to be _SY:?
+	BEQ	25$		;        Yes it is, just put the colon
+	ENDIF			;      Endif
+	ENDIF			;    Endif
+	CALB	INSERT <#32$,#2,R5>; No, put in the device name
+	  			;    Insert underscore and two-character device
+				;    name into TRNBUF. 
+	BCS	29$		;    Quit if error.
+	TSTB	FIRQB+FQDEVN+1	;    Is there a unit number?
+	IFNZ			;    If so then
+	CLR	R1		;
+	BISB	FIRQB+FQDEVN,R1	;      Get unit number.
+	CALB	INSERT <#39$,R1>;      Insert unit number into TRNBUF.
+	BCS	29$		;      Quit if error.
+	ENDIF			;    Endif
+	ELSE			;  Else there is an untranslatable logical.
+	CALB	INSERT <#31$,(R5),2(R5),-4(R5)>
+	 			;    Insert logical name into TRNBUF.
+	BCS	29$		;    Quit if error.
+	ENDIF			;  Endif
+25$:	CALB	INSERT <#30$>	;  Insert a colon into TRNBUF.
+29$:	BCS	120$		;  Quit if error.
+	ENDIF			;Endif
+
+;+
+; Do the PPN
+;-
+
+	BIT	#F2PPN,(R2)	;Is there a PPN?  
+	IFNZ			;If so then
+	CALB	INSERT <#35$>	;  Insert left bracket
+	BCS	120$		;  Quit if error
+	CLR	R1		;  Clear spot for project number
+	BISB	1(R4),R1	;  Get project number.
+	CMP	R1,#377		;  Is it a wildcard?
+	IFEQ			;  If so then
+	CALB	INSERT <#36$>	;    Insert "*" into TRNBUF.
+	ELSE			;  Else
+	CALB	INSERT <#39$,R1>;    Insert "proj" into TRNBUF.
+	ENDIF			;  Endif
+	BCS	120$		;  Quit if error.
+	CALB	INSERT	<#37$>	;  Insert a comma into TRNBUF
+	CLR	R1		;  Clear spot for progrommer number
+	BISB	(R4),R1		;  Get programmer number.
+	CMP	R1,#377		;  Is it wild?
+	IFEQ			;  If so then
+	CALB	INSERT <#36$>	;    Insert "*" into TRNBUF.
+	ELSE			;  Else
+	CALB	INSERT <#39$,R1>;    Insert "prog" into TRNBUF.
+	ENDIF			;  Endif
+	BCS	120$		;  Quit if error.
+	CALB	INSERT <#38$>	;  Finish up PPN by inserting a right bracket
+	BCS	120$		;  Quit if error
+	ENDIF			;Endif
+
+;+
+; Do the FILENAME
+;-
+
+	BIT	#F2NAM,(R2)	;Is there a file name?
+	IFNZ			;If so then
+	TST	(R4)+		;  Point at the file name field in the FIRQB
+	BIT	#F2NAMS,(R2)	;  Is the filename a star (*)?
+	IFNZ			;  If so then
+	CALB	INSERT <#36$>	;    Insert a star into TRNBUF.
+	ELSE			;  Else
+	CALB	INSERT <#33$,(R4),2(R4)>
+	 			;    Insert the filename into TRNBUF.
+	ENDIF			;  Endif
+	BCS	120$		;Quit if error.
+	CMP	(R4)+,(R4)+	;Point to filetype
+	ENDIF			;Endif
+	
+;+
+; Do the FILETYPE
+;-
+
+	BIT	#F2EXT,(R2)	;Is there a filetype?
+	IFNZ			;If so then
+	BIT	#F2EXTS,(R2)	;  Is the filetype a star (*)?
+	IFNZ			;  If so then
+	CALB	INSERT <#100$>	;    Insert a dot and star into TRNBUF.
+	ELSE			;  Else
+	CALB	INSERT <#110$,FIRQB+FQEXT>
+	 			;    Insert a dot and the filetype into TRNBUF.
+	ENDIF			;  Endif
+	;BCS	120$		;  Quit if error.
+	ENDIF			;Endif
+120$:	MOV	(SP),(SP)+	;Give back stack space, don't effect C-bit
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<OURPPN,U.CMN>
+
+.SBTTL	PUTRFIL -- Put a remote filespec into TRNBUF
+;+
+; PUTRFIL -- Put a remote filespec into TRNBUF
+;
+; USAGE (threaded call):
+;	PUTRFIL	[NODE=YES]
+;	PUTRFIL [NODE=NO]
+;
+; DESCRIPTION:
+;	PUTRFIL puts a remote filespec into TRNBUF.
+;	Use PUTRFIL after a successful FETP, FETNP, or FETA, to copy the 
+;	filespec parameter or qualifier argument into TRNBUF.
+;	Use PUTFIL, not PUTRFIL, for a local file specification.
+;	(You can also use PUTSTR to put a local filespec.  The difference
+;	is that PUTFIL expands logical names and can do other massaging
+;	on the filespec. See PUTFIL for more info on this.
+;
+;	NODE=YES says that you want to put the node into TRNBUF.  This
+;	will be done if no NODE= is specified.
+;	NODE=NO  says that you do not want to put the node into TRNBUF.  The
+;	reason for this is because NFT allows only one nodename on each side
+;	of the equal sign.  The common usage for PUTRFIL is:
+;
+;	$IF	NET=YES		;If it's a network command then
+;	PUTCCL	...NFT		;  "NFT"
+;	...
+;	$FETP	PARM1		;  Fetch the remote filespec
+;	PUTRFIL			;  "filespec" - with NODENAME 
+;10$:	$FETNP			;  Fetch the next file spec.
+;	$IF	PRESENT		;  If there were more,
+;	PUTSTR	""<COMMA>	;    ","
+;	PUTRFIL	NODE=NO		;    "filespec" - Strip NODENAME off
+;	$GOTO	10$		;    ...
+;	$ENDIF			;  Endif
+;
+; 	PUTRFIL stores the nodename in NODE: in lower case letters.  When and 
+;	if a second node is discovered, it is compared to the first.  If they
+;	are identical, then the second nodename is stripped off and not put
+;	into TRNBUF if NODE=NO is specified.  
+;
+; ERRORS:
+;	CNFN.E	if nodes conflict.
+;	INOD.E	if node has more than 6 characters.  NFT does not allow 
+;		nodenames with more than 6 characters.
+;	LONG.E	if TRNBUF overflowed.
+;-
+
+.MACRO	PUTRFIL	NODE=YES
+.IF	IDN	<NODE>,<YES>
+	.WORD	PUTRFIL,0
+.IFF	
+.IF	IDN	<NODE>,<NO>
+	.WORD	PUTRFIL,-1
+.IFF
+	.ERROR	;Invalid argument - NODE
+.ENDC
+.ENDC
+	.GLOBL	PUTRFIL
+	.ENDM   PUTRFIL
+
+;Set up temporary node place holders.
+	TMPORG	IMPURE
+NODE:	.BLKB	6.
+STRLEN:	.WORD		;This is a hack. LX.LEN wants to POINT to string length
+NODPOS:	.WORD
+NODLEN:	.WORD
+	UNORG
+
+.ENABL	LSB
+
+PUTRFIL::TST	(R3)			;Is this a node insertion?
+	IFEQ				;If so then
+	CLR	NODLEN			;  Preclear node flag.
+	ENDIF				;Endif
+	MOV	#U.CMN+U.STR,R2		;R2 -> file-spec
+	MOV	U.CMN+U.LEN,R1		;R1 =  file-spec length
+	MOV	U.CMN+U.POS,R5		;R5 = Position  of filespec
+	MOV	R1,R4			;Save length in R4
+10$:	CMPB	(R2),#'"		;Have we found a double-quote?
+	BEQ	15$			;Yes.  We found a valid node-name.
+	CMPB	(R2)+,#':		;Have we found a colon?
+	BEQ	20$			;Yes, go look for a second.
+	SOB	R1,10$			;No, look till end of the file-spec.
+	BR	30$			;We didn't find a node.
+	
+15$:	MOV	R2,LX.STR		;Set up to match quoted string.
+	MOV	R1,STRLEN		;Must use this cell //This is a hack//
+	MOV	#STRLEN,LX.LEN		;LX.LEN wants to point to the length.
+	MOV	#1,LX.POS		;Save string pointer, pos, and length.
+	CALBX	LX.DQUOT		;Match a double quoted string.
+	BCS	70$			;It failed.  Quit.
+	MOV	LX.NMAT,R0		;We know have number of chars in string
+17$:	TSTB	(R2)+			;Bump R2 past the double quoted string.
+	SOB	R0,17$			;until there are no more chars.
+	TSTB	(R2)+			;R0 = 0 now, so no problem here. Bump
+	TSTB	(R2)+			;R2 past the double colons. Make R4 =
+	SUB	R1,R4			;number of characters in nodename.
+	SUB	#2,R1			;R1 is now ast the double colon.
+	BR	40$			;Go to where we know we have a node.
+
+20$:	CMPB	(R2)+,#':		;Have we found second colon? ie a node?
+	IFNE				;If not then
+30$:	CALL	MOVSTR			;  Move entire string,there is no node.
+	TST	(R3)+			;  Were we to insert a node?
+	BNE	70$			;  No.  And there was none, just quit.
+	MOV	R5,NODPOS		;  Yes.  Remember position of file.
+	ELSE				;Else we found a node.
+	SUB	R1,R4			;  R4 = # chars in node.
+40$:	CMP	R4,#6			;  Were there more than 6 chrs in node?
+	IFHI				;  If so then 
+	MOV	#INOD.E,R0		;    Error. ?Invalid network node name.
+	MOV	R5,LX.ERP		;    Position of node is pos of error.
+	ELSE				;  Else it's a legal node name
+	TST	(R3)+			;    Are we to insert the NODE?
+	IFEQ				;    If so then
+	CALL	MOVSTR			;      Move entire string.
+	MOV	R5,NODPOS		;      Note node position.
+	MOV	R4,NODLEN		;      Note node length.
+	MOV	#U.CMN+U.STR,R2		;      Point R2 at node.
+	MOV	#NODE,R5		;      Point R5 at storage space.
+45$:	BISB	#40,(R2)		;      Convert node name to lower case.
+	MOVB	(R2)+,(R5)+		;      Move characters until
+	SOB	R4,45$			;      end of the node.
+	ELSE				;    Else we are not to insert the node
+	TST	NODLEN			;      Have we already seen a node?
+	IFEQ				;      If not then
+	BR	65$			;        We have a conflict.
+					;        Report ?Confilcting nodes.
+	ELSE				;      Else we have seen a node.
+	SUB	#2,R1			;        Get R1 past the "::"
+	CALB	INSERT	<#55$,R1,R2>	;        Insert filespec but not the
+	 TMPORG	TEXT			;        nodename.  R2=first character
+55$:	 .ASCIC	<"!AD">			;        of filespec.  R1=length of the
+	 UNORG				;        filespec.
+	CMP	R4,NODLEN		;        Are node lengths the same?
+	IFEQ				;        If so then
+	MOV	#NODE,R5		;          Point R5 to the 1st filespec
+	MOV	#U.CMN+U.STR,R2		;          Point R2 to the 2nd filespec
+60$:	MOVB	(R2)+,R1		;          Store the character.
+	BISB	#40,R1			;          Convert node to lower case.
+	CMPB	(R5)+,R1		;          Are the characters the same?
+	BNE	65$			;          No.  They conflict.  Error.
+	SOB	R4,60$			;          Yes.  Go on until end.
+	ELSE				;        Else the node lengths differ.
+65$:	MOV	#CNFN.E,R0		;          ?Conflicting network nodes.
+	MOV	NODPOS,CONFPOS		;          Position of node is lefthand
+	MOV	U.CMN+U.POS,LX.ERP	;          This file is righthand error
+	ENDIF				;        Endif
+	ENDIF				;      Endif
+	ENDIF				;    Endif
+	ENDIF				;  Endif
+	ENDIF				;Endif
+
+70$:	RETURN				
+
+.DSABL	LSB
+GLOBAL	<U.CMN,CNFN.E,CONFPOS,INOD.E>
+GLOBAL	<LX.STR,LX.NMAT,LX.POS,LX.LEN,LX.ERP>
+
+.SBTTL	MOVSTR -- Move string from CMDBUF to TRNBUF
+;+
+; MOVSTR -- Move string from CUI common into TRNBUF.
+;
+; INPUTS:
+;	U.CMN+U.STR contains string to move
+;	U.CMN+U.LEN =	length of string
+;	TRNLEN	=	Number of chars already in TRNBUF
+;
+; CALL	MOVSTR
+;
+; OUTPUTS:
+; C=1 if error.
+;	R0	=	U.LONG (?Command too long) 
+;			because string didn't fit into TRNBUF
+; C=0 if success.
+;	R0	=	0
+;	TRNBUF		includes string
+;	TRNLEN		updated to reflect additional characters in TRNBUF
+;-
+
+.ENABL	LSB
+
+MOVSTR:	CALB	INSERT <#10$,U.CMN+U.LEN,#U.CMN+U.STR>
+	 TMPORG	TEXT		;Insert source string into CMDBUF.
+10$:	 .ASCIC	<"!AD">
+	 UNORG
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<CMDBUF>
+
+.SBTTL	PUTCSTR -- Put counted ASCII string into TRNBUF
+;+
+; PUTCSTR -- Put counted ASCII string into TRNBUF.  
+;
+; INPUTS:
+;	R4	->	Counted ASCII string to put.
+;			(First byte is char count;string proper starts in
+;			second byte.)
+;	TRNLEN	=	Number of chars already in TRNBUF
+;	TRNNEX	->	Next free slot in TRNBUF.
+;
+; CALL	PUTCSTR
+;
+; OUTPUTS:
+; C=1 if error.
+;	R0	=	U.LONG (?Command too long) because string didn't
+;			fit into TRNBUF.
+;	TRNLEN		random
+; C=0 if success.
+;	R0	=	0
+;	TRNBUF		includes string
+;	TRNLEN		updated
+;	TRNNEX	->	next free slot in TRNBUF.
+;
+; SIDE EFFECTS:
+;	R2	random
+;-
+
+.ENABL	LSB
+
+PUTCSTR:CALB	INSERT <#10$,R4>
+	 TMPORG	TEXT
+10$:	  .ASCIC "!AC"
+	 UNORG
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	PUTZSTR -- Put ASCIZ string into TRNBUF
+;+
+; PUTZSTR -- Put ASCIZ string into TRNBUF.  
+;
+; INPUTS:
+;	R4	->	ASCIZ string to put.
+;			(String is terminated by a null byte, which is not
+;			part of the string itself.)
+;	TRNLEN	=	Number of chars already in TRNBUF
+;	TRNNEX	->	next free slot in TRNBUF
+;
+; CALL	PUTZSTR
+;
+; OUTPUTS:
+; C=1 if error.
+;	R0	=	U.LONG (?Command too long) because string didn't
+;			fit into TRNBUF.
+;	TRNLEN		random
+; C=0 if success.
+;	R0	=	0
+;	TRNBUF		includes string
+;	TRNLEN		updated
+;	TRNNEX	->	next free slot in TRNBUF
+;
+; SIDE EFFECTS:
+;-
+
+.ENABL	LSB
+
+PUTZSTR:CALB	INSERT <#10$,R4>
+	 TMPORG	TEXT
+10$:	  .ASCIC "!AZ"
+	 UNORG
+	RETURN
+	
+.DSABL	LSB
+
+.SBTTL	$CHECK -- Threaded routines to do assorted checking
+;+
+; These macros are for threaded routines only.  The routines return R0=0
+; if the check succeeds and R0=-1 if it fails.  The threaded routines may use
+; the $IF macros to test for success (presence) and failure (absence).
+;
+; Current options of the $CHECK variety:
+; ===== =================================================================
+; LOG	Checks to see if a log file is currently open
+; ICF	Checks to see if an ICF is currently active
+;
+;-
+
+.MACRO	$CHECK  WHAT
+	.IF	IDN	<WHAT>  <LOG>
+	 .WORD	$CHKLOG
+	.GLOBL	$CHKLOG
+	.IFF
+	.IF	IDN	<WHAT>  <ICF>
+	 .WORD	$CHKICF
+	.GLOBL	$CHKICF
+	.IFF
+	.ERROR ;WHAT is an invalid $CHECK option
+	.ENDC
+	.ENDC
+	.ENDM	$CHECK
+
+.SBTTL 	MACRO threaded routines -- $MOV, $MOVV, $MOVB, $CLR, $BIC, $BIS, $BIT
+;+
+; $MOV	- Move an immediate word value in the destination cell
+; $MOVV	- Move a word value in the destination cell
+; $MOVB	- Move an immediate byte value in the destination cell
+; $CLR	- Clear the destination cell
+; $BIC	- Clear an immediate bit value from the destination cell
+; $BIS	- Set an immediate bit value in the destination cell
+; $BIT	- Test to see if a bit is set in the destination cell
+;
+; USAGE: (threaded call)
+;	$MOV	source,dest
+;	$MOVV	source,dest
+;	$MOVB	source,dest
+;	$CLR	dest
+;	$BIC	source,dest
+;	$BIS	source,dest
+;	$BIT	bit,cell
+;
+; DESCRIPTION:
+;	These macros let you manipulate bits in a cell, set/clear a flag bit, 
+;	test a bit, or clear a flag word.
+;
+; OUTPUTS:
+;	No errors can occur
+;
+;-
+.ENABL	LSB
+
+	.MACRO	$MOV  SRC,DST
+	 .WORD	$MOV,SRC,DST
+	.GLOBL	$MOV
+	.ENDM	$MOV
+
+	.MACRO	$MOVV  SRC,DST
+	 .WORD	$MOVV,SRC,DST
+	.GLOBL	$MOVV
+	.ENDM	$MOVV
+
+	.MACRO	$MOVB  SRC,DST
+	 .WORD	$MOVB,SRC,DST
+	.GLOBL	$MOVB
+	.ENDM	$MOVB
+
+	.MACRO	$CLR   SRC
+	 .WORD	$CLR,SRC
+	.GLOBL	$CLR
+	.ENDM	$CLR
+
+	.MACRO	$BIC   SRC,DST
+	 .WORD	$BIC,SRC,DST
+	.GLOBL	$BIC
+	.ENDM	$BIC
+
+	.MACRO	$BIS   SRC,DST
+	 .WORD	$BIS,SRC,DST
+	.GLOBL	$BIS
+	.ENDM	$BIS
+
+	.MACRO	$BIT   SRC,DST
+	 .WORD	$BIT,SRC,DST
+	.GLOBL	$BIT
+	.ENDM	$BIT
+
+$MOV::	MOV	(R3)+,@(R3)+		;Move immediate value into destination
+	RETURN				;Return
+
+$MOVV::	MOV	@(R3)+,@(R3)+		;Move value into destination
+	RETURN				;Return
+
+$MOVB::	PUSH	<R1,R2>			;Save registers
+	MOV	(R3)+,R1		;Get source	
+	MOV	(R3)+,R2		;Get destination
+	MOVB	R1,(R2)			;Move the byte
+	POP	<R2,R1>			;Restore registers
+	RETURN				;Return
+
+$CLR::	CLR	@(R3)+			;Clear the destination
+	RETURN				;Return
+
+$BIC::	BIC	(R3)+,@(R3)+		;Clear a bit in the destination
+	RETURN				;Return
+
+$BIS::	BIS	(R3)+,@(R3)+		;Set a bit in the cell, preserving what
+					; bits may already be set
+	RETURN				;Return
+
+$BIT::	CLR	R0			;Assume SUCCESS
+	BIT	(R3)+,@(R3)+		;Test the bit in the destination
+	IFEQ				;If NOT set then
+	COM	R0			;  R0 = -1  --> FAILURE
+	ENDIF				;Endif
+	RETURN				;Return
+
+.DSABL	LSB
+
+.SBTTL	INSERT -- Insert a string into TRNBUF, with plugins
+;+
+; INSERT -- Insert a string into TRNBUF, with plugins
+;
+; INPUTS:
+;	format	-	a $FAO-type format string
+;	plugin1	-	optional $FAO-type plugin
+;	plugin2	-	optional $FAO-type plugin
+;
+; CALB	INSERT <format [,plugin1 [,plugin2]]>
+;
+; OUTPUTS:
+; C=0 if success.
+;	R0	=	0
+;	Format string has been appended to contents of TRNBUF, with appropriate
+;		$FAO substitutions.
+; C=1 if failure.
+;	R0	=	U.LONG (?Command too long) because TRNBUF overflowed
+;-
+
+.ENABL	LSB
+
+INSERT::SUBR	<FORMAT,PLUG1,PLUG2,PLUG3,PLUG4>
+	TST	-(SP)		;Allocate scratch location for count of
+				;chars put into TRNBUF by $FAO.
+	MOV	SP,R2		;Point at scratch location.
+	MOV	#TRN.BSIZ,R1	;Compute number of free chars ...
+	SUB	TRNLEN,R1	;in TRNBUF.
+	$FAO   FORMAT(R5),R2,R1,TRNNEX,<PLUG1(R5),PLUG2(R5),PLUG3(R5),PLUG4(R5)>
+				;Format and insert the string.
+	BCS	10$		;Quit if error.
+	ADD	(R2),TRNNEX	;Point at next free character in TRNBUF.
+	ADD	(R2),TRNLEN	;Update length of string in TRNBUF.
+10$:	POP			;Discard scratch location.
+	RETURN
+
+.DSABL	LSB

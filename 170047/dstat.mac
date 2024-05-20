@@ -1,0 +1,163 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+TITLE	DSTAT,<DISK STATISTICS>,0A,10-MAY-91,MHB/ABC/MND/DRP/KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DSTAT
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	MND  14-JUL-81	Modified to work with DATA CACHING (BUFEXT)
+;  002	JTC  16-Sep-81	Change "FIPBUF" to "OVRBUF"
+;  003	MND  05-Nov-81	Change bit assignments in SWR to SW.FRZ!SW.LOG
+;  004	DRP  05-Oct-82	Take out code that overlays COMDSK
+;
+;			[RSTS V9.0]
+;  005	KPH  16-Jul-84	Move stats to XBUF
+;			Make code I-only			
+;  006	KPH  19-Dec-84	Make the ORG DSTISP be a DEFORG DSTISP
+;
+;			[RSTS V9.6]
+;  007  KPH  19-Feb-88	Changes for online stats control
+;
+;-
+
+
+.SBTTL	DISK STATISTICS TABLE LAYOUT
+;+
+;
+;00	Flag word     (15:8 = Table reset flag -- 7:0 = MAXUNT+1)
+;       
+;	Request type		Request device	Request code (2 word counters)
+;
+;	Access type 0 (SWAP)
+;				Fip unit number 0
+;02						Read miss accesses 	
+;06						Read miss blocks
+;12						Write accesses	
+;16						Write blocks
+;22						Cache hit accesses	
+;26						Cache hit blocks
+;32				Fip unit number 1
+;      				Fip unit number n
+;	Access type 1 (FILE)
+;	Access type 2 (SAT)
+;	Access type 3 (OVLY)
+;	Access type 4 (DIR)
+;nn	Access type 5 (DECTAPE BUFFER)
+;
+;  Table length = (MAXUNT +1) *  6 access types * 6 function types * 2 words
+;  (Table length in words)
+;  Table index = 4 * (access type * (MAXUNT+1) + FIP UNIT) * 6 + request code)
+;  (Table index is byte offset from 140001 when table is mapped through DPAR6)
+;-                                                      
+
+	DEFORG	DSTAT
+
+.SBTTL	DISK STATISTICS
+                                        
+.ENABL	LSB
+
+DSKSTS::CALL	50$		;CHECK CACHE FOR A HIT			;007
+	CMP	#GOSTAT,JSTATS	;Statistics enabled?			;007
+	BNE	40$		;No, nothing to do			;007
+	TST	R1		;Is this a cache requested transfer?   	;007
+	BMI	40$		;Yes, we don't log those.               ;007
+	MAP	PUSH,APR=6,DATA	;Save caller's APR6 mapping		;004
+	MAP	DSTPTR,APR=6,DATA ;And map the stats table		;007
+	MOVB	#1,@#140000+1	;Indicate that stats are valid		;007
+	MUL	#DSTMUL,R1	;MAKE AN INDEX FROM THE CATEGORY
+				; DSTMUL = MAXUNT+1*6*2*2 
+	MOVB	DSQUNT(R4),R3	;GET THE FIP UNIT NUMBER
+	MUL	#4*2*3,R3	;MAKE AN INDEX FROM THE FUN
+	ADD	R3,R1		;Get the offset into the stats area	;007
+       	MOV	R1,R3		;And make a copy of the offset		;007
+	ASH	#-6,R1		;Get the MMU offset from the table base	;007
+	BIC	#^C<77>,R3	;And get the byte offset from MMU base	;007
+	ADD	R1,@DPAR6	;Update the mapping			;007
+	ADD	#140000+2,R3	;And point to the data area itself	;007
+	CMPB	DSQFUN(R4),#RFUN ;READING?
+	BHIS	25$    		;YES
+	ADD	#4*2,R3		;NO, WRITING
+	BR	30$
+
+25$:	CMP	DSQL3Q(R4),#CHRDL3 ;DID THIS DSQ CAUSE A CACHE INSTALL?
+	BEQ	30$		;YES, DON'T COUNT IT AS A CACHE HIT.
+	ADD	R0,R3		;ADD 4*2*2 IF A CACHE HIT
+30$:	ADD	#1,(R3)+	;KEEP XFER COUNT
+	ADC	(R3)+		; (DOUBLE)
+	MOV	DSQCNT(R4),-(SP) ;GET XFER WORD COUNT
+	ADD	#400-1,(SP)	;ROUND COUNT UP TO
+	CLRB	(SP)		; A BLOCK COUNT
+	SWAB	(SP)		;MAKE A BLOCK COUNT
+	ADD	(SP)+,(R3)+	;KEEP BLOCK COUNT
+	ADC	(R3)+		; (DOUBLE)
+	MAP	POP,APR=6,DATA	;Restore caller's mapping		;007
+40$:	TST	R0     		;WAS IT A CACHE HIT?			;007
+	BNE	47$		;Yes, no I/O to start up		;007
+	MOV	GODISK,-(SP)	;SET ADDRESS OF REST OF THE CODE	;007
+	MOV	DSKAP5,-(SP)	;STACK DSK PHASE PAR5 VALUE		;007
+	JMPX	CALLMX		;GO TO CONTINUE IN MAPPED CODE...	;007
+
+47$:	JMPX	RETMX		;Return to caller, restoring mapping	;007
+
+GLOBAL	<GOSTAT,JSTATS,DSTPTR,DSTMUL,CHRDL3,GODISK,DSKAP5>		;007
+
+50$:   	MOV	#-1.,R1		;ASSUME THIS IS A SPECIAL CACHE REQUESTED XFR
+	TSTB	DSQJOB(R4)	;WERE WE CORRECT?
+	BMI	60$		;YES, WE DON'T CARE ABOUT THE CATEGORY
+	CMP	DSQL3Q(R4),#CHRDL3 ;Is this a split cache transfer?	;007
+	BEQ	60$		;Yes, ignore those as well		;007
+	CLR	R1		;SET SWAPS (0)
+	CMP	DSQL3Q(R4),#SWDNE ;SWAP?
+	BEQ	60$		;YES
+	CMP	R4,#FIPAR	;Is this FIP's private DSQ?		;007
+	BEQ	55$		;Yes, figure out what this is		;007
+	INC	R1		;NO, SET FILE (1)
+	CMP	DSQL3Q(R4),#WTDNE ;Is this window turn I/O?		;007
+	BNE	60$		;No, call it user I/O			;007
+	MOV	#4,R1		;Call this directory I/O		;007
+	BR	60$		;And check out the cache		;007
+                                                                            
+55$:	MOV	#3,R1		;Set code for overlay I/O		;007
+	TSTB	DSQMAM(R4)	;INTO HIGH MEMORY (OVRBUF - FIP OVERLAY)?
+	BNE	60$		;YES
+	CMP	DSQMAL(R4),#120000 ;ABOVE THE ROOT (OVRBUF - FIP OVERLAY)?  
+	BHIS	60$		;YES
+	DEC	R1		;NO, SET SAT (2)
+	CMP	DSQMAL(R4),#SATBUF ;SAT?
+	BEQ	60$		;YES
+	CMPB	(R1)+,(R1)+	;NO, SET DIRECTORY (4)
+	CMP	DSQMAL(R4),#FIBUF ;DIRECTORY?
+	BEQ	60$		;YES
+	INC	R1		;NO, SET BIG BUFFER (5)
+60$:	CALLX	CHECHK		;Check to see if request is in cache	;007
+	MOV	#4*2*2,R0	;And guess that the request was in cache ;007
+	BCS	70$		;Good guess, all set			;007
+	CLR	R0		;Request not satisfied by cache		;007
+70$:	RETURN	
+       
+.DSABL	LSB
+
+GLOBAL	<SWDNE,WTDNE,FIPAR,SATBUF,FIBUF,DSTMUL,DSTPTR,DSTSIZ>		;007
+
+.END
+

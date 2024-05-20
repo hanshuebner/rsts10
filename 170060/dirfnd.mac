@@ -1,0 +1,259 @@
+	$BEGIN	DIRFND,<31.1>,<FIND DIRECTORY ID - INTERNAL>
+
+;
+; THIS  SOFTWARE  IS FURNISHED UNDER A LICENSE AND MAY
+; BE USED OR COPIED ONLY IN ACCORDANCE WITH THE  TERMS
+; OF SUCH LICENSE.
+;
+; COPYRIGHT (c) 1985, 1982, 1991 BY DIGITAL EQUIPMENT CORPORATION.
+; ALL RIGHTS RESERVED.
+;
+; Previously modified by
+;
+;	Peter H. Lipman
+;	G. H. Kuenning
+;	B. Leavitt
+;	Loni Brown
+;	S. Ruzich
+;
+; Modified:
+;
+;	S. M. Thomas		30-April-1983
+;		SMT033 - Named directory support based on
+;			Simon Szeto's changes
+;
+;	Michael Pettengill	10-October-1983
+;		MLP106 - Make .GTDID behave correctly
+;
+; Modified for RSTS/E V10.1 by:
+;
+;	S. LeVan	21-Oct-91	V31.1
+;		SEL001 - Shrink code by assuming N.FID=0.
+;
+
+;
+; **-..DIRF-Directory find
+;
+; Given an ASCII directory string, determine the directory file ID.
+; This is accomplished by first determining the form of directory
+; spec used, then filling in the name block with the appropriate
+; RAD50 representation for the directory name, and then performing
+; a standard find file, using the MFD as the directory.
+;
+; Inputs:
+;	R0=FDB address
+;	R1=File name block address
+;	R2=Directory string descriptor
+; Outputs:
+;	C=0 if successful
+;	C=1 if failure, F.ERR set to reason
+;	R0-R3 preserved, R4-R5 destroyed
+;	Directory ID is set up in FNB if successful
+;
+
+..DIRF::MOV	R3,-(SP)	; Save registers
+	MOV	R2,-(SP)	;
+
+	.IF	GT,R$RSTS
+
+	MOV	R1,R3
+	ADD	#N.DID,R3	; ADDRESS TO STORE PPN
+	CALL	.ASCPP		; CONVERT ASCII TO PPN
+	BCS	40$		; BR IF BAD SYSTAT
+	CLR	N.STAT(R1)	;RESET FNB STATUS
+	;CLR	N.FID(R1)	;REINIT THE FILE ID; SEL001
+	CLR	(R1)		;REINIT THE FILE ID; SEL001
+	ASSUME	N.FID,0		;SEL001
+	CLR	N.FID+2(R1)	;
+	CLR	N.FID+4(R1)	;
+	CLR	N.NEXT(R1)	;
+	BR	60$		; Join common exit
+
+	.IFF
+
+	.IF	EQ,R$$NAM
+
+	MOV	R1,R3		; Point R3 at a scratch word
+	CALL	.ASCPP		; Convert ASCII directory to PPN
+	BCS	40$		; If CS then bad directory spec
+	MOV	(R1),R3		; Pick up converted PPN in R3
+	MOV	R1,R2		; Copy FNB pointer
+	ASSUME	N.FID,0
+	MOV	#PP.ZER!PP.SEP,R4 ; Select fill, no separators
+	CALL	.PPASC		; Form ASCII string gggmmm
+	MOV	#6,R3		; Length of string to convert
+	MOV	R1,R2		; Recover start of ASCII string
+
+	.IFF
+
+; Verify the brackets around the directory specification
+
+	MOV	(R2)+,R3	; Get length of string
+	MOV	(R2),R2		; And address of string
+	SUB	#2,R3		; Compute length of string minus brackets
+	BEQ	40$		; Can't be null
+	MOVB	(R2)+,R4	; Get the initial character
+	CMPB	#'[,R4		; Possible square brackets
+	BEQ	5$		; If EQ yes
+	CMPB	#'<,R4		; Possible angle brackets
+	BNE	40$		; If NE no
+5$:	MOV	R2,R5		; Compute address of right bracket
+	ADD	R3,R5		;
+	CMPB	(R4)+,(R4)+	; Compute value of right bracket
+	CMPB	R4,(R5)		; Valid right bracket?
+	BNE	40$		; If NE no
+
+; Assume that the directory is specified as [g,m] and attempt to
+; reformat to gggmmm using the FID as a scratch area.
+
+	ASSUME	N.FID,0
+	MOV	R1,R3		; Point to FID for use as scratch area
+	CALL	GGGMMM		; Attempt to format GGG
+	CMPB	#',,(R2)+	; Must be a comma here
+	BNE	10$		; If NE then try alternate form
+	CALL	GGGMMM		; Attempt MMM
+	CMPB	R2,R5		; Must have reached the end
+	BNE	40$		; If NE then bad directory syntax
+	MOV	#6,R3		; Length of string to convert
+	MOV	R1,R2		; Recover start of ASCII string
+	BR	20$		; Join common RAD50 conversion code
+
+; Then it must be in the form [name].  Validate it and convert to RAD50
+
+10$:	MOV	(SP),R2		; Retrieve directory string desc
+	MOV	(R2)+,R3	; Get length of string
+	MOV	(R2),R2		; And address of string
+	CMP	R3,#11.		; Is length valid?
+	BHI	40$		; If HI then too long or negative
+	CMPB	-(R3),-(R3)	; Adjust count for brackets
+	INC	R2		; Skip bracket
+
+	.ENDC	; R$$NAM
+
+20$:	MOV	R1,R4		; Copy pointer to FNB
+	ADD	#N.FNAM+6,R4	; Point to file name in FNB
+	CLR	-(R4)		; Make sure that there's no trailing
+	CLR	-(R4)		; trash to confuse things
+	CLR	-(R4)		;
+	CALL	..SGR5		; Convert name to RAD50
+	BCS	40$		; If CS then syntax error
+	MOV	#^RDIR,N.FTYP(R1) ; Fill in the rest of the directory
+	MOV	#1,N.FVER(R1)	; name, .DIR;1
+	MOV	#4,N.DID(R1)	; Look it up in the MFD
+	MOV	#4,N.DID+2(R1)	;
+	CALL	..FIND		; Find the ID for this directory name
+	BCS	50$		; If CS then error exit
+	ASSUME	N.FID,0
+	MOV	R1,R4		; Point at key parts of FNB
+	MOV	R1,R5		;
+	ADD	#N.NEXT,R5	;
+	CLR	(R5)+		; Reset N.NEXT
+	ASSUME	N.DID,N.NEXT+2
+	MOV	(R4),(R5)+	; Copy directory FID to N.DID
+	CLR	(R4)+		; and reset N.FID
+	MOV	(R4),(R5)+	;
+	CLR	(R4)+		;
+	MOV	(R4),(R5)+	;
+	ASSUME	N.FNAM,N.FID+6
+	ASSUME	N.FTYP,N.FNAM+6
+	ASSUME	N.FVER,N.FTYP+2
+	MOV	#6,R2		; Zero next six words
+30$:	CLR	(R4)+		; N.FID+4, N.FNAM, N.FNAM+2, N.FNAM+4
+	SOB	R2,30$		; N.FTYP, N.FVER
+	BR	60$		; Join common exit
+
+	.ENDC
+
+40$:	MOVB	#IE.BDI,F.ERR(R0) ; Some sort of error in directory spec
+
+; Trash the DID so that the MFD isn't used by mistake when programs
+; that don't check errors do a create after an error in .PARSE
+
+50$:	CLR	N.DID+2(R1)	; Trash the DID
+	SEC			; Set carry
+60$:	MOV	(SP)+,R2	; Restore registers
+	MOV	(SP)+,R3	;
+	RETURN
+
+;
+; **-GGGMMM-Form ggg or mmm from g or m input
+;
+; Inputs:
+;	R2=Input string pointer
+;	R3=Output string pointer
+;
+; Outputs:
+;	R2=Updated input pointer
+;	R3=Updated output pointer
+;	(R2)=correct delimiter if valid string
+;
+; R4 clobbered
+;
+
+	.IF	GT,R$$NAM
+
+; Initialize count of digits, start initialing of output so that we have
+; a useful constant ASCII 0.
+
+GGGMMM:	CLR	R4		; Initialize character count
+	MOVB	#'0,(R3)	; Setup constant ASCII 0
+
+; Skip over all leading zeros
+
+10$:	CMPB	(R2)+,(R3)	; Leading zero?
+	BEQ	10$		; If EQ yes
+
+; First digit of three digit number must be in range of 1 to 3
+; Do special checks for this possible leading digit
+
+	CMPB	-(R2),(R3)	; Possible three digit number?
+	BLO	30$		; If LO no
+	CMPB	(R2),#'3	; Maybe, possible three digit number?
+	BHI	20$		; If HI no
+	CMPB	(R4)+,(R2)+	; Bump count and pointer
+
+; Now get up to two more digits
+
+20$:	CALL	100$		; Get another character if possible
+	CALL	100$		; Get last valid character
+
+; Did we get anything?  If not, recheck for a leading zero.  This check
+; also detects the case of a null string with the correct delimiter by
+; pointing to the leading delimiter, so that the delimiter check will
+; fail on return.
+
+30$:	TST	R4		; Did we get something?
+	BNE	40$		; If EQ no
+	CMPB	-(R2),(R3)	; Leading zero?
+	BNE	60$		; If NE no
+	CMPB	(R4)+,(R2)+	; Bump count and pointer
+
+; Now fill in the output area with zeros and copy in the input string
+
+40$:	MOVB	(R3)+,(R3)	; Fill in output area and
+	MOVB	(R3)+,(R3)+	; Bump pointer past end
+	MOV	R2,-(SP)	; Save R2
+	MOV	R3,-(SP)	; And R3
+50$:	MOVB	-(R2),-(R3)	; Move number into output
+	SOB	R4,50$		; Until done
+	MOV	(SP)+,R3	; Restore output pointer
+	MOV	(SP)+,R2	; And input pointer
+60$:	RETURN			;
+
+; Check for a valid digit.  Advance pointer and increment count if valid.
+
+100$:	CMPB	(R2),(R3)	; Possible valid character?
+	BLO	110$		; If LO no
+	CMPB	#'7,(R2)	; Really valid?
+	BLO	110$		; If LO no
+	CMPB	(R4)+,(R2)+	; Bump count and pointer
+110$:	RETURN			;
+
+	.ENDC
+
+;
+;
+	$END	DIRFND
+;
+;
+	.END

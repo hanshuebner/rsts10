@@ -1,0 +1,235 @@
+1	SUB OMSINI(STRING ERR.MSG, WORD ERROR.NUM)
+	!		PROGRAM		: OMS.TSK
+	!		PACKAGE		: OMS
+	!		MODULE		: OMSINI.B2S
+	!		VERSION		: V10.1
+	!		EDIT		: A
+	!		EDIT DATE	: 10-MAY-91
+	!		START DATE	: 28-MAR-89
+	!****************************************************************
+	!
+	!		  C O P Y R I G H T				 
+	!
+	!
+	!		      Copyright (C) 1983, 1991 by
+	!
+	! This software is furnished under a license and may be used and
+	! copied  only  in accordance with the terms of such license and
+	! with the  inclusion  of  the  above  copyright  notice.   This
+	! software  or  any  other copies thereof may not be provided or
+	! otherwise made available to any other person.  No title to and
+	! ownership of the software is hereby transferred.
+	!
+	! The information in this software is subject to change  without
+	! notice  and should not be construed as a commitment by Digital
+	! Equipment Corporation.
+	!
+	! DIGITAL assumes no responsibility for the use  or  reliability
+	! of its software on equipment that is not supplied by DIGITAL.
+	!
+	!****************************************************************
+
+
+
+	OPTION TYPE = EXPLICIT
+
+	 %INCLUDE "SYSTEM:CMNDEF.B2S"
+	 %INCLUDE "SYSTEM:OMSCMN.B2S"
+
+	DECLARE STRING CONSTANT						&
+		UU.SYS = "6"C + "26"C,					&
+		OMS = "Operator/Message Services"
+
+	EXTERNAL WORD	CONSTANT			! RSTS/E error codes  &
+			CTRLCE, EOF, NOBUFS, PRVIOL
+
+	DECLARE	WORD	RETRY.CNT,	! Retry counter &
+		WORD	I		! General use, Index used in FOR loops
+
+ OMSINI_START:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("OMSINI Entered",1%)		!  Tell'em they're here
+    %END %IF
+
+	I = CTRLC
+	ON ERROR GO BACK			! Caller handles unexpected errs
+	ERR.MSG = ""				! No errors to begin with
+	ERROR.NUM = 0%				! Default error number is zero
+	SYS.CHNL = 1%				! Work file channel number
+	LOG.CHNL = 2%				! Log file channel number
+	FQB = SYS("6"C + "22"C			! Remove receiver call	      &
+		+ STRING$(33%, 0%) + "255"C)	!  remove all receivers for job
+	RETRY.CNT = 0%				! Init retry declare recv count
+
+
+ DECLR_RECVR:
+
+	ON ERROR GOTO DECLR_RECVR_ERR		! Err loc for declare receiver 
+	FQB = STRING$(40%, 0%)			! Clear out the FIRQB
+	FQJOB = 6%				! SYS call to FIP
+	FQFUN = 22%				! .MESAG directive
+	FQFIL = 1%				! Declare receiver
+	FQBCFM.RCVN = P.NAM			! Receiver name
+	FIRQB(21%) = OMS.LOT			! Local object type
+	FIRQB(22%) = 1%				! Access = LCL, NoPRV, SLP
+	FIRQB(25%) = MSG.MAX			! Message maximum
+	FQB = SYS(FQB)				! Do it
+
+	RETRY.CNT = 0%				! Init open file retry count
+
+
+ WRK_FIL_OPN:
+
+	ON ERROR GOTO WRK_FIL_ERR		! Set work file error location
+	OPEN OMS.LOC + OMS.SYS FOR INPUT	! Find the work file	      &
+	  AS FILE SYS.CHNL, MAP OMSREQ,		!  set channel and buffer     &
+	  ORGANIZATION VIRTUAL			!  use RSTS native I/O
+
+	CAUSE ERROR PRVIOL IF STATUS AND 1024%	! Make sure we have write access
+
+
+ GET_HEADER:
+
+	CALL GETSYS BY REF (0%, OMSINT)		! Read in the header record
+
+	IF (OMS.VER <> PTCL.VER)		! If bad version	      &
+	OR (OMS.REV <> PTCL.REV)		! or bad revision
+	THEN
+	  GOTO BAD_HEADER
+	END IF
+
+	ON ERROR GOTO OPEN_LOG_ERR		! New error trap
+	REQ.LEN = -1%				! Signal "open only" to PUTREQ
+	CALL PUTREQ BY REF (OMSREQ)		! Try to open log file
+
+
+ OMS_STARTUP:
+ 
+	ON ERROR GO BACK			! Standard error handling
+	CALL GETDAT BY REF (OMS.DTM BY DESC, TRUE)
+	CALL PUTSYS BY REF (0%, OMSINT)		! Store header in work file
+	STAMP.DATE = OMS.DATE			! Save day for daily date stamp
+	BITVAL(I) = 2%^I FOR I = 0% TO 15%	! Setup bit value array
+	PNDREQ(I) = 0% FOR I = 1% TO PND.MAX	! Zero out pending req table
+	KEEP.MSG = ((OMS.STS AND ML.MSG)=ML.MSG)! Create "keeping messages" flag
+	KEEP.REQ = ((OMS.STS AND ML.REQ)=ML.REQ)! Create "keeping requests" flag
+	FQB = SYS(UU.SYS)			! Get info about OMS's job
+	OMS.JOB, JOB.NO = FIRQB(3%)/2%		! OMS'S job number
+	OMS.KB, KB.NO = FIRQB(4%)		! OMS's console keyboard #
+	OMS.PPN, PPN = FQBWRD(11%)		! OMS'S PPN
+	FQB = SYS(UU.SYS + "0"C + "1"C)		! Tell me more about OMS's job
+	PMC.LOC = FQBWRD(15%) + 14%		! Pending message count address 
+	STOP.OMS = FALSE			! We're just getting started
+	STOPPING.OMS = FALSE			! 
+
+	OMSREQ = OMSINT				! Set up basic message string
+	CALL GETDAT BY REF (REQ.DTM BY DESC, TRUE)
+	REQ.TYP = ML.MSG			! This is a message
+	REQ.STS = 0%				! Message have no status
+	REQ.FLG = FLG.BEL			! Ring the morning bells...
+	REQ.TXT = "Starting " + OMS		! "Starting operator services"
+	REQ.LEN = LEN(TRM$(REQ.TXT))		! Gotta save the text length
+
+	CALL ASNSEQ BY REF			! Assign a seq # for message
+	CALL PUTREQ BY REF (OMSREQ) IF KEEP.MSG	! Put msg in logfile as needed
+	CALL BRDCST				! Broadcast message to operators
+
+	EVENT.DAT, EVENT.TIM = MAXINT		! Set no event time
+	UPD.ACT = FALSE				! Say event time is valid
+	ON ERROR GOTO LOAD_REQ_ERR		! Local error trap
+	FOR I = 1% TO PND.MAX			! Check out work file req slots
+
+	  CALL GETSYS BY REF (I, OMSREQ)	!   Check out this slot
+	  IF REQ.NUM				!   Pending request here?
+	  THEN
+	    IF REQ.ACT < EVENT.TIME		!   Yes, is action time earlier?
+	    THEN
+	      EVENT.TIME = REQ.ACT		!     Yes, save new action time
+	    END IF
+	    PNDREQ(I) = REQ.NUM			!     Mark slot in use
+	  END IF
+
+	NEXT I					! On to next slot
+	GOTO OMSINI_END				! Done with startup
+
+
+ DECLR_RECVR_ERR:
+
+	I = CTRLC				! Re-enable ^C trapping
+	IF ERR = CTRLCE THEN
+	  ON ERROR GO BACK
+	END IF
+	IF (RETRY.CNT < 10%) AND (ERR = NOBUFS)	! If no small buffers
+	THEN					! Then
+	  RETRY.CNT = RETRY.CNT + 1%		!  Count the attempt
+	  SLEEP 1%				!  wait awhile
+	  RESUME DECLR_RECVR			!  try to declare receiver again
+	END IF					! Done trying
+	ERROR.NUM = ERR				! Return the error number
+	ERR.MSG = "?Can't declare receiver"	! Tell-em
+	RESUME OMSINI_END			! return with error
+
+
+ WRK_FIL_ERR:
+
+	I = CTRLC				! Re-enable ^C trapping
+	IF ERR = CTRLCE THEN
+	  ON ERROR GO BACK			! back to caller
+	END IF
+	IF (ERR = PRVIOL) OR (ERR = 138%)	! OMSMGR has work file open?
+	THEN
+	  IF (RETRY.CNT < 30%)			! Yes, retries left?
+	  THEN
+	    RETRY.CNT = RETRY.CNT + 1%		!   Yes, count attempt
+	    SLEEP 1%				!     Wait a second
+	    RESUME WRK_FIL_OPN			!     Try it again
+	  END IF
+	END IF
+	ERROR.NUM = ERR				! Set error # and text
+	ERR.MSG = "?Can't open " + OMS + " work file"
+	RESUME OMSINI_END
+
+
+ GETHDR_ERR:
+
+	I = CTRLC				! Re-enable ^C trapping
+	IF ERR = CTRLCE THEN
+	  ON ERROR GO BACK			! Back to caller
+	END IF
+	ERROR.NUM = ERR				! Save the error number
+	RESUME BAD_HEADER			! Set error text and quit
+
+
+ LOAD_REQ_ERR:
+
+	IF ERR = EOF				! Reached EOF on work file?
+	THEN
+	  RESUME OMSINI_END			! Yes, that error is OK
+	END IF
+	ON ERROR GO BACK			! Return other errors to caller
+
+
+ OPEN_LOG_ERR:
+
+	I = CTRLC				! Re-enable ^C trapping
+	IF ERR = CTRLCE THEN
+	  ON ERROR GO BACK			! Back to caller
+	END IF
+	ERROR.NUM = ERR				! Set error # and text
+	ERR.MSG = "?Can't open " + OMS + " log file"
+	RESUME OMSINI_END
+
+
+ BAD_HEADER:
+
+	ERR.MSG = "?" + OMS + " work file is corrupt"
+
+
+ OMSINI_END:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("OMSINI Exit",-1%)		!  Tell em we're leaving
+    %END %IF
+
+	SUBEND

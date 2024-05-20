@@ -1,0 +1,2821 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /DSK:MSCPDF/
+	.INCLUDE /CMN:RTCOM/
+TITLE	SILUS,<SILUS FOR RSTS/E>,0A,10-MAY-91,ABC/MHB/SJK/AWR/JTC/SRM/JHC/JFM/KMF/KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR SILUS
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - STOLEN FROM MHB
+;  001	AWR  24-APR-81	INSTALL V7.0 PATCH 22.14.1, ADD PATCH SPACE
+;  002	JTC  13-Jul-81	Removed SE.APR, pre-squished APR values.
+;  003  SRM  28-Jul-81	Add SE.OFF and phase compression.
+;  004  JTC  07-Aug-81	Reorganize buffer usage.
+;  005	JTC  10-Aug-81	Add symbol sorting + D-space buffer stuff.
+;  006  SRM  25-Aug-81	Make D-space messages match INIT's.
+;  007	SJM  27-Oct-81	Fix for the redefinition of USERTOP.
+;  008  SRM  13-Nov-81	Add printing of small buffer table.
+;  009  JHC  23-Feb-83	change OVR reads to full block. Also determine
+;			whether MORBUF is part of SYSGEN buffer count
+;			get accurate output tables.
+;  010  JHC  23-Feb-83  Provide hooks for MSCP constant in SILUS
+;  011  JFM  26-Jun-83  Allow more than 15 phases. Up to 255, see symbol SI.NBL
+;  012	JFM  29-Jul-83	Fixed STB starting block bug, and single file SILUS bug
+;  013  KMF  14-Jan-84  Update for 8-bit compatibility (unset parity bit)
+;  014	KPH  05-Sep-84	Changes for APR5 FIP pool
+;			Add handling of MSCP region
+;			Move $$EPMM to 120000
+;			Remove resident overlay stuff (done online)
+;  015	KPH  22-Jan-85	Add /T switch (supress STB)
+;
+;			[RSTS V9.2]
+;  016  KPH  14-Sep-85	Remove stuff from SIL map table that isn't accurate
+;  017  KPH  25-Oct-85	Fix a typo
+;
+;			[RSTS V9.4]
+;  018	GPK  29-Sep-86	Fix the overlay descriptor handling to be less
+;			sensitive to overlay handler details (thereby
+;			allowing the INIT-specific overlay handler)
+;
+;-
+
+.SBTTL	MACRO DEFINTIONS
+
+.ENABL	LC
+
+.MCALL	..V1..,	.CLOSE,	.CSISPC,.ENTER,	.LOOKUP
+.MCALL	.PRINT,	.RCTRLO,.READW,	.SETTOP,.SRESET,.WRITW
+
+..V1..
+
+.MACRO	PRINT	TXT,CRLF
+	 MOV	(PC)+,R0
+	TXTGEN	<TXT>,<CRLF>
+	.PRINT
+.ENDM	PRINT
+
+.MACRO	WARN	TXT
+	PRINT	<"%"TXT>,CRLF
+.ENDM	WARN
+
+.MACRO	ERROR	TXT
+	CALL	ERRPRT,R1
+	TXTGEN	<"?"TXT>
+.ENDM	ERROR
+
+.MACRO	RSTSER	TXT
+	CALL	RSTSER,R1
+	TXTGEN	<TXT>
+.ENDM	RSTSER
+
+.MACRO	TXTGEN	TXT,CRLF
+	TMPORG	TEXT
+.DSABL	CRF
+$$$$$$	=	.
+.ENABL	CRF
+	UNORG
+	  .WORD	$$$$$$
+	TMPORG	TEXT
+.DSABL	CRF
+.NLIST	BEX
+.IF	NB	<CRLF>
+	   .ASCII TXT<0>
+.IFF
+	   .ASCII TXT<200>
+.ENDC
+.LIST	BEX
+.ENABL	CRF
+	UNORG
+.ENDM	TXTGEN
+
+
+.MACRO	CPYTXT	TXT
+	JSR	R4,CPYTXT
+	TXTGEN	<TXT>
+.ENDM	CPYTXT
+
+.MACRO	NODSPA	TXT
+	CALL	NODSPA,R4
+	TXTGEN	<TXT>
+.ENDM	NODSPA
+
+.MACRO	BMPIDX	REG
+.IF	IDN	<REG>,<R0>
+	CALL	BMPIDX
+.IFF
+	MOV	R0,-(SP)
+	MOV	REG,R0
+	CALL	BMPIDX
+	MOV	R0,REG
+	MOV	(SP)+,R0
+.ENDC
+.ENDM	BMPIDX
+
+.SBTTL	ORDER THE CSECTS
+
+	DEFORG	SILUS
+	DEFORG	SILCTL
+	DEFORG	PATCH
+	DEFORG	TEXT
+
+.SBTTL	DEFINING CONSTANTS
+
+.EQUATE	IOST,	FIRQB	;ERROR STATUS BYTE FOR RSTS/E
+
+.BSECT			;SWITCH FLAG BIT DEFINITIONS
+
+M.SWIT:	.BLKB	.	;/M (MERGE)
+N.SWIT:	.BLKB	.	;/N (SPECIFY MODULE NAME)
+A.SWIT:	.BLKB	.	;/A (ALIGN PHASE ON A BLOCK BOUNDRY)
+T.SWIT:	.BLKB	.	;/T (Supress symbol table)			;015
+
+.DSECT			;FLAG TABLE ENTRY DEFINITIONS
+
+FL.FLG:	.BLKW		;FLAG WORD FOR FILE (SWITCHES)
+FL.STB:	.BLKW		;EXTENSION FOR STB FILE IF NOT 'STB' (/E:XXX)
+FL.MOD:	.BLKW	2	;USER'S MODULE NAME (/N & USER'S RESPONSE)
+FL.MGN:	.BLKW		;MODULE NUMBER TO MERGE TO (/M[:N], N=1 DEFAULT)
+FL.LEN:			;SIZE OF A FLAG TABLE ENTRY IN BYTES
+
+.DSECT			;SIL INDEX ENTRY DEFINITIONS
+
+SE.NAM:	.BLKW	2	;NAME OF MODULE
+SE.IDN:	.BLKW	2	;IDENT OF MODULE
+SE.BLK:	.BLKW		;STARTING BLOCK OF MODULE
+SE.STB:	.BLKW		;STARTING BLOCK OF STB
+SE.STN:	.BLKW		;NUMBER OF ENTRIES IN STB
+SE.LOD:	.BLKW		;LOAD ADDRESS OF MODULE
+SE.SIZ:	.BLKW		;SIZE OF MODULE (IN BYTES)
+SE.XFR:	.BLKW		;TRANSFER ADDRESS OF MODULE
+SE.SZD:	.BLKW		;SIZE OF MODULE ON DISK (IN BLOCKS)
+SE.OVB:	.BLKW		;STARTING BLOCK OF OVERLAY DESCRIPTORS
+SE.OVN:	.BLKW		;NUMBER OF ENTRIES IN OVERLAY DESCRIPTORS
+SE.OFF:	.BLKW		;STARTING OFFSET OF MODULE
+	.BLKW		;RESERVED
+SE.XXX:	.BLKW		;UNUSED, BUT CAN BE ANYTHING...
+SE.LEN:			;SIZE OF A SIL INDEX ENTRY IN BYTES
+
+.ASSUME	SE.LEN	EQ	40
+
+.DSECT			;CONSTANTS TO DETERMINE NUMBER OF PHASES SILUS ALLOWS
+
+SI.NBL	=	16.	;Number of blocks for SIL Index. Only this 	;011+
+			;number needs to be changed to expand/contract	
+			;the SIL index size				
+SI.NMD	= SI.NBL*1000/SE.LEN - 1					
+			;Maximum number of modules allowed in SIL	;011-
+
+.DSECT			;SIL INDEX LAYOUT
+
+SI.NUM:	.BLKW		;NUMBER OF MODULES IN SIL
+SI.ENT:	.BLKB	15.*SE.LEN ;SPACE FOR SIL INDEX ENTRIES
+	.BLKW	11.	;RESERVED
+SI.ISZ:	.BLKW		;SIZE OF THE SIL INDEX IN BLOCKS		;011
+SI.BLS:	.BLKW		;SIZE OF THIS SIL IN BLOCKS
+SI.CHK:	.BLKW		;CHECKSUM OF SIL INDEX
+SI.SIL:	.BLKW		;RAD50 "SIL" FOR IDENTIFICATION
+SI.MOR:	.BLKB	SI.NMD-15.*SE.LEN					;011
+			;Starting space for additional sil index entries;011
+SI.SIZ:			;SIZE OF SIL INDEX IN BYTES
+
+.ASSUME	SI.SIZ	EQ	1000*SI.NBL					;011
+
+;
+; Define our channel numbers
+;
+
+TMPSIL	=	0	;Temporary file to hold the module(s).
+SAVINP	=	1	;Input SAV file(s) from the linker.
+SILOUT	=	1	;Also our final output SIL file.
+STBINP	=	2	;Input STB file(s) from the linker.
+MAPOUT	=	15	;Our output MAP file.
+TMPSTB	=	16	;Temporary file for symbols and overlay descriptors
+
+.SBTTL	MAIN LOOP
+
+	ORG	SILUS
+
+; ERROR(S)
+
+.ENABL	LSB
+
+10$:	.LIMIT			;OUR LIMIT(S)
+
+RSTSER:	MOVB	IOST,R0	;GET RSTS/E ERROR CODE
+	BEQ	15$		;IF NONE, DON'T PRINT ANYTHING
+	.ERRPRT			;PRINT RSTS/E ERROR FIRST
+	PRINT	<" - ">		;OUR TEXT WILL FOLLOW
+	BR	ERRPRT		;GO PRINT OUR TEXT			;014
+
+15$:	PRINT	<"?">		;ANOUNCE OUR TEXT WITH A QUESTION MARK
+				; IF NO RSTS/E ERROR PRECEDED IT
+ERRPRT:	.PRINT	(R1)		;PRINT OUR TEXT				;014
+	PRINT	<"">,CRLF	;RESTORE CARRIAGE
+	.BR	RESTRT		; AND RESTART
+
+; START UP
+
+RESTRT:	NOP			;RESTART ENTRY
+START::	MOV	USERSP,SP	;RESET THE STACK
+	.RCTRLO			;CANCEL ^O
+	.SRESET			;RESET ALL CHANNELS
+	BIS	#RSTRT$,JSW	;ALLOW RESTARTS
+	MOV	10$+2,R2	;GET OUR UN-EXPANDED PROGRAM TOP
+	MOV	R2,BIGBUF	;THAT'S WHERE OUR BIG BUFFER STARTS
+	MOV	#-2,R0		;ASK FOR MUCH TOO MUCH
+	.SETTOP			; FOR BUFFERING SPACE
+	BCS	20$		;ERROR.  COULDN'T GET ANY
+	SUB	R2,R0		;GET OUR NET INCREASE IN SIZE
+	BIC	#777,R0		; AND ROUND IT DOWN TO A BLOCK BOUNDARY
+	MOV	R0,R1		;COPY THE ROUNDED SIZE
+	ADD	R2,R1		;TO GET THE TOP OF OUR BIG BUFFER
+	MOV	R1,BIGTOP	; REMEMBER THE TOP OF BIG BUFFER
+	SUB	#4*2,R1		;FIND ONE SYMBOL DESCRIPTOR LESS THAN TOP
+	MOV	R1,BIGSYM	; AND REMEMBER WHERE THAT IS
+	;CLC			;(CARRY CLEARED FROM SUBTRACT)
+	ROR	R0		;GET BIG BUFFER SIZE
+	SWAB	R0		; IN BLOCKS
+	MOV	R0,BIGBLK	;AND STORE THAT FOR LATER TOO
+	CMP	R0,#3		;DID WE GET OUR MINIMUM DAILY REQUIREMENT?
+	BHIS	30$		;YES, WE'RE HEALTHY
+20$:	PRINT	<"?Not enough memory to run">,CRLF ;NOT NUTRITIOUS ENOUGH
+	.EXIT			;QUIT NOW, BEFORE WE LOOP ON IT
+
+30$:	CLR	SWCONT		;NO /C SWITCH YET
+	CLR	SWSAVE		;NO /S SWITCH YET
+
+.DSABL	LSB
+
+; GET THE FIRST COMMAND LINE
+
+	.CSISPC	#OUTSPC,#DFEXTS	;SCAN US A STRING
+	CALL	PARSWT		;PARSE THE SWITCHES, IF ANY
+	BCS	RESTRT		;SWITCH ERROR, RESTART THE RUN
+	CLR	OUTFLG		;ASSUME NO OUTPUT FILE
+	CLR	MAPFLG		;ASSUME NO MAP FILE
+
+; CHECK FOR AND SAVE SIL FILE INFORMATION
+
+.ENABL	LSB
+
+	MOV	#OUTSPC,R1	;POINT TO OUTPUT FILE SPECIFICATION
+	MOV	#OUTNAM,R5	;POINT TO AREA FOR FILE NAME
+	MOV	R1,R0		;COPY THE POINTER
+	TST	(R0)+		;ANYTHING THERE?
+	BEQ	40$		;NO, NO OUTPUT
+	COM	OUTFLG		;YES, SET FLAG SAYING OUTPUT DESIRED
+	TST	(R0)		;ANY FILE NAME?
+	BEQ	10$		;NO
+	CALLX	RAD$FN		;YES, CONVERT FILE NAME TO ASCII
+10$:	MOV	#SILPRM,R2	;POINT TO SIL FILE PARAMETER BLOCK
+	CLR	(R2)+		;CLEAR PPN
+	CLR	(R2)+		;CLEAR PROTECTION CODE
+	CLR	(R2)+		;CLEAR FILE OPEN MODE
+	CLR	(R2)+		;CLEAR FILE CLUSTERSIZE
+	CLR	(R2)+		;CLEAR DCN POSITION
+	MOV	R1,R0		;SAVE CSI BLOCK POINTER TO SIL FILE
+	MOV	(R1)+,(R2)+	;COPY THE DEVICE
+	MOV	(R1)+,(R2)+	;COPY THE
+	MOV	(R1)+,(R2)+	; FILE NAME
+	MOV	(R1)+,(R2)+	;COPY THE EXTENSION
+	CMP	-(R1),#^RSAV	;IS EXTENSION ".SAV"?
+	BNE	20$		;NO
+	MOV	#-1,SWSAVE	;YES, ASSUME /S
+20$:	.SETFQB			;NOW LET RT11.RTS SET UP THE FIRQB
+	BCS	40$		;OOPS, SOME ERROR
+	MOV	#SILPRM,R2	;POINT TO SIL FILE PARAMETER BLOCK AGAIN
+	MOV	FIRQB+FQPPN,(R2)+ ;SAVE PPN
+	MOV	FIRQB+FQPROT-1,(R2)+ ;SAVE PROTECTION CODE
+	MOV	FIRQB+FQMODE,(R2)+ ;SAVE FILE OPEN MODE
+	TSTB	FIRQB+FQFLAG	;A DISK FILE?
+	BNE	30$		;NO
+	BIS	#64.!100000,-2(R2) ;YES, SO TRY FOR A CONTIGUOUS SIL FILE
+30$:	MOV	FIRQB+FQCLUS,(R2)+ ;SAVE FILE CLUSTERSIZE
+	MOV	FIRQB+FQNENT,(R2)+ ;SAVE DCN POSITION
+40$:	CLRB	(R5)		;MAKE FILE NAME ASCIZ
+
+.DSABL	LSB
+
+; CHECK FOR AND ENTER MAP FILE
+
+.ENABL	LSB
+
+	TST	MAPSPC		;IS THERE A MAP?
+	BEQ	10$		;NO
+	COM	MAPFLG		;YES, SET FLAG
+	.ENTER	MAPOUT,#MAPSPC	; AND ENTER THE MAP FILE
+	BCC	10$		;OK
+	RSTSER	<"MAP enter error">
+
+; ENTER THE TEMP FILES
+
+10$:	.ENTER	TMPSIL,#TMPFIL	;CREATE SIL FILE AS A TEMPORARY FILE FOR NOW
+	BCC	20$		;OK
+	RSTSER	<"SIL temp file enter error">
+
+20$:	.ENTER	TMPSTB,#TMPFIL	;CREATE THE TEMP FILE FOR THE STB'S
+	BCC	30$		;CREATE SUCCESSFUL
+	RSTSER	<"Temp file enter error">
+
+; INITIALIZE THE SIL INDEX, ETC.
+
+30$:	MOV	#1,OUTBLK	;OUTPUT TO SIL FILE STARTS AT BLOCK 1
+	CLR	STBBLK		;STB OUTPUT STARTS AT BLOCK 0
+	MOV	#LOKTBL+2,R4	;POINT INTO RSTS SYMBOL LOOKUP TABLE
+35$:	TST	(R4)+		;SKIP TO VALUE ENTRY
+	CLR	(R4)+		;CLEAR OUT THE VALUE ENTRY
+	TST	(R4)+		;AT END OF TABLE YET?
+	BNE	35$		;NO, CONTINUE LOOPING.
+	CLR	APRVAL		;NO APR VALUE OFFSET YET
+	MOV	#SILIDX+SI.MOR,R4 ;POINT TO BLOCK IN MEM FOR SIL INDEX	;011
+	MOV	#^RSIL,-(R4)	;SET UP IDENTIFICATION WORD
+.ASSUME	SI.SIL	EQ	SI.MOR-2 ; WE WRITE RAD50 "SIL" AT THE END OF THE FIRST
+				;  BLOCK, RIGHT BEFORE THE REST OF THE ENTRIES.
+40$:	CLR	-(R4)		;CLEAR OUT THE REST
+	CMP	R4,#SILIDX	;DONE?
+	BHI	40$		;NO
+	CLR	(R4)+		;POINT TO FIRST SIL INDEX ENTRY
+.ASSUME	SI.ENT	EQ	2
+
+; PROCESS INPUT(S)
+
+50$:	MOV	#INSPC,SPEC	;SET UP SPEC POINTER
+	MOV	#FLGTBL,FLGWRD	;POINT FLAG AT FLAG TABLE ENTRY		;014
+60$:	CALL	DOSPEC		;PROCESS AN INPUT SPEC
+	ADD	#4*2,SPEC	;ON TO THE NEXT ONE
+	ADD	#FL.LEN,FLGWRD	; AND ADVANCE FLAG POINTER		;014
+	CMP	SPEC,#INSPC+<4*2*6> ;DONE ALL 6?
+	BLO	60$		;NOT YET
+	DEC	SWCONT		;IS THERE A '/C' SWITCH?
+	BMI	FINISH		;NO
+	.CSISPC	#OUTSPC,#DFEXTS	;YES, GET ANOTHER INPUT LINE
+	CALL	PARSWT		;AND PARSE THE SWITCHES
+	BCC	50$		;IF SWITCHES OK, DO THE REST OF THEM
+	JMP	RESTRT		;ELSE ABORT AND TRY AGAIN
+
+.DSABL	LSB
+
+.SBTTL	FINISH UP
+
+.ENABL	LSB
+
+FINISH:	MOV	APRVAL,R5	;GET THE TOTAL NUMBER OF MMU UNITS
+	ADD	#7,R5		;AND ROUND THE NUMBER UP TO THE NEXT BLOCK.
+	ASH	#-3,R5		;CONVERT TO BLOCKS.
+	MOV	#SILIDX,R4	;GET POINTER TO SIL INDEX
+	MOV	R4,R3		;COPY IT
+	MOV	(R3)+,R2	; AND FIND NUMBER OF ENTRIES IN SIL INDEX
+.ASSUME	SI.NUM	EQ	0	;Number of modules is first thing in SIL;012+
+	ASH	#-4.,R2		;Convert number of modules (phases) to 	
+	INC	R2		; number of blocks for SIL index, then	
+	MOV	R2,SI.ISZ(R4)   ; Store number of blocks in SIL index, 	
+	TST	SWSAVE		;IS THIS A .SAV TYPE SIL?
+	BNE	05$		;YES, DON'T BOTHER ADJUSTING THE SIZE.
+	ADD	R2,R5		;Add in the SIL header.			
+05$:	MOV	(R4),R2		;Store number of entries in SIL index.	;012-
+	BNE	10$		;IF ANY
+	ERROR	<"No modules in SIL">
+
+; UPDATE STB/OVERLAY BLOCK NUMBERS
+
+.ASSUME	SI.ENT	EQ	SI.NUM+2
+10$:	TST	SE.STN(R3)	;ANY STB ENTRIES?
+	BEQ	20$		;NO
+	ADD	R5,SE.STB(R3) ;YES, UPDATE STB BLOCK NUMBER
+20$:	TST	SE.OVN(R3)	;ANY OVERLAY DESCRIPTORS?
+	BEQ	30$		;NO
+	ADD	R5,SE.OVB(R3) ;YES, UPDATE OVERLAY DESCRIPTOR BLOCK NUMBER
+30$:	BMPIDX	R3		;Bump R3 to the next SIL index entry.	;011
+	SOB	R2,10$		; AND LOOP...
+
+
+; ENTER THE REAL SIL FILE
+
+50$:	TST	OUTFLG		;ARE WE CREATING OUPUT?
+	BNE	51$		;YES, SO CONTINUE
+	JMP	160$		;NO, WE'RE ALL DONE
+51$:	MOV	#SILPRM,R1	;POINT TO SIL FILE PARAMETER BLOCK
+	MOV	SYSPTR,R0	;GET RT11.RTS PARAMETER AREA POINTER
+	MOV	(R1)+,(R0)+	;SET PPN
+	MOV	(R1)+,(R0)+	;SET PROTECTION CODE
+	MOV	(R1)+,(R0)+	;SET FILE OPEN MODE
+	MOV	(R1)+,(R0)+	;SET FILE CLUSTERSIZE
+	MOV	(R1)+,(R0)+	;SET DCN POSITION
+	ADD	STBBLK,R5	;AND THE # OF STB/OVERLAY BLOCKS
+	MOV	R5,@#SILIDX+SI.BLS ;SAVE THE NUMBER OF BLOCKS IN THE HEADER
+	.ENTER	SILOUT,R1,R5	;CREATE THE SIL FILE AT CORRECT SIZE
+	BCC	60$		;SIL FILE IS THERE
+	RSTSER	<"SIL enter error">
+
+	;
+	; COPY THE MODULE BLOCKS AND COMPRESS THEM INTO THE REAL SIL FILE
+	;
+	; R0	Used to pass parameters to RT11 EMTs
+	; R1	The buffer fill pointer
+	; R2	General scratch
+	; R3	General scratch
+	; R4	Module number currently being processed.
+	; R5	Number of modules in this SIL.
+	;
+
+58$:	RSTSER	<"SIL temp file input error">
+
+59$:	RSTSER	<"SIL output error">
+
+	;
+	; Initialization
+	;
+
+60$:	MOV	#1,I.BLK 	;Start with the first block in file for input.
+	MOV	SILIDX,R5	;Get the number of modules in the SIL.
+.ASSUME	SI.NUM	EQ	0
+	MOV	R5,R1		;Store number of modules in sil		;011+
+	ASH	#-4.,R1		;Convert to blocks in SIL index 	
+	INC	R1		; and add in the first block.		
+	MOV	R1,O.BLK 	;Start with the (R1) block when 	
+				; outputting SIL file. (.TSKs and .STBs);011-
+	MOV	#SILIDX+SI.ENT,R4 ;Start with the first module.
+	CLR	R1		;Start filling the buffer at the beginning.
+
+
+75$:	MOV	SE.SZD(R4),R3	;Get the size in blocks for a .SAV type SIL.
+	BEQ	76$		;Not a .SAV type.  Calculate the size from
+	DEC	R3		;The size is one block too big.
+	CLR	R2		;the virtual size.
+	ASHC	#8.,R2		;Turn the blocks into words.
+	MOV	R2,MSB		;Store the value in the word count
+	MOV	R3,LSB		;fields.
+	BR	77$
+
+76$:	CLR	MSB		;Convert the size from bytes.
+	MOV	SE.SIZ(R4),LSB	;Get the size of the module and make it a
+	;CLC			;word count.
+	ROR	LSB
+
+77$:	MOV	O.BLK,R3	;Get the current output block.
+	TST	SWSAVE		;Is this a .SAV?
+	BEQ	78$		;No
+	CLR	R3		;Yes, the SE.BLK must be zero.
+78$:	TST	SE.OFF(R4)	;Should this module be aligned?
+	BEQ	80$		; No.
+	MOV	R1,R2		; Yes, now zero the remainder of the block.
+	ASL	R2		; Get the fill pointer in bytes
+	ADD	BIGBUF,R2	; and add in the base address of the buffer.
+
+	BIT	#376,R1		; If we are already at a block boundry
+	BEQ	80$		;  then don't do anything.
+	INC	R3		;  Otherwise add another block.
+79$:	CLR	(R2)+		;  Clear and increment by a word.
+	INC	R1		;  Increment the fill pointer.
+	BIT	#376,R1		;  And repeat until all words have been
+	BNE	79$		;  zeroed.
+
+	;
+	; Update the SIL header and see how many words we can read.
+	;
+
+80$:	MOV	R3,SE.BLK(R4)	;The new starting block
+	MOV	R1,R2		;Copy the fill pointer
+	BIC	#^C<377>,R2	;and get the offset.
+	MOV	R2,SE.OFF(R4)	;Save the offset in the header.
+81$:	MOV	BIGBLK,R3	;Get our buffer size in blocks
+	SWAB	R3		;and convert it to size in words.
+	SUB	R1,R3		;Calcluate amount that can be overwritten.
+	CLRB	R3		;Round it down to the nearest block.
+	TST	MSB		;Do we have a whole bunch to transfer?
+	BNE	90$		;Yes, so only do a buffer's worth.
+	CMP	R3,LSB		;Is there a full buffers worth?
+	BLOS	90$		; Yes.
+	MOV	LSB,R3		; No, so only do this much.
+
+
+
+	;
+	; Read modules from the temporary file.
+	;
+
+90$:	MOV	R1,R2		;Determine where to read data
+	ASL	R2		;into the buffer.
+	ADD	BIGBUF,R2
+	.READW	TMPSIL,R2,R3,I.BLK
+				;Get the next block(s).
+	BCS	58$		;Trouble!  Go away.
+	SUB	R0,LSB		;Update how many much is left.
+	SBC	MSB		;(Double precission).
+	ADD	R0,R1		;Update the fill pointer.
+	ADD	#377,R0		;Round up to calculate which
+	CLRB	R0		;block to read next.
+	SWAB	R0		;Convert to blocks.
+	ADD	R0,I.BLK	;to calculate where the next read starts.
+
+	;
+	; Write them to the real SIL file.
+	;
+
+	MOV	R1,R2		;Set up to calculate how many blocks
+	CLRB	R2		;to write.
+	.WRITW	SILOUT,BIGBUF,R2,O.BLK
+	BCS	59$		;Abort on any error writing to disk.
+	SWAB	R2		;Convert bytes transfered to blocks.
+	ADD	R2,O.BLK	;Count up the blocks output.
+	SWAB	R2		;Back to words.
+	SUB	R2,R1		;Get how many words weren't written.
+
+
+	;
+	; Handle an incomplete block
+	;
+
+	BEQ	105$		;If everything was transfered.
+	ASL	R2		;Convert to bytes.
+	ADD	BIGBUF,R2	; Point to where we start.
+	MOV	BIGBUF,R0	; and to where we're going.
+	MOV	R1,R3		; For each word
+100$:	MOV	(R2)+,(R0)+	;  Copy the data a word at a time.
+	SOB	R3,100$		; Back for more.
+
+	;
+	; End of processing a module
+	;
+
+105$:	MOV	LSB,-(SP)	;Copy the low order
+	BIS	MSB,(SP)	;and "add in" the high
+	TST	(SP)+		;Is there anything left?
+	BNE	81$		;No.
+	BMPIDX	R4		;Yes, so on to the next module		;011
+
+	;
+	; Loop back for another module
+	;
+
+	DEC	R5		;Back for another module
+	BEQ	106$		;Continue if no more.
+	JMP	75$
+
+	;
+	; Done with all of the modules.  Write out an incomplete last block.
+	;
+
+106$:	TST	R1		;Is there an incomplete last block
+	BEQ	107$		;No
+	.WRITW	SILOUT,BIGBUF,R1,O.BLK ; Write it out
+	INC	O.BLK		;and increase the number of blocks written.
+
+
+;
+; CALCULATE SIL INDEX CHECKSUM AND WRITE SIL INDEX
+;
+
+107$:	MOV	#SILIDX,R4	;GET THE POINTER TO THE SIL INDEX.
+	MOV	SI.ISZ(R4),R2   ;Get number of blocks in SIL index, 	;012
+	SWAB	R2		;Make it number of words to write.	;012
+	CLR	R3		;CLEAR CHECKSUM
+108$:	MOV	(R4)+,R0	;GET WORD OF INDEX
+	XOR	R0,R3		;.XOR. INTO CHECKSUM
+	CMP	R4,#SILIDX+SI.CHK ;DONE?  Only doing XOR of first block.;011
+	BLO	108$		;NO, LOOP...
+	MOV	R3,(R4)		;PUT CHECKSUM INTO INDEX
+	.WRITW	SILOUT,#SILIDX,R2,#0 ;WRITE OUT SIL INDEX AT BEGINNING OF SIL.
+	MOV	O.BLK,R2	;Return number of blocks in R2 for
+				;routines below. (C BIT UNAFFECTED)	;011
+	BCC	110$		;CONTINUE UNLESS THERE'S AN ERROR
+	.BR	109$		;FLOW INTO THE ERROR HANDLER
+
+
+109$:	RSTSER	<"SIL output error">
+
+; COPY THE STB/OVERLAY BLOCKS TO REAL SIL FILE
+
+110$:	CLR	R1		;CLEAR INPUT BLOCK FOR TEMP FILE
+120$:	MOV	STBBLK,R3	;GET NUMBER OF BLOCKS
+	SUB	R1,R3		; AND FIND NUMBER MORE TO COPY
+	BLOS	150$		;DONE
+	CMP	R3,BIGBLK	;IS NUMBER BIGGER THAN THE BUFFER?
+	BLOS	130$		;NO
+	MOV	BIGBLK,R3	;YES, LOWER THIS REQUEST
+130$:	SWAB	R3		;MAKE NUMBER OF WORDS TO READ
+	.READW	TMPSTB,BIGBUF,R3,R1 ;READ BLOCK(S)
+	BCC	140$		;NO ERROR
+	RSTSER	<"Temp file input error">
+
+140$:	MOV	R0,R3		;USE AMOUNT ACTUALLY READ
+	.WRITW	SILOUT,BIGBUF,R3,R2 ;COPY TO SIL FILE
+	BCS	109$		;OOPS
+	SWAB	R3		;MAKE COUNT BACK TO BLOCKS
+	ADD	R3,R1		;NEXT INPUT BLOCK
+	ADD	R3,R2		;NEXT OUTPUT BLOCK
+	BR	120$		;LOOP...
+
+; CLOSE UP SHOP
+
+150$:	TST	$$EPMM		;Is this a monitor SIL?
+	BEQ	155$		;No, so don't get size information.
+	CALL	SILSCN,R5	;Find the FIP module to calculate length.
+	 .RAD50	\FIP   \
+	BCS	180$		;die if we didn't find FIP module	;009
+	MOV	SE.SIZ(R0),FIPL	;Get the virtual size of the module.
+	CALL	SILSCN,R5	;Get the OVR module.
+	 .RAD50	\OVR   \
+	BCS	180$		;No such luck.  Give and error.
+	CALL	SILSCN,R5
+	 .RAD50	\DEFALT\	;Next get DEFALT
+	BCS	180$		;This ones missing?  That's an error as well.
+155$:	.CLOSE	SILOUT		;CLOSE REAL SIL OUTPUT
+	BCS	170$		;ERROR DOING IT!
+160$:	TST	MAPFLG		;IS THERE A MAP?
+	BNE	PRTMAP		;YUP, PRINT IT
+	JMP	RESTRT		;RESTART SILUS AGAIN
+
+170$:	RSTSER	<"Error closing SIL">
+
+180$:	ERROR	<"Invalid SIL format - module missing">
+
+.DSABL	LSB
+
+	.SBTTL	Lookup a Module in the SIL
+
+;
+;	SILSCN	--	Find the module header in the SIL header
+;
+;	Inputs:		SILIDX must contain the SIL header
+;
+;	CALL	SILSCN,R5
+;	 .RAD50	/Module name/ (Space filled to six characters)
+;
+;	Outputs:	C = 0 => Module was found
+;			C = 1 => Module was not found
+;			R0 -> Module header
+;
+SILSCN::PUSH	R1		;Get a scratch register
+	MOV	#SILIDX,R0	;Get the begiing of the SIL header
+	MOV	(R0)+,R1	; and the number of modules.
+10$:	CMP	(R0),(R5)	;Is this our man?
+	BNE	20$		;No!
+	CMP	2(R0),2(R5)	;Really?
+	BEQ	30$		;Yes, so indicate success.
+20$:	BMPIDX	R0		;On to the next module.			;011
+	SOB	R1,10$		;Loop the loop.
+	SEC			;Set error code.
+30$:	BIT	(R5)+,(R5)+	;Skip the name without affecting carry.
+	POP	R1		;Restore the saved sole.
+	RETURN	R5		;Bye.
+
+
+.SBTTL	PRODUCE MAP FILE
+
+.ENABL	LSB
+
+PRTMAP:	CLR	STBBLK		;CLEAR OUTPUT
+	MOV	#BLKBUF,R3	;INITIALIZE OUTPUT POINTER
+	MOV	#FBBUF,R5	;INITIALIZE TEXT POINTER
+	CPYTXT	<"Directory of SIL"> ;COPY HEADER
+	TSTB	OUTNAM		;IS THERE AN OUTPUT FILE NAME?
+	BEQ	10$		;NO
+	MOVB	#40,(R5)+	;YES, SPACE IT
+	CALL	CPYTXT,R4,OUTNAM ;INSERT THE FILE NAME
+10$:	TST	SWSAVE		;.SAV STYLE?
+	BEQ	20$		;NO
+	CPYTXT	<" done in .SAV format"> ;YES, SO SAY SO
+20$:	CPYTXT	<" on ">	;SET FOR DATE/TIME
+	MOV	R5,R0		;COPY TEXT POINTER FOR MONITOR
+	.PRIV,	.DATE		;GET TODAY'S DATE & TIME
+	.DATTIM			;OUTPUT DATE
+	MOVB	#40,(R0)+	;" AT "
+	MOVB	#'A+40,(R0)+
+	MOVB	#'T+40,(R0)+
+	MOVB	#40,(R0)+
+	CLR	XRB		;DO TIME THIS TIME
+	.DATTIM			;OUTPUT TIME
+	MOV	R0,R5		;POINTER BACK HERE AGAIN
+	CALL	MAPLIN		;EMIT A LINE
+	CALL	MAPLIN		;EMIT BLANK LINE
+CPYTXT	<" Name"<11>"Ident"<11>" Load"<11>" Size  Transfer"<11>"Total">
+	CALL	MAPLIN		;PRINT HEADER
+	CALL	MAPLIN		; AND BLANK LINE
+
+	CLR	SIZMMU		;CLEAR THE TOTAL SIZE
+	MOV	#SILIDX+SI.NUM,R0 ;POINT TO INDEX BLOCK
+	MOV	(R0)+,R1	;R1 = # OF ENTRIES
+.ASSUME	SI.ENT	EQ	SI.NUM+2
+30$:	MOV	R1,-(SP)	;SAVE R1
+	CALLX	RAD$R0		;PRINT NAME
+.ASSUME	SE.NAM	EQ	0
+	CALLX	RAD$R0
+	MOVB	#11,(R5)+	;TAB
+	CALLX	RAD$R0		;PRINT IDENT
+.ASSUME	SE.IDN	EQ	SE.NAM+4
+	CALLX	RAD$R0
+	MOV	R0,R2		;COPY INDEX BLOCK POINTER
+	ADD	#SE.LOD-<SE.IDN+4>,R2 ;POINT TO LOAD ADDRESS
+	CALL	120$		;EMIT TAB & LOAD ADDRESS
+	MOV	(R2),R1		;SAVE THE VIRTUAL SIZE IN BYTES
+	CLC			; AND CONVERT IT TO MMUS
+	ROR	R1		; BEING CAREFUL NOT TO EXTEND THE SIGN
+	ASH	#-5,R1
+	CALL	120$		;EMIT TAB & SIZE
+.ASSUME	SE.SIZ	EQ	SE.LOD+2
+	CALL	120$		;EMIT TAB & TRANSFER ADDRESS
+.ASSUME	SE.XFR	EQ	SE.SIZ+2
+	MOVB	#11,(R5)+	;EMIT TAB
+	TST	(R2)		;IF THERE IS A SIZE IN BLOCKS,
+.ASSUME	SE.SZD	EQ	SE.XFR+2
+	BEQ	35$		; THEN USE IT
+	MOV	(R2),R1		;BUT FIRST CONVERT IT TO MMUS.
+	ASH	#3,R1
+35$:	TST	(R2)+		;POP OFF THE SIZE IN BLOCKS
+	ADD	SIZMMU,R1	;ADD THE RUNNING TOTAL TO THIS MODULE.
+	MOV	R1,SIZMMU	;AND REMEMBER THE NEW TOTAL SIZE
+	ADD	#37,R1		;DO 1K WORD ROUND
+	ASH	#-5,R1		; AND CONVERT IT.
+	CMP	R1,#100.	;LESS THAN 100.?
+	BHIS	40$		;NOPE
+	MOVB	#40,(R5)+	;YEP, DO A LEADING SPACE
+	CMP	R1,#10.		;LESS THAN 10.?
+	BHIS	40$		;NOPE
+	MOVB	#40,(R5)+	;YEP, ANOTHER LEADING SPACE
+40$:	CALL	DECNUM		;OUTPUT A DECIMAL NUMBER
+	MOVB	#'K,(R5)+	;IT IS K WORDS
+	CALL	MAPLIN		;EMIT LINE OF INFO
+
+	MOV	(R2)+,R0	;GET STARTING OVERLAY BLOCK NUMBER
+.ASSUME	SE.OVB	EQ	SE.SZD+2
+	MOV	(R2),R1		;ANY OVERLAY DESCRIPTORS?
+.ASSUME	SE.OVN	EQ	SE.OVB+2
+	BEQ	70$		;NO
+	MOV	R2,-(SP)	;YES, SAVE R2
+	MOV	BIGBUF,R2	;R2 -> OVERLAY BUFFER
+	SUB	OUTBLK,R0	;FIND TEMP FILE BLOCK OF DESCRIPTORS
+	.READW	TMPSTB,R2,#256.	; AND READ IT
+	BCC	50$		;OK
+	RSTSER	<"Temp file input error">
+
+50$:	CLR	-(SP)		;START AT OVERLAY #0
+60$:	CPYTXT	<" Segment #">	;ANNOUNCE OVERLAY
+	MOV	R1,-(SP)	;SAVE R1
+	MOV	2(SP),R1	;GET OVERLAY NUMBER
+	CALL	DECNUM		; AND CONVERT IT
+	MOV	(SP)+,R1	;RESTORE R1
+	INC	(SP)		;BUMP OVERLAY NUMBER FOR NEXT TIME
+	CALL	120$		;EMIT TAB & BASE
+	CALL	120$		;EMIT TAB & SIZE
+	CMP	(R2)+,(R2)+	;SKIP BYTE OFFSET WORDS
+	CALL	MAPLIN		;EMIT LINE OF INFO
+	SOB	R1,60$		;LOOP FOR NEXT...
+	TST	(SP)+		;POP OVERLAY #
+	MOV	(SP)+,R2	;RESTORE R2
+70$:	SUB	#SE.OVN,R2	;Point R2 to beginning of module entry	;011
+	BMPIDX	R2		; and bump R2 to next entry properly.	;011
+	MOV	R2,R0		;RESTORE INDEX POINTER
+	MOV	(SP)+,R1	;RESTORE R1
+	DEC	R1		;MORE?
+	BEQ	80$		;NOPE
+	JMP	30$		;DO ANUDDER
+
+80$:	TST	$$EPMM		;A RSTS/E MONITOR SIL?
+	BEQ	90$		;NO
+	CALL	MONSIZ		;YES, TALK ABOUT IT...
+90$:	MOVB	#14,(R5)+	;FORM FEED AT END
+	CALL	PUTMAP		;EMIT IT
+	BIT	#1,R3		;ODD BOUNDARY?
+	BEQ	100$		;NO
+	CLRB	(R3)+		;YES
+100$:	SUB	#BLKBUF,R3	;COMPUTE SIZE TO WRITE
+	ROR	R3		; IN WORDS (ROUNDED DOWN)
+	.WRITW	MAPOUT,#BLKBUF,R3,STBBLK ;WRITE FINAL PARTIAL BUFFER
+	BCS	MAPERR		;OOPS
+	.CLOSE	MAPOUT		;DONE WITH MAP
+	BCS	110$		;ERROR CLOSING IT
+	JMP	RESTRT		;ELSE TAKE IT FROM THE TOP
+
+110$:	RSTSER	<"Error closing map file">
+
+120$:	MOVB	#11,(R5)+	;EMIT A NUMBER WITH A TAB
+	MOV	(R2)+,R0	;GET THE NUMBER
+	MOVB	#30,(R5)	;THE FAMOUS OCTAL OUTPUT ROUTINE
+	SEC
+130$:	ROL	R0
+	ROLB	(R5)+
+	MOVB	#206,(R5)
+140$:	ASL	R0
+	BEQ	150$
+	ROLB	(R5)
+	BCS	140$
+	BR	130$
+
+150$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	MAP FILE OUTPUT ROUTINES
+
+MAPLIN:	MOVB	#15,(R5)+	;END LINE WITH <CR><LF>
+	MOVB	#12,(R5)+
+PUTMAP:	MOV	#FBBUF,R4	;POINT TO START OF OUTPUT LINE
+10$:	CMP	R3,#BLKBUF+1000	;ROOM IN BUFFER?
+	BLO	20$		;YUP
+	MOV	#BLKBUF,R3	;NO, RESET POINTER
+	.WRITW	MAPOUT,R3,#256.,STBBLK ;WRITE THE OUTPUT
+	BCS	MAPERR		;OOPS
+	INC	STBBLK		;NEXT TIME OUTPUT NEXT BLOCK
+20$:	MOVB	(R4)+,(R3)+	;EMIT A BYTE
+	CMP	R4,R5		;DONE?
+	BLO	10$		;NO
+	MOV	#FBBUF,R5	;RESET FOR ANOTHER LINE
+	RETURN
+
+MAPERR:	RSTSER	<"MAP output error">
+
+DECNUM:	MOV	R1,-(SP)	;Save number to display			;014
+	CLR	R0		;CLEAR HIGH ORDER
+	DIV	#1000.,R0	;FIND THOUSANDS (LIMIT IS 9999)
+	MOV	R0,-(SP)	;SAVE THE DIGIT
+	BEQ	5$		;SUPPRESS LEADING ZERO
+	CALL	30$		;PRINT THE DIGIT
+5$:	CLR	R0		;CLEAR THE HIGH REGISTER AGAIN
+	DIV	#100.,R0	;FIND HUNDREDS
+	BIS	R0,(SP)		;ENSURES WE PRINT EMBEDDED ZEROES
+	BEQ	10$		;NO HUNDREDS OR THOUSANDS
+	CALL	30$		;A REAL DIGIT, OUTPUT IT
+10$:	CLR	R0		;CLEAR HIGH ORDER
+	DIV	#10.,R0		;FIND TENS
+	BIS	R0,(SP)+	;ANY SIGNIFICANT DIGITS EXIST YET?
+	BEQ	20$		;NOPE
+	CALL	30$		;OUTPUT TENS
+20$:	MOV	R1,R0		;SET UNITS
+	MOV	(SP)+,R1	;Restore caller's R1			;014
+30$:	ADD	#'0,R0		;MAKE A DIGIT
+	MOVB	R0,(R5)+	; AND OUTPUT IT
+	RETURN			;  THEN RETURN
+
+CPYTXT:	MOV	R0,-(SP)	;SAVE R0
+	MOV	(R4)+,R0	;R0 -> TEXT
+10$:	MOVB	(R0)+,(R5)+	;COPY A BYTE
+	BITB	#177,(R0)	;END?
+	BNE	10$		;NO
+	MOV	(SP)+,R0	;RESTORE R0
+	RETURN	R4
+
+NODSPA:	CPYTXT	<"Data space buffers unavailable - "> ;ANNOUNCE NO D-SPACE.
+	BR	CPYTXT		;ANNOUNCE WHY (CALLER SUPPLIED).
+
+.SBTTL	TELL ABOUT MONITOR SIZES
+
+.ENABL	LSB
+
+MONSIZ:	CALL	MAPLIN		;EMIT A BLANK LINE
+	MOV	#40-1,R2	;Get the rounding value
+	MOV	@#$$BUFE,R0	;Get the end of BUFPOL
+	BIC	R2,R0		; and round down to a buffer.
+	SUB	@#$$BUFS,R0	;Subtract the start of the pool
+	BIC	R2,R0		; and align that.
+	MOV	R0,BUFBAS	;keep this size intact			;009
+	MOV	@#$$MBFE,R0	;and get size of MORBUF Pool		;009
+	BIC	R2,R0		; in a similar fashion.			;009
+	SUB	@#$$MBFS,R0						;009
+	BIC	R2,R0							;009
+	CMP	@#$$USEM,@#$$MBFS ;did TBL allocate any MORBUF???	;009
+	BEQ	5$		;NO. so keep a separate count 		;009
+	ADD	R0,BUFBAS	;yes, so lump it together 		;009
+	CLR	R0		;so we don't forget, dump the value	;009
+5$:	ASH	#-5,R0		;keep MORBUF alone as a buffer count	;009
+	BIC	#174000,R0	;and get rid of sign propagation	;009
+	MOV	R0,MORBAS	;store it away for awhile.		;009
+
+;+
+;  Messy systems with few small buffers don't use MORBUF explicitly 
+;  during the GEN procedure-- it is strictly rounding. When this happens,
+;  it is important not to use the MORBUF buffers in calculations about 
+;  maximum gennable small buffers as it can knock the count off by up to 
+;  17(8) buffers.  So we keep MORBUF separate for use in the tables.
+;-
+
+	ADD	#100-1,$$EPMM	;Round $$EPMM up to a sliver boundry	;016
+	BIC	#100-1,$$EPMM	;NOTE: This rounding factor MUST be the	;016
+				;      same as the one specified during
+				;      LINK of the RSTS phase.
+	MOV	#120000,R0	;Find the distance from 120000 to	;014
+	SUB	$$EPMM,R0	; $$EPMM (is the RSTS phase too big?).
+	BLO	40$		;Too big.
+	MOV	#140000,R1	;Now find out if the virtual size
+	SUB	SILIDX+SI.ENT+SE.SIZ,R1 ; is below APR 6.
+	BLO	40$		;We blew it.  Too big.
+	CMP	R1,R0		;Which size is the smaller
+	BLOS	80$		;Less to the end of the phase.
+	MOV	R0,R1		;Otherwise use up to $$EPMM.
+	BR	80$		;On to bigger and better things.
+
+40$:	CPYTXT	<"?????This system is too big?????"> ;SAY THE BAD NEWS...
+	CALL	MAPLIN		;NEW LINE
+	CALL	MAPLIN		; AND A BLANK LINE
+	MOV	BUFBAS,R0	;Get number of bytes in buffer pool	;016
+	MOV	SILIDX+SI.ENT+SE.SIZ,R4 ;Get the RSTS phase size
+	SUB	R0,R4		;Get the size minus the buffer pools.
+	BLO	60$		;Give a warning and die.
+	MOV	#140000,R2	;Get the RSTS phase maximum
+	SUB	R4,R2		;Get this maximum.
+	BLO	70$		;Illegal number so there's no help.
+	MOV	$$EPMM,R4	;Get the max permanently mapped size
+	SUB	R0,R4		; and find this size minus the buffer pool.
+	BLO	60$		;Symbol is missing or illegal.
+	MOV	#120000,R1	;Get the $$EPMM maximum and		;014
+	SUB	R4,R1		; find the size of the maximum buffer pool.
+	BLO	70$		;Nothing can fit!
+	CMP	R2,R1		;Which is the smaller
+	BHIS	50$		;The one to $$EPMM.
+	MOV	R2,R1		;The one to 140000.
+50$:	CMP	R1,#50.*40	;IS MINIMUM LESS THAN SOMETHING REASONABLE?
+	BLO	70$		;YES, A REAL DEATH...
+	ASH	#-5,R1		;Convert to buffers
+	BIC	#174000,R1	;(no sign extension).
+
+
+	CPYTXT	<"Specifying only "> ;START CORRECTION ANNOUNCEMENT # OF
+	CALL	DECNUM
+	CPYTXT	<" small buffers would correct the problem."> ; SMALL BUFFERS.
+	JMP	160$		;Print the line and exit.
+
+60$:	WARN	<"Monitor symbol(s) missing or illegal">
+70$:	CPYTXT	<"?Specifying fewer small buffers won't correct the problem">
+				;SAY THE REALLY BAD NEWS...
+
+	JMP	160$		;Print the line and exit.
+
+80$:	MOV	R1,-(SP)	;Remember how much room is left for later
+	CPYTXT	<"Maximum buffers available without using data space:">	;016
+	CALL	MAPLIN		;Print out the text			;016
+	CPYTXT	<"  ">		;Now two spaces				;016
+	MOV	BUFBAS,R1	;Get number of bytes in small pool	;016
+	ASH	#-5,R1		;Convert to a number of buffers		;016
+	BIC	#174000,R1	;Trim any sign extension		;016
+	ADD	MORBAS,R1	;Add in MORBUF buffers			;016
+	CALL	DECNUM		;Print out how many buffers there are	;016
+	CPYTXT	<" general small buffers.">				;016
+	CALL	MAPLIN		;Now print out this line		;016
+	CPYTXT	<"  ">		;Now two spaces again			;016
+	CLRB	DSPACE		;Indicate date space not being used	;016
+	CALL	CLCFPL		;Calculate FIP pool size		;016
+	CALL	DECNUM		;Print out the number			;016
+	CPYTXT	<" FIP small buffers.">					;016
+	CALL	MAPLIN		;Now output that line			;016
+	CALL	MAPLIN		;And a blank line			;016
+
+	TST	$$2780		;DOES THIS SIL HAVE 2780?
+	BEQ	90$		;NO, WE PASS THIS TEST.
+	NODSPA	<"IBM RJ2780 present."> ;YUP, NO D-SPACE BECAUSE RJ2780.
+	CALL	MAPLIN		;PRINT THIS LINE
+	BR	150$		;And skip the D-space stuff		;016
+
+90$:	COMB	DSPACE		;Turn on data space now			;016
+	CPYTXT	<"Maximum buffers available using data space:">		;016
+	CALL	MAPLIN		;Print out maximum buffers text		;016
+	MOV	BUFBAS,R0	;Get number of bytes in small pool	;016
+	ASH	#-5,R0		;Convert to a number of buffers		;016
+	BIC	#174000,R0	;Trim any sign extension		;016
+	ADD	MORBAS,R0	;Add in MORBUF buffers			;016
+	CALL	CLCISP		;Figure out how much I-space can be moved ;016
+	ADD	R0,R1		;Add in D-space buffers			;016
+	CPYTXT	<"  ">		;Print out two spaces			;016
+	CALL	DECNUM		;Display the number of buffers		;016
+	CPYTXT	<" general small buffers.">				;016
+	CALL	MAPLIN		;Now print that out			;016
+	CPYTXT	<"  ">		;Two spaces please			;016
+	CALL	CLCFPL		;Calculate FIP pool buffers		;016
+	CALL	DECNUM		;And display it				;016
+	CPYTXT	<" FIP small buffers.">					;016
+	CALL	MAPLIN		;Go display that			;016
+150$:	CALL	MAPLIN		;Print out a blank line			;016
+	MOV	(SP)+,R1	;Get the space available for buffers.
+	BEQ	180$		;None there
+	ADD	BUFBAS,R1	;Add the number of bytes in pool now	;016
+	ASH	#-5,R1		;Turn it into a buffer count.
+	BIC	#174000,R1	;Trim any sign extension		;016
+	CPYTXT	<"If you choose to restart the installation, you may">	;016
+	CALL	MAPLIN
+	CPYTXT	<"specify up to ">
+	CALL	DECNUM
+	CPYTXT	<" small buffers for this system.">			;016
+	CALL	MAPLIN
+	CPYTXT	<"Doing so will increase the number of general buffers"> ;016
+	CALL	MAPLIN							;016
+	CPYTXT	<"available both with and without data space.">		;017
+160$:	CALL	MAPLIN		;NEW LINE
+170$:	RETURN
+
+180$:	CPYTXT	<"This system contains the maximum number of buffers that">
+	CALL	MAPLIN
+	CPYTXT	<"can be specified at installation time.">		;016
+	BR	160$		;And out
+
+.DSABL	LSB
+
+;-
+; CLCISP - Calculate how much I-space code can be moved
+;
+; Everything between $$ISPS (I-SPace Start) and $$ISPE (I-SPace End) can be
+; mapped I-only.  Everything between $$IBOT and $$ISPS can be mapped
+; D-only.  Everything between $$ISPE and $$ITOP can be mapped D-only.
+;
+; We can get small buffers by moving some or all of the code between $$ISPS
+; and $$ISPE to the I-space area, remapping the appropriate I APRs,
+; and turning the corresponding part of D-space into buffers.
+;
+; In practice the I-space code (from $$ISPS to $$ISPE) is mapped by APR 1 
+; or by APRs 1 and 2.  However, nothing in INIT depends on that.
+;
+; If part of the I-space code is mapped by one APR and part by another,
+; we can move the first part or the second part or both to the I-space area,
+; depending how many buffers we need.  If we split the area, we do
+; so at the first APR boundary above $$ISPS.
+;
+; We can move the first part of the I-space code only if there is an
+; APR boundary between $$IBOT and $$ISPS.  This is because the stuff
+; below $$IBOT requires I as well as D mapping.
+;
+; We can move the second part of the I-space code only if there is an
+; APR boundary between $$ISPE and $$ITOP.  This is because the stuff above
+; $$IOP requires I as well as D mapping.
+;
+; If all of the I-space code is mapped by one APR, then we can move 
+; the I-space code only if both of the above conditions hold.
+;
+; INPUTS:
+;	$$ISPS	->	$$ISPS (start of pure I-space code)
+;	$$ISPE	->	$$ISPE (end of pure I-space code)
+;	$$IBOT  ->	$$IBOT (end of low area which requires I&D mapping)
+;	$$ITOP	->	$$ITOP (start of high area which requires I&D mapping)
+;
+;	CALL	CLCISP
+;
+; OUTPUTS:
+;	R1 = Number of buffers available
+;
+; SIDE EFFECTS:
+;	Other registers preserved.
+;
+; INTERNAL VARIABLES:
+; 	R5	=	Address of first APR boundary in I-space code, or of 
+;			end of I-space code if no APR boundary.
+
+.ENABL	LSB
+
+CLCISP:	REGSCR			;Save all registers.
+	CLR	R1		;Assume that we can't move anything	;016
+	MOV	$$ISPS,R2	;Point at start of I-space code.	;016
+	ADD	#20000-1,R2	;Round up ...
+	BIC	#20000-1,R2	; to next APR boundary.
+	CMP	R2,@#$$ISPE	;Is all of the I-space code mapped by one APR?
+	BLOS	10$		;No.  
+	MOV	@#$$ISPE,R2	;Yes.  Get the end of I-space code.
+10$:	MOV	R2,R5		;Save the address of end of first part of 
+				; I-space code.
+	CMP	R2,@#$$ISPE	;Is all of the I-space code mapped by one APR?
+	BNE	20$		;No, go see about splitting the code.
+
+; We must move I-space code in one piece if at all.
+
+	MOV	@#$$IBOT,R0	;Point at first location that doesn't
+				;need both I- and D-space mapping.
+	DEC	R0		;Point at end of low executable code.
+	MOV	@#$$ISPS,R2	;Point at start of pure I-space code.
+	XOR	R2,R0		;Compare the high bits ...
+	BIT	#160000,R0	; to see if there's an APR boundary between.
+	BEQ	50$		;Nope.  Can't move I-space area.
+	MOV	@#$$ISPE,R2	;Point at start of area that doesn't
+				;need I-space mapping.
+	DEC	R2		;Point at end of pure I-space code.
+	MOV	@#$$ITOP,R0	;Point at start read-only area that needs
+				;both I- and D-space mapping.
+	XOR	R2,R0		;Compare the high bits ...
+	BIT	#160000,R0	; to see if we crossed an APR boundary.
+	BEQ	50$		;We didn't; can't move I-space code.
+
+; APR alignment is OK for moving I-space code.
+
+	MOV	@#$$ISPE,R4	;Get virtual address of end of root I-space 
+				; code.
+	ADD	#100-1,R4	;Extend it next higher
+	BIC	#100-1,R4	; sliver boundary.
+	MOV	@#$$ISPS,R2	;Get address of start of I-space code in root.
+	BIC	#100-1,R2	;Extend it down to an sliver boundary.
+	SUB	R2,R4		;Compute (end) - (start) of I-space area.
+	ASH	#-5,R4		;Convert to buffers			;016
+	BIC	#174000,R4	;Clear possible propagation of sign bit. ;016
+	MOV	R4,R1		;Get it in the right register		;016
+	BR	50$		;And get out
+
+; The I-space code is mapped by at least two APRs.  Determine whether
+; we can move the part mapped by the first APR.
+
+20$:	MOV	@#$$IBOT,R0	;Point at first location that doesn't
+				;need both I- and D-space mapping.
+	DEC	R0		;Point at end of low executable code.
+	MOV	@#$$ISPS,R2	;Point at start of pure I-space code.
+	XOR	R2,R0		;Compare the high bits ...
+	BIT	#160000,R0	; to see if there's an APR boundary between.
+	BEQ	30$		;Nope.  Can't move first part of I-space area.
+
+; APR alignment is OK for moving first part of I-space area.
+
+	MOV	R5,R0		;Get end of first part of I-space code.
+	SUB	@#$$ISPS,R0	;Get length of first part of I-space code.
+	ASH	#-5,R0		;And convert to a number of buffers	;016
+	BIC	#174000,R0	;Clear possible propagation of sign bit. ;016
+	MOV	R0,R1		;And stash this number away		;016
+
+; Determine whether we can move second part of I-space area.
+
+30$:	MOV	@#$$ISPE,R2	;Point at start of area that doesn't
+				;need I-space mapping.
+	DEC	R2		;Point at end of pure I-space code.
+	MOV	@#$$ITOP,R0	;Point at start read-only area that needs
+				;both I- and D-space mapping.
+	XOR	R2,R0		;Compare the high bits ...
+	BIT	#160000,R0	; to see if we crossed an APR boundary.
+	BEQ	50$		;We didn't; can't move second part of 
+				; I-space code.
+
+; APR alignment is OK for moving second part of I-space code.
+
+	MOV	@#$$ISPE,R0	;Get virtual address of end of root I-space 
+				; area.
+	SUB	R5,R0		;Get length of second part of I-space area.
+	ASH	#-5,R0		;Convert to a number of buffers		;016
+	BIC	#174000,R0	;Clear possible propagation of sign.	;016
+	ADD	R0,R1		;Add in this much more I-space to move	;016
+50$:	MOV	R1,TOS.R1(SP)	;Give it back to our caller		;016
+	RETURN			;All done
+
+.DSABL	LSB
+
+;+
+; CLCFPL -- Calculate the length of FIP pool
+;
+; INPUTS:
+;	DSPACE	=	-1 if we're going to use D-space
+;		=	0 if not
+; 
+; CALL 	CLCFPL
+;
+; OUTPUTS:
+;	R1 =	number of available buffers
+;
+; SIDE EFFECTS:
+;	Other registers preserved.
+;
+; FIP pool should use all of the available space if possible, but cannot
+; exceed two APRs minus 1000 bytes minus a sliver if we're using D space,
+; nor an APR size minus a sliver minus the length of the FIP phase if
+; we're not using D space.
+;-
+
+.ENABL	LSB
+
+CLCFPL:	MOV	#40000-1000-100,R1 ;The FIP pool can be at most two APRs ;016
+				;minus 1000 minus a sliver with D space	;014
+	TSTB	@#DSPACE	;Are we using D-space?
+	BNE	10$		;Yes.
+	MOV	#20000-100,R1	;No, so set up one APR minus a sliver	;016
+	SUB	@#FIPL,R1	;And subtract length of FIP phase.	;016
+	BLE	80$		;What the f---?  FIP phase exceeds an APR size.
+				; Fatal.
+10$:	ASH	#-5,R1		;Convert to buffers, rounding down	;016
+	BIC	#174000,R1	;Clear any propagation of sign bit.	;016
+	RETURN
+
+80$:	ERROR	<"FIP phase exceeds an APR size">
+
+.DSABL	LSB
+
+.SBTTL	PROCESS A SINGLE INPUT SPECIFICATION
+
+.ENABL	LSB
+
+DOSPEC:	MOV	SPEC,R1		;R1 -> INPUT FILE NAME SPEC
+	TST	(R1)		;IS THERE ANYTHING THERE?
+	BNE	10$		;YES, DO IT
+	RETURN			;EASY
+
+10$:	.LOOKUP	SAVINP,R1	;OPEN IT ON CHANNEL 1
+	BCC	20$		;FOUND THE INPUT FILE
+	RSTSER	<"Input file open error">
+
+20$:	MOV	6(R1),-(SP)	;SAVE THE OLD EXTENSION
+	MOV	FLGWRD,R0	;POINT TO FLAG TABLE ENTRY
+	MOV	FL.STB(R0),6(R1) ;AND SET UP EXTENSION FOR STB
+	BNE	30$		;IF ANY
+	MOV	#^RSTB,6(R1)	;ELSE USE STB
+30$:	.LOOKUP	STBINP,R1	;FIND THAT, TOO
+	BCC	40$		;GOT STB TOO
+	RSTSER	<"STB file open error">
+
+40$:	MOV	(SP)+,6(R1)	;RESTORE ORIGINAL EXTENSION
+	CMP	SILIDX+SI.NUM,#SI.NMD ;Up to maximum number of modules?	;011
+	BHIS	50$		;YES, ERROR
+	TST	SWSAVE		;.SAV STYLE?
+	BEQ	60$		;NO
+	TST	SILIDX+SI.NUM	;YES, ARE THERE ANY MODULES?
+	BEQ	60$		;NOT YET, OK
+	ERROR	<"Only 1 module allowed if /S">
+
+50$:	ERROR	<"Too many modules">					;011
+
+60$:	INC	SILIDX+SI.NUM	;ANOTHER MODULE
+
+	CLR	R2		;INPUT BLOCK NUMBER = 0
+	MOV	BIGBUF,R3	;R3 -> BUFFER
+	.READW	SAVINP,R3,#256.,R2 ;READ IN FIRST BLOCK OF FILE
+	BCC	80$		;GOT IT
+70$:	RSTSER	<"Input file error">
+
+80$:	MOV	OUTBLK,SE.BLK(R4) ;MOVE MODULE BLOCK START TO INDEX
+	MOV	USERTOP(R3),R1	;R1 = HIGH LIMIT OF PROGRAM
+	ADD	#2,R1		;CORRECT HIGH LIMIT FOR Vn.n LINKER.
+	CLR	R2		;GUESS AT .SAV STYLE (LOAD WHOLE FILE)
+	TST	SWSAVE		;GOOD GUESS?
+	BNE	90$		;YES
+	MOV	USERSP(R3),R2	;R2 = LOW LIMIT (LOAD ADDRESS)
+	BIC	#777,R2		; ROUNDED DOWN
+90$:	MOV	R2,SE.LOD(R4)	;SAVE LOAD ADDRESS
+	SUB	R2,R1		;COMPUTE LENGTH OF MODULE
+	BHI	110$		;WHICH MUST BE > 0
+	BEQ	100$		;FLAG A NULL IMAGE, BUT ALLOW IT
+	ERROR	<"High limit below low limit">
+
+100$:	WARN	<"Null length module">
+110$:	MOV	R1,SE.SIZ(R4)	;SAVE SIZE OF MODULE IN BYTES
+	CLR	SE.OFF(R4)	;GUESS THAT WE DON'T ALIGN THIS MODULE.
+	BIT	#A.SWIT,@FLGWRD	;ALIGN THIS MODULE ON A BLOCK BOUNDRY?	;014
+	BEQ	115$		;NO, SO JUST GO ADD THE SIZE AS IS
+	COM	SE.OFF(R4)	;FLAG THIS MODULE AS HAVING TO BE ALIGNED.
+	ADD	#7,APRVAL	;ROUND THE TOTAL SIZE OF THE SIL UP
+	BIC	#7,APRVAL	;TO THE NEXT BLOCK BOUNDRY.
+115$:	MOV	USERPC(R3),SE.XFR(R4) ;SAVE TRANSFER ADDRESS IN INDEX
+	SWAB	R2		;COMPUTE START BLOCK TO TRANSFER
+	ASR	R2
+	BIT	#M.SWIT,@FLGWRD	;MERGE FROM THIS MODULE?		;014
+	BEQ	140$		;NO
+	TST	SWSAVE		;.SAV STYLE?
+	BEQ	120$		;NO
+	ERROR	<"/M illegal if /S">
+
+120$:	CMP	USERSP(R3),SE.LOD(R4) ;WAS LOAD ADDRESS CORRECTLY ALIGNED?
+	BEQ	130$		;YES
+	ERROR	<"Load address not aligned">
+
+130$:	CALL	MERGE		;DO THE MERGE
+140$:	TST	SWSAVE		;.SAV STYLE?
+	BEQ	180$		;NO
+	DEC	SE.BLK(R4)	;YES, MODULE BLOCK IS 0
+	INC	R2		;START TRANSFER BLOCK IS 1
+	INC	SE.SZD(R4)	;SIZE ON DISK IS 1 BLOCK BIGGER
+	MOV	BIGBUF,R3	;R3 -> BUFFER
+	MOV	#SILIDX,R1	;POINT TO SIL INDEX BUFFER
+150$:	CMP	R1,#SILIDX+SI.ENT+SE.XXX ;WITHIN FIRST ENTRY SPACE?
+	BLO	160$		;YEP, CHECK FOR ZERO
+	CMP	R1,#SILIDX+SI.CHK ;WITHIN CHECKSUM, ID?
+	BHIS	160$		;YEP, CHECK FOR ZERO
+	MOV	(R3),(R1)	;COPY A WORD
+	CLR	(R3)		; THEN FORCE A ZERO
+160$:	TST	(R3)+		;A ZERO?
+	BEQ	170$		;YES
+	ERROR	<"Module overlays SIL index">
+
+170$:	TST	(R1)+		;ADVANCE INDEX POINTER
+	CMP	R1,#SILIDX+SI.MOR ;DONE? (SIL index is one block)	;012
+	BLO	150$		;NOT YET...
+	MOV	#-1,R1		;SET "INFINITE" COPY
+	BR	190$		; AND GO DO IT
+
+180$:	MOV	SE.SIZ(R4),R1	;GET SIZE AFTER MERGE BLOCKS REMOVED
+	ADD	#777,R1		;ROUND SIZE TO A BLOCK MULTIPLE
+	CLRB	R1		;COMPUTE NUMBER OF BLOCKS TO TRANSFER
+	SWAB	R1
+	ASR	R1
+	BEQ	DOOVR		;DON'T BOTHER IF IT'S A NULL MODULE
+	MOV	OUTBLK,R0	;GET OUTPUT BLOCK NUMBER
+	ADD	R1,R0		; + NUMBER OF BLOCKS TO COPY
+	DEC	R0		;  -1 FOR ORIGIN 0
+	.WRITW	TMPSIL,BIGBUF,#256. ;EXTEND THE OUTPUT FILE (WRITE LAST BLOCK)
+	BCS	240$		;OOPS
+
+190$:	MOV	R1,R3		;COPY NUMBER OF BLOCKS TO DO
+	CMP	R3,BIGBLK	;MORE THAN OUR BUFFER?
+	BLOS	200$		;NOPE
+	MOV	BIGBLK,R3	;YEP, DO LESS THIS TIME
+200$:	SWAB	R3		;MAKE COUNT A WORD COUNT
+	.READW	SAVINP,BIGBUF,R3,R2 ;READ BLOCK(S)
+	BCC	210$		;NO ERROR
+	TSTB	ERRBYT		;REAL ERROR?
+	BNE	220$		;YEP
+210$:	MOV	R0,R3		;SET AMOUNT READ AS AMOUNT TO WRITE
+	BNE	230$		;WE GOT SOME
+	TST	SWSAVE		;.SAV STYLE?
+	BNE	DOOVR		;YES, WE ARE DONE
+220$:	JMP	70$		;NO, AN ERROR
+
+230$:	.WRITW	TMPSIL,BIGBUF,R3,OUTBLK ;WRITE TO SIL
+	BCC	250$		;OK
+240$:	RSTSER	<"SIL temp file output error">
+
+250$:	SWAB	R3		;MAKE WORDS INTO BLOCKS AGAIN
+	ADD	R3,R2		;BUMP INPUT BLOCK NUMBER
+	ADD	R3,OUTBLK	;BUMP OUTPUT BLOCK NUMBER
+	TST	SWSAVE		;IS THIS A .SAV TYPE SIL?
+	BEQ	251$		;NO, DON'T COUNT BLOCKS
+	ADD	R3,SE.SZD(R4)	;BUMP # BLOCKS ON DISK
+251$:	SUB	R3,R1		;NOW WE HAVE LESS TO DO
+	BHI	190$		;BUT STILL MORE, LOOP...
+	.BR	DOOVR		;DONE
+
+.DSABL	LSB
+
+.SBTTL	DO OVERLAY DESCRIPTORS FOR A SINGLE INPUT SPECIFICATION
+
+.ENABL	LSB
+
+DOOVR:	MOV	#BLKBUF,R3	;R3 -> BUFFER
+	.READW	SAVINP,R3,#256.,#0 ;READ BACK THE FIRST BLOCK OF FILE
+	BCC	20$		;GOT IT
+10$:	RSTSER	<"Input file error">
+
+20$:	MOV	USERSP(R3),R2	;GET BASE (ALSO START OF OVERLAY HANDLER)
+	MOV	USERTOP(R3),R1	;GET HIGH LIMIT
+	ADD	#2,R1		;CORRECT HIGH LIMIT FOR Vn.n LINKER.
+	MOV	JSW(R3),-(SP)	;GET AND SAVE "OVERLAID" INDICATION
+	MOV	R2,(R3)+	;SET BASE ADDRESS OF ROOT (OVERLAY #0)
+	SUB	R2,R1		;FIND THE MODULE'S SIZE
+	MOV	R1,(R3)+	;SET SIZE OF ROOT (OVERLAY #0)
+	MOV	APRVAL,R1	;GET STARTING MMU OF MODULE
+	CLR	R0		;CLEAR A HIGH ORDER
+	ASHC	#6,R0		; AND FIND BYTE START OF ROOT
+	ADD	R2,R1		;ADD BASE TO BYTE START
+	ADC	R0		; WITH ANY CARRY
+	SUB	SE.LOD(R4),R1	;SUBTRACT INDEX LOAD ADDRESS
+	SBC	R0		; WITH ANY CARRY
+	MOV	R0,(R3)+	;SET BYTE OFFSET MSB
+	MOV	R1,(R3)+	; AND LSB TO ROOT (OVERLAY #0)
+	MOV	R3,R1		;COPY THE POINTER
+	MOV	#256.-4,R0	; AND SET WORD SIZE FOR REST OF ONE BLOCK
+30$:	CLR	(R1)+		;CLEAR REST
+	SOB	R0,30$		; FOR OVERLAY INDEX
+	BIT	(SP)+,#OVLY$	;OVERLAID MODULE?
+	BEQ	90$		;NOPE
+	TST	SWSAVE		;YEP, DOING .SAV STYLE?
+	BNE	40$		;OK IF SO, GO BUILD OVERLAY DESCRIPTORS
+	ERROR	<"Overlaid module not /S">
+
+;
+; In dealing with the overlay descriptors, we have to do a bunch of	;018
+; because we don't have enough information to do it "right". 		;018
+; Basically, the idea is to locate the overlay segment table and get	;018
+; the segment descriptors from it.  We don't, at this point, have	;018
+; the table address directly available (since the STB file hasn't	;018
+; been read yet) so we kludge it as follows:				;018
+;
+;	1. If this is a standard overlayed program (i.e. not INIT.SYS)	;018
+;	   it has the standard RT11 overlay handler as the first thing	;018
+;	   in the program.  This case is recognized by the fact that	;018
+;	   the word at offset 2 from the program base is 10046, i.e.	;018
+;	   PUSH R0.  We then look at offset 6, and find either 421 or	;018
+;	   422 depending on the age of the overlay handler.  Using this	;018
+;	   we skip to the end of the overlay handler, and process	;018
+;	   the table entries.						;018
+;	2. If this is INIT.SYS, it has a "strange" overlay handler,	;018
+;	   which is somewhere else in the program.  In this case, the	;018
+;	   first thing in the image is the overlay segment table.	;018
+;	   Since the second word of a segment descriptor is the start	;018
+;	   block number of the overlay, the check for 10046 is safe 	;018
+;	   given that we don't expect to process .SAV files that big.	;018
+;	3. In scanning the overlay segment table, we examine the first	;018
+;	   word of each entry and compare it with 4537.  If we find 	;018
+;	   that value, this indicates the end of the table.  This works	;018
+;	   because the autoload vectors immediately follow the segment	;018
+;	   table and each autoload vector begins with JSR R5,@#OVHD,	;018
+;	   i.e. 4537.  There can't be a 4537 in a real segment table	;018
+;	   entry since the first word of each entry is the segment	;018
+;	   (or actually region) base address, which has to be even.	;018
+;									;018
+; If you think all this is an incredible kludge and thoroughly messy,	;018
+; you won't get any argument from me!					;018
+;
+
+40$:	MOV	R2,-(SP)	;COPY ADDRESS OF OVERLAY HANLDER
+	BIC	#^C<777>,(SP)	;FIND OFFSET TO IT
+	BIC	(SP),R2		;REMOVE FROM ADDRESS
+	SWAB	R2		; AND FIND
+	ASR	R2		;  BLOCK NUMBER
+	MOV	BIGBUF,R1	;R1 -> 2 BLOCK BUFFER
+	.READW	SAVINP,R1,#512.,R2 ;READ OVERLAY HANLDER BLOCK(S)
+	BCS	10$		;OOPS
+	ADD	(SP)+,R1	;POINT TO OVERLAY HANDLER
+	CMP	2(R1),(PC)+	;Is this the standard overlay handler?	;018
+	 MOV	R1,-(SP)	; which has this at word 2		;018
+	BNE	66$		;No, so hopefully it's INIT.SYS		;018
+	CMP	6(R1),#421	;REALLY THERE?
+	BEQ	60$		;YEP
+	CMP	6(R1),#422	;NEW LINKER?
+	BEQ	65$		;YEP
+50$:	ERROR	<"Overlay handler in illegal format">
+
+60$:	ADD	#2,R1		;NOW INDEX TO OVERLAY SEGMENTS
+65$:	ADD	#102,R1		;FOR WHICHEVER LINKER
+66$:	MOV	R1,R2		; AND MOVE POINTER TO HERE		;018
+70$:	CMP	(R2),#4537	;END OF DESCRIPTORS?
+	BEQ	100$		;YES
+	INC	SE.OVN(R4)	;NO, COUNT ANOTHER DESCRIPTOR
+	CMP	SE.OVN(R4),#64.	;CAN WE REALLY DO ANOTHER?
+	BHIS	50$		;TOO MUCH, MUST BE A FORMAT ERROR...
+	CMP	SE.OVN(R4),#1	;ABOUT TO DO FIRST OVERLAY?
+	BNE	80$		;NOPE
+	MOV	(R2),-6(R3)	;YEP, MOVE FIRST OVERLAY BASE TO ROOT SIZE
+	SUB	-10(R3),-6(R3)	; AND FIND ROOT'S TRUE SIZE
+80$:	MOV	(R2)+,(R3)	;COPY THE BASE ADDRESS
+	ADD	#2,(R3)+	; AND ADD IN THE FLAG WORD
+	MOV	(R2)+,R1	;SAVE BLOCK OFFSET
+	MOV	(R2)+,(R3)	;COPY WORD SIZE
+	DEC	(R3)		; AND SUBTRACT THE FLAG WORD
+	ASL	(R3)+		;  THEN MAKE IT A BYTE SIZE
+	CLR	R0		;CLEAR A HIGH ORDER
+	ASH	#3,R1		;CONVERT TO MMUS.
+	ADD	APRVAL,R1	;ADD IN THE STARTING BLOCK NUMBER
+	ADC	R0		; AND CARRY ANY CARRY
+	ASHC	#6,R0		;FIND BYTE OFFSET TO OVERLAY
+	ADD	#2,R1		;ADD FLAG WORD TO BYTE START
+	ADC	R0		; WITH ANY CARRY
+	SUB	SE.LOD(R4),R1	;SUBTRACT INDEX LOAD ADDRESS
+	SBC	R0		; WITH ANY CARRY
+	MOV	R0,(R3)+	;SET BYTE OFFSET MSB
+	MOV	R1,(R3)+	; AND LSB TO OVERLAY
+	BR	70$		;NOW LOOP...
+
+90$:	BIT	#M.SWIT,@FLGWRD	;WAS MERGE DONE FOR MODULE?		;014
+	BNE	110$		;YES, SO IT MUST BE OK
+	CMP	R2,SE.LOD(R4)	;ELSE IS BASE ADDRESS SAME AS LOAD ADDRESS?
+	BEQ	110$		;YEP, ALL OK, NO NEED FOR DESCRIPTORS
+100$:	INC	SE.OVN(R4)	;COUNT THE ROOT (OVERLAY #0) DESCRIPTOR
+	MOV	STBBLK,SE.OVB(R4) ;SET STARTING OVERLAY DESCRIPTOR BLOCK
+	MOV	#BLKBUF,R3	;POINT TO BUFFER (RESETTING R3)
+	.WRITW	TMPSTB,R3,#256.,STBBLK ;WRITE OVERLAY DESCRIPTOR BLOCK
+	INC	STBBLK		;COUNT THE BLOCK WE'RE WRITING OUT
+	BCC	110$		;OUTPUT WAS SUCCESSFUL
+	RSTSER	<"Overlay descriptor output error">
+
+110$:	MOV	#-1,OVRCNT	;PRE-SET OVERLAY COUNTER TO START @ #0
+	MOV	#OVRLST,R0	;POINT TO OVERLAY ADDRESS LIST
+	MOV	R0,OVRPTR	; AND SET ITS POINTER
+	CLR	(R0)+		;FIRST IS THE ROOT @ 0
+	MOV	SE.OVN(R4),R1	;GET # OF OVERLAY ENTRIES
+120$:	DEC	R1		;MORE?
+	BLE	130$		;NO MORE
+	ADD	#10,R3		;ELSE INDEX TO NEXT ENTRY
+	MOV	(R3),(R0)+	;SET A BASE ADDRESS
+	BR	120$		; AND LOOP...
+
+130$:	MOV	R0,OVREND	;SAVE ENDING OVERLAY LIST POINTER
+	MOV	SE.SZD(R4),R0	;GET THE SIZE IN BLOCKS OFF ON THE DISK
+	BEQ	131$		;THIS MUST NOT BE A .SAV TYPE SIL
+	ASH	#3,R0		;CONVERT THE BLOCKS TO MMUS.
+	BR	132$		;ADD THIS IN TO THE TOTAL.
+
+131$:	MOV	SE.SIZ(R4),R0	;GET SIZE AFTER MERGE BLOCKS REMOVED
+	BEQ	DOSTB		;DON'T BOTHER IF IT'S A NULL MODULE
+	ADD	#77,R0		;ROUND SIZE UP TO AN MMU BOUNDARY
+	ROR	R0		; AND SHIFT IT DOWN INTO A LENGTH
+	ASH	#-5,R0		;  IN MMU UNITS
+132$:	ADD	R0,APRVAL	;GET APR VALUE FOR THE NEXT MODULE
+	.BR	DOSTB		; AND CONTINUE WITH THE STB
+
+.DSABL	LSB
+
+.SBTTL	DO STB FOR A SINGLE INPUT SPECIFICATION
+
+.ENABL	LSB
+
+DOSTB:	CLR	FBSIZ		;CLEAR FB SIZE TO FORCE READ OF STB
+	MOV	#-1,R2		;SET FB BUFFER POINTER TO FORCE READ
+	CLR	STIBLK		;SYMBOL TABLE INPUT STARTS AT BLOCK 0
+	MOV	BIGBUF,R3	;SIL OUTPUT BUFFER
+	CALL	GETGSD		;GET A GSD ITEM
+	BCC	20$		;GOT IT
+10$:	ERROR	<"Missing or null module name">
+
+20$:	TST	R0		;THIS BETTER BE A MODULE NAME
+	BNE	10$		;ERROR
+	MOV	FLGWRD,R0	;POINT TO FLAG TABLE			;014
+	ADD	#FL.MOD,R0	;POINT TO MODULE NAME PART
+	TST	(R0)		;IS THERE AN OVERRIDE?
+	BNE	30$		;YES
+	MOV	R5,R0		;NO, USE MODULE NAME FROM STB
+30$:	MOV	#SILIDX+SI.ENT-SE.LEN,R1 ;POINT TO CHECK FOR DUPLICATES
+40$:	BMPIDX	R1		;GO TO NEXT IN INDEX			;011
+	CMP	R1,R4		;ANY MORE BEFORE THIS?
+	BHIS	50$		;NO
+	CMP	(R0),(R1)	;NEW NAME SAME AS OLD?
+	BNE	40$		;NO
+	CMP	2(R0),2(R1)	;MAYBE
+	BNE	40$		;NO
+	ERROR	<"Duplicate module name">
+
+50$:	MOV	(R0),(R4)	;MOVE MODULE NAME TO SIL INDEX
+	BEQ	10$		;IT BETTER NOT BE 0
+	MOV	2(R0),2(R4)	;REST OF NAME
+
+60$:	CALL	GETGSD		;GET GSD ITEM
+	BCS	90$		;DONE WITH STB
+	MOV	#GSDTTB,R1	;POINT TO DISPATCH TABLE
+70$:	CMP	R0,(R1)+	;ACTION ON THIS ITEM?
+	BEQ	80$		;YES
+	TST	(R1)+		;SKIP DISPATCH ADDRESS
+	TST	(R1)		;ANY MORE?
+	BNE	70$		;YES
+	WARN	<"Invalid GSD item found">
+	BR	60$		;IGNORE IT
+
+80$:	CALL	@(R1)+		;PROCESS GSD ITEM
+	BR	60$		; AND DO ANOTHER
+
+90$:	CMP	OVRPTR,OVREND	;DID WE GET CORRECT # OF OVERLAYS?
+	BEQ	100$		;YES
+	WARN	<"Incorrect overlay sequencing">
+100$:	MOV	BIGBUF,R0	;GET BEGINNING OF SYMBOL AREA
+	MOV	R3,R1		; AND END OF SYMBOL AREA
+	SUB	#10,R1		;BACK UP OVER THE LAST SYMBOL
+	CMP	R0,R1		;DID WE GET ANY SYMBOLS?
+	BHI	120$		;NO, THAT WAS EASY.
+	MOV	R4,-(SP)	;YES, SAVE THE SIL INDEX POINTER,
+	CALL	QUICKS		;AND GO SORT THE SYMBOLS.
+	ADD	#10,R1		;POINT PAST SYMBOLS AGAIN.
+
+	CMP	SILIDX+SI.NUM,#1 ;IS THIS THE FIRST MODULE?
+	BNE	109$		;NO, DON'T LOOK FOR RSTS PHASE
+	MOV	#LOKTBL-2,R5	;YES, IS THIS THE "RSTS" PHASE?
+	MOV	R0,R4		;COPY POINTER TO LOOK AT SYMBOLS.
+	CLR	R2		;START WITH A NULL SYMBOL
+	CLR	R3		;SO THE ORDER CHECK WORKS
+101$:	TST	(R5)+		;SKIP OVER VALUE LOCATION.
+	TST	(R5)		;AT END OF TABLE YET?
+	BEQ	109$		;YES, DONE LOOKING FOR "RSTS" PHASE.
+	CMP	(R5),R2		;TABLE SYMBOLS IN ORDER?
+	BHI	102$		;YES.
+	CMP	2(R5),R3	;DUNNO. SECOND HALF IN ORDER?
+	BHI	102$		;YES.
+	ERROR	<"Symbol lookup table out of order">
+
+102$:	MOV	(R5)+,R2	;GET NEW SYMBOL FROM TABLE
+	MOV	(R5)+,R3	; AND LOW-ORDER PART.
+
+103$:	CMP	(R4),R2		;HIGH-ORDER MATCH?
+	BHI	101$		;TOO HIGH ALREADY, NEXT FROM LOOKUP TABLE
+	BLO	104$		;TOO LOW, GET NEXT SYMBOL IN BUFFER
+	CMP	2(R4),R3	;LOW-ORDER MATCH?
+	BHI	101$		;TOO HIGH, GET NEXT FROM LOOKUP TABLE
+	BLO	104$		;TOO LOW, GET NEXT SYMBOL IN BUFFER
+	MOV	6(R4),(R5)	;GOT A MATCH!  RECORD THE VALUE.
+104$:	ADD	#4*2,R4		;POINT TO THE NEXT SYMBOL.
+	CMP	R4,R1		;PAST THE LAST SYMBOL ALREADY?
+	BLOS	103$		;NOT YET, KEEP ON GOING.
+	.BR	109$		;ALL DONE LOOKING FOR RSTS PHASE.
+
+.MACRO	LOOKUP	LIST
+.IRP	SYMBOL,<LIST>
+.NCHR	LEN,<SYMBOL>
+.IF	GT	LEN-6
+	 .ERROR		;SYMBOL MUST BE SIX CHARACTERS OR LESS.
+.IFF
+.IF	GT	LEN-3
+	 .RAD50	 /SYMBOL/
+.IFF
+	 .RAD50	 /SYMBOL   /
+.ENDC
+SYMBOL:	 .WORD	 0
+.ENDC
+.ENDR
+.ENDM	LOOKUP
+
+	TMPORG	SILCTL
+
+LOKTBL:		;THESE MUST BE SORTED IN ASCENDING RADIX-50 ORDER.
+
+	LOOKUP	<$$BUFE,$$BUFS>
+	LOOKUP	<$$EPMM>
+	LOOKUP	<$$IBOT,$$ISPE,$$ISPS,$$ITOP>
+	LOOKUP	<$$MBFE,$$MBFS>
+	LOOKUP	<$$USEM>						;009
+	LOOKUP	<$$2780>
+
+	.WORD	0		;MARK THE END OF THE TABLE.
+
+	UNORG
+
+109$:	MOV	(SP)+,R4	;RESTORE THE SIL INDEX POINTER.
+	MOV	R1,R3		;COPY POINTER TO END OF SYMBOLS.
+	SUB	R0,R3		;GET LENGTH OF SYMBOLS IN THE BUFFER
+	MOV	R3,R2		;REMEMBER UNROUNDED LENGTH OF SYMBOLS
+	ADD	#777,R3		;ROUND LENGTH UP TO
+	BIC	#777,R3		; THE NEXT BLOCK
+	MOV	R3,R5		;REMEMBER ROUNDED LENGTH
+	SUB	R2,R3		;GET AMOUNT WE ROUNDED BY
+	BEQ	115$		;NO ROUNDING.  WE HAD A FULL BLOCK.
+	ASR	R3		;GET A WORD COUNT OF THE ROUNDING
+110$:	CLR	(R1)+		;CLEAR OUT
+	SOB	R3,110$		; TO END OF BLOCK
+115$:	;CLC			;CARRY CLEARED SINCE THE SUBTRACT.
+	ROR	R5		;GET WORD COUNT OF SYMBOL AREA
+	.WRITW	TMPSTB,BIGBUF,R5,STBBLK ;WRITE SYMBOLS OUT TO TEMP FILE
+	BCS	135$		;ERROR WRITING THE SYMBOLS OUT
+	MOV	STBBLK,SE.STB(R4) ;MOVE STARTING STB BLOCK START TO INDEX
+	SWAB	R5		;CONVERT WORD COUNT TO BLOCK COUNT
+	ADD	R5,STBBLK	;UPDATE OUR STB BLOCK COUNT
+
+120$:	.CLOSE	SAVINP		;CLOSE INPUT FILE
+	BCS	140$		;ERROR CLOSING IT
+	.CLOSE	STBINP		;CLOSE INPUT STB
+	BCS	150$		;ERROR CLOSING IT
+	BMPIDX	R4		;SKIP TO NEXT SIL INDEX ENTRY		;011
+130$:	RETURN			;DONE WITH THIS INPUT SPEC
+
+135$:	RSTSER	<"STB output error">
+
+140$:	RSTSER	<"Error closing input file">
+
+150$:	RSTSER	<"Error closing input STB">
+
+.DSABL	LSB
+
+GSDTTB:	.WORD	6,GSIDEN	;IDENT DECLARATION
+	.WORD	1,GSCSEC	;CSECT DECLARATION
+	.WORD	4,GSSYM		;SYMBOL DEFINITION
+	.WORD	0		;END OF TABLE
+
+.SBTTL	DO A MERGE OPERATION
+
+;+
+; MERGE - DO A MERGE FROM CURRENT INPUT SAV TO DESTINATION MODULE IN SIL.
+;
+; CALL:	SIL INDEX ENTRY FOR THIS MODULE SET
+;	CALL	MERGE
+;
+; BACK:	MERGE DONE
+;	R2 = NEXT BLOCK IN INPUT IMAGE WITH REAL DATA
+;	SIL INDEX UPDATED TO REMOVE MERGED INPUT
+;
+; DURING THE MERGE:
+;	BLKBUF	PAGES IN THE INPUT SAV IMAGE
+;	FBBUF	PAGES IN AND OUT THE BLOCKS FROM OUTPUT MODULE
+;	BIGBUF	PAGES IN THE STB FOR OUTPUT MODULE DURING SYMBOL LOOKUP
+;-
+
+.ENABL	LSB
+
+MERGE:	MOV	FLGWRD,R3	;POINT TO THE FLAG WORD			;014
+	MOV	FL.MGN(R3),R3	;R3 = MODULE NUMBER TO MERGE TO
+	CMP	R3,SILIDX+SI.NUM ;IS THAT BEFORE THE CURRENT MODULE?
+	BLO	10$		;YES, IT'S OK
+	ERROR	<"Merge to later module not legal">
+
+10$:	MUL	#SE.LEN,R3	;COMPUTE OFFSET JUST BEYOND DESTINATION INDEX
+	ADD	#SILIDX+SI.ENT-SE.LEN,R3 ;R3 -> MERGE DESTINATION INDEX ENTRY
+	MOV	R3,MRGIDX	;REMEMBER IT
+	MOV	#-1,BLKMG	;BLKBUF DOES NOT CONTAIN DATA
+	CLR	MGBLKD		; AND IT DOES NOT NEED TO BE REWRITTEN
+	MOV	#-1,R3		;FORCE A READ WHEN GETTING FIRST WORD
+	CALL	TRYSYM		;TRY TO GET SYMBOL NAME FOR APR VALUE PLUG
+	BCS	30$		;NO SYMBOL FOR APR VALUE
+	CALL	WORDMG		;R1 = ADDRESS IN MODULE. POINT R0 TO IT
+	MOV	APRVAL,(R0)	; AND STUFF THE VALUE IN
+	INC	MGBLKD		;INDICATE BLOCK FROM OUTPUT MODULE IS DIRTY
+	BR	190$		;GO TO DATA MERGE LOOP
+
+30$:	TST	R1		;WAS THERE ANY APR VALUE PLUG SYMBOL AT ALL?
+	BEQ	190$		;NO, NO APR PLUG WAS DESIRED
+	ERROR	<"Merge symbol for APR value undefined">
+
+40$:	ROR	-(SP)		;SAVE UNDEFINED SYMBOL INDICATOR ON STACK
+	CALL	GETMGW		;GET NUMBER OF BYTES TO MERGE
+	MOV	R0,-(SP)	;SAVE UNTOUCHED BYTE COUNT
+	BPL	50$		;POSITIVE MEANS MERGE BY WORDS
+	NEG	R0		;ELSE CHANGE COUNT TO TRUE VALUE
+50$:	MOV	R0,R5		;GET BYTE COUNT OF MERGE DATA TABLE
+	CLC			;ENSURE NO SIGN EXTENSION
+	ROR	R5		; AND FORM THE WORD COUNT
+	BCC	100$		;EVEN COUNT, IT'S A NORMAL MERGE
+	TST	(SP)		;ODD COUNT, SPECIAL MERGE, A WORD MERGE?
+	BPL	90$		;YES, IT'S THE SPECIAL DRIVER WORD MERGE
+	ERROR	<"Merge specifies odd byte count">
+
+60$:	ERROR	<"Merge with APR value to illegal symbol">
+
+70$:	ERROR	<"Merge with APR value has illegal format">
+
+80$:	ERROR	<"Merge with APR value to other than first module not legal">
+
+90$:	CMP	MRGIDX,#SILIDX+SI.ENT ;IS MERGE TO THE FIRST (ROOT) MODULE?
+	BNE	80$		;NOPE, THAT'S AN ERROR
+	CMP	SYMNAM+2,#^RINT	;LEGAL SYMBOL NAME (2ND PART OF "??DINT")?
+	BNE	60$		;NOPE
+	MOV	R0,-(SP)	;SAVE R0
+	MOV	R1,-(SP)	; AND R1
+	CLR	R0		;CLEAR A HIGH ORDER
+	MOV	SYMNAM,R1	; AND SET LOW ORDER TO SYMBOL NAME FIRST PART
+	DIV	#50,R0		;DIVIDE FOR THIRD CHARACTER
+	CMP	R1,(PC)+	;REALLY NAMED "??DINT"?
+	 .RAD50 /  D/
+	BNE	60$		;NOPE
+	MOV	(SP)+,R1	;RESTORE R1
+	MOV	(SP)+,R0	; AND R0
+
+100$:	CALL	GETMGW		;GET A WORD FROM THE INPUT FILE
+	MOV	R0,-(SP)	;SAVE VALUE
+	BIT	2(SP),#1	;SPECIAL (DRIVER) MERGE?
+	BEQ	130$		;NOPE
+	TST	4(SP)		;WAS MERGE SYMBOL DEFINED?
+	BMI	130$		;NO, CAN'T MAKE THE DRIVER MERGE CHECKS...
+	CALL	WORDMG		;YES, POINT R0 AT WORD FOR MERGE
+	MOV	R5,-(SP)	;SAVE R5
+	SEC			;SET THE CARRY
+	ROL	R5		; AND MAKE REMAINING BYTE COUNT +1
+	NEG	R5		;  THEN NEGATIVE IT
+	ADD	4(SP),R5	;FIND THIS MERGE'S BYTE OFFSET IN TABLE
+	BNE	110$		;NON-ZERO OFFSET, NO INITIAL CHECK
+	CMP	(R0),(PC)+	;OFFSET ZERO, DOES IT LOOK CORRECT?
+		JSR R5,@(PC)+
+	BNE	70$		;NOPE???
+110$:	TST	2(SP)		;TRYING TO CLOBBER THE VALUE?
+	BNE	70$		;YEP???
+	CMP	R5,#4		;ABOUT TO MERGE OFFSET 4?
+	BNE	120$		;NOPE
+	CMP	(R0),#1200	;YEP, DOES IT LOOK CORRECT?
+	BNE	70$		;NOPE???
+	MOV	APRVAL,2(SP)	;SET MERGED WORD'S VALUE TO APR VALUE
+	BIC	#1,4(SP)	;SAY WE'VE DONE THE APR VALUE MERGE
+120$:	MOV	(SP)+,R5	;RESTORE R5
+
+130$:	TST	(SP)		;IS THERE ANY VALUE TO MERGE?
+	BEQ	170$		;ZERO WORD, DO NOT MERGE
+	TST	4(SP)		;WAS MERGE SYMBOL DEFINED?
+	BMI	200$		;NO, GO GIVE AN ERROR
+	CALL	WORDMG		;YES, POINT R0 AT WORD FOR MERGE
+	TST	2(SP)		;MERGE BY BYTES?
+	BMI	140$		;YES, DO IT DIFFERENTLY
+	MOV	(SP),(R0)	;SAVE NEW WORD VALUE IN BUFFER
+	BR	160$		;GO MARK IT
+
+140$:	TSTB	(SP)		;NON-ZERO BYTE TO MERGE?
+	BEQ	150$		;SKIP A ZERO BYTE
+	MOVB	(SP),(R0)	;MERGE A NON-ZERO BYTE
+150$:	SWAB	(SP)		;NON-ZERO BYTE IN HIGH PART?
+	BEQ	160$		;SKIP A ZERO BYTE
+	MOVB	(SP),1(R0)	;MERGE A NON-ZERO BYTE
+160$:	INC	MGBLKD		;MARK IT DIRTY
+170$:	TST	(SP)+		;DUMP THE MERGE BYTES
+	ADD	#2,R1		;BUMP ADDRESS WITHIN OUTPUT MODULE
+	DEC	R5		;ANOTHER TABLE ENTRY TO DO?
+	BNE	100$		;YES, LOOP...
+	ASR	(SP)+		;C=1 IF SPECIAL MERGE NOT DONE
+	MOV	(SP),(SP)+	;NEGATIVE IF WEAK MERGE (PRESERVE C-BIT)
+	BCC	190$		;SPECIAL APR VALUE MERGE DONE, NO WARNING
+	BMI	190$		;APR NOT FILLED IN BUT IT WAS A WEAK MERGE
+	WARN	<"Merge with APR value not done">
+190$:	CALL	TRYSYM		;GET SYMBOL NAME, LOOK IT UP
+	BCC	40$		;A DEFINED SYMBOL, GO USE IT
+	MOV	R1,R1		;WHAT IS THE CONDITION (KEEPING C=1)?
+	BNE	40$		;AN UNDEFINED SYMBOL, GO CHECK FOR REAL MERGES
+	CALLR	WRITCG		;END, REWRITE OUTPUT MODULE IF DIRTY, RETURN
+
+200$:	ERROR	<"Merge symbol undefined">
+
+.DSABL	LSB
+
+.SBTTL	SUBROUTINES FOR MERGE OPERATION
+
+;+
+; TRYSYM - TRY TO GET A SYMBOL NAME FROM THE INPUT FILE, LOOK IT UP
+;	   IN THE STB FOR OUTPUT MODULE.
+;
+; CALL:	R3 -> BLKBUF+?? FOR CALLING GETMGW
+;	CALL	TRYSYM
+;
+; BACK:	C=0 MEANS SYMBOL WAS PRESENT AND DEFINED
+;		R1 = SYMBOL'S VALUE
+;		SYMNAM = SYMBOL'S NAME (2 RAD50 WORDS)
+;	C=1 MEANS:
+;	     NO SYMBOL PRESENT (FULL 0 WORD)			1 WD SKIPPED
+;		R1 = 0
+;	     SYMBOL UNDEFINED					2 WDS SKIPPED
+;		R1 = -1
+;		SYMNAM = SYMBOL'S NAME (2 RAD50 WORDS)
+;-
+
+.ENABL	LSB
+
+TRYSYM:	CALL	GETMGW		;GET FIRST HALF OF POSSIBLE SYMBOL NAME
+	MOV	R0,R1		; AND SAVE IT
+	BEQ	60$		;WORD WAS 0, RETURN C=1, R1=0
+	CALL	GETMGW		;GET 2ND HALF OF NAME
+	MOV	R1,SYMNAM	;SAVE SYMBOL'S NAME FIRST HALF
+	MOV	R0,SYMNAM+2	; AND SECOND HALF
+	CALLX	SAVREG,R5	;NOW HOLD ON TO THE REGISTERS
+	MOV	R0,R2		;SAVE SECOND HALF OF NAME
+	MOV	MRGIDX,R4	;R4 -> INDEX ENTRY FOR OUTPUT MODULE
+	MOV	SE.STB(R4),R3	;R3 = START BLOCK IN TEMP FILE FOR STB
+	MOV	SE.STN(R4),R4	;R4 = NUMBER OF ENTRIES IN STB
+	BEQ	40$		;NONE, SO COULDN'T FIND IT
+	MOV	#-1,R5		;FORCE A READ OF THE TEMP FILE
+
+10$:	CMP	R5,BIGTOP	;NEED TO READ FROM STB FILE?
+	BLO	20$		;NO
+	MOV	R4,R5		;YES, COPY NUMBER OF SYMBOLS LEFT
+	ADD	#77,R5		;AND ROUND UP TO A NUMBER OF BLOCKS
+	ASH	#-6,R5		; (10 BYTES PER SYMBOL ENTRY).
+	CMP	R5,BIGBLK	;MORE BLOCKS THAN WE CAN READ IN?
+	BLOS	15$		;NO, WE CAN READ IT ALL IN
+	MOV	BIGBLK,R5	;YES, LIMIT OURSELVES TO A BUFFER FULL
+15$:	SWAB	R5		;GET A WORD COUNT TO READ
+	.READW	TMPSTB,BIGBUF,R5,R3 ;READ FROM STB FILE
+	BCC	17$		;OK
+	RSTSER	<"Temp file input error">
+
+17$:	SWAB	R5		;TURN OUR WORD COUNT BACK INTO A BLOCK COUNT
+	ADD	R5,R3		;NEXT TIME WE'LL GET A LATER BLOCK
+	MOV	BIGBUF,R5	;NOW RESET POINTER TO BUFFER
+20$:	CMP	R1,(R5)		;IS THIS THE SYMBOL?
+	BNE	30$		;NO
+	CMP	R2,2(R5)	;MAYBE
+	BEQ	50$		;GOT IT
+30$:	ADD	#10,R5		;TRY FOR MORE
+	SOB	R4,10$		;COUNT NUMBER OF SYMBOLS
+40$:	MOV	#-1,1*2+2(SP)	;SAY UNDEFINED WITH RETURNED R1=-1
+	BR	60$		; AND GO EXIT C=1
+
+50$:	MOV	6(R5),1*2+2(SP)	;MOVE SYMBOL VALUE INTO RETURNED R1
+	TST	(PC)+		;SET C=0 TO INDICATE SYMBOL FOUND
+60$:	SEC			;SET C=1 TO INDICATE NO SYMBOL
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	GET WORD FROM INPUT MODULE FOR MERGE
+
+;+
+; GETMGW - GET WORD FROM INPUT MODULE FOR MERGE, READING INPUT MODULE
+;	   (AND ADJUSTING MODULE TRUE SIZE) AS NEEDED.
+;
+; CALL:	R3 -> BLKBUF+?? (BUFFER PAGES FORWARD IN INPUT FILE)
+;	CALL	GETMGW
+;
+; BACK:	R0 = NEXT INPUT WORD
+;	CONDITION CODES SET
+;	R2 = NEXT INPUT BLOCK TO READ
+;	SE.LOD(R4) AND SE.SIZ(R4) UPDATED FOR EACH BLOCK READ
+;-
+
+.ENABL	LSB
+
+GETMGW:	CMP	R3,#BLKBUF+1000	;NEED TO READ A NEW BLOCK?
+	BLO	30$		;NO
+	MOV	#BLKBUF,R3	;R3 -> BUFFER
+	.READW	SAVINP,R3,#256.,R2 ;READ A BLOCK FROM THE INPUT FILE
+	BCC	10$		;GOT IT
+	RSTSER	<"Input file error">
+
+10$:	INC	R2		;BUMP INPUT FILE BLOCK NUMBER
+	ADD	#1000,SE.LOD(R4) ;LOAD ADDRESS IS 1 BLOCK HIGHER
+	BCS	20$		;OOPS, LOAD ADDRESS OVERFLOW
+	SUB	#1000,SE.SIZ(R4) ; AND THE SIZE IS 1 BLOCK SMALLER
+	BCC	30$		;OK
+20$:	ERROR	<"Merge overflows module">
+
+30$:	MOV	(R3)+,R0	;GET A WORD, BUMP R3
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	GET A WORD IN OUTPUT MODULE DATA AREA
+
+;+
+; WORDMG - GET A WORD IN OUTPUT MODULE DATA AREA BUFFER.
+;
+; CALL:	R1 = ADDRESS WITHIN OUTPUT MODULE
+;	CALL	WORDMG
+;
+; BACK:	R0 -> WORD WITHIN BUFFER
+;	FBBUF IS USED FOR DATA
+;	BUFFER PAGED OUT IF NEW BLOCK READ AND OLD BLOCK DIRTY
+;-
+
+.ENABL	LSB
+
+WORDMG:	MOV	R1,-(SP)	;SAVE R1
+	MOV	R1,R0		;COPY ADDRESS WITHIN MODULE
+	MOV	MRGIDX,R1	;R1 -> INDEX ENTRY FOR OUTPUT MODULE
+	SUB	SE.LOD(R1),R0	;MAKE IT RELATIVE TO MODULE START
+	BCS	10$		;OOPS, OUT OF MODULE
+	CMP	R0,SE.SIZ(R1)	;IS IT IN THE MODULE?
+	BLO	20$		;YUP
+10$:	ERROR	<"Merge to symbol outside output module">
+
+20$:	MOV	R0,-(SP)	;SAVE RELATIVE ADDRESS
+	BIC	#777,R0		;REMOVE BLOCK OFFSET
+	BIC	R0,(SP)		;WORD ON STACK IS OFFSET IN BLOCK
+	SWAB	R0		;MAKE R0 A BLOCK NUMBER
+	ROR	R0
+	ADD	SE.BLK(R1),R0	;BLOCK WITHIN SIL
+	CALL	RDBMG		;READ IN A BLOCK FROM OUTPUT MODULE
+	MOV	(SP)+,R0	;R0 = OFFSET WITHIN BUFFER
+	ADD	#FBBUF,R0	;R0 -> WORD
+	MOV	(SP)+,R1	;RESTORE R1
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	PAGE OUTPUT MODULE IN & OUT OF FBBUF
+
+;+
+; RDBMG - READ A BLOCK FROM OUTPUT MODULE, REWRITING IF NECESSARY.
+;
+; CALL:	R0 = BLOCK NUMBER IN SIL FILE
+;	CALL	RDBMG
+;
+; BACK:	DONE, R0 DESTROYED
+;-
+
+RDBMG:	CMP	R0,BLKMG	;IS THE CORRECT BLOCK ALREADY THERE?
+	BEQ	10$		;YES
+	CALL	WRITCG		;NO, REWRITE BUFFER IF DIRTY
+	MOV	R0,BLKMG	;SAVE BLOCK NUMBER BEING READ
+	.READW	TMPSIL,#FBBUF,#256. ;READ BLOCK (BLK # IN R0)
+	BCS	20$		;ERROR
+10$:	RETURN
+
+20$:	RSTSER	<"SIL temp file input error">
+
+;+
+; WRITCG - REWRITE BLOCK IN FBBUF IF MARKED DIRTY.
+;
+; CALL:	CALL	WRITCG
+;
+; BACK:	REWRITTEN IF NEEDED, FLAG TURNED OFF
+;-
+
+WRITCG:	TST	MGBLKD		;IS THE BLOCK DIRTY?
+	BEQ	10$		;NO, IT'S EASY
+	MOV	R0,-(SP)	;YES, PRESERVE R0
+	.WRITW	TMPSIL,#FBBUF,#256.,BLKMG ;NO, REWRITE THE BLOCK
+	BCS	20$		;OOPS
+	MOV	(SP)+,R0	;RESTORE R0
+	CLR	MGBLKD		;IT'S NO LONGER DIRTY
+10$:	RETURN
+
+20$:	RSTSER	<"STB output error">
+
+.SBTTL	PROCESS GSD ITEMS
+
+;+
+; GSD ITEMS ARE PROCESSES ACCORDING TO THEIR TYPE.
+; EACH GSD PROCESS ROUTINE IS ENTERED WITH:
+;	R4 -> SIL INDEX ENTRY
+;	R5 -> GSD ITEM
+;	R3 -> OUTPUT BUFFER FOR WRITING STB
+;
+; ROUTINES MUST RETURN WITH R1,R2,R4,R5 INTACT
+;-
+
+.ENABL	LSB
+
+GSIDEN:	TST	SE.IDN(R4)	;ALREADY HAVE AN IDENT?
+	BEQ	10$		;NO
+	WARN	<"Duplicate IDENT found">
+	RETURN
+
+10$:	MOV	(R5),SE.IDN(R4) ;MOVE IDENT INTO SIL INDEX
+	BEQ	20$		;OOPS, NULL IDENT
+	MOV	2(R5),SE.IDN+2(R4) ;2ND WORD
+	RETURN
+
+20$:	WARN	<"Null IDENT found">
+	RETURN
+
+.DSABL	LSB
+
+.ENABL	LSB
+
+GSCSEC:	CMP	(R5),(PC)+	;CSECT GSD BETTER BE FOR ASECT
+	 .RAD50	/. A/
+	BNE	20$		;NO
+	CMP	2(R5),#^RBS.	;IS IT?
+	BNE	20$		;NO
+	CMP	6(R5),@OVRPTR	;IS BASE CORRECT?
+	BNE	30$		;NO, SOME ERROR
+	ADD	#2,OVRPTR	;OK, BUMP THE POINTER
+	INC	OVRCNT		; AND OVERLAY COUNTER
+10$:	RETURN
+
+20$:	WARN	<"CSECT other than ASECT ignored">
+	BR	10$
+
+30$:	WARN	<"Incorrect base address sequencing">
+	BR	10$
+
+.DSABL	LSB
+
+.ENABL	LSB
+
+GSSYM:	CMP	R3,BIGSYM	;WILL ANOTHER SYMBOL FIT?
+	BLOS	10$		;YES, WE HAVE ROOM.
+	ERROR	<"Not enough memory for Symbol Table"> ;NOPE.
+
+10$:	CMP	4(R5),#2110	;Correct definition?			;015
+	BEQ	20$		;Yes, good				;015
+	WARN	<"Incorrect symbol definition ignored">
+	BR	40$
+
+20$:	BIT	#T.SWIT,@FLGWRD	;Should we ignore symbols?		;015
+	BNE	40$		;Yes, sure should			;015
+	MOV	(R5),(R3)	;MOVE THE SYMBOL
+	MOV	2(R5),2(R3)	; NAME
+	MOV	OVRCNT,4(R3)	;SET OVERLAY # HERE
+	BPL	30$		;OK
+	WARN	<"Symbol before ASECT ignored">
+	BR	40$
+
+30$:	ADD	#6,R3		;ADVANCE POINTER TO VALUE SPOT
+	MOV	6(R5),(R3)+	; AND SET SYMBOL'S VALUE
+	INC	SE.STN(R4)	;INDICATE ANOTHER SYMBOL
+40$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	GET A GSD ITEM FROM THE STB
+
+;+
+; GETGSD - GET NEXT GSD ITEM.
+;
+; CALL:	R5 -> WITHIN FBBLK TO PREVIOUS GSD ITEM
+;	CALL	GETGSD
+;
+; BACK:	R5 -> NEXT GSD ITEM
+;	R0 =  TYPE OF ITEM (BYTE 5 WITHIN ITEM)
+;	CONDITION CODES SET ON R0
+;
+;	C=1 => END OF GSD FOUND (I.E., ENDGSD FB ITEM FOUND)
+;-
+
+.ENABL	LSB
+
+GETGSD:	ADD	#10,R5		;ADVANCE TO NEXT GSD ITEM IN BUFFER
+	SUB	#10,FBSIZ	; AND TAKE IT OUT OF THE FB BLOCK SIZE
+	BHI	20$		;THERE IS SOME LEFT
+10$:	CALL	GETFB		;GET A FORMATTED BINARY BLOCK
+	BCS	50$		;OOPS, NO ENDGSD FOUND!
+	CMP	(R5),#6		;IS THIS THE ENDGSD?
+	SEC			;RETURN C=1 IF SO
+	BEQ	30$		;YES, END OF GSD
+	CMP	(R5)+,#1	;IS THE TYPE = 1 (GSD) ?
+	BNE	10$		;NO, SKIP IT
+	BIT	#7,FBSIZ	;IS IT A MULTIPLE OF 10?
+	BNE	40$		;NO, GIVE A FATAL ERROR
+20$:	MOVB	5(R5),R0	;R0 = TYPE OF GSD ITEM
+	CLC			;NO ERROR
+30$:	RETURN
+
+40$:	ERROR	<"GSD block wrong length">
+
+50$:	ERROR	<"No ENDGSD block in STB">
+
+.DSABL	LSB
+
+.SBTTL	READ A FORMATTED BINARY BLOCK
+
+.ENABL	LSB
+
+GETFB:	CLR	R1		;CLEAR OUT THE CHECKSUM
+	CALL	FBBYTE		;GET A BYTE
+	BCS	30$		;END OF FILE, RETURN C=1
+	CMPB	R0,#1		;IS IT A 1?
+	BNE	GETFB		;NO, SKIP UNTIL 1
+	CALL	FBBYTE		;GET NEXT BYTE
+	BCS	30$		;END
+	TSTB	R0		;IS IT 0?
+	BNE	GETFB		;NO, SKIP AGAIN
+	CALL	FBBYTE		;GET FIRST BYTE OF LENGTH
+	BCS	40$		;OOPS, ERROR IN FB
+	MOV	R0,-(SP)	;SAVE IT
+	CALL	FBBYTE		;GET SECOND BYTE OF LENGTH
+	BCS	40$
+	MOVB	R0,1(SP)	;INSERT IT FOR A WORD
+	MOV	#FBSIZ,R5	;POINT TO BUFFER FOR FB BLOCK
+	MOV	(SP),(R5)	;SAVE THE SIZE
+	SUB	#6,(R5)+	;MINUS 6 (LEADING 1, SIZE, FB TYPE)
+	CMP	(SP),#256.	;IS IT TOO BIG FOR US?
+	BHI	50$		;YUP, GIVE AN ERROR
+	SUB	#4,(SP)		;COUNT OFF THE LEADING 1 AND SIZE
+	BLOS	40$		;OOPS, GIVE AN ERROR
+.ASSUME	FBTYP	EQ	FBSIZ+2
+.ASSUME	FBBUF	EQ	FBTYP+2
+10$:	CALL	FBBYTE		;GET ANUDDER BYTE
+	BCS	40$		;OOPS
+	MOVB	R0,(R5)+	;SAVE IT
+	DEC	(SP)		;COUNT DOWN
+	BNE	10$		;UNTIL DONE
+	TST	(SP)+		;DUMP THE COUNT
+	CALL	FBBYTE		;ADD THE CHECKSUM INTO THINGS
+	TSTB	R1		;DOES IT SUM?
+	BEQ	20$		;YUP
+	WARN	<"Checksum error">
+20$:	MOV	#FBTYP,R5	;POINT TO BUFFER
+	CLC
+30$:	RETURN
+
+40$:	WARN	<"EOF inside formatted binary block">
+	SEC
+	RETURN
+
+50$:	ERROR	<"Formatted binary block too long">
+
+.DSABL	LSB
+
+.ENABL	LSB
+
+FBBYTE:	CMP	#BLKBUF+1000,R2	;END OF INPUT BUFFER?
+	BHI	20$		;NOT YET
+	MOV	#BLKBUF,R2	;YES, RESET POINTER
+	.READW	STBINP,R2,#256.,STIBLK ;READ BLOCK INPUT FROM SYMBOL TABLE
+	BCC	10$		;OK
+	TSTB	ERRBYT		;EOF?
+	BEQ	30$		;YEP
+	RSTSER	<"STB input error">
+
+10$:	INC	STIBLK		;NEXT TIME READ NEXT BLOCK
+20$:	MOVB	(R2)+,R0	;GET NEXT BYTE
+	ADD	R0,R1		;ACCUMULATE CHECKSUM
+	TST	(PC)+		;C = 0 FOR OK
+30$:	SEC			;C = 1 FOR EOF
+	RETURN			;RETURN
+
+.DSABL	LSB
+
+.SBTTL	PARSE SWITCHES
+
+.ENABL	LSB
+
+PARSWT:	MOV	#FLGTBL,R5	;CLEAR OUT FLAG TABLE
+10$:	CLR	(R5)+
+	CMP	R5,#FLGTBE
+	BLO	10$
+	MOV	(SP)+,R5	;SAVE RETURN ADDRESS
+	MOV	(SP)+,R3	;R3 = # OF SWITCHES
+	BEQ	70$		;NONE, GO EXIT SLOWLY
+20$:	MOV	#SWTTBL,R2	;POINT TO SWITCH TABLE
+30$:	CMPB	(SP),(R2)	;IS THIS IT?
+	BEQ	40$		;YUP
+	CMP	(R2)+,(R2)+	;NO, NEXT SWITCH
+	TST	(R2)		;ANY MORE?
+	BNE	30$		;YUP
+	WARN	<"Invalid switch ignored">
+	TST	(SP)+		;DUMP THE SWITCH
+	BPL	60$		;SKIP IF NO VALUE
+	TST	(SP)+		;DUMP THE VALUE
+	BR	60$		; AND CONTINUE
+
+40$:	MOV	(SP)+,R0	;GET THE FILE NUMBER
+	BPL	50$		;NO VALUE
+	MOV	(SP)+,R1	;VALUE IN R1
+50$:	SWAB	R0		;FILE NUMBER IN LOW BYTE
+	ASLB	R0		;VALUE FLAG IN CARRY, DOUBLE FILE #
+	BIC	#^C<36>,R0	;R0 = FILE NUMBER * 2
+	CALL	@2(R2)		;CALL SWITCH HANDLER
+60$:	SOB	R3,20$		;MORE SWITCHES
+70$:	MOV	R5,-(SP)	; AND SAVE RETURN ADDRESS AGAIN
+
+.DSABL	LSB
+
+.ENABL	LSB
+
+ASKSWT:	MOV	#INSPC+2,R2	;R2 -> FIRST FILE NAME
+	MOV	#FLGTBL,R1	;R1 -> FLAG TABLE
+10$:	MOV	R2,R0		;COPY FILE NAME POINTER
+	MOV	#FBBUF,R5	;POINT TO BUFFER FOR FILE NAME
+	CALLX	RAD$FN		;CONVERT FILE NAME TO ASCII
+	MOVB	#200,(R5)+	;END IT PROPERLY
+	MOV	(R1)+,R3	;R3 = FLAG WORD FOR FILE
+	TST	(R1)+		;R1 -> MERGE MODULE NAME AREA
+	BIT	R3,#N.SWIT	;/N PRESENT
+	BEQ	30$		;NO
+20$:	PRINT	<"Module name for file ">
+	.PRINT	#FBBUF
+	PRINT	<"? ">
+	CALL	SWTRAD,R4	;GET USER-DEFINED MODULE NAME
+	 BR	20$		;ILLEGAL, TRY AGAIN
+30$:	ADD	#FL.LEN-FL.MOD,R1 ;POINT TO NEXT FILE FLAGS
+	ADD	#4*2,R2		;POINT TO NEXT FILE NAME
+	CMP	R1,#FLGTBE	;DONE?
+	BLO	10$		;NOT YET
+	RETURN			;YES, RETURN TO MAIN LINE
+
+.DSABL	LSB
+
+.SBTTL	GET INPUT REPLY TO SWITCH QUESTION
+
+.ENABL	LSB
+
+SWTRAD:	CALLX	INPUTL,R5,<83.,BLKBUF> ;GET ANSWER LINE
+	CALL	CVT$$B		;CLEAN IT UP				;013
+	CALLX	ASCR50		;CONVERT A WORD TO RAD50
+	MOV	R0,(R1)		;SAVE IT
+	CALLX	ASCR50		;AGAIN
+	MOV	R0,2(R1)	;SAVE 2ND WORD
+	TSTB	(R5)		;DID THAT EAT THE WHOLE LINE?
+	BNE	10$		;NO
+	TST	(R4)+		;YES, TAKE SKIP RETURN
+	RETURN	R4
+
+10$:	PRINT	<"?Invalid response">,CRLF ;PRINT THE ERROR
+	RETURN	R4
+
+.DSABL	LSB
+
+.SBTTL	TRIM ALL OF STRING EXCEPT PARITY BIT
+
+;+
+; CVT$$B - Trim all of a string except for the parity bit		;013+
+;
+;	R5 -> .ASCIZ String
+;
+;	CALL 	CVT$$B
+;
+;	R5 -> .ASCIZ String (may be shorter) at same place
+;-
+
+CVT$$B:	MOV 	R0,-(SP)	;Save R0 for caller
+	MOV	#-2,R0		;Set up mask for CVT$$
+	CALLX	CVT$$		;Convert the string
+	MOV 	(SP)+,R0	;Restore R0
+	RETURN			;And go back to caller			;013-
+
+.SBTTL	INDIVIDUAL SWITCH HANDLERS
+
+SWTS:	TST	R0		;ON OUTPUT?
+	BNE	10$		;NO
+	MOV	#-1,SWSAVE	;SAY .SAV STYLE
+	RETURN
+
+10$:	ERROR	<"/S not on output file">
+
+SWTC:	BCS	10$		;SKIP IF VALUE PRESENT
+	MOV	#1,R1		;ELSE USE 1
+10$:	ADD	R1,SWCONT	;UP THE CONTINUE COUNT
+	RETURN
+
+SWTE:	BCC	10$		;OOPS, NO VALUE
+	CALL	SWTIFL		;ENSURE SWITCH IS ON AN INPUT FILE
+	MOV	R1,2(R0)	;SAVE THE EXTENSION
+	RETURN
+
+10$:	ERROR	<"/E no value">
+
+SWTM:	BCS	10$		;GOT A VALUE, USE IT
+	MOV	#1,R1		;USE DEFAULT OF 1
+10$:	CALL	SWTIFL		;MUST BE INPUT FILE
+	MOV	R1,FL.MGN(R0)	;SAVE MERGE MODULE NUMBER
+	BEQ	20$		;ERROR
+	BIS	#M.SWIT,(R0)	;SAVE INDICATION
+	RETURN
+
+20$:	ERROR	<"/M zero value illegal">
+
+SWTN:	CALL	SWTIFL		;MUST BE ON INPUT FILE
+	BIS	#N.SWIT,(R0)	;SAVE SWITCH
+	RETURN
+
+SWTA:	CALL	SWTIFL		;MUST ALSO BE ON INPUT FILE.
+	BIS	#A.SWIT,(R0)	;INDICATE THIS MODULE SHOULD BE ALIGNED.
+	RETURN
+
+SWTT:	CALL	SWTIFL		;Must also be on input file		;015
+	BIS	#T.SWIT,(R0)	;Indicate symbol table supression	;015
+	RETURN			;And we're done				;015
+
+SWTIFL:	MOV	R1,-(SP)	;SAVE R1
+	MOV	R0,R1		;COPY FILE # * 2
+	SUB	#3*2,R1		;DOWN TO RELATIVE 0
+	BLO	10$		;ERROR, SWITCH ON OUTPUT FILE
+	MUL	#4,R1		;GET FILE POINTER
+	TST	INSPC(R1)	;FILE EXISTS?
+	BEQ	10$		;NO
+	MOV	R0,R1		;DO IT AGAIN
+	MUL	#FL.LEN/2,R1	;GET FILE # * FLGTBL SIZE
+	ADD	#FLGTBL-<FL.LEN*3>,R1 ;BUT FLGTBL IS INPUT ONLY
+	MOV	R1,R0		;RETURN IN R0
+	MOV	(SP)+,R1	;RESTORE VALUE
+	RETURN
+
+10$:	ERROR	<"Switch on output or null input file">
+
+.SBTTL	BMPIDX - Bump SIL Index module description pointer		;011
+;+
+;  BMPIDX - Bump SIL Index module description pointer	by JFM
+;
+; FORMAT:
+;    BMPIDX	Rn
+;
+; This is a MACRO call which allows the SIL index entry pointer to be updated 
+; without munging any registers.  The work is done inside R0, but any register 
+; can be used in this call.  The MACRO stores and restores R0 if the register
+; you are bumping is not R0.
+; 
+; This routine will increment the register (typical) to the start of the 
+; next SIL index entry.  The only special case is where the module that
+; is pointed to presently is the 15th module description in the SIL.  The
+; 16th and every subsequent entry gets incremented by SE.LEN, as well as the 
+; first 15 entries.  The 16th entry will be aligned on the start of the second
+; block of the SIL index.  
+;
+; INPUTS:
+; 	Rn 	->	n-th module description entry in SIL
+;
+; OUTPUTS:
+; 	Rn 	->	(n+1)-th module description entry in SIL
+;
+;
+; No errors are possible, though invalid results will occur if Rn is not 
+; pointing to the beginning of a module desciptor on entry to this routine.
+;-
+
+
+BMPIDX:	ADD	#SE.LEN,R0		;Assume we are doing a normal advance.
+	CMP	R0,#SILIDX+SI.SIL	;Are we already into the second block?
+	BGT	10$			;Yes.  Then we made a good assumption.
+	CMP	R0,#SILIDX+SI.SIL-SE.LEN;Can we fit another module in here?
+	BLE	10$			;Yes.  We really did make a good one.
+	MOV	#SILIDX+SI.MOR,R0	;Put this at the start of second block.
+.ASSUME	SI.MOR	EQ	1000		;It really is the start of second block
+10$:	RETURN				;And we are done.
+
+
+.SBTTL	A QUICKSORT ROUTINE
+
+;+
+; QUICKS - Quicksort Routine				by JTC
+;
+;	R0  ->	First record in area to sort.
+;	R1  ->	Last record in area to sort.
+;
+;	23. words available on stack (see discussion).
+;
+;	CALL	QUICKS
+;
+;	R0,R1 =	Same as passed.
+;	R2-R5 = Undefined.
+;
+; This routine will sort records in memory using a combination
+; quicksort/insertion sort method.  This algorithm follows fairly
+; closely Knuth's quicksort algorithm in "Searching and Sorting".
+;
+; This routine will sort records of length RECWRD words.  The first
+; KEYWRD words in each record the binary key (sorted ascending).
+; Quicksort is used to sort the records down to streams of INSERT
+; or fewer records, using only the first work in the key.  A straight
+; insertion sort using the full key is then used on the whole area.
+; This sorts the streams with INSERT records or less and also orders
+; the records having identical first key words.
+;
+; Both the quicksort and the insertion sort code require stack space.
+; Since the quicksort finishes before the insertion sort is started,
+; the stack space requirements are not additive.  The stack space
+; required is the maximum requirement of the two algorithms.
+;
+; The maximum space required for the quicksort is:
+;
+;	5 + ( 2 * ( log base 2 (N) - log base 2 (INSERT) ) ) words
+;
+; where N is the number of records to be sorted.
+; The stack space required for the insertion sort is:
+;
+;		    2 + KEYWRD + RECWRD words
+;
+; For example, if 4-word records are used (RECWRD=4), the most
+; that could possibly fit into the PDP-11's 32KW address space is
+; 8192 records.  If INSERT=16 then the maximum stack required for the
+; quicksort is 5 + ( 2 * ( log base 2 (8192) - log base 2 (16) ) ) =
+; 5 + ( 2 * ( 13 - 4 ) ) = 23 words.  If the key is two words long, the
+; stack space required for the insertion sort is 2 + 2 + 4 = 8 words,
+; so the maximum total stack for sorting in this case is 23 words.
+; (All numbers are in decimal.)
+;
+; In an isolated test on an 11/44, 4800 4-word records with random
+; 2-word keys were sorted using different values of INSERT.  The
+; best performance was observed with INSERT around 17.  This is much
+; higher than Knuth's optimum value of 9 for MIX, possibly due to
+; the efficiency with which the insertion sort could be coded in PDP-11
+; assembly language, making heavy use of the registers for local variables.
+;-
+
+; Define sorting parameters
+
+RECWRD	=	4		; Four words per record.
+KEYWRD	=	2		; Two words per key.
+INSERT	=	17.		; # records at which insertion sort is used.
+
+; From the sorting parameters, define other useful symbols.
+
+RECBYT	=	RECWRD*2	; Record length in bytes.
+INSBYT	=	INSERT*RECBYT	; Insertion sort cutoff stream length.
+
+; The XCHANG macro will exchange two records pointed at by registers,
+; using a third register for temporary storage.  Note that the pointer
+; registers will be auto-incremented and end up pointing past the records.
+
+.MACRO	XCHANG	REG1,REG2,SCRAT
+	.REPT	RECWRD
+	 MOV	 (REG1),SCRAT
+	  MOV	  (REG2),(REG1)+
+	   MOV	   SCRAT,(REG2)+
+	.ENDR
+.ENDM	XCHANG
+
+; The CMPKEY macro will compare two keys pointed at by registers.  The
+; lables passed to the macro tell it where to branch if a difference is
+; encountered before the last word of the key.  LOB tells where to branch
+; if the first key is lower than the second, HIB tells where if the first
+; key is higher.  The conditional branch(es) after comparing the last
+; word in the key must be supplied after the macro invocation.  This
+; allows the caller to define where to branch on key equality and to
+; define which condition(s) fall through the code and which conditions
+; branch off elsewhere.
+
+.MACRO	CMPKEY	REG1,REG2,LOB,HIB
+	 CMP	 (REG1),(REG2)
+	OFF	=	0
+	.REPT	KEYWRD-1
+	 BLO	 LOB
+	 BHI	 HIB
+	OFF	=	OFF	+	2
+	 CMP	 OFF(REG1),OFF(REG2)
+	.ENDR
+.ENDM	CMPKEY
+
+; The MOVREC macro generates enough MOV instructions to move a record.
+; The arguments should be of the form (Rn)+,(Rn)+ or -(Rn),-(Rn).
+; Note that the registers will be autoincremented/autodecremented
+; and left pointing past/at the record.
+
+.MACRO	MOVREC	SOURCE,DEST
+	.REPT	RECWRD
+	 MOV	 SOURCE,DEST
+	.ENDR
+.ENDM	MOVREC
+
+		; First we initialize for the quicksort.  Note that
+		; quicksort, not insertion sort, is always used the
+		; first time on the whole area to be sorted, even if
+		; the whole area is smaller than the tradeoff point
+		; at which an insertion sort would be more economical.
+		; Since one iteration of the quicksort is so fast
+		; anyway, the check wouldn't be worth it.
+		;
+		; Note that we poke values before and after our sorting
+		; area to set up fake keys for automatic boundary
+		; checking.  The real values of the cells we poke are
+		; saved on the stack and restored when we're through.
+		;
+		; This routine is coded such that it won't poke itself
+		; if it happens to get linked just before or after the
+		; sort area.  But if you're using ODT on this routine,
+		; watch where ODT gets linked relative to the sorting
+		; area!!!
+
+QUICKS:	MOV	-RECBYT(R0),-(SP) ; Save key just before our sorting area
+	CLR	-RECBYT(R0)	  ; and fake a low value key for testing.
+	MOV	RECBYT(R1),-(SP) ; For quicksort, also fake a key after our
+	MOV	#177777,RECBYT(R1) ; area with a high value key for testing.
+	MOV	R0,-(SP)	; Remember where our sorting area starts.
+	CLR	-(SP)		; Flag the end of the quicksort stack.
+	MOV	R1,-(SP)	; Remember where the area ends.
+		;
+		;   R0  = l -> Leftmost record in unordered segment
+		;   R1  = r -> Rightmost record in unordered segment
+		;  (SP) = Saved value of r
+		; 2(SP) = 0 = End flag for the quicksort stack
+		; 4(SP) = Saved value of l
+		; 6(SP) = Saved real value of high end fake key
+		;10(SP) = Saved real value of low end fake key
+
+		; R0 = l -> Leftmost record in unordered segment
+		; R1 = r -> Rightmost record in unordered segment
+		;
+QSNEXT:	MOV	R1,R3		; Get left end of segment to sort.
+	SUB	R0,R3		; Get segment length in bytes.
+.IF	EQ	RECWRD-4	; Optomize for record length = 4 words:
+	;CLC			;   (Carry cleared from Subtract.)
+	ROR	R3		;  Get length of half our segment rounded down
+	BIC	#2*2,R3		;   to an even multiple of 4-word records.
+.IFF				; For any random record length:
+	CLR	R2		;  Clear high order for divide.
+	DIV	#RECBYT,R2	;  Get number of records in segment.
+	MUL	#RECBYT/2,R2	;  Get offset into segment of middle record.
+.ENDC
+	ADD	R0,R3		; Compute m -> middle record in segment,
+				;  to look for median(key(l),key(m),key(r)).
+	CMP	(R0),(R1)	; Is key(l) <= key (r)?
+	BHI	10$		; No.
+	CMP	(R3),(R0)	; Is key(m) <= key(l) <= key(r)?
+	BLOS	40$		; Yes. key(l) is median.
+	CMP	(R3),(R1)	; Is key(l) < key(m) <= key(r)?
+	BLOS	30$		; Yes. key(m) is median.
+	BR	20$		; No. key(l) < key(r) < key(m).
+				; Key(r) is median.
+10$:	CMP	(R0),(R3)	; Is key(r) < key(l) <= key(m)?
+	BLOS	40$		; Yes. key(l) is median.
+	CMP	(R1),(R3)	; Is key(r) <= key(m) < key(l)?
+	BLOS	30$		; Yes. key(m) is median.
+				; No. key(m) < key(r) < key(l).
+20$:	MOV	R1,R3		; Key(r) is median.
+30$:	MOV	R0,R2		; Copy l for exchange.
+	XCHANG	R3,R2,R5	; Exchange median key record with l
+40$:	MOV	(R0),R4		; Get our partition key value.
+		;
+		; R0 = l -> Leftmost record in unordered segment
+		;		(Record(l) is the key record.)
+		; R1 = r -> Rightmost record in unordered segment
+		; R4 = K =  Key value on which to partition
+
+		; R0 = l -> Leftmost record in unordered segment
+		;		(Record(l) is the key record.)
+		; R1 = r -> Rightmost record in unordered segment
+		; R4 = K =  Key value on which to partition
+		;
+		; This routine is the heart of the quicksort.
+		; It partitions the segment from l to r so that
+		; all records to the left of j have key value less
+		; than or equal to all records to the right of j.
+		;
+QSPART:	MOV	R0,R2		; Initialize i = l
+	MOV	R1,R3		; Initialize j = r
+	ADD	#RECBYT,R3	; Now set j = r + 1
+10$:	ADD	#RECBYT,R2	; i = i + 1
+20$:	CMP	(R2),R4		; Is key(i) < K still?
+	BLO	10$		; Yes, keep coming in from the left.
+30$:	SUB	#RECBYT,R3	; j = j - 1
+	CMP	(R3),R4		; Is key(j) > K still?
+	BHI	30$		; Yes, keep coming in from the right.
+	CMP	R2,R3		; Is i < j still?
+	BHIS	40$		; No, go finish up the partition.
+	XCHANG	R2,R3,R5	; Yes, exchange record(i) <-> record(j)
+	SUB	#RECBYT,R3	; Correct for the exchange.
+	BR	20$		; And start in from the left again.
+
+40$:	MOV	R0,R2		; Copy l.
+	MOV	R3,R4		; Copy j.
+	XCHANG	R2,R4,R5	; Exchange record(l) <-> record(j)
+		;
+		; R0 = l -> Leftmost record in partitioned segment
+		; R1 = r -> Rightmost record in partitioned segment
+		; R3 = j -> Partition record
+
+		; R0 = l -> Leftmost record in partitioned segment
+		; R1 = r -> Rightmost record in partitioned segment
+		; R3 = j -> Partition record
+		;
+QSSTAK:	MOV	R1,R2		; Copy r.
+	SUB	R3,R2		; Get right side length ( r - j ).
+	MOV	R3,R5		; Copy j.
+	SUB	R0,R5		; Get left side length ( j - l ).
+		;
+		; R0 =     l	 -> Leftmost record in partitioned segment
+		; R1 =     r	 -> Rightmost record in partitioned segment
+		; R2 = ( r - j ) =  Length of right side of partition
+		; R3 =     j	 -> Partition record
+		; R4 = ( j + 1 ) -> First record in right side of partition
+		; R5 = ( j - l ) =  Length of left side of partition
+		;
+	CMP	R2,R5		; Is right side longer than left side?
+	BHI	20$		; Yes, go handle right side longer.
+	CMP	INSBYT,R5	; No, left longer, insertion sort both sides?
+	BHIS	40$		; Yes, both too short for quicksorting.
+	CMP	INSBYT,R2	; Isertion sort only the right side?
+	BHIS	30$		; Yes, Insertion sort right, quicksort left.
+	MOV	R0,-(SP)	; No, stack the left side of partition for
+	MOV	R3,-(SP)	; later (it's longer than the right side).
+	SUB	#RECBYT,(SP)	; Push ( l , j - 1 ) to quicksort later.
+10$:	MOV	R4,R0		; Now set up the right side for sorting,
+				; Set ( l , r ) = ( j + 1 , r ).
+	BR	QSNEXT		; And go quicksort the right side now.
+
+20$:	CMP	INSBYT,R2	; Right longer, insertion sort both sides?
+	BHIS	40$		; Yes, both too short for quicksorting.
+	CMP	INSBYT,R5	; Insertion sort only the left side?
+	BHIS	10$		; Yes, Insertion sort left, quicksort right.
+	MOV	R4,-(SP)	; No, stack the right side of partition for
+	MOV	R1,-(SP)	; later (it's longer than the left side).
+				; Push ( j + 1 , r ) to quicksort later.
+30$:	MOV	R3,R1		; Now set up the left side for sorting,
+	SUB	#RECBYT,R1	; Set ( l , r ) = ( l , j - 1 ).
+	BR	QSNEXT		; And go quicksort the left side now.
+
+40$:	MOV	(SP)+,R1	; Get a new left bound for sorting.
+	MOV	(SP)+,R0	; Get a new right bound	for sorting.
+	BNE	QSNEXT		; Now go a quicksort if we've more to do.
+	MOV	(SP)+,R0	; Finish restoring original area to (R0,R1).
+	MOV	(SP)+,RECBYT(R1)  ; Now restore the fake high key.
+		;
+		; R0  -> First record in area to sort
+		; R1  -> Last record in area to sort
+		; (SP) = Saved value of -RECBYT(R0)
+		; -RECBYT(R0) = 0 (First word of fake low end key).
+
+		; R0  -> First record in area to sort
+		; R1  -> Last record in area to sort
+		; (SP) = Saved value of -RECBYT(R0)
+		; -RECBYT(R0) = 0 (First word of fake low end key).
+		;
+		; The quicksort is all over.  Now we prepare for
+		; the straight insertion sort.
+		;
+		; The insertion sort doesn't need any dummy key
+		; values at the high end of the sort area, but
+		; it does want a full 0 key at the low end.
+		; (The quicksort routine needed only the first
+		; word of the low end dummy key to be 0.)
+		;
+QSIINI:
+	OFF	=	0
+.REPT	KEYWRD-1
+	 OFF	 =	OFF	+	2
+	 MOV	 -RECBYT+OFF(R0),-(SP) ; Save a word of the key before
+	 CLR	 -RECBYT+OFF(R0)   ;  our starting area and fake a low value.
+.ENDR
+	MOV	R0,-(SP)	; Save start of area to sort,
+	MOV	R1,-(SP)	;  and end of the area.
+	MOV	R1,R3		; Copy right pointer.
+	SUB	R0,R3		; Get distance between pointers.
+	BEQ	QSEND		; Only one record, skip insertion sort.
+				; (We dont want # records - 1 = 0!)
+	CLR	R2		; Clear high order for divide.
+	DIV	#RECBYT,R2	; Get number of records - 1.
+				; (Yes, we could have optomized here
+				; with another conditional assembly
+				; for a 4-word record, but we do this
+				; only once per sort, so who cares?)
+				;
+			;**DEBUGG**	BR	QSEND
+				; As Knuth points out, some bugs in the
+				; above quicksort routine could be masked
+				; by the below insertion sort routine.
+				; If you made any changes to quicksort,
+				; try setting INSERT to 1 and branching
+				; around the insertion sort here.  Then
+				; when you know your quicksort works, you
+				; can put things back.  (Remember that
+				; the quicksort routine sorts only by
+				; the first word of the key.)
+		;
+		; R0 -> First record to sort
+		; R2 = Number of records to sort - 1
+
+		; Now just do a nice vanilla insertion sort over
+		; the records.  Use the full key this time.
+		;
+		; R0 -> First record to sort
+		; R2 = Number of records to sort - 1
+		;
+QSINS:	MOV	#RECBYT,R4	; Use R4 and R1 for fast access to
+	MOV	#RECBYT*2,R1	;  constants RECBYT and RECBYT*2.
+10$:	MOV	R0,R3		; Copy old record pointer.
+	ADD	R4,R0		; Now point to the next record.
+	CMPKEY	R0,R3,20$,50$	; Is this record larger than the last one?
+	BHIS	50$		; Yes, the order's fine.  Go loop.
+20$:	ADD	R4,R0		; Out of order.  Point past new record,
+	MOVREC	-(R0),-(SP)	;  and save it on the stack.
+	MOV	R0,R5		; Copy record pointer for insertion shuffle.
+30$:	MOVREC	(R3)+,(R5)+	; Shuffle a record up one,
+	SUB	R1,R3		;  and point to previous record.
+	SUB	R1,R5		;   and previous record plus 1.
+	CMPKEY	R3,SP,40$,30$	; Do we need to shuffle this record too?
+	BHI	30$		; Yes, keep doing it.
+40$:	ADD	R4,R3		; No, point to just shuffled record.
+	MOVREC	(SP)+,(R3)+	; And the "out of order" record rests here.
+50$:	SOB	R2,10$		; This record now in order.  On to next...
+				; All through insertion sort.  On to clean-up.
+
+		; Now clean up and get out of here.
+		;
+QSEND:	MOV	(SP)+,R1	; Restore the beginning and ending
+	MOV	(SP)+,R0	;  of our sorting area.
+	OFF	=	KEYWRD*2
+.REPT	KEYWRD
+	OFF	=	OFF	-	2
+	MOV	(SP)+,-RECBYT+OFF(R0) ; Restore the fake low key
+.ENDR
+	RETURN			; Finally return from QUIKS.
+
+	;.BLKB	RECBYT		; This hack will keep us from poking
+				; ourselves just in case the data
+				; area starts right after our code.
+				; It can be commented out if you are
+				; sure that the data to be sorted
+				; won't immediately follow this code,
+				; but you'd better be sure!!!
+
+.SBTTL	READ-ONLY DATA AREA
+
+DFEXTS:	.RAD50	"SAVSILSID   "	;DEFAULT EXTENSIONS FOR INPUT, OUTPUT
+
+TMPFIL:	.RAD50	"DK TMPTMPTMP"	;TEMP FILE (NEVER CLOSED)
+
+SWTTBL:	.WORD	'S,SWTS
+	.WORD	'C,SWTC
+	.WORD	'M,SWTM
+	.WORD	'N,SWTN
+	.WORD	'E,SWTE
+	.WORD	'A,SWTA
+	.WORD	'T,SWTT							;015
+	.WORD	0
+
+.SBTTL	READ/WRITE DATA AREA
+
+	ORG	SILCTL
+
+OUTSPC:	.BLKW	5		;OUTPUT SPECIFICATION AREA
+MAPSPC:	.BLKW	5		;MAP SPECIFICATION
+	.BLKW	5
+INSPC:	.BLKW	6*4		;INPUT SPECIFICATIONS
+
+OUTFLG:	.BLKW			;<>0 IF OUTPUT FILE EXISTS
+MAPFLG:	.BLKW			;<>0 IF MAP FILE EXISTS
+OUTNAM:	.BLKB	12.		;OUTPUT FILE NAME
+SILPRM:	.BLKW	5+4		;OUTPUT FILE RSTS/E PARAMETERS, RT-11 SPEC
+OUTBLK:	.BLKW			;OUTPUT BLOCK NUMBER IN SIL FILE
+STBBLK:	.BLKW			;STB OUTPUT BLOCK NUMBER (IN TEMP FILE)
+STIBLK:	.BLKW			;STB INPUT FILE BLOCK NUMBER
+BLKMG:	.BLKW			;BLOCK IN FBBUF WHILE MERGING
+MGBLKD:	.BLKW			;DIRTY FLAG FOR MERGING
+APRVAL:	.BLKW			;CURRENT MODULE'S APR VALUE
+SPEC:	.BLKW			;POINTER TO CURRENT INPUT SPEC
+FLGWRD:	.BLKW			;POINTER TO INPUT FLAGS			;014
+SWCONT:	.BLKW			;/C SWITCH COUNTER (CONTINUE ON NEXT LINE)
+SWSAVE:	.BLKW			;<>0 FOR .SAV STYLE OUTPUT
+SYMNAM:	.BLKW	2		;LAST LOOKED FOR SYMBOL'S NAME
+MRGIDX:	.BLKW			;POINTER TO MERGE OUTPUT MODULE INDEX
+SIZMMU:	.BLKW			;TOTAL SIZE BUCKET
+OVRCNT:	.BLKW			;CURRENT OVERLAY #
+OVRPTR:	.BLKW			;POINTER TO OVERLAY BASE
+OVREND:	.BLKW			;ENDING OVERLAY POINTER
+BIGBUF:	.BLKW			;POINTER TO OUR BIG BUFFER
+BIGTOP:	.BLKW			;POINTER TO TOP OF OUR BIG BUFFER
+BIGBLK:	.BLKW			;NUMBER OF BLOCKS IN OUR BIG BUFFER
+BIGSYM:	.BLKW			;WHERE LAST SYMBOL IN BIG BUFFER MAY START
+I.BLK:	.BLKW			;INPUT BLOCK NUMBER FOR PHASE COMPRESSION
+O.BLK:	.BLKW			;OUTPUT BLOCK NUMBER FOR PHASE COMPRESSION
+MSB:	.BLKW			;THE LENGTH IN WORDS OF ANY MODULE BEING
+LSB:	.BLKW			;WRITTEN INTO THE SIL.
+DSPACE:	.BLKB			;IF MONITOR WILL USE DATA SPACE.
+	.BLKB			;Reserved				;016
+BUFBAS:	.BLKW			;Number of buffers in BUFPOL and MORBUF.
+MORBAS:	.BLKW			;Number of buffers in MORBUF if MORBUF is  ;009
+				;strictly for rounding of RSTS phase	   ;009
+FIPL:	.BLKW			;Size of FIP phase
+
+.SBTTL	READ/WRITE LISTS AND BUFFERS
+
+OVRLST:	.BLKW	64.		;SPACE FOR BASE(S)
+
+FLGTBL:	.BLKB	6*FL.LEN	;FLAGS FOR INPUT FILES
+FLGTBE:
+
+; ***** THE FOLLOWING THREE ITEMS ARE GROUPED *****
+FBSIZ:	.BLKW	1		;SIZE OF THIS FB BLOCK
+FBTYP:	.BLKW	1		;TYPE OF THIS FB BLOCK
+FBBUF:	.BLKW	256.		;BUFFER FOR FB BLOCK AND OTHER THINGS
+
+SILIDX:	.BLKW	256.*SI.NBL	;BUFFER FOR ENTIRE SIL INDEX		;011
+
+BLKBUF:	.BLKW	256.		;A GENERAL-PURPOSE, 1-BLOCK BUFFER
+
+.SBTTL	PATCH SPACE
+
+	ORG	PATCH
+
+PATCH::	.BLKW0	200		;128. WORDS SEEMS SUFFICIENT
+
+.END	START

@@ -1,0 +1,104 @@
+\ Case statements: Harry Starr - February 83
+\ Bugfix (CONDEND) Paul Koning - March 83
+\ New ?PAIRS	   Paul Koning - August 83
+
+BASE @ DECIMAL
+
+( Useful primitives )
+
+: @EX @ EXECUTE ;
+: PSELF LATEST PFA [COMPILE] LITERAL ;	IMMEDIATE
+
+( Case statements: CASE )
+
+: (CASE)
+	R @ MIN -1 MAX 2*
+	R 4 + + @EX
+	R @ 2* 6 + R> + >R ;
+
+: CASE
+	?COMP COMPILE (CASE)
+	HERE 0 ,
+	COMPILE NOOP PSELF ; 		IMMEDIATE
+
+: NOCASE
+	' CASE ?PAIRS PSELF ;		IMMEDIATE
+
+: CASEND
+	DUP ' CASE =
+	IF
+		DROP COMPILE NOOP
+	ELSE
+		' NOCASE ?PAIRS
+	ENDIF
+	HERE 2- @ OVER 2+ !
+	HERE OVER -
+	6 - 2/ SWAP ! ;		IMMEDIATE
+
+( Case statements: SEL )
+
+: (SEL)
+	R 2+ DUP 2+ DUP R @
+	2* 2* + R> DROP DUP >R SWAP
+	DO
+		I @ 2 PICK =
+		IF
+			I 2+ SWAP DROP LEAVE
+		ENDIF
+	4 /LOOP
+	SWAP DROP @EX ;
+
+: SEL
+	?COMP
+	COMPILE (SEL) HERE
+	0 , COMPILE NOOP [COMPILE] [
+	PSELF ;				IMMEDIATE
+
+: NOSEL
+	' SEL ?PAIRS [COMPILE] '
+	CFA OVER 2+ ! ' SEL ;	IMMEDIATE
+
+: ->
+	SWAP ' SEL ?PAIRS , DUP @ 1+
+	OVER ! [COMPILE] '
+	CFA , ' SEL ;		IMMEDIATE
+
+: SELEND
+	' SEL ?PAIRS
+	DROP [COMPILE] ] ;	IMMEDIATE
+
+( Case statements: COND )
+
+: COND
+	0 COMPILE DUP ;		IMMEDIATE
+
+: <<
+	1+ [COMPILE] IF
+	COMPILE DROP ;		IMMEDIATE
+
+: >>
+	[COMPILE] ELSE COMPILE DUP
+	ROT ;			IMMEDIATE
+
+: NOCOND
+	MINUS COMPILE 2DROP ;	IMMEDIATE
+
+: CONDEND
+	DUP 0>=
+	IF
+		[COMPILE] NOCOND
+	ENDIF
+	MINUS 0 DO
+		[COMPILE] ENDIF
+	LOOP ;			IMMEDIATE
+
+( Case statements: CASE: )
+
+: CASE:
+	<BUILDS
+		SMUDGE !CSP
+		[COMPILE] ]
+	DOES>
+		SWAP 2* + @EX ;
+
+BASE !

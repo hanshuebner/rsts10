@@ -1,0 +1,2818 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+.INCLUDE /CMN:PKDEF/
+.INCLUDE /CMN:HDRDEF/
+TITLE	KBDVR,<Service and other driver things>,0J,27-MAR-92,KPH/DRP/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	KBDVR EDIT HISTORY
+
+;+
+;               
+;  000  KPH  08-Jun-87	Creation - extract from TTDVR.MAC
+;  001	DRP  09-Dec-87	Preserve current user's buffer pointer around
+;			call to the input character processing routine.
+;  002	DRP  28-Dec-87	Source clear correction to properly clean up the
+;			stack when a broadcast fails because the user has
+;			reached or exceeded their buffer quota.
+;			Source clear Jim's fix to correct the lost line
+;			feed in RSX-to-normal mode transition.
+;  003	DRP  17-Feb-88	Add support for "Allow conditional sleep" mode
+;			Allocate dynamic keyboards immediately after
+;			static keyboards.
+;  004	DRP  01-Mar-88	Modify SETMOD to preserve R3 around the call to
+;			SETPRM.
+;  005	DRP  24-Mar-88	Source clear fix to REMKBD to ignore disabled KBs
+;
+;			[RSTS/E V9.7]
+;  006	DRP  14-Jul-88	Source clear patch to correct loop problem in
+;			MULTTC.
+;			Source clear patch to XON input when clearing out
+;			the terminal input buffers.
+;  007	JFM  04-Nov-88	Source clear patch to correct race condition in 
+;			CLRTIN when deallocating a device which is open in
+;			binary mode. (Second half of patch 3.3.18)
+;  008	DRP  07-Dec-88	Make APT work with the new terminal driver.
+;			Remove clear typeahead code when opening the KB
+;			in Echo Control, Binary or XON/XOFF modes.
+;
+;			[RSTS/E V10.0]
+;  009	JFM  11-Sep-89	Add command line recall support
+;			Other general cleanup along the way
+;  010	DRP  11-Oct-89	Add new entry point to CREKBD routine.
+;  011	JFM  16-Oct-89	Don't put escape sequence into recall buffer, get rid
+;			of unneeded comment.
+;  012	JFM  02-Nov-89	Default back to line editing/recall on a CTRL/C read
+;  013	DRP  09-NOV-89	Return "?Missing special feature" error if a large
+;			DMA is issued and APT is not loaded.
+;			Source clear patch 3.3.25.
+;  014	JFM  14-Nov-89	Undid 012, due to PPC (product planning commitee) 
+;			recommendation.  Added GETLVL routine (moved from 
+;			TERREC) which gets current command read level.
+;  015	DRP  20-Nov-89	Added application terminal support.
+;  016	JFM  13-Dec-89	Changed job header size to 2K, moved size setup to 
+;			before call to SETMDE, which needs that size.
+;			PROTYP stops at delim, doesn't check for special char.
+;  017	JFM  02-Jan-90	Sleep checking, CHKTYP look at type ahead buffer
+;			Add job header size to minimum RTS size to get residency
+;			Check for more input using type ahead buffer
+;  018	JFM  04-Jan-90	Make delimiter "count" a bit
+;  019	JFM  10-Jan-90	Set pending read bit right away, needed for multi-tty
+;			Do code cleanup due to echo on read.
+;			Make levels in CURLVL bits (after all, it IS the DDB)
+;  020	DRP  04-Feb-90	Moved KB specific code from ASS.MAC to ASN$KB and
+;			DSN$KB.
+;			Fixed bug in FORCE/BROADCAST to application terminals.
+;			Change DEA$KB to only terminate LAT connections if the
+;			device is not explicitly assigned.
+;			Source clear patch 3.3.27.
+;  021	JFM  09-Feb-90	Check for type ahead routine also checks binary mode.  
+;			Cleanup in check buffer routines.
+;  022	JFM  18-Feb-90	Changed name of DDFLG3 to TTFLG3, CURLVL becomes TTRFLG
+;			Keep track of position of last read
+;			PREAD bit moved to TTRFLG
+;  023	DRP  20-Feb-90	Check for system jobs in ASN$KB.
+;  024	JFM  28-Feb-90	Clear prompt position, and pending read flag on close
+;			Only set up prompt position first time read issued,
+;			not on IOREDO, and clear it when read is complete.
+;  025	JFM  12-Mar-90	Clear DDCNT when clearing the job number in DETJOB
+;			Retype command after successful broadcast
+;  026	DRP  17-Mar-90	Modify ASN$KB to preserve some registers.
+;  027	JFM  20-Apr-90	Implement code review comments.
+;  			Fix bug - type ahead writing to log file in RSX mode
+;			misses line feeds.
+;			Fix bug - only redisplay line after broadcast, (and
+;			after a force only if it really needs it.)
+;			Check for logfile open first thing in PUTLOG
+;  028	JFM  17-May-90	Fix echo control read bug in STALL - check for field 
+;			active before processing type ahead.  Add comments.
+;  029	JFM  22-May-90	Make changes necessary for binary mode echo on read
+;  030	DRP  23-May-90	Help a friend, save a word.
+;  031	JFM  25-May-90	Don't set TTERMS in output service, clear it in input
+;			service.  TERICF is only place where this bit matters
+;  032	JFM  01-Jun-90	Fix multi-terminal service (handle console type ahead)
+;			Move setting of prompt position up.
+;  033	JFM  06-Aug-90	Source clear patches in MONITR.CMD (V10.0)
+;			a) Fix problem of "echo before read" by setting up 
+;			   PREAD only if it's not a .COM file read.
+;			b) Fix problem of shipping long line as soon as input
+;			   buffer quota hit by going to STALL if no more 
+;			   characters and NOT in binary, teco, DDT mode.
+;
+;			[RSTS/E V10.1]
+;  034	JFM  09-Apr-91	Source clear patch to MONITR.CMD (V10.0).  Set up 
+;			command level, ICF status on every .READ in SER$KB.
+;  035	JFM  12-Apr-91	Source clear patch to MONITR.CMD (V10.0).  Fix multi-
+;			terminal service with echo control mode
+;  036	JFM  12-Apr-91	Source clear patch to MONITR.CMD (V10.0).  Don't 
+;			display type ahead during a conditional sleep unless
+;			a read is active.
+;  037	JFM  30-Apr-91	Source clear patch to MONITR.CMD (V10.0).  Re-work
+;			when and how DATERR is returned during echo control
+;			mode reads.
+;  038	JFM  02-May-91	Source clear March 1991 Dispatch Article 3.4.4
+;  039	JFM  08-May-91	Source clear March 1991 Dispatch Article 3.4.5
+;  040	JFM  19-Jun-91	Source clear July 1991 Dispatch Article 3.4.9
+;  041	JFM  24-Jun-91	Call RECSTR indirectly (through dispatch table)
+;  042	JFM  10-Jul-91	Don't check for START of escape sequence in CHKINP/TYP
+;  043	JFM  10-Jul-91	Set "pending read" condition in FORCE
+;  044	JFM  26-Jul-91	Undo changes of 039 - the real fix is in TERCLS
+;  045	JFM  30-Jul-91	Use TTISGL, not TTOMDS in CHKINP/TYP routines
+;  046	JFM  22-Jul-91	Allow conditional sleep to sleep if only an escape
+;			in type ahead buffer.  Also, clear TTESCT cell whenever
+;			TTESCC cell cleared.  Split CHKTYP from CHKINP, put
+;			it into SLP$KB routine.
+;  047	FEK  02-Oct-91	Optimize HDRSIZ reference
+;  048	JFM  25-Nov-91	Cleaned up some comments, clear type ahead buff at PR5.
+;  049	JFM  25-Nov-91	Give back small buffers if resources low and 
+;			no type ahead left in buffer.
+;  050	FEK  28-Dec-91	Optimize some code
+;  051	JFM  20-Feb-92	Fix problem with ;049 - Cmp to FREES+2, not FREES
+;  052	JFM  20-Mar-92	Fix problem with echo control mode (WORD-11 fails)
+;			by removing check for type ahead buffers in EKODEC.
+;			Also, remove call to RECSTR in INPDON, moved to TERREC
+;  053	JFM  27-Mar-92	Ensure "SET VERIFY" in effect when calling RSXLF
+;  054	JFM  27-Mar-92	If RSX mode read, don't put LF into logfile
+;-
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	KBDVRM
+
+.SBTTL	TIMEOUTS
+;+
+; TMO$KB - TIME OUT ENTRY POINT.
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB
+;	IF C=0 THEN CLEAR FUNNY MODES
+;	IF C=1 THEN DON'T CLEAR THE MODES
+;	PRIORITY IS PR3
+;
+;	...
+;
+;	RETURN
+;-
+
+	TMPORG	TMOTBL,2
+	 .WORD	TMO$KB
+	UNORG
+
+TMO$KB:	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver
+	BCS	10$		;SKIP IF MODES OK
+	SPLC	5		;Lock out interrupts
+	CALL	BINEND		;;END BINARY MODE
+	BIC	#TTDDT,DDFLAG(R1) ;ALSO DDT SUB-MODE
+	SPLC	3		;;Enable interrupts
+10$:	JMPX	TMOTER		;Now finish in the terminal driver
+
+.SBTTL	CHECK IF VALID MULTI-TERMINAL TERMINAL
+;+
+; MULTTC - CHECK FOR VALID MULTI-TERMINAL TERMINAL.
+;
+;	R0 =  KB NUMBER TIMES 2
+;	R4 -> ORIGINAL DDB
+;
+;	Calling job is "JOB"
+;
+;	CALL	MULTTC,R5
+;               
+;	R1 -> KB'S DDB
+;
+;	FIRST RETURN IF NOT MULTI-TERMINAL TERMINAL
+;
+;	SECOND RETURN IF MULTI-TERMINAL TERMINAL
+;
+;		N-BIT = 1 => LINE HUNG UP (IF MODEM CONTROL)
+;-
+.ENABL	LSB
+
+MULTTC:	BIC	#^C<377*2>,R0	;TRIM JUNK HIGH BYTE OFF KB NUMBER
+	CMP	R0,#CNT.KB*2	;VALID LINE NUMBER?
+	BHIS	30$		;NOPE
+	MOV	DEV.KB(R0),R1	;GET DDB ADDRESS
+	CMPB	DDJBNO(R1),JOB	;Do we own it?
+	BNE	30$		;NOPE
+	CMP	R1,R4		;SAME AS ORIGINAL DDB?
+	BEQ	20$		;YES
+	TSTB	DDCNT(R1)	;JUST ASSIGNED?
+	BNE	30$		;NOPE
+	MOV	R2,-(SP)	;SAVE R2
+	MOV	TTMODE(R4),R2	;GET MASTER TERMINAL'S MODE
+	CMP	R2,TTMODE(R1)	;ARE THE MODES THE SAME?
+	BEQ	10$		;YES, CONTINUE
+	MOV	R4,-(SP)	;Save the original DDB pointer		;006
+	CALL	SETMOD		;SET THE CORRECT MODE (FROM R2)
+	MOV	(SP)+,R4	;Restore the original DDB pointer	;006
+	CALL	CLRTTI		;NOW CLEAR OUT ALL TERMINAL INPUT
+10$:	MOV	(SP)+,R2	;RESTORE R2
+20$:	TST	(R5)+		;O.K., TAKE 2ND EXIT			
+	TST	MODCLK(R1)	;SET N-BIT=1 IF LINE HUNG UP
+.ASSUME	TTDSBL	EQ	100000
+30$:	RETURN	R5		;EXIT NOW
+
+.DSABL	LSB
+
+GLOBAL	<DEV.KB,CNT.KB>
+
+.SBTTL	ROUND-ROBIN MULTI-TERMINAL SCANNER
+;+
+; MULTTS - FIND PENDING INPUT ON NEXT (ROUND ROBIN) MULTI-TERMINAL TERMINAL.
+;
+;	R4 -> MASTER DDB
+;
+;	Calling job is "JOB"
+;
+;	CALL	MULTTS,R5
+;
+;	R0 =  KEYBOARD NUMBER TIMES 2
+;	R1 -> DDB
+;
+;	FIRST RETURN IS ONE FOUND
+;	SECOND RETURN IS NONE FOUND
+;-
+.ENABL	LSB
+
+MULTTS:	TST	(R5)+		;PRESET THE 2ND RETURN (NONE FOUND)	
+	CLR	R0		;GET STARTING KB # *2
+	BISB	TTMSCN(R4),R0	; FOR THE SCANNING
+10$:	TST	(R0)+		;ADVANCE TO THE NEXT KB # *2
+	CMP	R0,#CNT.KB*2	;OUT OF RANGE?
+	BLO	20$		;NO
+	CLR	R0		;YES, RESET TO KB0:
+20$:	CALL	MULTTC,R5	;IS THIS ONE OF OUR MULTI-TERMINAL KB'S?
+	  BR	40$		;NOPE
+	BMI	30$		;YEP, BUT DON'T INPUT CHECK IF LINE HUNG UP
+	CALL	MULINP		;Check for input on this multi-tty line	;032
+	BCS	30$		;Pending input, go process it		
+	MOV	R3,-(SP)	;Save current contents of R3		
+	MOV	R4,-(SP)	; and R4 from ASKINP			
+	SPLC	5		;Lock out terminal interrupts		;006
+	CALLX	ASKINP		;;XON input if XOFF'd			;006
+	SPLC	3		;;Re-enable interrupts			;006
+	MOV	(SP)+,R4	;Restore R4				
+	MOV	(SP)+,R3	; and R3				
+	BR	40$		;Keep scanning					
+
+30$:	MOVB	R0,TTMSCN(R4)	;Save the KB # *2			
+	SUB	#2,R5		; AND TAKE 1ST RETURN ('CMPB' WON'T BRANCH) 
+40$:	CMPB	R0,TTMSCN(R4)	;DID WE JUST DO THE ORIGINAL KB?
+	BNE	10$		;NO, CONTINUE TO CONTINUE
+	RETURN	R5		;YES, EXIT
+
+GLOBAL	<CNT.KB>
+
+.DSABL	LSB
+
+.SBTTL	MULINP	Check for input on this multi-tty line
+;+
+; MULINP - Check for input on this multi-tty line
+;
+;
+;	R0 = unit number * 2
+;	R1 -> DDB
+;	R2 = 2 (indicating this is a read operation)
+;	R3 -> XRB @ XRBC (? for both callers?)
+;	R4 = original DDB in round robin checking
+;	R5 = callers return address, in at least one case
+;	Priority is PR3
+;
+;	...
+;
+;	C=0 if no input available (from CHKINP)
+;	C=1 if input available (from CHKINP)
+;-
+.ENABL	LSB
+
+MULINP:	BIT	#TTECTL,TTMODE(R1) ;Echo control mode?			;035
+	BEQ	5$		;Not this time				;035
+	TST	EKOCTW(R1)	;Yes, is a field active?		;035
+.ASSUME	TTACTV	EQ 100000						;035
+	BPL	10$		;No, then don't process type ahead	;035
+5$:	BITB	#PREAD,TTRFLG(R4) ;Is a read pending?			;036
+	BEQ	10$		;Not right now, so don't process input	;036
+	REGSAV			;Save all registers			;035
+	SPLC	5		;Lock out interrupts			;032
+	CALL	PROTYP		;;Yes, process type ahead, if any	;032
+	SPLC	3		;;Re-enable interrupts			;032
+	REGRES			;Restore all registers			;032
+10$:	CALLR	CHKINP		;Any pending input on this line? 	;032
+				; (Return with C=1 if line available)	;032
+
+.DSABL	LSB
+
+.SBTTL	MULTTF	Execute routine for all owned terminals (from FIP context)
+;+
+; MULTTF - Execute routine for all owned terminals (from FIP context)
+;
+;	Calling job is in FIP
+;
+;	CALL	MULTTF,R5
+;	 -- first exit called for each owned terminal --
+;
+;		R0 =  Unit # * 2
+;	 	R1 -> DDB
+;		R5 =  Undefined
+;
+;		Routine may modify R2, R3, and R4
+;
+;	 -- return past first exit when done --
+;
+;		R2, R3, and R4 are set by service routine
+;-
+.ENABL	LSB
+           
+MULTTF:	MOV	R1,-(SP)	;SAVE REAL DDB ADDRESS
+	MOV	R0,-(SP)	; along with the current unit # * 2	
+	MOV	#-2,R0		;PRESET A KB NUMBER (TIMES 2)
+10$:	TST	(R0)+		;ADVANCE TO NEXT KB NUMBER (TIMES 2)
+	CMP	R0,#CNT.KB*2	;OUT OF RANGE?
+	BHIS	20$		;YES, SO ALL DONE
+	MOV	DEV.KB(R0),R1	;NO, GET ITS DDB ADDRESS
+	CMPB	DDJBNO(R1),FIJOB ;OWNED?
+	BNE	10$		;NO, SO SKIP IT
+	TSTB	DDCNT(R1)	;YES, BUT IS IT JUST ASSIGNED?
+	BNE	10$		;NOT ONLY ASSIGNED, SO SKIP IT
+	CALL	CLRTTI		;ONLY ASSIGNED. CLEAR INPUT BUFFER CHAIN(S)
+	CALL	(R5)		;MODIFY ITS DDB
+	BR	10$		; AND CONTINUE
+           
+20$:	MOV	(SP)+,R0	;Restore the unit # * 2			
+	MOV	(SP)+,R1	;  along with the real DDB address	
+	RETURN	R5		; AND EXIT
+
+GLOBAL	<DEV.KB,FIJOB,CNT.KB>
+           
+.DSABL	LSB
+
+.SBTTL	MULTI-TERMINAL SERVICE CODE
+
+.ENABL	LSB
+
+10$:	CALL	MULTTS,R5	;DO ROUND-ROBIN CHECK FOR PENDING INPUT
+	  BR	80$		;FOUND ONE, GET THAT INPUT
+	ADD	#XRMOD-XRBC,R3	;NONE FOUND, INDEX TO PARAMETER WORD
+	BIT	#TI.NST,(R3)	;DESIRE A STALL?
+	BNE	30$		;NO, SO GIVE HIM AN ERROR
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry through APR6	
+	MOV	JOBJCR,R4	;And point to it			
+	CLR	JCCLOK(R4)	;ENSURE HIGH ORDER OF TIMER IS ZERO	
+	MOVB	(R3),JCCLOK(R4)	;SET "SLEEP" TIME IF ANY		
+	BEQ	20$		;NONE, JUST PUT INTO WAIT STATE
+	BIS	#TI.NST,(R3)	;ONE, TAKE ERROR EXIT NEXT TIME
+	MOVB	JOB,R4		;Get the job # * 2			
+	BIS	#JSTIM,JBWAIT(R4) ; AND INCLUDE THAT IN WAKEUP CONDITIONS
+20$:	JMPX	IOREDO		;NOW STALL				
+           
+30$:	SPLC	5		;;LOCK OUT TERMINAL INTERRUPTS
+	CALLX	ASKINP		;;Go get more input if possible
+	ERROR	DATERR		;GIVE "NO DATA" ERROR
+
+40$:	ERROR	NODEVC		;SAY "NOT A MULTI-TERMINAL TERMINAL"
+
+; MULTI-TERMINAL WRITE SERVICE
+
+MULTTO:	MOV	R1,R4		;SAVE ORIGINAL DDB ADDRESS
+	TSTB	XRCI-XRBC(R3)	;CHANNEL #0?
+	BEQ	50$		;YES, ALWAYS NORMAL I/O
+	MOV	XRMOD-XRBC(R3),R0 ;NO, FETCH KB NUMBER PARAMETER
+	ASL	R0		;MAKE IT TIMES TWO
+	CALL	MULTTC,R5	;VERIFY IT AS MULTI-TERMINAL
+	  BR	40$		;ERROR IF NOT
+	BMI	60$		;GIVE AN ERROR IF HUNG UP		
+	BIC	#DDSTAT,(R1)	;RE-ENABLE THAT OUTPUT
+50$:	JMP	TTOMUL		; AND PROCESS OUTPUT			
+
+60$:	ERROR	DETKEY		;?I/O to detached keyboard		
+           
+GLOBAL	<JBWAIT>							
+
+; MULTI-TERMINAL READ SERVICE
+
+TTIMUL:	TSTB	XRCI-XRBC(R3)	;CHANNEL #0??
+	BNE	70$		;NO, SO LEAVE PARAMETER WORD ALONE
+	BIC	#TI.MUL,XRMOD-XRBC(R3) ;YES, SO ALWAYS NORMAL I/O
+70$:	MOV	XRMOD-XRBC(R3),R4 ;GET THE PARAMETER WORD
+	BPL	90$		;>=0 SO NOT MULTI-TERMINAL CALL
+.ASSUME	TI.MUL	EQ	100000
+	MOV	R4,R0		;NOW PUT PARAMETER WORD INTO CORRECT REGISTER
+	MOV	R1,R4		; AND SAVE THE ORIGINAL DDB ADDRESS
+	ASL	R0		;MAKE INTO CORRECT KB NUMBER
+	BMI	10$		;SCAN ALL MULTI-TERMINAL'S IS <0 HERE
+.ASSUME	TI.SCA	EQ	040000
+	CALL	MULTTC,R5	;SCAN JUST THIS TERMINAL (CHECK FOR VALID)
+	  BR	40$		;ERROR IF NOT MULTI-TERMINAL
+	BMI	80$		;DON'T INPUT CHECK IF LINE HUNG UP
+	CALL	MULINP		;Any data for this terminal?		;032
+	BCC	30$		;NO, GIVE AN ERROR
+80$:	MOVB	R0,R2		;NOW GET THE KB NUMBER TIMES TWO
+	CLC			;MAKE SURE CARRY IS CLEAR
+	RORB	R2		;MAKE IT KB NUMBER TIME 1
+	CALL	PUTUSR		; AND PUT IT IN THE USER'S BUFFER	
+	INC	(R3)		;COUNTING THAT AS ONE BYTE READ
+	TST	MODCLK(R1)	;IS THIS LINE HUNG UP?
+	BMI	60$		;YES, GIVE AN ERROR			
+.ASSUME	TTDSBL	EQ	100000
+90$:	JMP	TTISER		;NOW CONTINUE WITH INPUT
+
+.DSABL	LSB
+
+.SBTTL	Define private XRB offsets
+
+.DSECT	XRBUSE
+
+XRBUSE:	.BLKW		;Dispatch address of output routine		
+XRBSV2:	.BLKW		;Dispatch address for GETUSR/LOGBUF		
+XRBSV3:	.BLKW		;Dispatch address for CHRLOG			
+
+	UNORG
+
+.SBTTL	USER LEVEL SERVICE
+;+
+; SER$KB - USER LEVEL READ/WRITE SERVICE.
+;
+;	R0 =  UNIT NUMBER TIMES TWO
+;	R1 -> DDB/FCB
+;	R2 =  2 (.READ)
+;	      4 (.WRITE)
+;	R3 -> XRB
+;	R4 =  CALLING JOB NUMBER TIMES 2
+;	R5 -> USER'S BUFFER (THROUGH APR 6)
+;	Z-BIT = 1 FOR THE FIRST CALL (ELSE Z-BIT = 0).
+;	C-BIT = 0 FOR THE FIRST CALL (ELSE C-BIT = 1).
+;               
+; NOTES:
+;
+;	1) ACCESS RIGHTS HAVE BEEN VERIFIED.
+;	2) DIRECTIONAL RIGHTS HAVE BEEN VERIFIED.
+;
+; EXITS:   
+;
+;	1) ALL COMPLETE WITH NO ERROR
+;
+;		JMP	IOEXIT
+;
+;	2) ALL COMPLETE WITH ERROR
+;          
+;		SETERR	CODE
+;		JMP	IOEXIT
+;
+;		-OR-
+;               
+;		ERROR	CODE
+;          
+;	3) STALL DESIRED (FOR "REDO" LATER)
+;
+;		JMP	IOREDO
+;-
+.ENABL	LSB
+
+           
+	TMPORG	SERTBL,2
+	 .WORD	SER$KB
+	UNORG   
+
+SER$KB:	MOV	@DPAR6,TTUSRM	;Save user mapping			
+	MAP	TERAP6,APR=6,CODE,DATA ;And map the terminal driver root
+	CLR	XRBLK(R3)	;INDICATE TRUELY A			
+	CLRB	XRBLKM(R3)	; SEQUENTIAL DEVICE
+	CMPB	R4,DDJBNO(R1)	;DOES JOB OWN THE TERMINAL?
+	BNE	20$		;IF NO MATCH, THEN DETACHED
+	TST	MODCLK(R1)	;IS KB ENABLED?
+	BMI	20$		;ERROR IF NOT
+.ASSUME	TTDSBL	EQ	100000
+	TSTB	XRCI(R3)	;CHANNEL 0?
+	BNE	70$		;IF NOT, THEN NORMAL
+	BIT	#TTPCOL!TTGARD!TTECTL!TTBIN!TTFMS,TTMODE(R1) 
+				;ANY "FUNNY" MODE(S)?
+	BEQ	10$		;NOPE
+	REGSAV			;SAVE ALL REGISTERS
+	SPLC	5		;Lock out terminal interrupts		
+	CALL	BINEND		;;CANCEL BINARY INPUT MODE
+	BIC	#TTGARD,TTMODE(R1) ;; AND CANCEL ANY OTHER(S)
+	MOV	R1,R4		;;SAY THIS "IS THE CONSOLE"
+	CALL	EKOEND		;;AND END ECHO CONTROL AND/OR FMS MODE IF NEEDED
+	SPLC	3		;;Enable interrupts			
+	REGRES			;NOW RESTORE ALL REGISTERS
+10$:	BIT	#DDCONS,DDCNT(R1) ;REALLY CONSOLE?
+	BNE	70$		;IF SO, THEN NORMAL
+20$:	MAP	FIPPOL		;Map the FIP pool			
+	MOV	@JOBDA,-(SP)	;Pick up console DDB pointer		
+.ASSUME	JDIOB	EQ	0
+	CMP	R1,@(SP)+	;Is this DDB open on channel #0?	
+	BEQ	40$		;Yes, this passes			
+30$:	ERROR	DETKEY		;No, so give an error right away	
+
+40$:	MAP	KBDAP5,APR=5,DATA ;Re-map our data
+	MAP	TERAP6,APR=6,DATA ;And the terminal driver subroutine data
+	CALL	LOGCHK		;Are we logged out?
+	BCC	50$		;No					
+	JMP	KILLIT		;Yes, kill the job...			
+                
+50$:	TSTB	XRCI(R3)	;NO, CHANNEL #0??
+	BEQ	60$		;JUST HIBERNATE IF SO
+	CMP	R1,#KBFDDB	;GUARDED DETACHED JOB??? (USING FAKE DDB?)
+	BEQ	30$		;ALWAYS GIVE AN ERROR IF SO		
+60$:	CLR	JBWAIT(R4)	;INFINITE WAIT IF STALLED AND DETACHED
+	JMPX	IOSTAL		;Now go stall the job...		
+                
+70$:	TST	(R3)+		;GET PTR TO XRB @XRBC
+	CMP	R2,#.READ&377	;WAS IT A READ OR WRITE REQUEST?
+	BNE	80$		;Write request				;019
+
+	; Read request							;033
+
+	TSTB	PMTPOS(R1)	;Has prompt position been set up?	;033
+	BNE	73$		;Yes, don't do set up again		;034
+	MOVB	DDHORZ(R1),PMTPOS(R1) ;Get prompt position of this read ;033
+73$:	CALL	GETLVL		;Set up command level			;034
+	MOVB	#PREAD,-(SP)	;Assume not an ICF			;033
+	CALLX	TSTICF		;Is this an ICF read?			;033
+	BCS	75$		;No, not this time			;033
+	MOVB	#ICFLVL,(SP)	;Yes, it's an ICF read, but don't set	;033
+				; pending read.  This avoids a timing	;033
+				; condition where character is echoed 	;033
+				; if typed between here and time where	;033
+				; .READ is satisfied from the ICF.	;033
+75$:	BISB	(SP)+,TTRFLG(R1);Set either ICFLVL or PREAD accordingly	;033
+	JMP	TTIMUL		;Go do the read request			;033
+
+	; Write request
+
+80$:	MOV	#JSTEL,JBWAIT(R4) ;If output set output wait		;019
+	TST	XRMOD-XRBC(R3)	;MULTI-TERMINAL CALL?
+	BPL	90$		;No, not this time			
+.ASSUME	TO.MUL	EQ	100000
+	JMP	MULTTO		;Yes, go handle it			
+
+90$:	CMP	#1,XRMOD-XRBC(R3) ;OLD STYLE BINARY OUTPUT?
+	BNE	TTOMUL		;NO
+	MOV	#TO.BIN,XRMOD-XRBC(R3) ;YES, UPDATE TO NEW STYLE
+	.BR	TTOMUL		;And enter output service
+									
+.DSABL	LSB     
+
+GLOBAL	<KBFDDB,JBWAIT,TERAP6>
+
+.SBTTL	USER LEVEL OUTPUT SERVICE
+
+.ENABL	LSB
+                                                         
+TTOMUL:	MOV	#IOEXIT,-(SP)	;SET DONE COMPLETION RETURN ADDRESS
+	MOV	#CHOUT,XRBUSE-XRBC(R3) ;GUESS AT NORMAL OUTPUT
+	CMPB	#DHDMA,XRMOD-XRBC+1(R3) ;Is it an APT request?		;008
+	BNE	20$		;No, again normal processing		;015
+	TST	APTAP5		;Is APT loaded?				;008
+	BMI	10$		;No, missing special feature		;013
+	JMPM	HSDHEN,APTAP5	;Yes, then let APT handle it		;008
+
+10$:	ERROR	ERRERR		;APT not loaded				;013
+
+20$:	BIT	#DDAPLT,(R1)	;Application terminal?			;015
+	BEQ	60$		;No, normal processing			;015
+.ASSUME	DDIDX	EQ	0						;020
+.ASSUME	DDSTS	EQ	DDIDX+1						;020
+	REGSAV			;Yes, save all registers		;015
+	CALLX	LINSTS		;Get solicit status			;015
+	BCC	50$		;Connection established, do I/O		;015
+	TSTB	R0		;Solicit in progress?			;020
+	BNE	30$		;Yes					;020
+	ERROR	DETKEY		;No, not connected or solicit failed	;020
+30$:	REGRES			;Restore registers			;015
+	BIT	#TO.NST,XRMOD-XRBC(R3) ;User specify no-stall?		;015
+	BEQ	40$		;No, then wait for solicit to finish	;015
+	ERROR	NOTAVL		;Otherwise, say it's not available	;015
+40$:	MOV	#IOSTAL,(SP)	;Need to stall the I/O			;015
+	RETURN			;Done for now				;015
+
+50$:	REGRES			;Restore all registers and continue	;015
+60$:	MOV	#GETUSR,XRBSV2-XRBC(R3) ;Put address of GETUSR in save area ;015
+	TST	@JOBF3		;Is there a log file?			
+	BPL	70$		;No					
+.ASSUME	J2LOG LT 0							
+	MOV	#LOGBF2,XRBSV2-XRBC(R3) ;Yes, save the address of LOGBF2 
+70$:	BIT	#DDCONS,DDCNT(R1) ;Is this our console terminal?	
+	BEQ	80$		;No					
+	MOV	#NOSCAN,XRBSV3-XRBC(R3) ;Assume no scanning		
+	TSTB	@JOBF3		;ICFP active?				
+	BPL	90$		;No, good assumption			
+.ASSUME	J2ICF EQ 200
+	MOV	#DOSCAN,XRBSV3-XRBC(R3) ;Yes, then do scanning		
+	BR	90$							
+
+80$:	MOV	#NTCNSL,XRBSV3-XRBC(R3) ;Set up for non-console processing 
+	TST	(R1)		;Control-O in effect?			
+	BMI	260$		;Yes, then ignore this request		
+90$:	CALL	CHKRSX,R5	;CHECK FOR RSX MODE AND/OR RSX DESIRED	
+	  BR	140$		;NO RSX MODE DESIRED, JUST CONTINUE
+	  BR	110$		;RSX MODE DESIRED, WE'RE IN RSX MODE
+	CMPB	DDHORZ(R1),DDHORC(R1) ;;JUST INTO RSX MODE, AT LEFT MARGIN?
+	BEQ	100$		;;YES, PRESET MODE OF EXTRA <LF> IS CORRECT
+	CALLX	RSXCR		;;NO, OUTPUT A <CR> AND SET <LF> NEEDED MODE
+100$:	CALL	RSXEAT,R4,015	;;EAT ANY LEADING <CR> (WE FORCED LEFT MARGIN)
+	BIS	#TO.PRE,XRMOD-XRBC(R3) ;;FORCE A "PREFIX" CALL TO EAT <LF>
+110$:	SPLC	5		;;ENSURE LEVEL 5 FOR SAFETY NOW
+	BIT	#TO.PRE,XRMOD-XRBC(R3) ;;IS THIS THE "PREFIX" CALL?
+	BEQ	130$		;;NOPE (OR INITIAL CHECK ALREADY DONE)
+	BIT	#TTRSX1,DDFLAG(R1) ;;IS EXTRA <LF> SET?
+	BNE	120$		;;NO EXTRA <LF>, SO KEEP WHOLE THING
+	CALL	RSXEAT,R4,012	;;YEP, EAT A <LF> IF ONE'S THERE
+120$:	BIC	#TO.PRE,XRMOD-XRBC(R3) ;;WE DO "PREFIX" CHECK ONLY ONCE
+130$:	BIS	#TTRSX2!TTRSX1,DDFLAG(R1) ;;FORCE RSX MODE
+	DECB	DDFLAG+1(R1)	;; OF NORMAL RSX
+.ASSUME	TTRSX2	EQ	400
+	SPLC	3		;;NOW WE CAN GO BACK TO LEVEL 3
+140$:	CLR	-(SP)		;GUESS AT NORMAL I/O (0=>DONE)
+	BIT	#TO.DEC,XRMOD-XRBC(R3) ;ECHO FIELD DECLARATION ?
+	BEQ	150$		;NO, NORMAL PUT
+	BIT	#TTECTL,TTMODE(R1) ;YES, ECHO CONTROL MODE?
+	BEQ	150$		;NOPE
+	MOV	#2,(SP)		;YEP, SO STOP WHEN <=2 DO TO
+150$:	BIT	#TTCTLC,TTMODE(R1) ;CLEAN CONTROLS MODE?		
+	BNE	160$		;YEP					
+	BIT	#TO.CTL,XRMOD-XRBC(R3) ;CLEAN CONTROLS?			
+	BEQ	170$		;NOPE					
+160$:	MOV	#CHOUTC,XRBUSE-XRBC(R3) ;YES, SO CHANGE IT		
+170$:	BIT	#TO.BIN,XRMOD-XRBC(R3) ;BINARY MODE OUTPUT?		
+	BEQ	180$		;NOPE
+	MOV	#CHROUT,XRBUSE-XRBC(R3) ;YES, SWITCH TO BINARY MODE OUTPUT
+180$:	CMP	(R3)+,(SP)	;MORE TO OUTPUT?			;031
+	BLOS	270$		;NO, WE'RE DONE WITH OUTPUT
+	TST	(R1)		;HAS USER TYPED A ^O RECENTLY?
+	BPL	200$		;No					
+.ASSUME	DDSTAT	EQ	100000
+	BIT	#DDCONS,DDCNT(R1) ;Is this our console terminal?	
+	BNE	210$		;Yes, then skip the buffer check	
+	BR	250$		;No, then don't do anything		
+
+200$:	CALLX	CHKFRE		;CHECK FOR FREE BUFFERS			
+	BCS	230$		;NOT ENOUGH, SO STALL
+210$:	CALL	@XRBSV2-XRLOC(R3) ;Check log file and/or get a character 
+	CALL	@XRBSV3-XRLOC(R3) ;Now process the character		
+220$:	INC	(R3)		; AND BUMP UP THE ADDRESS		
+	DEC	-(R3)		;  AND BUMP DOWN THE BYTE COUNT
+	BITB	#BQSCHED,L3QUE+OQSCHED ;Is our run-burst over?		
+	BEQ	180$		;No, so continue			;031
+	MOVB	JOB,R4		;Yes, get our job number		
+	MOV	JBWAIT(R4),JBSTAT(R4) ;Make the job runnable		
+	BR	240$		;And stall the job			
+        
+GLOBAL	<JBWAIT,IOEXIT,JBSTAT,L3QUE,NOSCAN,DOSCAN,NTCNSL,HSDHEN,CHOUTC,CHROUT>
+GLOBAL	<APTAP5,HSDHEN>							;008
+
+230$:	MOV	JOBWRK,R3	;R3 -> XRB COPY				
+	BIT	#TO.NST,XRMOD(R3) ;USER REQUESTED NO STALL?		
+	BNE	250$		;YES, SO DON'T STALL			
+240$:	MOV	#IOSTAL,2(SP)	;CHANGE RETURN ADDRESS TO STALL THIS JOB 
+250$:	TST	(SP)+		;POP THE FINISHING COUNT WORD
+260$:	SPLC	5		;Lock out interrupts			
+	CALLX	CHKLIN		;;Start up any output if possible	
+	SPLC	3		;;Enable interrupts			
+	RETURN			;And we're done				
+
+270$:	SPLC	5		;;GO TO LEVEL 5 FOR SAFETY
+	BIT	#TO.SUF,XRMOD-XRLOC(R3) ;;DOING "POSTFIX" CHECKING?
+	BEQ	280$		;;NO, CHECK FOR A FIELD DECLARATION
+	CALLX	RSXCR		;;YES, OUTPUT A <CR> AND SET <LF> NEEDED MODE
+280$:	TST	(SP)+		;;FIELD DECLARATION?
+	BEQ	260$		;;NOPE, ALL DONE
+	CALL	EKODEC		;;YEP, SO GO DO IT
+	BR	260$		; THEN EXIT
+
+.DSABL	LSB
+
+.SBTTL	USER LEVEL INPUT SERVICE
+
+.ENABL	LSB
+
+TTISER:	BIT	#TTFMS,TTMODE(R1) ;Using FMS mode?
+	BEQ	10$		;No, then don't error			;009
+	ERROR	MODERR		;Can't do .READs and FMS mode
+
+10$:	TST	APTAP5		;APT loaded				;008
+	BMI	20$		;No, nothing to do for APT		;008
+	BIT	#DDAPT,(R1)	;Owned by APT?				;008
+.ASSUME	DDSTS	EQ 1
+	BEQ	20$		;No, normal processing			;008
+	CALLM	HSBUFE,APTAP5	;Check for DMA line buffer exhaustion	;008
+	BCC	20$		;All is well				;008
+	SETERR	HNGDEV,@IOSTS	;Buffer exhausted, give appropriate error ;008
+	JMPX	IOEXIT		; and return to the user job		;008
+
+20$:	BIC	#DDSTAT,(R1)	;Re-enable output if reading		;033
+.ASSUME	DDSTS	EQ 1
+	BICB	#TTERMS,DDFLG2(R1) ;No longer outputting error message	;031
+	MOV	#CHOUT,XRBUSE-XRBC(R3) ;Routine to output possible RSX LF ;002
+	CALL	CHKRSX,R5	;CHECK FOR RSX MODE AND RSX DESIRED
+	  BR	40$		;NORMAL MODE
+	  BR	40$		;RSX MODE, AND WE'RE IN IT
+	BIS	#TTRSX2!TTRSX1,DDFLAG(R1) ;;ENSURE BEING IN
+	DECB	DDFLAG+1(R1)	;; RSX NORMAL MODE
+.ASSUME	TTRSX2	EQ	400
+	SPLC	3		;;BACK TO LEVEL 3 NOW
+40$:	MOV	#CHORTS,XRBUSE-XRBC(R3) ;No TT output for TT read logging ;002
+	TST	XRTIME-XRBC(R3)	;IS THIS THE "EDITOR" WAIT??
+	BPL	70$		;NO
+	CALL	DLMCLR		;CLEAR PRIVATE DELIMITER MASK
+	BITB	#ICFLVL,TTRFLG(R1) ;ICF read?				;022
+	BEQ	60$		;No, so die if logged out or captive	;021
+	CALL	LOGCHK		;Yes, check only for logged-out		
+	BCC	70$		;No, everything is a-okay		;029
+50$:	JMP	STALL		;Go try to stall			;029
+
+60$:	CALL	LOGCAP		;Logged in and not captive?		
+	BCS	50$		;No, attempt to stall (i.e. kill) the job
+70$:	BISB	#TTNREC,TTFLG3(R1) ;Assume we won't be putting anything ;022
+				; in recall buffers			;009
+	BITB	#ICFLVL,TTRFLG(R1) ;Is this going to be an ICFP read?	;022
+	BNE	MOVCHR		;Yes, so skip check for type ahead	;021
+	CALL	CHKINP		;Check for full command in input buffer	;027
+	BCC	50$		;None, try to stall the job		;029
+DOINI:	CALLX	RECINI		;Initialize recall pointers		;029
+	.BR	MOVCHR		;Now start moving characters		;019
+
+.DSABL	LSB
+
+GLOBAL	<APTAP5,CHORTS>
+
+.SBTTL	MOVCHR	Move characters from input buffer into user's buffer
+;+
+;	R0 =  unit # * 2
+;	R1 -> DDB
+;	R3 -> XRB @ XRBC
+;	R5 -> user's buffer 
+;
+; Start reading characters from input buffer, and put them into
+; the user's buffer to satisfy the .READ.  Put them into the
+; recall buffer as well if the open modes and terminal characteristics
+; set properly (see RECINI).
+;-
+.ENABL	LSB
+
+MOVCHR:	BITB	#TTSKLF,DDFLG2(R1) ;Need to skip <LF> for RSX mode read? 
+	BNE	10$		;Yes, so skip user buffer full check	
+	CMP	XRLEN-XRBC(R3),(R3) ;Check "length" vs. "count"
+	BHI	5$		;Still have room, continue		;039
+	JMP	INPDN3		;Buffer all full, then quit now		;039
+
+5$:	TST	@JOBF3		;Log file active?			;039
+	BPL	10$		;No, then skip log buffer check		
+.ASSUME	J2LOG LT 0							
+	CALL	LOGBUF		;Check for log buffer full, exit if so	
+				; NOTE: might note return
+10$:	BITB	#ICFLVL,TTRFLG(R1) ;Is this going to be an ICF read?	;022
+	BEQ	20$		;No, skip				;021
+	CALLX	TTIICF		;Yes, get the data			
+	BCS	INPDN3		;Forced exit, go do it			
+	BR	30$		;A-okay, go and store this character	
+
+20$:	CALL	FCHINP		;Fetch the next character		;019
+	BCC	25$		;Got one!				;033
+	CALLX	TTISGL		;Is term in a single character mode?	;033
+	BNE	INPDN3		;Yes, then we're all done		;033
+	JMP	STALL		;No, then stall for more input		;044
+
+25$:	CALL	PUTLOG		;Put character in logfile if needed	;019
+30$:	BITB	#TTSKLF,DDFLG2(R1) ;Need to skip <LF>?			
+	BNE	40$		;Yes, do so				
+	INC	XRLOC-XRBC(R3)	;Bump up the buffer address
+	INC	(R3)		; and bump up the byte count
+	CALL	PUTUSR		;  and store character in user's buffer	
+40$:	BIT	#TTBIN,TTMODE(R1) ;Binary mode?
+	BNE	70$		;Yep
+	CMPB	#200,R2		;Is this the start of an escape sequence
+	BNE	50$		;No
+	BISB	#TTESCO,DDFLG2(R1) ;Signal start of escape seq scan
+50$:	CMPB	#233,R2		;Is this the end
+	BNE	60$		;No
+	BICB	#TTESCO,DDFLG2(R1) ;Signal end of scan
+60$:	BITB	#TTESCO,DDFLG2(R1) ;IS an escape sequence being scanned
+	BNE	80$		;Yep no private delimiter check		;013
+	CALLX	RECPUT		;No, put character into recall buffer	;011
+70$:	CALLX	CHKDLM		;Is this char the private delimiter?	
+	BCS	INPDN1		;Yes => all done			
+80$:	TSTB	R2		;What was that character?		;013
+	BEQ	MOVCHR		;A null => continue			;019
+90$:	BIT	#TTBIN,TTMODE(R1) ;binary mode ?			
+	BNE	MOVCHR		;Yes					;019
+	BIT	#TI.ISB,XRMOD-XRBC(R3) ;Doing RSX I/O status block? (QIO$)
+	BEQ	95$		;No					;054
+	BITB	#TTSKLF,DDFLG2(R1) ;Did we just skip the <LF> beyond the <CR>? 
+	BEQ	100$		;No, continue				
+	MOV	#015,R2		;Yes, so set up <CR> as current char	
+	BR	INPDN2		; and store that as the delimiter	
+
+95$:	BIT	#TTRSX2!TTRSX1,DDFLAG(R1) ; Are we in RSX mode?		;054
+	BEQ	110$		;Not this time				;054
+100$:	CMPB	R2,#015		;Is it <CR> (that's a delimiter)?	
+	BNE	110$		;No, carry on
+	BISB	#TTSKLF,DDFLG2(R1) ;Yes, set up to skip the following <LF>	
+	BR	MOVCHR		;And loop				;019
+
+110$:	MOV	#TTDLIM,R4	;Get address of delimiter list
+120$:	CMPB	R2,(R4)+	;Delimiter??
+	BLO	120$		;No, and keep looping
+	BHI	MOVCHR		;No, and quit looping			;019
+	CMPB	R2,#'C-100	;Is this a CTRL/C?			
+	BNE	INPDON		;Nope					
+	BIT	#TTECTL,TTMODE(R1) ;In echo control mode?		
+	BNE	INPDON		;Yes, then CTRL/C is always a delimiter 
+	BITB	#TTCTRC,TTCTRL(R1) ;ARE WE ALLOWING CTRL/C?		
+	BEQ	MOVCHR		;No => don't treat this as a delimiter	;019
+	.BR	INPDON		;Yes, then this is a delimiter
+
+.DSABL	LSB
+
+GLOBAL	<TTDLIM>
+
+.SBTTL	INPDON	Input complete, finish up
+;+
+; INPDON - Input complete, finish up - A read has completed.  
+; 
+;	R1 -> DDB
+;	R2 = character 
+; 	R3 -> XRB @ XRBC
+;
+; 	Branched to from various locations for various reasons.
+;
+;	R2 is usually a delimiter, but in the case of binary mode, the character
+;	may not be one.  We can get here (INPDN3) if the fetch failed, meaning
+;	R2 is the last character fetched, and is NOT a delimiter, for binary
+;	mode reads.
+;
+;	This routine always exits through IOEXIT.
+;-
+.ENABL	LSB
+
+INPDON:	BIS	#400,R2		;Yes, flag as from the delimiter list	
+INPDN1:	BIT	#TI.ISB,XRMOD-XRBC(R3) ;Doing RSX I/O status block?
+	BEQ	10$		;No
+INPDN2:	DEC	(R3)		;Yes, don't count the delimiter in XRBC
+	MOVB	R2,XRBLKM-XRBC(R3) ;Return delimiter in XRBLKM
+10$:	BICB	#TTSKLF!TTESCO,DDFLG2(R1) ;Make sure skip-LF is off, as	;038
+				; well as our escape seq scanner flag	;038
+	CMP	R2,#<'Z-100>!400 ;Was character CTRL/Z from delimiter list?
+	BNE	INPDN3		;No
+	CALLX	TTISGL		;Check for single character mode (eg binary)
+	BNE	INPDN3		;Special mode, so don't give EOF error
+	SETERR	EOF,@IOSTS	;Normal mode, so give "EOF" error
+	CLRB	XRBLKM-XRBC(R3)	; and never return a delimiting character
+INPDN3:	BIC	#TTDDT,DDFLAG(R1) ;DDT sub-mode is one-shot
+	BICB	#1,TTDLMC(R1)	;Delimiter has been looked at		;018
+	BICB	#PREAD,TTRFLG(R1) ;Read has been satisfied		;022
+	CLRB	PMTPOS(R1)	;Clear out our prompt position		;024
+	SPLC	5		;Lock out terminal interrupts		
+	CMP	TTINEC+FP(R1),TTINEC+EP(R1) ;;Any more input?		;017
+	BNE	20$		;;Yes, there sure is			
+	CALLX	ASKINP		;;No, so check on sending an XON now	
+20$:	CALLX	CHKLIN		;;Start any pending ICF output
+	SPLC	3		;;Back to PR3 now			
+	JMPX	IOEXIT		; AND EXIT
+
+.DSABL	LSB
+
+.SBTTL	STALL	- Stall, waiting for more input from user
+;+
+; STALL - Stall, waiting for more input from user
+; 
+;	R0 =  unit number * 2
+;	R1 -> DDB
+;	R3 -> XRB @ XRBC
+;
+; This routine is called (or rather JMPed to), when we have no command
+; to put into the user's buffer.  It calls the PROTYP routine to actually
+; process the type ahead (which is the process of taking characters one 
+; at a time out of the type ahead buffer and processing them, putting
+; them into the input buffer).  
+;
+; We will give an error if we are in echo control mode and there is no
+; field declared, and also if we cannot stall.
+;	
+;-
+.ENABL	LSB
+
+STALL:	MOV	R3,-(SP)	;Save the work block pointer		;037
+	MOV	R5,-(SP)	;Save pointer to user's buffer		;029
+	SPLC	5		;;Ensure level 5 for safety		;028
+	CALL	PROTYP		;;Process the type-ahead		;028
+	CALLX	ASKINP		;;Go run the reader and xon input if needed
+	MOV	(SP)+,R5	;;Restore pointer to user's buffer	;029
+	MOV	(SP)+,R3	;;Restore work block pointer
+	CLR	TIM.KB(R0)	;;Clear time out initially
+	MOV	XRTIME-XRBC(R3),R2 ;;Wait of 0 or editor wait?
+	BLE	20$		;;If so then leave clock alone
+	MOV	R2,TIM.KB(R0)	;;Set the terminal time out wait period
+20$:	SPLC	3		;;Back to level 3 again
+	BITB	#1,TTDLMC(R1)	;Did PROTYP find a delimiter?		;028
+	BNE	40$		;Yes!  Keep going			;028
+	BIT	#TI.MUL!TI.NST,XRMOD-XRBC(R3) ;Can we stall?
+	BEQ	40$		;Yes, go do it
+	CALLX	TTISGL		;Any single character mode?		;028
+	 NOP			;**TEMP** for patch to BIT #TTBIN,TTMODE ;028
+	BEQ	30$		;Nope, then give error			;028
+	CMP	TTINPT+EP(R1),TTINPT+FP(R1) ;Any characters fetched?	;028
+	BEQ	30$		;No, then return an error		;029
+	JMP	DOINI		;Yes, initialize recall buffer, move 'em;029
+
+30$:	ERROR	DATERR		;No, so give error instead
+
+40$:	CALL	LOGCAP		;Logged out or captive?			
+	BCC	IOSTAL		;If not, no more checking
+	TST	R2		;If so, is this an editor wait?
+	BPL	IOSTAL		;If not editor, then stall also
+	.BR	KILLIT		;Editor wait, go kill job
+
+GLOBAL	<TIM.KB>
+
+.DSABL	LSB
+
+.SBTTL	KILLIT, DOKILL - Kill the job
+;+
+;	R0 = unit # * 2
+;	R1 -> DDB
+;
+;	...
+;	
+;	No Outputs
+;
+; 	DOKILL is called by the PK driver (via CALLM) to try to kill the job.
+;-
+.ENABL	LSB
+
+KILLIT:	MOVB	JOB,R2		;GET JOB # *2				
+	MOV	#DMPJOB,-(SP)	;SET RETURN FOR DUMPING THE JOB (AND EXIT)
+DOKILL::BIC	#^C<63.*2>,R2	;ENSURE A VALID JOB # *2
+	BEQ	20$		;NO JOB...
+	TST	JBWAIT(R2)	;IS JOB WAITING FOR SOMETHING?
+	BNE	10$		;IF SO, USE THAT WAIT CONDITION
+	MOV	#JS.KB,JBWAIT(R2) ;GIVE JOB A WAIT CONDITION TO WAKE UP FROM
+10$:	BIS	#JSALL,JBSTAT(R2) ;MAKE JOB RUN SOON IF WE CAN
+	MOV	R2,-(SP)	;Save job # * 2				
+	MOV	JOBTBL(R2),R2	;GET JOB DATA POINTER
+	BIS	#JFSPCL,JDFLG(R2) ;SAY SPECIAL CONDITION
+	BISB	#JFKILL,JDFLG2(R2) ; AS KILL THIS JOB
+	MOV	(SP)+,R0	;Restore job # * 2			
+	MAP	PUSH,APR=6,DATA	;Save APR6 mapping
+	CALLX	MAPJCR		;Map JCR entry for job			
+	MOVB	#127.,JCPRI(R1)	;And make the kill be high priority	
+	MAP	POP,APR=6,DATA	;Restore mapping
+20$:	RETURN			;And we're done				
+
+.DSABL	LSB
+
+.SBTTL	IOSTAL - Stall the job, come back in through IO REDO
+;+
+;	R0 = unit # * 2
+;	R1 -> DDB
+;
+;	...
+;
+;	No outputs
+;-
+.ENABL	LSB
+
+IOSTAL:	CMPB	#TTPK11,TTINTF(R1) ;Is this a PK?
+	BNE	10$		;No, not this time
+	CALLMI	SETPKW,PKDAP5	;Yes, tell the user about the I/O wait
+10$:	JMPX	IOREDO		;And exit
+
+.DSABL	LSB
+
+.SBTTL	LOGCAP, LOGCHK routines
+
+.ENABL	LSB								
+
+LOGCAP:	SEC			;Assume it's a captive job		;019
+	BIT	#J2CAPT,@JOBF3	;Captive job?				
+	BNE	10$		;Yes, we were right, exit with C=1	;019
+
+LOGCHK:	MOV	R0,-(SP)	;Save a register			
+	MOV	JOBJD2,R0	;Get JDB2 pointer			
+	CMP	J2PPN(R0),#1	;C=0 if logged in (BHIS = BCC)		
+	MOV	(SP)+,R0	;Restore R0				
+10$:	RETURN			;Done					
+
+.DSABL	LSB								
+
+GLOBAL	<DMPJOB,JBWAIT,JSALL,JBSTAT,JOBTBL>
+
+.SBTTL	PUTLOG	Put character in log if needed
+;+
+; PUTLOG - Put character in log if needed
+;
+; Inputs:
+;	R1 -> DDB
+;	R0 = unit number * 2
+;	R2 = character
+;	Priority is PR3
+;
+; Outputs:
+;	Character logged if conditions are right
+;
+;	All registers preserved
+;
+; This routine is called by the MOVCHR routine to put the character into
+; the logfile.  If the log is not open, or if we're not echoing, we return
+; without logging the character.  
+;-
+.ENABL	LSB
+
+PUTLOG:	TST	@JOBF3		;Is a logfile open?			;027
+.ASSUME	J2LOG LT 0
+	BPL	20$		;No, don't log anything			;027
+	BITB	#TTSKLF,DDFLG2(R1) ;Are we skipping a line feed?	;019
+	BNE	20$		;Yes, so don't log it
+	BIT	#NOECHO!TAPE,DDFLAG(R1) ;Echo turned off?		
+	BNE	20$		;Yes, skip logging
+	BIT	#DDCONS,DDCNT(R1) ;Console device?
+	BEQ	20$		;No, skip logging
+	CMPB	R2,#'Z-100	;Is this Control/Z?			;019
+	BEQ	10$		;Yes, go log it
+	CALLRX	CHRLG3		;Echo char to the log
+
+10$:	CALLRX	LOGCTZ		;Go log the Control/Z			
+
+.SBTTL	LOGBUF, LOGBF2 Check whether log file buffer needs to be emptied
+;+
+; LOGBUF -- Check whether log file buffer needs to be emptied		
+;-
+
+LOGBF2:	MOV	#GETUSR,-(SP)	;Get a character when done with LOGBUF	
+LOGBUF:	CALLMI	CHKLBF,EM2AP5	;Go check for full buffer, exit if so	
+20$:	RETURN			;Done					
+
+.DSABL	LSB
+
+.SBTTL	EKODEC	Declare a field in Echo Control Mode 
+;+
+; EKODEC - Declare a field in Echo Control Mode 
+;
+;	R1 -> DDB
+;	R3 -> XRB @ XRLOC
+;
+;	CALL  EKODEC
+;
+;	R1 unchanged
+;	R3 -> XRB @ XRBC
+;	R2,R4 Random
+;
+; This routine is called only from the user level output service (TTOMUL)
+; to make a field active.  This is done when TO.DEC is set in XRB+XRBC
+; during an echo control mode write.  
+;-
+.ENABL	LSB
+
+EKODEC:	TST	EKOCTW(R1)	;;FIELD ALREADY ACTIVE ?
+	BPL	20$		;;NO, SO PROCESS THIS DECLARATION
+.ASSUME	TTACTV	EQ	100000
+	CMP	TTINPT+EP(R1),TTINPT+FP(R1) ;;EQUAL PTRS MEAN NO CHAR
+	BNE	60$		;;Some, so return "in use" error	;037
+20$:	CALL	GETUSR		;;GET FIELD SIZE & OVERFLOW MODE	
+	ADD	#200,R2		;;REVERSE SENSE ON OVERFLOW MODE (1=NORMAL NOW)
+	BIC	#^C<377>,R2	;;TRIM OFF ALL BUT THE LOW BYTE
+	BIT	R2,#177		;;IS FIELD SIZE ZERO ?
+	BEQ	70$		;;Yes, so return error
+	MOV	R2,R4		;;SAVE FIELD SIZE
+	DEC	-(R3)		;;IF XRBC (BYTE COUNT) WAS 1
+	BEQ	40$		;;DEFAULT PAINT CHARACTER TO SPACE
+	CALL	GETUSR		;;GET HIS PAINT CHARACTER		
+	BIC	#^C<177>,R2	;;TAKE OUT THE GARBAGE
+	BNE	50$		;;IF ANYTHING LEFT, IT'S A PAINT CHAR.
+40$:	MOV	#040,R2		;;ELSE, DEFAULT PAINT CHARACTER TO <SPACE>
+50$:	SWAB	R2		;;PAINT CHARACTER TO HIGH BYTE
+	ADD	R2,R4		;;ADD TO FIELD SIZE & OVERFLOW MODE
+	BIS	#TTACTV,R4	;;Set to mark the field as active	
+	MOV	R4,EKOCTW(R1)	;;Now set that up			
+	RETURN			;;And we're all done			;037
+
+60$:	ERROR	INUSE		;;ERROR, FIELD ACTIVE AND INPUT PENDING	;037
+
+70$:	ERROR	BADCNT		;;YES, SO RETURN ERROR			;037
+
+.DSABL	LSB
+
+.SBTTL	PROTYP	Process pending type-ahead
+;+
+; PROTYP - Process pending type-ahead
+;
+;	R1 -> DDB
+;	Priority is PR5
+;
+;	CALL	PROTYP
+;
+;	R2 =  Undefined
+;	R3 =  Undefined (is it?)
+;	R4 =  Undefined
+;
+; Process type ahead by calling FETCH and ECHOIN until no more
+; characters are in the type ahead buffer, or until a delimiter 
+; is found.
+;-
+.ENABL	LSB
+
+PROTYP:	BIT	#1,TTDLMC(R1)	;;Has a delimiter been typed already?	;037
+	BNE	20$		;Yes, so don't process type ahead	;037
+	BIT	#TTECTL,TTMODE(R1) ;;Are we in Echo control mode?	
+	BEQ	10$		;;No, process type ahead now
+	TST	EKOCTW(R1)	;;Yes, field active?			
+.ASSUME	TTACTV	EQ	100000
+	BPL	30$		;;Can't do a read if no field active	;037
+10$:	CALLX	FETCH,R5,TTINEC+EP ;;Fetch a char from type ahd buffer	;027
+	BCS	22$		;;No more to fetch 			;046
+	CALLM	ECHOIN,KINAP5	;;Process the input character		
+	BITB	#TTBIN,TTMODE(R1);;Binary mode read?			;029
+	BEQ	15$		;;No, not this time			;029
+	CALLX	CHKDLM		;;Yes, does it match any private delim?	;029
+	BCC	10$		;;No, keep fetching			;029
+15$:	BITB	#1,TTDLMC(R1)	;;A delimiter found?			;018
+	BEQ	10$		;;No, loop and fetch some more		;016
+20$:	CMPB	TTINEC+EP(R1),TTINEC+FP(R1) ;;Type ahead buffer empty?	;046
+	BNE	25$		;;Not yet				;046
+22$:	CLRB	TTESCT(R1)	;;Yes, no escape seq here now		;046
+	CMP	FREES+2,#60.	;;Down to less than 60 small buffers?	;051
+	BHIS	25$		;;More, nothing to give back		;049
+	CALLX	CLRBUF,R5,TTINEC+EP ;;Less, give back type ahead buffer	;049
+25$:	CALLRX	CHKLIN		;;Start up the line if XON		;016
+
+30$:	ERROR	DATERR		;;?Data Error On Device if a read is	;037
+				;; issued without an active field	;037
+
+.DSABL	LSB
+
+GLOBAL	<FREES>
+
+.SBTTL	GETLVL	Get command level of this read
+;+
+; GETLVL - Get command level of this read
+; 
+; Inputs:
+;	R1 -> DDB
+;	R3 -> XRB @ XRBC
+;	Terminal driver (TERCLS) is mapped in APR 6 
+;
+; Format:	
+;	CALL GETLVL
+;
+; Outputs:
+;	R0,R1 preserved
+;	TTRFLG (read flag) in DDB set up with current level, and other info:
+;	    DCLLVL if read occurred from DCL
+;	    RTSLVL if read was from any keyboard monitor besides DCL
+;	    PRGLVL if not from a RTS (including DCL).  
+;	       [*** note: only one of the above 3 bits can be set at once ***]
+;	    CUILVL if the CUI modifier was used, to indicate a CUI prompt
+;	    ICFLVL if this read is coming from (came from) an ICF
+;
+;	All mapping is preserved
+;-
+.ENABL	LSB
+
+GETLVL:	MOV	R0,-(SP)	;Save unit number * 2			;014
+	MOV	R1,-(SP)	;Save DDB pointer			;014
+	MAP	PUSH,APR=6,DATA	;Save Dspace APR6 mapping		;014
+	MOVB	JOB,R0		;Get job number * 2			;014
+	CALLX	MAPJCR		;Map the user's JCR			;014
+	CLR	R0		;Clear bits to set in TTRFLG		;022
+	BIT	#TI.CNT,XRMOD-XRBC(R3) ;Is CUI "continue" modifier set?	;019
+	BEQ	10$		;No, then don't set CUI level		;019
+	BISB	#CUILVL,R0	;Yes, set CUI level			;019
+10$:	CMP	JOBRTS,DEFKBM	;Is the runtime system DCL?		;014
+	BNE	20$		;No, try RTS				;019
+	BISB	#DCLLVL,R0	;Yes, set DCL level			;019
+	BR	40$		;Now get out				;019
+
+20$:	CMP	SYSTAK-4,JCMHGH(R1) ;Is address above job's minimum RTS?;038
+	BLO	30$		;No, so it's a program			;014
+	TST	XRTIME-XRBC(R3)	;Could still be a program, ^C read?	;014
+	BPL	30$		;No, so it's a program			;019
+	BISB	#RTSLVL,R0	;Yes, set RTS level			;019
+	BR	40$		;Now get out				;019
+
+30$:	BISB	#PRGLVL,R0	;Set program level			;019
+40$:	MAP	POP,APR=6,DATA	;Restore Dspace APR6 mapping		;014
+	MOV	(SP)+,R1	;Restore DDB pointer			;014
+	SPLC	5		;Raise to PR5 for safety		;027
+	BICB	#CUILVL!DCLLVL!RTSLVL!PRGLVL!ICFLVL,TTRFLG(R1) 		;027
+				;;Clear all levels 			;027
+	BISB	R0,TTRFLG(R1)	;;Set the command level in DDB		;022
+	SPLC	3		;;Back to PR3 again			;027
+	MOV	(SP)+,R0	;Restore unit number * 2		;014
+	RETURN			;All done				;033
+
+.DSABL	LSB
+
+GLOBAL	<JCMHGH,DEFKBM,SYSTAK>						;014
+
+.SBTTL	OPEN SERVICE
+;+
+; OPN$KB - OPEN SERVICE FOR TERMINALS.
+;
+;	R0 =  UNIT NUMBER TIMES TWO
+;	R1 -> DDB (MUST BE PRESERVED)
+;	R4 -> FIRQB (DEFAULT FQFLAG AND FQBUFL VALUE LOADED)
+;	R5 -> JOB'S IOB ENTRY (MUST BE PRESERVED)
+;
+;	...     
+;
+;	RETURN
+;
+;	-OR-
+;
+;	CALL	RETDEV
+;	ERROR	CODE
+;-
+.ENABL	LSB
+
+	TMPORG	OPNTBL,2
+	 .WORD	OPN$KB
+	UNORG
+
+OPN$KB:	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver
+	MOV	FQMODE(R4),R2	;GET OPEN MODE BITS			
+	BIC	#100000,R2	;Make sure sign bit is off		
+	BIT	R2,#TTECTL	;ECHO CONTROL OPEN?
+	BEQ	10$		;NOPE
+	BIC	#^C<TTCTLC!TTTECS!TTGARD!TTESEQ>,R2 ;CLEAR ALL BUT THESE 
+	BIS	#TTECTL!TTCRLF,R2 ; AND TURN ON ECHO CONTROL & NO AUTO CR/LF
+10$:	BIT	#TTFMS,R2	;FMS open?
+	BEQ	30$		;No, not this time
+	TST	FMSAP5		;Yes, do we have FMS support?
+	BPL	20$		;Yes, so go call FMS for initialization
+	ERROR	ERRERR		;No, give missing special feature
+
+20$:	CALLM	FMSOPN,FMSAP5	;Call FMS to perform the open
+	SPLC	5		;Lock out interrupts
+	CALL	CLRTTI		;;Cancel type-ahead			;008
+	BR	50$		;;And join up				;008
+
+30$:	BIT	#DDAPLT,(R1)	;Application terminal?			;015
+	BEQ	40$		;No					;015
+.ASSUME	DDIDX	EQ	0						;020
+.ASSUME	DDSTS	EQ	DDIDX+1						;020
+	PUSH	<R3,R4>		;Preserve these from INICON		;020
+	CALLX	INICON		; and go initiate a connection		;015
+	POP	<R4,R3>		;Restore the saved registers		;020
+40$:	CALL	MULTTF,R5	;SET ALL TO DESIRED MODE		;015
+	BIC	#TTRSET!TTDFIL,DDFLAG(R1) ;Ensure no DDB reset and no	;038
+				; defeating next char performed on any 	;038
+				; DDB owned by master, including console;038
+SETMOD:	SPLC	5		;Lock out terminal interrupts
+	MOV	#40*400,EKOCTW(R1) ;;DEFAULT FIELD DESCRIPTOR
+50$:	MOV	R2,TTMODE(R1)	;;Set the open mode
+	MOV	R2,-(SP)	;;Save open mode for multi-terminal service
+	MOV	R3,-(SP)	;; and R3 (XRB -> for multi-tty I/O)	;004
+	CALLX	SETPRM		;;And set the line parameters
+	MOV	(SP)+,R3	;;Restore the saved R3 contents		;004
+	MOV	(SP)+,R2	;;Restore the open mode
+	SPLC	3		;;Enable interrupts
+	RETURN			;NOW EXIT
+
+GLOBAL	<FIPRVM,TERAP6,FMSAP5>
+
+.DSABL	LSB
+
+.SBTTL	TERMINAL CLOSE ROUTINE
+;+
+; CLS$KB - CLOSE SERVICE FOR TERMINALS.
+;
+;	R0 =  UNIT NUMBER TIMES TWO
+;	R1 -> DDB/FCB
+;	R5 -> DDB/FCB (MUST BE PRESERVED)
+;	IF Z=1 THEN A REAL CLOSE CALL
+;	IF Z=0 THEN A "RESET" CLOSE CALL
+;
+;	...
+;
+;	RETURN
+;-
+.ENABL	LSB
+
+	TMPORG	CLSTBL,2
+	 .WORD	CLS$KB
+	UNORG
+
+CLS$KB:	MAP	FIPPOL		;Map FIP pool to get the console DDB	
+	MOV	FIJBDA,R4	;Get job data block address		
+	MOV	@(R4)+,R4	;Now get the console DDB address	
+.ASSUME	JDIOB	EQ	0
+	MAP	KBDAP5,APR=5,DATA ;Re-map our data
+	MAP	TERAP6,APR=6,CODE,DATA ;And map the terminal driver
+	CMPB	DDJBNO(R1),FIJOB ;IS THIS TERMINAL OWNED ?		
+	BNE	10$		;NO. DON'T DO ANYTHING
+	CALL	MULTTF,R5	;DO THINGS BELOW FOR ALL		
+	SPLC	5		;Lock out terminal interrupts		
+	CALL	BINEND		;;CANCEL ANY BINARY INPUT MODE
+	CALL	EKOEND		;;End echo control			
+	BIC	#TTDDT,DDFLAG(R1) ;;CANCEL DDT-SUBMODE IF ON
+	BICB	#PREAD,TTRFLG(R1) ;;Cancel pending read on the terminal	;024
+	CLRB	PMTPOS(R1)	;;Indicate no prompt position known	;024
+	CLR	TTMODE(R1)	;;CLEAR ANY OPEN MODE(S)
+	SPLC	3		;;Enable interrupts			
+10$:	RETURN			;All done				
+                
+GLOBAL	<FIJBDA,FIJOB,KBDAP5,TERAP6>
+
+.DSABL	LSB								
+
+.SBTTL	EKOEND	No longer in echo control mode
+;+
+; EKOEND - No longer in echo control mode
+;
+;	R1 -> DDB
+;	R4 -> DDB of master terminal in multi-tty environment
+;
+;	CALL	EKOEND
+;
+;	R1, R4 unchanged
+;
+; This routine is called from various places when we need to turn off echo 
+; control mode for any reason.  These reasons are:
+;
+;	o We're reading or writing to the terminal in a mode which can't 
+;	  coexist with echo control mode (e.g. binary write).
+;	o When the terminal is closed (CLS$KB) or reset (KBDRST)
+;	o Whenever we're clearing all modes and delimiters (CLRDLM)
+;-
+.ENABL	LSB
+
+EKOEND:	BIT	#TTFMS,TTMODE(R1) ;;Using FMS mode?
+	BEQ	10$		;;No, not this time
+	CALLM	FMSCLS,FMSAP5	;;Yes, end FMS mode now
+	BR	20$		;;And exit
+
+10$:	BIT	#TTECTL,TTMODE(R1) ;;Using echo control mode?
+	BEQ	20$		;;No, nothing to do
+	MOV	#40*400,EKOCTW(R1) ;;DEACTIVATE ANY ECHO CONTROL FIELD
+.ASSUME	TTACTV	EQ	100000
+20$:	BIC	#TTFMS!TTECTL,TTMODE(R1) ;;Ensure mode is set correctly	;037
+30$:	RETURN			;;All done				
+
+.DSABL	LSB
+
+.SBTTL	"SLEEP" CHECKING
+;+
+; SLP$KB - "SLEEP" CHECKING ENTRY POINT.
+;
+; Inputs:
+;	R0 =  unit number times 2
+;	R1 -> DDB
+;	R4 -> Job's IOB @ ch# +2
+;	Priority is PR3
+;
+; Outputs:
+;	R0, R2, R3, R4 random
+;	R1, R5 preserved
+;	Priority is PR3
+;
+;	C=0 if we let the job "sleep"
+;	C=1 if we should not let the job "sleep"
+;-
+.ENABL	LSB
+
+	TMPORG	SLPTBL,2
+	 .WORD	SLP$KB
+	UNORG
+
+SLP$KB:	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver
+	CMPB	JOB,DDJBNO(R1)	;Does user own this terminal?
+	BNE	20$		;No, then no input available (C=0)
+	BIT	#TTUSLP,TTMODE(R1) ;Unconditional sleep mode?		;003
+	BNE	20$		;Yes, then no input available (C=0)	;003
+	TST	-(R4)		;Get IOB pointer for this channel	;016
+	BIC	#^C<40-1>,R4	;Then find the channel # times 2
+	BEQ	10$		;Skip multi-terminal check if channel #0
+	MOV	R1,R4		;Set the master terminal DDB pointer
+	CALL	MULTTS,R5	;Check for multi-terminal pending input	
+	  BR	30$		;One found, go exit c=1
+	MOV	R4,R1		;None found, restore real DDB pointer
+10$:	CALL	CHKINP		;Check for available input in input buffer
+	BCS	40$		;Got some, exit C = 1			
+	BR	CHKTYP		;None here, check type ahead buffer	;046
+
+20$:	TST	(PC)+		;Indicate no input available, sleep	;046
+30$:	 SEC			;Indicate input is available, don't sleep ;046
+40$:	RETURN			;And get out with C=status		;046
+
+.DSABL	LSB
+
+.SBTTL	CHKTYP	Scan type ahead buffer for a delimiter
+;+
+; CHKTYP - Scan type ahead buffer for a delimiter
+;
+; Inputs:
+;	R1 -> DDB
+;	Priority is PR3
+;
+; Outputs:
+;	R0, R2, R3, R4 random
+;	R1, R5 preserved
+;	Priority is PR3
+;
+;	C=0 if we let the job "sleep"
+;	C=1 if we should not let the job "sleep"
+;
+; Now look for a delimiter or escape sequence in the type ahead	buffer.  Use 
+; TTESCT cell for parsing the escape sequence in the type ahead buffer, but 
+; save and restore the old value.  We have to lock out interrupts because of 
+; our munging with the TTESCT cell.
+;-
+.ENABL	LSB
+
+CHKTYP:	SPLC	5		;Lock out interrupts 			;046
+	MOVB	TTESCT(R1),-(SP) ;;Save current escape sequence state	;046
+	CLRB	TTESCT(R1)	;;Set no escape sequences seen so far	;046
+	MOV	TTINEC+FP(R1),R3;;Get the type ahead buffer end pointer	;046
+	MOV	TTINEC+EP(R1),R0;;Get the type ahead buf start pointer	;046
+	BEQ	70$		;;No buffer, therefore no delimiter	;046
+	CMP	R0,R3		;;Any input in the buffer?		;046
+	BEQ	90$		;;Indicate nothing there if not	(C=0)	;046
+	CALLX	TTISGL		;;Got some. Teco, Binary or DDT submode?;046
+	BNE	80$		;;Yes, then indicate input available	;046
+10$:	BIT	#40-1,R0	;;Within the buffer?			;046
+	BNE	20$		;;Yes, continue scanning		;046
+	MOV	-40(R0),R0	;;Get the link				;046
+20$:	MOVB	(R0)+,R2	;;Fetch the character			;046
+	CALLX	CHKDLM		;;Is it a private delimiter?		;046
+	BCS	90$		;;Yes, get out with C bit set		;046
+	CMPB	R2,#15		;;Carriage Return?			;046
+	BEQ	80$		;;Yes, then input is available		;046
+	TSTB	R2		;;Null character?			;046
+	BEQ	60$		;;Yes, ignore it and keep looping	;046
+	CMPB	R2,#33		;;Escape character in type ahd buffer?	;046
+	BNE	30$		;;No, then check list			;046
+	CALLX	CHKESC,R5	;;Escape sequences allowed right now?	;046
+	 BR	80$		;;No, then input is available		;046
+	MOVB	#200,TTESCT(R1) ;;Yes, so indicate escape seq start	;046
+	BR	60$		;;And look for more characters		;046
+
+30$:	TSTB	TTESCT(R1)	;;Escape seq started in this buffer?	;046
+	BEQ	40$		;;Not this time				;046
+	CALLX	ESCPRC,R5,TTESCT ;;Yes, see if this is the end		;046
+	 BR	60$		;;Not the end, keep looking		;046
+	BR	80$		;;Found end, then input is available	;046
+
+40$:	MOV	#TTDLIM,R4	;;Get address of delimiter list		;046
+50$:	CMPB	R2,(R4)+	;;Delimiter?				;046
+	BLO	50$		;;No, keep looping			;046
+	BEQ	80$		;;Yes!  Indicate input available	;046
+60$:	CMP	R0,R3		;;Have we reached the end?		;046
+	BNE	10$		;;No, then loop				;046
+70$:	TST	(PC)+		;;Indicate no input available		;046
+80$:	 SEC			;;Indicate input available		;046
+90$:	MOVB	(SP)+,TTESCT(R1) ;;Restore the original escape seq cell	;046
+	SPL	3		;Enable interrupts, w/o touching carry	;046
+	RETURN			;And get out with C=status		;046
+
+.DSABL	LSB
+
+GLOBAL	<TERAP6,TTDLIM>	
+
+.SBTTL	DEVICE ASSIGNMENT SERVICE
+;+
+; ASN$KB - DEVICE ASSIGNMENT SERVICE FOR TERMINALS.
+;
+;	R0 =  JOB NUMBER OF ASSIGNER TIMES 2 (or CFGJOB for disable device)
+;					     (or TRNJOB for NO driver)
+;	R1 -> DDB
+;
+;	...
+;
+;	RETURN		(WITH ALL REGISTERS PRESERVED)
+;-
+.ENABL	LSB
+
+	TMPORG	ASNTBL,2
+	.WORD	ASN$KB
+	UNORG
+
+ASN$KB:	CMPB	R0,#CFGJOB	;Are we here to disable a device?	
+	BEQ	50$		;Yes, go do it
+	MAP	PUSH,APR=6,CODE,DATA ;Save mapping
+	MAP	TERAP6,APR=6,CODE,DATA ;Map terminal driver
+	BIT	#1,R0		;System job?				;023
+	BNE	90$		;Yes, disabled or owned by TRN		;023
+	REGSAV			;Save registers				;026
+	MOV	JOBTBL(R0),R4	;R4 -> JDB				;020
+	MOV	JDWORK(R4),R4	;R4 -> Work Block			;020
+	CMPB	#OPNFQ,FQFUN(R4) ;Assign resulting from an OPEN?	;020
+	BNE	10$		;No, need to check the FIRQB		;020
+	BIT	#DDAPLT,(R1)	;Open, Application terminal?		;020
+	BNE	30$		;Yes, go initiate a connection		;020
+.ASSUME	DDIDX	EQ	0						;020
+.ASSUME	DDSTS	EQ	DDIDX+1						;020
+	BR	40$		;Interactive, nothing special to do	;020
+
+10$:	CLRB	FQFIL+1(R4)	;Assign, assume interactive terminal	;020
+	BIT	#DDAPLT,(R1)	;Application terminal?			;020
+	BEQ	40$		;Interactive, nothing special to do	;020
+.ASSUME	DDIDX	EQ	0						;020
+.ASSUME	DDSTS	EQ	DDIDX+1						;020
+	INCB	FQFIL+1(R4)	;Flag it as an application terminal	;030
+	BICB	#<ACSNOQ!ACSQUD>,TTFLG3(R1) ;Assume use defaults	;022
+	BIT	#4,FQMODE(R4)	;User specify QUEUED access? 		;020
+	BEQ	20$		;No, then check for NOQUEUED access	;020
+	BISB	#ACSQUD,TTFLG3(R1) ;Yes, then flag as QUEUED		;022
+	BR	30$		;  and continue on			;020
+
+20$:	BIT	#2,FQMODE(R4)	;Do they want NOQUEUED?			;020
+	BEQ	30$		;No					;020
+	BISB	#ACSNOQ,TTFLG3(R1) ;Yes, set NOQUEUED wanted		;022
+30$:	MOVB	DDUNT(R1),R0	;Get the unit #				;020
+	ASL	R0		; and make it times two			;015
+	CALLX	INICON		;Go, initiate a connection		;015
+40$:	REGRES			;Restore saved registers		;026
+	BR	90$		;And join up
+
+50$:	SPLC	5		;Lock out terminal interrupts	
+	TSTB	DDJBNO(R1)	;;Is the terminal still free?		
+	BNE	60$		;;No, a job must have just started	
+	MOVB	R0,DDJBNO(R1)	;;It is free, disable it		
+	SPLC	3		;;Enable interrupts
+	RETURN			;And exit
+
+60$:	ERROR	NOTAVL		;;Can't disable device, it is busy	
+
+GLOBAL	<TERAP6>
+
+.SBTTL	DEVICE DEASSIGNMENT SERVICE
+;+
+; DEA$KB - DEVICE DEASSIGNMENT SERVICE FOR TERMINALS.
+;
+;	R0 =  Job # * 2 of deassigner, or CFGJOB to indicate enable device
+;				       or TRNJOB for NO driver
+;	R1 -> DDB
+;
+;	...
+;
+;	RETURN		(WITH ALL REGISTERS PRESERVED)
+;-
+
+	TMPORG	DEATBL,2
+
+	.WORD	DEA$KB
+
+	UNORG
+
+DEA$KB:	CMPB	R0,#CFGJOB	;Are we here to enable a device?	
+	BNE	70$		;No, not this time			
+	CLRB	DDJBNO(R1)	;Mark the terminal as available	
+	RETURN			;And go back to CFG			
+
+70$:	MAP	PUSH,APR=6,CODE,DATA ;Save mapping
+	MAP	TERAP6,APR=6,CODE,DATA ;And map terminal driver
+	REGSAV			;SAVE ALL THESE GUYS			
+	MOVB	DDUNT(R1),R0	;GET THE UNIT NUMBER			
+	ASL	R0		;MAKE IT TIMES 2			
+	SPLC	5		;TO LEVEL 5 FOR SAFETY			
+	CALLX	CHKDDB		;;Try to setup the DDB now		
+	SPLC	3		;;AND BACK DOWN AGAIN			
+	BIT	#DDAPLT,(R1)	;Application terminal?			;015
+	BEQ	80$		;No, nothing special to do		;015
+.ASSUME	DDIDX	EQ	0						;020
+.ASSUME	DDSTS	EQ	DDIDX+1						;020
+	TST	DDCNT(R1)	;Explicitly assigned?			;020
+	BMI	80$		;Yes, don't disconnect			;020
+.ASSUME	DDASN	EQ	100000						;020
+	CALLX	TRMCON		;Terminate the connection		;020
+	BICB	#<ACSNOQ!ACSQUD>,TTFLG3(R1) ;Reset to using defaults	;022
+80$:	REGRES			;AND RESTORE THEM			
+90$:	BIC	#NOECHO!TAPE!TTDDT,DDFLAG(R1) ;ENSURE NO SPECIAL FLAGS	
+	CALL	CLRTIN		;NOW CLEAR OUT THE TERMINAL
+	MAP	POP,APR=6,CODE,DATA ;Restore mapping
+	RETURN			;And exit
+
+.DSABL	LSB
+
+GLOBAL	<TERAP6>
+
+.SBTTL	SPECIAL FUNCTION SERVICE
+;+
+; TTEMT - Handle simple terminal EMTs
+;
+;	R1 -> JDB @ JDFLG for job
+;
+; The initial EMT dispatcher transfers control to the root (in TTDINT).
+; It in turns maps the TERSER root and comes here. We pick up the DDB
+; pointer out of FIP pool, map TERSER, and join up with the .SPEC service.
+;-
+.ENABL	LSB
+
+10$:	CMPB	DDJBNO(R1),JOB	;IS THE TERMINAL ATTACHED TO THIS JOB?
+	BNE	SPCDTK		;No, so give an error			
+	JMP	CLRTTI		;YES, CLEAR ALL INPUT AND EXIT		
+
+SPCDTK:	ERROR	DETKEY		;SAY DETACHED, SORRY
+
+; PROCESS SIMPLE CODES (0, 1, 2, 3, 4, 7)
+
+SIMPLE:	MOV	R1,R4		;SAVE THE DDB ADDRESS
+	MOV	2(R3),R0	;GET KB# TO ALTER
+	BEQ	20$		;NONE, USE CALLING KB#
+	ASL	R0		;ONE, MAKE IT TIMES TWO
+	CALL	MULTTC,R5	; AND CHECK IT OUT			
+	BR	SPCPRV		;ERROR
+
+	BMI	SPCDTK		;ERROR IF LINE HUNG UP
+20$:	CMP	R2,#16		;IS FUNCTION CLEAR TYPE AHEAD? (7. * 2.)
+	BEQ	10$		;YES
+	TST	R2		;NON-ZERO?
+	BNE	30$		;YES
+	MOV	#5*2,R2		;NO, MAKE ZERO INTO REAL CANCEL ^O CODE
+30$:	TST	-(R2)		;CORRECT CODE (0, 2, 4, 6, 10)
+	MOV	R2,R0		;MATCH CONVENTIONS
+	BR	40$		; AND GO DO IT
+
+	TMPORG	KBDDSP,0
+	 .WORD	TTEMT
+	UNORG
+
+TTEMT:	MAP	FIPPOL		;Map FIP pool				
+	MOV	@-(R1),R1	;Pick up channel #0 DDB pointer		
+.ASSUME	JDIOB	EQ	JDFLG-2
+	MAP	KBDAP5,APR=5,DATA ;Map our data now in APR5		
+	MAP	TERAP6,APR=6,CODE,DATA ;And map the terminal driver
+	SUB	#.TTAPE&377,R0	;MAKE A CODE (0, 2, 4, 6, 10)		
+40$:	CMPB	DDJBNO(R1),JOB	;IS THIS TERMINAL ATTACHED TO THIS JOB
+	BNE	SPCDTK		;NO, ERROR
+	ASL	R0		;YES, SO FORM THE
+	ADD	#SMPTBL,R0	; TABLE POINTER
+	ADD	(R0)+,R1	;INDEX TO BYTE IN THE DDB
+	BICB	(R0)+,(R1)	;CLEAR SPECIFIED BIT(S) AND
+	BISB	(R0)+,(R1)	; SET SPECIFIED BIT(S)
+50$:	RETURN			;NOW EXIT (TO "RTI3")
+
+GLOBAL	<TERAP6>
+
+; TABLE FOR SIMPLE SPECIAL FUNCTIONS
+
+SMPTBL:	.WORD	DDFLAG		;0 - SET TAPE MODE
+	.BYTE	0,TAPE		;	CLEAR NOTHING; SET TAPE MODE
+.ASSUME	<.TTAPE&377>	EQ	<<.TTAPE&377>+<0*2>>
+
+	.WORD	DDFLAG		;1 - ENABLE ECHO, CANCEL TAPE MODE
+	.BYTE	NOECHO!TAPE,0	;	CLEAR NO ECHO, TAPE; SET NOTHING
+.ASSUME	<.TTECH&377>	EQ	<<.TTAPE&377>+<1*2>>
+
+	.WORD	DDFLAG		;2 - DISABLE ECHO
+	.BYTE	0,NOECHO	;	CLEAR NOTHING; SET NO ECHO
+.ASSUME	<.TTNCH&377>	EQ	<<.TTAPE&377>+<2*2>>
+
+	.WORD	DDFLAG		;3 - PRESET DDT-SUBMODE
+	.BYTE	0,TTDDT		;	CLEAR NOTHING; SET DDT-SUBMODE
+.ASSUME	<.TTDDT&377>	EQ	<<.TTAPE&377>+<3*2>>
+
+	.WORD	DDSTS		;4 - CANCEL CONTROL/O
+	.BYTE	DDSTAT/400,0	;	CLEAR NO OUTPUT; SET NOTHING
+.ASSUME	<.TTRST&377>	EQ	<<.TTAPE&377>+<4*2>>
+
+.DSABL	LSB
+
+.SBTTL	SPC$KB	Special function service for terminals
+;+
+; SPC$KB - SPECIAL FUNCTION SERVICE FOR TERMINALS.
+;
+;	R0 =  UNIT NUMBER TIMES TWO
+;	R1 -> DDB/FCB
+;	R2 =  SPECIAL FUNCTION CODE
+;	R3 -> XRB
+;	R4 =  CALLING JOB NUMBER TIMES 2
+;	R5 -> (MAPPED) XRB
+;
+;	...
+;
+;	JMP	RTI3
+;
+;	-OR-
+;
+;	ERROR	CODE
+;
+; LEGAL FUNCTIONS ARE:
+;
+;	0	CANCEL ^O
+;	1	SET TAPE
+;	2	CLEAR NOECHO AND TAPE
+;	3	SET NOECHO
+;	4	SET DDT MODE
+;	5	FORCE TO KEYBOARD
+;	6	BROADCAST TO KEYBOARD
+;	7	CLEAR INPUT
+;	8	FMS SUPPORT
+;	9	PRIVATE DELIMITER MASK
+;      10	READ CTRL/C JUST TYPED FLAG				
+;
+;	Z-BIT = 1 FOR THE FIRST CALL (ELSE Z-BIT = 0).
+;	C-BIT = 0 FOR THE FIRST CALL (ELSE C-BIT = 1).
+;-
+
+	TMPORG	SPCTBL,2
+	 .WORD	SPC$KB
+	UNORG
+
+SPC$KB:	MOV	#RTI3,-(SP)	;SET OUR RETURN ADDRESS
+	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver
+	CALL	DISPAT,R5,<12,SPCDSP> ;DISPATCH TO SPECIAL FUNCTION	
+
+GLOBAL	<RTI3,TERAP6>
+
+; DISPATCH TABLE FOR SPECIAL FUNCTIONS
+
+SPCDSP:	.WORD	SIMPLE
+	.WORD	SIMPLE
+	.WORD	SIMPLE
+	.WORD	SIMPLE
+	.WORD	SIMPLE
+	.WORD	FORCE							
+	.WORD	SEND							
+	.WORD	SIMPLE
+	.WORD	FMSPRM
+	.WORD	FIXMSK
+	.WORD	RDCTRC							
+
+.ENABL	LSB
+
+; SOME SUBROUTINES
+
+DISPAT:	ROR	R0		;SAVE THE CARRY (LOW BIT IS CLEAR)
+	CMP	R2,(R5)+	;IS IT A LEGAL FUNCTION ?
+	BHI	SPCPRV		;No
+	ASL	R2		;MAKE A WORD OFFSET
+	MOV	(R5),R5		;GET DISPATCH TABLE ADDRESS
+	ADD	R2,R5		;ADD OFFSET
+	MOV	(R5),R5		;LOAD ADDRESS OF FUNCTION FOR RETURN
+	ASL	R0		;RESTORE CARRY
+	RTS	R5		;NOW GO THERE
+
+TSTPRV:	MOV	R0,-(SP)	;Save a register			
+	MOV	R5,-(SP)	; and another				
+	MOVB	JOB,R0		;Get job number				
+	MOV	(PC)+,R5	;Set up to check privilege		
+	 .BPRIV	HWCTL		;Which is hardware control privilege	
+	CALLX	CHKPR5,R4	;Check privileges			
+	BCS	SPCPRV		;No privilege, error and exit		
+	MOV	(SP)+,R5	;Restore a register			
+	MOV	(SP)+,R0	; and another				
+	RETURN			;ALL OK					
+
+RDCTRC:	CALL	NEWTTY		;GET THE DDB POINTER FOR THIS KB	
+	BIS	#JFPOST,@JOBF	;Set up for posting			
+	TST	(R3)+		;And advance to XRBC in XRB		
+.ASSUME	XRBC EQ XRLEN+2
+	CLR	(R3)		;SAY A CTRL/C HASN'T BEEN TYPED		
+	BITB	#TTCCTP,DDFLAG(R1) ;BUT,HAS A CTRL/C BEEN TYPED LATELY?	
+	BEQ	10$		;NOPE					
+	COMB	(R3)		;YES, SO TELL THEM ABOUT IT		
+10$:	CMPB	DDJBNO(R1),JOB	;DOES HE OWN THIS TERMINAL?		
+	BNE	20$		;NOPE, SO DON'T TOUCH THE FLAG		
+	BICB	#TTCCTP,DDFLAG(R1) ;YES, SO ALWAYS CLR FLAG		
+	RETURN			;AND LEAVE				
+
+NEWTTY:	MOV	XRBLK(R3),R4	;GET KB # TO ALTER
+	BEQ	HISTTY		;NONE, USE CALLING KB #
+	MOV	R4,R0		;ONE, GET IT
+	BIC	#177600,R0	;CLEAR JUNK
+	ASL	R0		;MAKE IT KB# TIMES TWO
+HISTTY:	CMP	R0,#CNT.KB*2	;CHECK FOR VALIDITY
+	BHIS	SPCPRV		;NO GOOD
+	MOV	R1,R4		;SAVE DDB POINTER
+	MOV	DEV.KB(R0),R1	;PICK UP THE DDB POINTER
+20$:	RETURN			;EXIT
+
+SPCPRV:	ERROR	PRVIOL		;NO, ERROR
+
+
+FORCE:	MOV	(PC)+,R5	;Set up to check			
+	 .BPRIV	SYSIO		;SYSIO privilege			
+	BR	30$		; and join up				
+
+SEND:	MOV	(PC)+,R5	;Set up to check			
+	 .BPRIV	SEND		;SEND privilege				
+30$:	MOVB	JOB,R0		;Get job number				
+	CALLX	CHKPR5,R4	;Go check privs				
+	BCS	SPCPRV		;Else error				
+	MOVB	XRBLK(R3),R0	;GET KB # TO ALTER
+	ASL	R0		;MAKE IT TIMES TWO
+	CALL	HISTTY		;GET ME A TERMINAL OR BARF ON ERROR
+	BITB	#1,DDJBNO(R1)	;DISABLED?
+	BNE	20$		;YES, CALL IT A NOP
+	BIT	#DDAPLT,(R1)	;Application terminal?			;020
+	BEQ	40$		;No					;020
+.ASSUME	DDIDX	EQ	0						;020
+.ASSUME	DDSTS	EQ	DDIDX+1						;020
+	REGSAV			;Save all registers			;020
+	CALLX	LINSTS		;Get current status of the port		;027
+	REGRES			;Restore saved registers		;020
+	BCS	20$		;Not connected, ignore request		;020
+	BITB	#CLSPND,TTFLG3(R1) ;Pending close on this port?		;022
+	BNE	20$		;Yes, ignore the request		;020
+40$:	TST	MODCLK(R1)	;Is line answered?			;020
+	BMI	20$		;No, this is a NOP
+.ASSUME	TTDSBL	EQ	100000
+	MOV	2(R3),(R3)	;MOVE BYTE COUNT TO BUF LENGTH
+	;CLC			;C=0 FROM 'ASL' OR 'TST'
+	CALLX	CHKXRB		;CHECK THE PARAMETERS
+	BIS	#JFPOST,@JOBF	;POSTING REMAINING COUNT TO USER
+	CALL	MAPUSR		;Set up user mapping			
+	MOV	#TTIN09,XRBUSE(R3) ;GUESS THAT IT'S FORCE
+	CMP	R2,#12		;GOOD GUESS? (5. * 2.)
+	BEQ	60$		;YES					;008
+	MOV	#100$,XRBUSE(R3) ;NO, IT'S BROADCAST
+	BIT	#TTGAG,TTCHAR(R1) ;IS THE TERMINAL GAGGED?
+	BNE	20$		;YES, CALL IT A NOP
+	BITB	#DDAUXD,DDSTS(R1) ;Owned by an auxiliary driver?	;008
+	BNE	20$		;Yes, call it a NOP			;008
+	TSTB	DDJBNO(R1)	;Terminal owned?			
+	BNE	50$		;Yes, good let the broadcast go		;025
+	BITB	#TTAUTO,TTCTRL(R1) ;Is it an autobaud line?		
+	BNE	20$		;Yes, call it a nop			
+50$:	BISB	#TYPPEN,TTRFLG(R1) ;Indicate that a retype is pending	;025
+	BR	70$		;No, join up				;008
+
+60$:	BITB	#DDAUXD,DDSTS(R1) ;Owned by an auxiliary driver?	;008
+	BNE	SPCPRV		;Yes, that's a protection error		;025
+	BISB	#PREAD,TTRFLG(R1) ;Indicate a pending read so characters ;043
+				;will be processed immediately (unless	;043
+				;characters already in type ahead buf)	;043
+70$:	TST	(R3)+		;POINT TO XRBC
+
+GLOBAL	<DEV.KB,TTIN09>
+
+80$:	TST	(R3)+		;ANY MORE TO DO?
+	BEQ	90$		;Nope, go retype the user's command	;025
+	MOV	R3,-(SP)	;SAVE XRB POINTER
+	CALL	GETUSR		;GET A CHARACTER			
+	MOV	R5,-(SP)	;Save the current user's buffer ->	;001
+	SPLC	5		;;GO TO LEVEL 5
+	CALL	@XRBUSE-XRLOC(R3) ;; AND DO OUR THING WITH IT
+	SPLC	3		;;BACK TO LEVEL 3 NOW
+	MOV	(SP)+,R5	;Restore the current user's buffer ->	;001
+	MOV	(SP)+,R3	;RESTORE XRB POINTER
+	INC	(R3)		;BUMP XRLOC
+	DEC	-(R3)		; AND ONE LESS BYTE IN XRBC
+	BR	80$		;THEN AROUND AGAIN...
+
+90$:	SPLC	5		;Lock out interrupts			;025
+	BITB	#TYPPEN,TTRFLG(R1) ;;Retype pending due to our broadcast? ;027
+	BEQ	110$		;;No, don't retype the command		;027
+	CALLM	RETCU2,KINAP5	;;Retype user's command (clears TYPPEN)	;027
+	BR	110$		;;And join up				;025
+
+100$:	CALLX	CHKFRE		;;CHECK FOR FREE BUFFERS
+	BCC	120$		;;O.K., SO DO IT
+	TST	(SP)+		;;Clear the stack of our return address	;002
+	CMP	(SP)+,(SP)+	;;... and the user's buffer and XRB ->s	;002
+110$:	BIS	#TTLFRC,DDFLAG(R1) ;;Indicate last was force/broadcast
+	CALLX	CHKLIN		;;Start up the line
+	SPLC	3		;;Enable interrupts
+	RETURN			;And exit
+
+120$:	CALLRX	CHOUT		;;DO THE BROADCAST
+
+.DSABL	LSB
+
+.SBTTL	Hook for FMS support
+
+FMSPRM:	BIT	#TTFMS,TTMODE(R1) ;Using FMS mode?
+	BEQ	10$		;No, not this time
+	JMPM	FMSSPC,FMSAP5	;Call the FMS special function entry point
+
+10$:	ERROR	DATERR		;Not using FMS mode right now
+
+.SBTTL	DELIMITER MASK ROUTINES
+
+.ENABL	LSB
+
+FIXMSK:	CALL	NEWTTY		;GET ME A TERMINAL OR BARF ON ERROR
+	CMPB	DDJBNO(R1),JOB	;DOES JOB OWN THIS TERMINAL ?
+	BEQ	10$		;YES
+	CALL	TSTPRV		;SEE IF PRIV'ED
+10$:	MOV	XRMOD(R3),R2	;GET SUBFUNCTION CODE	
+	CALL	DISPAT,R5,<2,DLMDSP> ;DIPATCH ON SUBFUNCTION
+
+DLMDSP:	.WORD	DLMCLR
+	.WORD	SETMSK
+	.WORD	GETMSK
+;+
+; SETMSK - SET PRIVATE DELIMITER MASK
+;
+;	R1 ->	DDB
+;	R3 ->	XRB
+;
+;	...
+;
+;	R0 =	0
+;	R2 =	RANDOM
+;	R4 =	RANDOM
+;	R5 =	RANDOM
+;-
+
+SETMSK:	MOV	2(R3),R0	;GET BYTE COUNT
+	CMP	#40,R0		;IS BYTE COUNT OK ?
+	BHIS	20$		;YES, OK
+SPCBAD:	ERROR	BADCNT		;NO, BAD COUNT FOR I/O
+
+20$:	;CLC			;BHIS -> C = 0
+	MOV	R0,(R3)		;COPY BYTE COUNT TO XRLEN
+	CALLX	CHKXRB		;CHECK XRB PARAMETERS
+	MOV	TTDLMM(R1),R4	;DO WE HAVE A MASK ALREADY ?
+	BNE	40$		;YES FILL IT UP
+	BUFFER	GETSML,,40.	;GET A SMALL BUFFER
+	BVS	75$		;GOT ONE OK				;050
+	MOV	R4,TTDLMM(R1)	;MOV POINTER TO DDB			;050
+40$:	CALL	MAPUSR		;Set up to map the user's buffer	
+50$:	CALL	GETUSR		;GET A BYTE FROM USER			
+	MOVB	R2,(R4)+	;PUT IT IN THE MASK
+	SOB	R0,50$		;MORE TO DO ?
+60$:	BIT	#37,R4		;MAYBE, KEEP CHECKING
+	BEQ	70$		;WE'RE REALLY DONE
+	CLRB	(R4)+		;CLEAR THE REST
+	BR	60$		;LET'S DO IT AGAIN
+
+70$:	RETURN			;EXIT
+
+75$:	ERROR	NOBUFS		;NO MORE BUFFERS			;050
+
+.SBTTL	GETMSK	Get private delimiter mask
+;+
+; GETMSK - GET PRIVATE DELIMITER MASK
+;
+;	R1 ->	DDB
+;	R3 ->	XRB
+;
+;	...
+;
+;	R0 =	0
+;	R2 =	RANDOM
+;	R4 =	RANDOM
+;	R5 =	RANDOM
+;-
+
+GETMSK:	MOV	#40,R0		;GET A 40
+	MOV	2(R3),(R3)	;COPY XRBC TO XRLEN
+	CLR	2(R3)		;CLEAR XRBC
+	CMP	(R3),R0		;CHECK BYTE COUNT
+	BLO	SPCBAD		;BAD COUNT
+	SEC			;SET CARRY FOR CHKXRB
+	CALLX	CHKXRB		;CHECK XRB PARAMETERS
+	MOV	TTDLMM(R1),R4	;GET POINTER TO DELIMITER MASK
+	BEQ	SPCNSH		;THERE ISN'T ONE, EXIT
+	CALL	MAPUSR		;Set up to map the user			
+80$:	MOVB	(R4)+,R2	;GET A BYTE
+	CALL	PUTUSR		;GIVE IT TO USER			
+	SOB	R0,80$		;REPEAT 'TIL DONE
+	RETURN			;EXIT
+
+SPCNSH:	ERROR	NOSUCH		;TRIED TO READ NON-EXISTENT MASK
+
+.DSABL	LSB
+
+.SBTTL	RSXEAT	Eat a character on behalf of RSX
+;+
+;	CALL	RSXEAT,R4,<CHARACTER>
+;-
+
+RSXEAT:	MAP	TTUSRM,APR=6,DATA ;;Set up mapping for user buffer	
+	TST	(R3)		;;ANY LEADING CHARACTER TO CHECK?
+	BEQ	10$		;;NO
+	CMPB	(R5),(R4)	;;YES, IS LEADING CHARACTER CORRECT?
+	BNE	10$		;;NOPE, DON'T EAT ANYTHING
+	INC	R5		;;YEP, ADVANCE POINTER BEYOND IT
+	INC	XRLOC-XRBC(R3)	;; AND ADVANCE THE XRB POINTER
+	DEC	(R3)		;;  AND SAY ONE LESS CHARACTER TO DO
+10$:	TST	(R4)+		;;SKIP THE CALLING ARGUMENT
+	MAP	TERAP6,APR=6,DATA ;;Restore mapping			
+	RETURN	R4		;; AND EXIT
+
+GLOBAL	<TTUSRM,TERAP6>							
+
+.SBTTL	CHECK FOR RSX MODE DESIRED/CURRENT
+;+
+;	R0 =  LINE NUMBER TIMES 2
+;	R1 -> DDB
+;	R3 -> XRB @ XRBC
+;
+;	CALL	CHKRSX,R5
+;	  --NORMAL MODE--
+;	  --RSX MODE & ALREADY IN RSX MODE--
+;	  --RSX MODE & NOW INTO IT (ALSO PR5)--
+;
+;	R4 =  UNDEFINED
+;-
+
+CHKRSX:	SPLC	5		;;TO LEVEL 5 FOR SAFETY
+	BIT	#TO.RSX,XRMOD-XRBC(R3) ;;DESIRE RSX MODE?
+.ASSUME	TI.RSX	EQ	TO.RSX
+	BNE	20$		;;YES
+	BIC	#TO.SUF!TO.PRE!TO.RSX,XRMOD-XRBC(R3) ;;NO, CLEAR THOSE BITS
+.ASSUME	TI.RX2	EQ	TO.SUF
+.ASSUME	TI.ISB	EQ	TO.PRE
+.ASSUME	TI.RSX	EQ	TO.RSX
+	MOV	@JOBF3,-(SP)	;;Save job flags			;053
+	BIS	#J2VFY,@JOBF3	;;Make SET VERIFY in effect for this	;053
+	CALLX	RSXLF		;;Check for <LF> to KB/Log		
+	MOV	(SP)+,@JOBF3	;;Restore job flags			;053
+	BIC	#TTRSX2!TTRSX1,DDFLAG(R1) ;;GET OUT OF RSX MODE
+10$:	SPLC	3		;;BACK TO LEVEL 3 AGAIN
+	RETURN	R5		;EXIT
+
+20$:	TST	(R5)+		;;SAY RSX MODE AT LEAST DESIRED		;048
+	BIT	#TTRSX2!TTRSX1,DDFLAG(R1) ;;ALREADY IN RSX MODE?
+	BNE	10$		;;YES, TAKE 2ND EXIT
+	TST	(R5)+		;;NO, WE'LL TAKE THE 3RD EXIT		;048
+	INCB	DDFLAG+1(R1)	;;GO INTO RSX EXTRA <LF> MODE
+.ASSUME	TTRSX2	EQ	400
+	RETURN	R5		;;EXIT STAYING AT PR5
+
+.SBTTL	RESET THE TERMINAL
+;+
+; KBRSET - RESET THE TERMINAL.
+;
+;	R1 -> DDB
+;	PRIORITY IS PR5
+;               
+;	CALL	KBRSET
+;
+;	R0 =  Unit number * 2
+;	R1 =  UNDEFINED
+;	R2 =  UNDEFINED
+;	R3 =  UNDEFINED
+;	R4 =  UNDEFINED
+;	R5 =  UNDEFINED
+;-
+   
+	TMPORG	KBDDSP,2           
+	 .WORD	KBRSET
+	UNORG	
+                
+KBRSET:	MAP	PUSH,APR=6,CODE,DATA ;;Save caller's mapping
+	MAP	TERAP6,APR=6,CODE,DATA ;;And map the terminal driver
+	MOVB	DDUNT(R1),R0	;;Get the keyboard number
+	ASL	R0		;; and make it times two
+	CALL	DETJOB		;;"Detach" the job first
+	CALL	BINEND		;;Cancel any binary input mode
+	CALL	CLRDLM		;;Turn off funny modes and delimiter(s)
+	TST	MODCLK(R1)	;;Is this line hung up?
+	BPL	10$		;;No
+.ASSUME	TTDSBL	EQ	100000
+	CALL	CLRTER		;;Yes, so clear out terminal buffers
+10$:	CLR	TIM.KB(R0)	;;Stop any pending timouts
+	MOV	R1,R4		;;Make this the console kb
+	CALL	EKOEND		;; and stop echo control and/or FMS mode 
+	MAP	POP,APR=6,CODE,DATA ;;Restore mapping
+	RETURN			;;And exit
+   
+GLOBAL	<TIM.KB>
+
+.SBTTL	"DETACH" A JOB
+;+
+; DETJOB - "DETACH" A JOB.
+;  
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;                                  
+;	CALL	DETJOB
+;
+;	R4 =  RANDOM
+;- 
+.ENABL	LSB
+
+	TMPORG	KBDDSP,4              
+	 .WORD	DETJOB
+	UNORG
+    
+DETJOB:	MOV	R5,-(SP)	;;Get a work register
+	CALLX	IOFINI,R5,<JSTIM!JSTEL!JS.KB> ;;Awaken the job if any
+	CLR	R5		;;Guess that we don't need to repoint DDBs
+	BIT	#DDDYNA,(R1)	;;Dynamic DDB?
+	BEQ	10$		;;No, not this time
+	MOV	#KBFDD2,R5	;;Yes, guess at using the dynamic fake DDB
+10$:	BIT	#TTGARD,TTMODE(R1) ;;Guarded terminal mode?
+	BEQ	20$		;;No, not this time
+	MOV	#KBFDDB,R5	;;Guarded mode, get the correct fake DDB
+20$: 	BIT	#DDASN,DDCNT(R1) ;;Explicitly assigned?
+	BNE	30$		;;Yes, leave it assigned     
+	CLRB	DDJBNO(R1)	;;NOW "DETACH" THE JOB
+	CLR	DDCNT(R1)	;;And clear open count and console bit	;025
+30$:	CMP	#TTPK11,TTINTF(R1) ;;Is this a pseudo-keyboard?
+	BNE	40$		;;No, not this time
+	MOV	R1,-(SP)	;;Yes, save DDB pointer
+	MOV	R4,-(SP)	;;And job # * 2 (or zero for unowned)
+	CALLMI	SETPKW,PKDAP5	;;And tell controlling job the job went away
+	MOV	(SP)+,R4	;:Restore job # * 2
+	MOV	(SP)+,R1	;;Restore DDB pointer
+40$:	TST	R5		;;Need to update IOB and PFB?
+	BEQ	60$		;;No, just exit
+	BIC	#^C<DDASN>,DDCNT(R1) ;;Yes, clear all but assigned bit
+	MOV	R0,-(SP)	;;And get a work register
+	MOV	R4,-(SP)	;;Save the job #		
+	MOV	JOBTBL(R4),R4	;;Pick up the JDB pointer		
+	BEQ	50$		;;No job...				
+	MOV	(R4),R4		;;Pick up the IOB pointer		
+.ASSUME	JDIOB	EQ	0
+	CALL	80$		;;Check the IOB for this DDB reference	
+	MOV	(SP)+,R0	;;Get the saved job number * 2		
+	CALL	70$		;;Fix the PFB references also		
+	MOV	(SP)+,R0	;;Restore caller's R0			
+	BR	60$		;;And get out				
+                                                             
+50$:	CMP	(SP)+,(SP)+	;;Clean up the stack			
+60$:	MOV	(SP)+,R5	;;Restore work register
+	RETURN			;;All done				
+
+70$:	MOV	R1,-(SP)	;;Get a work register			
+	CALLX	MAPJCR		;;Map caller's JCR entry		
+	MOV	R1,R4		;;And copy pointer to it		
+	MOV	(SP)+,R1	;;Restore work register			
+	ADD	#JCPFB+<2*2>,R4	;;Point to first data channel		
+	MOV	#14.,R0		;;Set up the number of channels to do	
+	BR	90$		;;Now finish in common code		
+
+80$:	MAP	FIPPOL		;;Go map the FIP pool			
+	MOV	#16.,R0		;;And set up the channel count		
+90$:	CMP	R1,(R4)+	;;Is this channel the KB: device?	
+	BNE	100$		;;No					
+	MOV	R5,-2(R4)	;;Yes, re-point it to the fake ddb	
+100$:	SOB	R0,90$		;;And loop for all the channels		
+	MAP	KBDAP5,APR=5,DATA ;;Set up APR5 data mapping		
+	MAP	TERAP6,APR=6,DATA ;;And APR6 data mapping		
+	RETURN			;;Exit					
+
+GLOBAL	<JOBTBL,KBFDDB,KBFDD2>
+
+.DSABL	LSB
+
+.SBTTL	RELEASE THE TERMINAL
+;+
+; ENDKEY - RELEASE THE TERMINAL.
+;
+;	R1 -> DDB
+;	PRIORITY IS PR5
+;
+;	CALL	ENDKEY
+;
+;	All registers (R0-R5) UNDEFINED
+;-
+.ENABL	LSB
+                
+	TMPORG	KBDDSP,6
+	 .WORD	ENDKEY
+	UNORG
+
+ENDKEY:	MAP	PUSH,APR=6,CODE,DATA ;;Save caller's mapping
+	MAP	TERAP6,APR=6,CODE,DATA ;;And map the terminal driver
+	CALL	KBRSET		;;Reset the terminal
+	REGSAV			;;SAVE ALL THESE GUYS
+	CALLX	CHKDDB		;;Try to reset the DDB now
+	REGRES			;;AND RESTORE THEM
+	CLR	DDCNT(R1)	;;Clear open count and flags
+	CALLX	SRTLIN		;;Force an output interrupt
+	TSTB	DDJBNO(R1)	;;Is this terminal still owned?
+	BNE	20$		;;Yes, don't try to create a job on it
+	BIT	#TTNINT,TTCAPB(R1) ;;Noninteractive terminal?
+	BNE	20$		;;Yes, never create a new job
+	CALL	CHKINP		;;No, any input?
+	BCS	10$		;;Yes, then create a new job		;016
+	CMP	TTINEC+EP(R1),TTINEC+FP(R1) ;Any type ahead?		;016
+	BEQ	20$		;;No, then don't create a new job	;016
+10$:	CALLM	NEWJOB,KINAP5	;;Yes, create a new job			;016
+20$:	MAP	POP,APR=6,CODE,DATA ;;Restore mapping
+	RETURN			;;We're done...
+
+.DSABL	LSB
+
+.SBTTL	JOB CREATION
+;+
+; CREJOB - CREATE A NEW JOB.
+;
+;	R0 =  KEYBOARD NUMBER TIMES 2	(OR 100001)
+;	R1 -> DDB			(OR "KBDDDB")
+;	PRIORITY IS PR5
+;          
+;	CALL	CREJOB
+;
+;	R3 =  NEW JOB NUMBER TIMES 2
+;	R4 =  UNDEFINED
+;
+;	IF C=0 THEN A JOB WAS CREATED
+;	IF C=1 THEN A JOB CANNOT BE CREATED NOW
+;-
+.ENABL	LSB
+
+	TMPORG	KBDDSP,10
+	 .WORD	CREJOB
+	UNORG
+
+; JOB SETUP FAILED. RELEASE SMALL BUFFERS OBTAINED SO FAR
+
+10$:	MOV	(SP)+,R4	;;Get pointer to second buffer 		;009
+	BUFFER	RETSML		;;Return the 2nd small buffer obtained	;009
+20$:	MOV	(SP)+,R4	;;Get pointer to first buffer 		;009
+	BUFFER	RETSML		;;Return the 1st small buffer obtained	;009
+	MOV	(SP)+,R2	;;Restore the register			;009
+30$:	MAP	POP,APR=6,CODE,DATA ;;Restore mapping
+	SEC			;;Indicate failure
+	RETURN			;;And exit
+
+CREJOB:	MAP	PUSH,APR=6,CODE,DATA ;;Save APR6 mapping
+	TST	STLJOB		;;STALL-SYSTEM IN EFFECT?		
+ 	BNE	30$		;;SYSTEM STALLED, NO NEW JOBS ALLOWED	
+	MOV	#JOBTBL+2,R3	;;LOOK FOR A JOB NUMBER
+40$:	CMP	(R3),#-1	;;END OF JOBTBL (-1) ?
+	BEQ	30$		;;YES, SAY SORRY...
+	TST	(R3)+		;;NO, IS THIS SLOT FREE?
+	BNE	40$		;;CONTINUE LOOKING FOR A FREE SLOT
+	CMP	R0,#0*2		;;IS THIS THE "CONSOLE TERMINAL"?
+..CTZ.	==	.-2	;**PATCH** 0 IF KB0: CAN ALWAYS LOG IN, -1 IF NOT
+	BEQ	50$		;;IT IS CONSOLE, SKIP NEXT CHECK
+	CMP	R0,#-1		;;IS THIS THE TERMINAL THAT CAN ALWAYS LOG IN?
+..CTY.	==	.-2	;**PATCH** ALWAYS LOG-IN KB # * 2 (OR -1 FOR NONE)
+	BEQ	50$		;;YES, SKIP NEXT CHECK
+	CMPB	JOBCNT,MAXJOB	;;SHOULD WE ALLOW ANOTHER JOB?
+	BHIS	30$		;;NO, ALREADY OVER # OF ALLOWED LOGINS
+50$:	CMPB	JOBCNT,MAXCNT	;;IS ANOTHER JOB POSSIBLE?
+	BHIS	30$		;;NO, NEVER ALLOW MORE THAN 'MAXCNT'
+60$:	BUFFER	GETSML,,40.	;;GET 1st BUFFER LEAVING 40. IN THE POOL;009
+	BVS	30$		;;Didn't get one, quit			;009
+	MOV	R2,-(SP)	;;Save a register			;009
+	MOV	R4,-(SP)	;;Save pointer to first small buffer	;009
+	BUFFER	GETSML,,39.	;;GET 2nd BUFFER LEAVING 39. IN THE POOL;050
+	BVS	20$		;;Didn't get one, quit			;009
+	MOV	R4,-(SP)	;;Save pointer to second small buffer	;009
+	MAP	FIPPOL		;;Set up FIP pool mapping
+	CALLX	GETFIP		;;Go get a FIP pool buffer
+	BCS	70$		;;Failed, don't set up DDB pointer
+	MOV	R1,(R4)		;;Got one, set up console DDB
+70$:	MAP	KBDAP5,APR=5,DATA ;;Restore APR5 mapping
+	BCS	10$		;;None to be had, oh well
+	MOV	R4,R2		;;Got one, put it in a safe place
+	MOV	(SP)+,R4	;;Pick up JDB pointer
+	MOV	R4,-(R3)	;;And set the pointer in JOBTBL
+	MOV	R2,(R4)+	;;Link the IOB to the JDB
+.ASSUME	JDIOB	EQ	0
+	MOV	#JFSPCL!JFIOKY!JFPOST,(R4)+ ;;SET 1ST TIME, UPDATE KEY, POST
+.ASSUME	JDFLG	EQ	JDIOB+2
+	MOV	(PC)+,(R4)+	;;SET:
+	 .BYTE	0,UUOFQ		;; NO ERROR AND POST AS "UUOFQ"
+	MOV	(SP)+,(R4)+	;;LINK TO WORK BLOCK
+	SUB	#JOBTBL,R3	;;Calculate (JobNo * 2)			
+	CLR	JBTICK(R3)	;;Clear out time clock for job
+	CLR	JBPPN(R3)	;;And be sure they are logged out
+	MOV	R3,(R4)		;;Set job # * 2 in JDB @ JDJDB2
+	ADD	#JBPPN-J2PPN,(R4)+ ;;Now set up the PPN table pointer
+	INC	R4		;;Point to job # * 2 slot
+.ASSUME	JDJBNO	EQ	JDJDB2+3
+	MOVB	R3,(R4)+	;;And set the job # * 2 of this job
+	MOV	DEFKBM,R2	;; and get default KBM	
+	MOV	R2,(R4)		;;  and set RTS pointer
+	INC	R.CNT(R2)	;;One more user for the RTS
+	MOVB	#OUT,M.CTRL+JDMCTL-JDRTS(R4) ;;Set non-resident
+.ASSUME	JDRTS	EQ	JDJBNO+1
+	MOV	R0,-(SP)	;;Save KB # * 2
+	MOV	R1,-(SP)	;;And save pointer to DDB
+	MOV	R3,R0		;;Copy job # * 2			
+	CALLX	MAPJCR		;;Map the new job's JCR entry		
+	MOV	JCRSIZ,R0	;;Pick up size of JCR entry in words	
+	ASL	R0		;;Now get it in bytes			
+	ADD	R1,R0		;;Now R0 -> End of JCR entry + 1	
+80$:	CLR	-(R0)		;;Clear out a word			
+	CMP	R0,R1		;;Are we done yet?			
+	BNE	80$		;;No, loop until we're at the start	
+	MOVB	#6,JCBRST(R1)	;;Set standard run burst		
+	MOV	#<1!<20*1>*400>+HDRSIZ,JCHDRS(R1) ;;Set Job header size	;017
+.ASSUME JCEXST	EQ JCHDRS+1	;;Set initial exit status = success 	;009
+	MOVB	R.MSIZ(R2),-(SP) ;;Get minimum RTS size			;017
+	MOVB	(SP),JCISIZ(R1)	;;And size of job's I-space		;047
+	ADD	#HDRSIZ,(SP)	;;Add job header size, in K		;017
+	MOVB	(SP)+,JCSIZN(R1) ;;Set real size of next residency	;017
+	MOV	R3,R0		;;Copy job # * 2			
+	CALLMI	SETMDE,GENAP5	;;And set up job's mapping context	
+	MOV	R2,JCDRTS(R1)	;;Set default to default KBM		
+	MOVB	SWPMAX,JCSIZM(R1) ;;Set no limit on memory size first	
+	ADD	#JCASTQ,R1	;;Point to AST queue cell		
+	MOV	R1,JCASTT-JCASTQ(R1) ;;And set up AST tail pointer	
+	MOV	#3,R0		;;We have three privilege masks	to do	
+	ADD	#JCAPRV+PRIVSZ-JCASTQ,R1 ;;Point beyond authorized privs 
+.ASSUME	JCSPRV EQ JCAPRV-PRIVSZ						
+.ASSUME	JCPRIV EQ JCSPRV-PRIVSZ						
+90$:
+$$$$$$	=	PRIVSZ/2						
+.REPT	$$$$$$								
+$$$$$$	=	$$$$$$ - 1						
+.IRP	N,<\$$$$$$>							
+	MOV	#..PRW'N,-(R1)	;;Set all defined bits on		
+.ENDR									
+.ENDR									
+	CLRPRV	SYSMOD,(R1)	;;Poke privilege off			
+	CLRPRV	TMPPRV,(R1)	;;Can't make programs priv'ed either	
+	SOB	R0,90$		;;Loop for all three masks		
+	MOV	(SP)+,R1	;;Restore DDB pointer			
+	MOV	(SP)+,R0	;;And KB # * 2				
+	MOV	#JS.KB,JBWAIT(R3) ;;SET WAIT TO KEYBOARD INPUT WAIT
+	CLR	JBSTAT(R3)	;;And ensure we're waiting
+	INCB	JOBCNT		;;ONE MORE JOB...
+	MOV	(SP)+,R2	;;RESTORE R2
+	CMP	R0,#100001	;;IS THIS THE SPECIAL CASE??
+	BEQ	130$		;;YES, JUST EXIT (NO REAL KB DDB...)
+	MOVB	R3,DDJBNO(R1)	;;NOW STORE JOB NUMBER IN TERMINAL DDB
+	MOV	TIME,DDTIME(R1)	;;SET TIME ASSIGNED
+	MOV	#DDCONS+1,DDCNT(R1) ;;MAKE TERMINAL CONSOLE+INIT
+	MAP	TERAP6,APR=6,CODE,DATA ;;Map the terminal driver	;020
+	MOV	R3,-(SP)	;;Save new job # * 2
+	CALL	CLRDLM		;;NO SPECIAL MODE OR DELIMITER(S)
+	MOV	(SP)+,R3	;;Restore new job # * 2
+	CMPB	TTINTF(R1),#TTPK11 ;;Is this the KB for a PK?
+	BNE	120$		;;No skip
+
+	; SPECIAL HANDLING FOR PK JOB CREATION
+
+	MOV	R0,-(SP)	;;Save a register
+	MOV	R1,-(SP)	;;And another one
+	MOV	R4,-(SP)	;;And another one
+	CALLMI	SETPKW,PKDAP5	;;TELL CONTROLLING JOB ABOUT THE NEW JOB
+	MOV	PKMODE(R1),-(SP) ;;Save PK open mode
+	MOVB	DDJBNO(R1),R0	;;And pick up controller's job number
+	MOV	R2,-(SP)	;;And get a work register
+	BIT	#1,R0		;;Controlling job a system job?
+	BNE	100$		;;Yes, get out (mapping is still OK)
+	CALLX	MAPJCR		;;Map controller's JCR entry
+	MOVB	JCPRI(R1),R2	;;And pick up priority
+	BPL	100$		;;Positive, don't touch new job
+	MOV	R3,R0		;;Negative, get new job's job # * 2
+	CALLX	MAPJCR		;;And map the JCR entry			
+	MOVB	R2,JCPRI(R1)	;;And set it up				
+100$:	MOV	(SP)+,R2	;;Restore our work register		
+	MOV	(SP)+,R1	;;And restore PK open mode		
+	BIC	#^C<PKBAT!PKNET!PKNOUT>,R1 ;;Isolate net, batch, nooutput
+.ASSUME	J2BAT	EQ	PKBAT
+.ASSUME	J2NET	EQ	PKNET
+	BIT	#PKNOUT,R1	;;Using trash-output mode?		
+	BEQ	110$		;;No, skip				
+	ADD	#J2NCHO!J2NERR-PKNOUT,R1 ;;Yes, set Noecho/nowarnings	
+110$:	MOV	(SP)+,R4	;;Restore JDB @ JDRTS pointer
+	BIS	R1,JDFLG3-JDRTS(R4) ;;Set the job access flags		
+	MOV	(SP)+,R1	;;Restore one register			
+	MOV	(SP)+,R0	;;And another one
+
+	; COMMON EXIT
+
+120$:	CLR	TIM.KB(R0)	;;Be sure there aren't any pending timeouts
+130$:	BIS	#J2IHDR,JDFLG3-JDRTS(R4) ;;Job header needs initializing ;009
+	MOV	R3,R4		;;Copy new job # * 2
+	CALLX	IOFIN4,R5,<JS.KB> ;;And make this new job runnable
+	MAP	POP,APR=6,CODE,DATA ;;Restore mapping
+	CLC			;;Indicate success
+	RETURN			;;And we're done
+
+.DSABL	LSB
+
+GLOBAL	<RTSLST,DEFKBM,SWPMAX,JOBTBL,JBWAIT,JBSTAT,JOBCNT,TIM.KB>
+GLOBAL	<JCRSIZ,JBPPN,JBTICK,STLJOB,MAXJOB,MAXCNT>
+
+.SBTTL	CLRTER	Clear out the whole terminal.
+;+      
+; CLRTER - Clear out the whole terminal.
+;
+;	R1 -> DDB
+;
+;	CALL	CLRTER
+;-
+.ENABL	LSB
+
+	TMPORG	KBDDSP,12
+	.WORD	CLRTER							
+	UNORG
+
+CLRTER:	REGSCR			;SAVE ALL REGISTERS
+	CALLX	CLRBUF,R5,DDBUFC+EP ;CLEAR THE OUTPUT BUFFER CHAIN
+	BR	10$		;NOW GO DO MODE(S) AND INPUT CLEAR
+
+
+.SBTTL	CLRTIN	Clear terminal input/mode(s).
+;+
+; CLRTIN - Clear terminal input/mode(s).
+;
+;	R1 -> DDB
+;
+;	CALL	CLRTIN
+;-
+
+	TMPORG	KBDDSP,14
+	 .WORD	CLRTIN
+	UNORG
+
+CLRTIN:	REGSCR			;SAVE ALL REGISTERS
+10$:	MOV	@#PS,-(SP)	;Save calling priority			;007
+	SPLC	5		;;And lock out interrupts		;007
+	CALL	CLRDLM		;;CLEAR MODE/PRIV DELIMITER(S)		;007
+	MOV	(SP)+,@#PS	;;Restore priority			;007
+	BR	20$		;GO CLEAR INPUT AND EXIT
+
+.SBTTL	CLRTTI	Clear terminal input.
+;+
+; CLRTTI - Clear terminal input.
+;
+;	R1 -> DDB
+;
+;	CALL	CLRTTI
+;-
+        
+	TMPORG	KBDDSP,16
+	 .WORD	CLRTTI
+	UNORG
+
+CLRTTI:	REGSCR			;KEEP REGISTERS THE SAME
+20$:	BICB	#1,TTDLMC(R1)	;NO DELIMITERS				;018
+	CLRB	TTESCC(R1)	; And no escape seq's the input buffer	;046
+	CLRB	TTESCT(R1)	; nor in the type ahead buffer		;046
+	BICB	#TTESCO,DDFLG2(R1) ;Escape sequence isn't being scanned	;016
+	MOV	#40*400,EKOCTW(R1) ;RESET ACTIVE FIELD AND PAINT CHARACTER
+	MOV	@#PS,-(SP)	;Save calling priority			
+	SPLC	5		;And lock out interrupts		
+	CALLX	CLRBUF,R5,TTINEC+EP ;;Clear the type ahead buffer chain	;048
+	CALLX	CLRBUF,R5,TTINPT+EP ;;Clear input buffer chain
+	CLR	TTIPTR(R1)	;;And input pointer			
+	MAP	PUSH,APR=6,CODE,DATA ;;Save the current APR 6 mapping	;006
+	MAP	TERAP6,APR=6,CODE,DATA ;; and map the terminal driver	;006
+	MOV	R0,-(SP)	;;Save the current value of R0		;006
+	MOVB	DDUNT(R1),R0	;;Get the unit number			;006
+	ASL	R0		;; times 2				;006
+	CALLX	ASKINP		;;XON input if XOFF'd			;006
+	MOV	(SP)+,R0	;;Restore the original value of R0	;006
+	MAP	POP,APR=6,CODE,DATA ;;Restore saved APR 6 mapping	;006
+	MOV	(SP)+,@#PS	;;Restore priority			
+30$:	RETURN			;NOW EXIT
+
+.DSABL	LSB
+
+.SBTTL	BINEND	Cancel binary input mode
+;+
+; BINEND - CANCEL BINARY INPUT MODE.
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;
+;	CALL	BINEND
+;
+;	R2 =  Undefined
+;	R3 =  Undefined
+;-
+
+BINEND:	BIT	#TTBIN!TTPCOL,TTMODE(R1) ;;Using binary and/or XON/XOFF mode?
+	BEQ	10$		;;No, simple exit
+	BIC	#TTBIN!TTPCOL,TTMODE(R1)  ;;Yes, clear the flags
+	CALLX	SETPRM		;;Reset the line parameters
+	BR	CLRTTI		;;CLEAR INPUT AND EXIT
+
+10$:	RETURN			;;Nothing to do but smile, smile, smile...
+
+.SBTTL	CLRDLM	Clear modes and private delimiters
+;+
+; CLRDLM - Clear modes and private delimiters
+;       
+;	R1 ->	DDB
+;
+;	CALL	CLRDLM
+;-
+.ENABL	LSB
+        
+	TMPORG	KBDDSP,20
+	 .WORD	CLRDLM
+	UNORG
+
+CLRDLM:	CALL	BINEND		;;End binary mode if necessary
+	CALL	EKOEND		;;End echo control if necessary
+	CLR	TTMODE(R1)	;;Clear modes 				
+	CLRB	TTPDLM(R1)	;;And private delimiter byte
+	.BR	DLMCLR		;;And mutliple private delimiters
+
+.SBTTL	DLMCLR	Clear multiple private delimiter mask
+;+
+; DLMCLR - Clear multiple private delimiter mask
+;       
+;	R1 ->	DDB
+;
+;	CALL	DLMCLR
+;-
+
+DLMCLR:	MOV	R4,-(SP)	;;SAVE R4
+	MOV	TTDLMM(R1),R4	;;IS THERE A DELIMITER MASK ?
+	BEQ	10$		;;NO, ALL DONE
+	BUFFER	RETSML		;;RETURN SMALL BUFFER
+	CLR	TTDLMM(R1)	;;CLEAR POINTER
+10$:	MOV	(SP)+,R4	;;RESTORE R4
+	RETURN			;;Now return				
+
+.DSABL	LSB
+
+.SBTTL	CHKINP - Scan input buffer for a delimiter
+;+
+; CHKINP - Scan the input buffer for presence of a delimiter
+;
+;	R1 ->	DDB
+;	Priority is PR3 or PR5
+;
+;	CALL	CHKINP
+;	
+;	C=0 if no input available, thus we let the job sleep
+;	C=1 if input available, so don't let the job sleep
+;
+;	All registers a preserved
+;	Priority is preserved
+;
+; This routine checks the input buffer to determine if there is a delimiter 
+; there.  It first checks TTDLMC, since since 99% of the cases if there IS a 
+; delimiter in the buffer, that bit will be set.  Only if an escape sequence 
+; which has no meaning to the monitor is hit can there be a delimiter in the
+; input buffer which wasn't already caught.
+;
+.ENABL	LSB
+
+CHKINP:	BIT	#1,TTDLMC(R1)	;;A known delimiter in the buffer?	;027
+	BNE	100$		;;Yes!  Get out immediately!		;046
+	TST	TTINPT+BC(R1)	;;Over input buffer quota?		;021
+	BLT	100$		;;Yes, then say input is available	;046
+	REGSCR			;;Save all registers			;019
+	MOV	@#PS,-(SP)	;;Save priority on stack		;021
+	SPLC	5		;;Ensure at level 5			;021
+	MOV	TTINPT+FP(R1),R3;;Get the input buffer end pointer	;017
+	MOV	TTINPT+EP(R1),R0;;Get the input buffer start pointer	;017
+	BEQ	70$		;;No buffer, therefore no delimiter	;019
+	CMP	R0,R3		;;Any input in the buffer?		;021
+	BEQ	90$		;;Indicate nothing there if not	(C=0)	;021
+	CALLX	TTISGL		;;Got some. Teco, Binary or DDT submode?;045
+	BNE	80$		;;Yes, then indicate input available	;021
+20$:	BIT	#40-1,R0	;;Within the buffer?			
+	BNE	30$		;;Yes, continue scanning		
+	MOV	-40(R0),R0	;;Get the link				
+30$:	MOVB	(R0)+,R2	;;Fetch the character			
+	CALLX	CHKDLM		;;Is it a private delimiter?		
+	BCS	90$		;;Yes, get out with C bit set		;018
+	CMPB	R2,#15		;;Carriage Return?			;032
+	BEQ	80$		;;Yes, then input is available		;032
+	TSTB	R2		;;Null character?			
+	BEQ	60$		;;Yes, ignore it and keep looping
+	MOV	#TTDLIM,R4	;;Get address of delimiter list		
+50$:	CMPB	R2,(R4)+	;;Delimiter?				
+	BLO	50$		;;No, keep looping			
+	BEQ	80$		;;Yes!  Indicate input available	;021
+60$:	CMP	R0,R3		;;Have we reached the end?		;017
+	BNE	20$		;;No, then loop				;021
+70$:	TST	(PC)+		;;Indicate no input available		;019
+80$:	 SEC			;;Indicate input available		;017
+90$:	ROR	R0		;;Store the C bit			;021
+	MOV	(SP)+,@#PS	;;Restore the priority			;021
+	ROL	R0		;;Restore the C bit			;021
+	RETURN			;;Return, restoring all registers	;021
+
+100$:	SEC			;;Indicate input is available		;046
+	RETURN			;;And return to our caller		;046
+
+.DSABL	LSB
+
+GLOBAL	<TTDLIM>	
+
+.SBTTL	MAPUSR	Set up to map a user's buffer
+;+
+; MAPUSR - Set up to map a user's buffer
+;
+;	R3 -> XRB in work block
+;
+;	CALL	MAPUSR
+;
+;	R5 -> User's buffer
+;
+;	TTUSRM = MMU address for user's buffer
+;-
+.ENABL	LSB
+
+MAPUSR:	CALLX	SCRUMX		;Map the buffer through DPAR6		
+	BR	10$		;And get out the common way		
+
+
+.SBTTL	GETUSR	Get a byte from the user's buffer
+;+
+; GETUSR - Get a byte from the user's buffer
+;
+;	R5 -> Buffer virtually
+;
+;	CALL	GETUSR
+;
+;	R2 = Character
+;	R5 is updated
+;-
+
+GETUSR:	MAP	TTUSRM,APR=6,DATA ;Map the user's buffer		
+	GETUSR			;Get that character			
+10$:	MOV	@DPAR6,TTUSRM	;Save the mapping			
+	MAP	TERAP6,APR=6,DATA ;Map the driver again			
+	RETURN			;Wasn't that easy			
+
+GLOBAL	<DPAR6,TTUSRM,TERAP6>						
+
+.SBTTL	PUTUSR	Give a byte to the user
+;+
+; PUTUSR - Give a byte to the user
+;
+;	R2 = Byte
+;	R5 -> User's buffer
+;
+;	CALL	PUTUSR
+;
+;	R5 is updated
+;-
+
+PUTUSR:	MAP	TTUSRM,APR=6,DATA ;Map the user's buffer		
+	PUTUSR			;Give the user the data			
+	BR	10$		;And get out
+
+GLOBAL	<TTUSRM>							
+
+.DSABL	LSB
+
+.SBTTL	FCHINP	Fetch a character from the input chain
+;+
+; FCHINP - Fetch a character from the input chain
+;
+;	R1 -> DDB
+;	Priority is PR3
+;
+;	CALL	FCHINP
+;
+;	C=0 if character fetched and 
+;		R2 =  Character
+;		R4 =  Undefined
+;	C=1 if no character and 
+;		R2, R4 = Undefined
+;
+; This routine is called in the MOVCHR subroutine which fetches characters
+; out of the input buffer and puts them into the user's buffer.  The FETCH
+; routine in SUB.MAC can not be used because our use of small buffers in 
+; the input buffer chain (TTINPT) is different because we have a "next" pointer
+; as well as a "previous" pointer as the first two words.
+; Because we are taking characters off the input buffer chain, this routine
+; must raise to PR5 to do its thing.
+;-
+.ENABL	LSB
+
+FCHINP:	SPLC	5		;Go to level 5 to lock out interrupts	;019
+10$:	MOV	TTINPT+EP(R1),R4 ;;Get empty pointer
+	CMP	R4,TTINPT+FP(R1) ;;Are the two pointesr equal?
+	BEQ	30$		;;Yes, then no characters in chain
+	BIT	#40-1,R4	;;Are we pointing at the buffer end?
+	BEQ	40$		;;Yes, go get the link to next buffer
+	MOVB	(R4)+,R2	;;No, fetch the next character
+	CMP	R4,TTINPT+FP(R1) ;;Is the buffer chain empty now?
+	BNE	20$		;;No, still more input there
+	DEC	R4		;;Yes, ensure we're pointing into buffer
+	BIC	#40-1,R4	;;Point to the buffer start
+	CMP	(R4)+,(R4)+	;;Now point past link words
+	MOV	R4,TTINPT+FP(R1) ;;And update fill pointer
+	MOV	R4,TTIPTR(R1)	;;And update input pointer
+20$:	MOV	R4,TTINPT+EP(R1) ;;Now update the empty pointer
+	TST	(PC)+		;;Indicate success
+30$:	 SEC			;;Indicate failure
+	SPL	3		;;Now enable interrupts, preserving carry ;019
+	RETURN			;And exit
+
+40$:	SUB	#40,R4		;;Get back to this buffer's top
+	MOV	(R4),TTINPT+EP(R1) ;;Update the empty pointer
+	BUFFER	RETSML		;;Now return this buffer
+	INC	TTINPT+BC(R1)	;;And count it as returned
+	BR	10$		;;And loop to the next buffer
+
+.DSABL	LSB
+
+.SBTTL	CREKBD	Create a KB: device
+;+
+; CREKBD - Create a KB: device
+;
+;	R1 =  Requested size of DDB extension (in bytes)
+;
+;	CALL	CREKBD
+;
+;	C = 0 if unit created
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R2 =  Undefined
+;	R3 =  Undefined
+;	R4 -> DDB @ DDB extension
+;
+;	CSR.KB entry for unit set up to point to DDB extension
+;
+;	C = 1 if no resources
+;
+;	R0 =  Undefined
+;	R1 =  Undefined
+;	R2 =  Undefined
+;	R3 =  Undefined
+;	R4 =  Undefined
+;-
+.ENABL	LSB
+
+CREKBD::MOV	DYNKBN,R0	;Get base KB # * 2 for dynamic KBs	;003
+10$:	CMP	DEV.KB(R0),#FAKDDB ;Is this slot free?			;003
+	BEQ	CREKB2		;Yes, go use it				;010
+	TST	(R0)+		;No, try next KB #			;003
+	CMP	R0,#CNT.KB*2	;Legal keyboard number			;003
+	BHIS	50$		;No, none available			;003
+	BR	10$		;And get out				;003
+
+CREKB2::MOV	KBDDBX,R2	;Pick up size of DDB extension		;010
+	ASL	R2		;Make that into bytes			
+	ADD	R2,R1		;Now add in the user's request		
+	ADD	#KBDDBS+2,R1	;Now add standard size + buffer overhead 
+	CALLX	BUFFR2,R5,<60.,MONPOL> ;Allocate the DDB		
+	BCS	50$		;No space, give an error		
+	TST	(R4)+		;Offset past the size field		
+.ASSUME	BF.SIZ	EQ	0
+	MOV	R4,R1		;Save DDB address for later		
+	MOV	#KBTMPS,R2	;Point to the template DDB		
+20$:	MOV	(R2)+,(R4)+	;Copy a word of the template		
+	CMP	R2,#KBTMPE	;Done with the template?		
+	BNE	20$		;No, loop				
+	MOV	KBDDBX,R2	;Get size of DDB extension		
+	BEQ	40$		;None, nothing to do			    
+30$:	CLR	(R4)+		;Clear out a word			
+	SOB	R2,30$		;Loop for the whole thing		
+40$:	ASR	R0		;Make it KB # * 1			;003
+	MOVB	R0,DDUNT(R1)	;Set the unit number in the DDB		
+	ASL	R0		;Now make it unit number times two
+	MOV	R4,CSR.KB(R0)	;Set DDB extension pointer in CSR table
+	CLR	TIM.KB(R0)	;Ensure no timeouts
+	MOV	R1,DEV.KB(R0)	;Set the address of the DDB		;003
+	TST	(PC)+		;And indicate success			
+50$:	 SEC			;Indicate failure			
+	RETURN			;Now we're done				
+
+.DSABL	LSB
+
+GLOBAL	<DYNKBN,CNT.KB,DEV.KB,FAKDDB,KBDDBX,MONPOL,CSR.KB>
+
+.SBTTL	Define template DDB
+
+STS.KB	=	STS.KB!<DDDYNA/400> ;Ensure created DDBs are dynamic
+
+KBTMPS:				;Start of template DDB
+	DDBDEF	TEMPLATE	;Define the template
+KBTMPE:				;End of template DDB
+
+.SBTTL	REMKBD	Remove a dynamic keyboard
+;+
+; REMKBD - Remove a dynamic keyboard
+;
+;	R1 -> DDB
+;
+;	CALL	REMKBD
+;
+;	R0 =  Undefined
+;	R1 =  Undefined
+;	R4 =  Undefined
+;-
+
+REMKBD::TSTB	DDCNT(R1)	;Is unit still open?
+	BNE	30$		;Yes, crash the system
+	MAP	PUSH,APR=6,DATA	;No, save DPAR6 mapping
+	MOVB	DDUNT(R1),R4	;Pick up unit number
+	ASL	R4		;Now make it times two
+	CLR	TIM.KB(R4)	;Ensure there are no more timeouts
+	MOV	#FAKDDB,DEV.KB(R4) ;Now remove the DDB pointer
+	MOV	R1,R4		;Copy pointer to DDB
+	MOVB	DDJBNO(R1),R0	;Get previous owner's job number
+	BEQ	20$		;None, no device time to clear
+	BITB	#1,R0		;Disabled?				;005
+	BNE	20$		;Yes					;005
+	CALLX	MAPJCR		;Got one, map the JCR entry
+	MOV	DDTIME(R1),-(SP) ;Get time ownership started
+	SUB	TIME,(SP)	;Find elapsed time
+	BPL	10$		;No midnight correction needed
+	ADD	#1440.,(SP)	; Else correct for midnight
+10$:	ADD	(SP)+,JCDEV(R1)	;Update the job's device time
+20$:	TST	-(R4)		;Point back at count field
+	BUFFER	RETURN		;Give it back to the system
+	MAP	POP,APR=6,DATA	;Restore DPAR6 mapping
+	RETURN			;And we're done
+                                   
+30$:	CRASH			;Attempt to return an open keyboard
+
+GLOBAL	<TIM.KB,FAKDDB,DEV.KB>
+
+.END

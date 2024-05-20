@@ -1,0 +1,355 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /INIT:INIPFX/
+	.INCLUDE /DSK:MIDDEF/
+TITLE	BLDBOT,<BUILD BOOTSTRAP CODE FOR HOOK/SAVRES>,0A,10-MAY-91,GPK/VAM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BLDBOT
+
+;+
+;
+;  000	GPK  09-Jul-82	Creation
+;  001	GPK  04-Aug-82	Removed date saving from magtape boots
+;  002	GPK  12-Aug-82	Added SKIP call for coping with SAVRES tapes
+;  003	GPK  03-Sep-82	Bugfix in RM03 boot setup
+;
+;			[RSTS V9.0]
+;  004  VAM  25-Oct-84  Remove code to modify branch for DB/DR boots
+;
+;			[RSTS V9.1]
+;  005  VAM  10-Jun-85	Remove density-dependent tape handling stuff.
+;			(Specifically, remove section CHKMM and any references
+;			 to R1 being used to pass density).
+;  006  VAM  14-Jun-85	Change TAPIO for new format magtape bootstraps.
+;  007  VAM  20-Jun-85	Add BLDMGB.
+;  008  VAM  09-Aug-85	Add symbol FINMU.
+;
+;			[RSTS/E V9.4]
+;  009	PJH  10-Feb-87	Add Disk DW/DZ support
+;-
+
+.SBTTL	Build a boot block full of code
+
+	DEFORG	BLDBOT
+
+;+
+; Entry:
+;	R0 =	Device index (IDX$xx) of device to boot
+;
+; Assumptions:
+;	XXBPTR = Address (doubleword) of boot pointer table in INIT
+;	MSBSID = Massbus ID of device (if needed)
+;	DCS    = Clustersize of device
+;	XFERAD = Transfer address
+;	INIWRD = A routine to return a word from INIT on the stack
+;		 given an address in R2,R3
+;
+; Call:
+;	CALL	BLDBOT,R5,<buffer>
+;		where <buffer> is the label of the buffer to build in
+;
+; Exit:
+;	R0 ->	End of area used
+;		0 if no bootstrap found
+;-
+
+BLDBOT:	REGSAV			;Save all the registers
+	MOV	XXBPTR,R3	;Get table pointer
+	MOV	XXBPTR+2,R2	; and high order
+	CALL	@CHKBOT(R0)	;Do any necessary initial setup
+	MOV	R0,R4		;Copy the device index
+	SXT	R1		;For double precision work
+	ADD	R0,R3		;Form address of table entry for this boot
+	ADC	R2		; double precision
+	ADD	R1,R2		;  and high order
+	CALLX	INIWRD		;Get that data
+	MOV	(SP)+,R0	;Get the offset from here to the boot
+	BEQ	40$		;There is no boot, get out of here
+	SXT	R1		;For double precision
+	ADD	R0,R3		;Form the actual address
+	ADC	R2		; again double precision
+	ADD	R1,R2		;  ...
+	MOV	(R5),R0		;Point to the supplied buffer
+	MOV	#256.,R1	;Words to clear
+10$:	CLR	(R0)+		;Clear one out
+	SOB	R1,10$
+	MOV	(R5),R0		;Get the pointer again
+	ADD	#B.TWC-B.BOOT,R3 ;Point to boot size
+	ADC	R2
+	CALLX	INIWRD		;Get the size
+	SUB	#B.TWC-B.BOOT,R3 ;Back up the pointer again
+	SBC	R2
+	MOV	(SP)+,R1	;Get the size in bytes
+	ASR	R1		; now words
+20$:	CALLX	INIWRD		;Get a word
+	MOV	(SP)+,(R0)+	;Store it
+	ADD	#2,R3		;Advance the pointer
+	ADC	R2
+	SOB	R1,20$		;Copy the whole boot
+	MOV	(R5),R1		;Get pointer to start of boot
+	TST	R4		;Tape or disk?
+	BMI	30$		;Tape, don't set a clustersize
+	MOV	DCS,B.DCS-B.BOOT(R1) ;Set clustersize
+30$:	MOV	XFERAD,B.XFER-B.BOOT(R1) ;Set transfer address
+	CLR	B.MEML-B.BOOT(R1) ;Ensure initial load address is correct
+	CLR	B.MEMH-B.BOOT(R1) ; all of it
+	CALL	@FINISH(R4)	;Finish up the bootstrap
+40$:	MOV	R0,TOS.R0(SP)	;Return the end to the caller
+	REGRES			;Restore registers
+	TST	(R5)+		;Bump the return address
+	RETURN	R5		; and exit
+
+GLOBAL	<XXBPTR,MSBSID,DCS,XFERAD>
+
+
+;007+
+
+.ENABL	LSB
+
+.SBTTL	Build MGBOOT (tape secondary bootstrap)
+
+;+
+; Entry:
+;	R3 = Low order address of MGBOOT
+;	R2 = High order address of MGBOOT
+;
+; Call:
+;	CALL	BLDMGB,R5,<buffer>
+;		where <buffer> is the label of the buffer to build in
+;
+; Exit:
+;	R0 ->	End of area used
+;-
+
+BLDMGB::REGSAV			;Save all the registers
+	MOV	(R5),R0		;Point to the supplied buffer
+	MOV	#256.,R1	;Words to clear
+10$:	CLR	(R0)+		;Clear one out
+	SOB	R1,10$		;Keep going 'till we're done.
+	CALLX	INIWRD		;Get first word of MGBOOT (byte count).
+	MOV	(SP)+,R1	;Take it off the stack and keep it.
+	MOV	(R5),R0		;Get the pointer again
+	BR	30$		;Go bump the address and keep moving.
+
+20$:	CALLX	INIWRD		;Get a word
+	MOV	(SP)+,(R0)+	;Store it
+30$:	ADD	#2,R3		;Advance the pointer
+	ADC	R2		;It's double precision, you know.
+	SOB	R1,20$		;Copy the whole boot
+	REGRES			;Restore registers
+	TST	(R5)+		;Bump the return address
+	RETURN	R5		; and exit
+
+.ENABL	LSB
+
+;007-
+
+.SBTTL	Tables
+
+.MACRO	PTR	SYM
+.IF	DF	SYM
+	.WORD	SYM
+.IFF
+	.WORD	NO.OP
+.ENDC
+.ENDM	PTR
+
+
+	$TAPES
+	PTR	CHK'NAME		;Setup for NAME tape
+.ENDR
+CHKBOT:	$DISKS
+	PTR	CHK'NAME		;Setup for NAME disk
+.ENDR
+
+	$TAPES
+	PTR	FIN'NAME		;Finishing up for NAME tape
+.ENDR
+FINISH:	$DISKS
+	PTR	FIN'NAME		;Finishing up for NAME tape
+.ENDR
+
+.SBTTL	Set up for various devices
+
+;+
+; Entry to all of these:
+;	R0 =	Device index
+;
+; Exit:
+;	R0 =	Device index (possibly changed)
+;
+;005+
+;
+; There are currently no device set-up routines defined.  To handle a device
+; specially, simply insert the necessary code using the label CHK??, where
+; ?? is the mnemonic of the device.
+;
+;005-
+;-
+
+NO.OP:	RETURN			;Enter here if nothing to do
+
+.SBTTL	Finish up bootstraps
+
+;+
+; Entry to all of these:
+;	R0 ->	End of data in buffer
+;	R1 ->	Start of buffer
+;
+; Exit:
+;	R0 ->	End of data (updated)
+;-
+
+FINMT:
+FINMM:
+FINMS:
+FINMU:	CALL	IMOVER,R5,<TAPIO,TAPIOE> ;Insert tape boot mainline	;008
+	MOV	#4,B.SPFC-B.BOOT(R1) ;Set for skip records function
+	RETURN			;That's all
+
+
+FINDK:
+FINDL:
+FINDM:
+FINDP:
+FINDU:
+FINDZ:
+FINDW:	CALL	IMOVER,R5,<DSKIO,DSKIOE> ;Insert disk boot mainline
+	RETURN			;That's all
+
+.SBTTL	Finish up DB and DR boots
+
+;+
+; DB and DR boots need to be told about the disk geometry and about which
+; way to branch on the device type check.  We assume that the words following
+; the READ entry point are to be set up as follows:
+;
+;	.WORD	SECTORS/CYLINDER
+;	.WORD	SECTORS/TRACK
+;
+; The first of these two words is assembled as offset (from B.BOOT) to the
+; branch that we'll modify.  The routine below sets up all this stuff,
+; using the massbus ID in MSBSID to determine disk type.
+; If the type is not recognized, we'll pretend it's an RP04.
+;-
+
+FINDB:
+FINDR:	CALL	IMOVER,R5,<DSKIO,DSKIOE> ;First insert the boot mainline
+	ADD	#B.READ-B.BOOT+2,R1 ;Point to the cells to modify
+10$:	MOV	#IDTBL,R3	;Point to table of IDs
+20$:	TSTB	(R3)		;End of table?
+	BEQ	40$		;Yes, use RP04
+	CMPB	(R3)+,MSBSID	;Match?
+	BNE	20$		;If not search some more
+	SUB	#IDTBL+1,R3	;Get offset
+	ASH	#2,R3		; * 4 for index into geometry table
+	ADD	#GEOTBL,R3	;Now point at geometry for this device
+	MOV	(R3)+,(R1)+	;Store sectors/cylinder
+	MOV	(R3)+,(R1)	;Store sectors/track
+30$:	RETURN			;Done!
+
+40$:	MOV	#RP04ID&377,MSBSID ;Couldn't find it, assume RP04
+	BR	10$		; and do it again
+
+IDTBL:	MASSID	<RP04,RP05,RP06,RM02,RM03,RM05,RM80,RP07> ;Set up MIDs
+	.EVEN
+
+GEOTBL:	MASSIZ	<RP04,RP05,RP06,RM02,RM03,RM05,RM80,RP07> ;Set up geometries
+
+GLOBAL	<MSBSID>
+
+.ENABL	LSB
+
+.SBTTL	Move code into the buffer
+
+;+
+; IMOVER - Insert code into the boot block buffer
+;
+;	R0 ->	Boot block buffer
+;
+;	CALL	IMOVER,R5,<start,end>
+;
+;	R0 ->	End of moved code
+;-
+
+IMOVER:: MOV	R4,-(SP)	;Save a register
+	MOV	(R5)+,R4	;Point to code to insert
+10$:	MOV	(R4)+,(R0)+	;Move some
+	CMP	R4,(R5)		;Done?
+	BLO	10$		;No
+	TST	(R5)+		;Skip second argument
+	MOV	(SP)+,R4	;Restore the scratch register
+	RETURN	R5		; and exit
+
+.ENABL	LSB
+
+.SBTTL	Various fixed boot routines
+
+; Each of these must be coded in position independent code
+
+
+; The disk boot mainline
+
+DSKIO:	CLR	R0		;R0 -> FIRST GOOD WORD OF BOOT
+	MOV	#B.BOOT,R1	;R1 -> WHERE TO PUT IT
+	MOV	#256.,R5	;256 WORD BOOTSTRAP
+10$:	MOV	(R0)+,(R1)+	;MOVE IT UP
+	SOB	R5,10$
+	MOV	(R0)+,-(R1)	;SAVE POSSIBLE DATE AND TIME
+	MOV	(R0)+,-(R1)
+	MOV	(R0)+,-(R1)
+	ADD	#B.BOOT,PC	;Jump to moved copy of the code
+BODVR::	MOV	PC,SP		;Set up a stack
+	CALL	@#B.RSET	;Initialize the bootstrap
+20$:	MOV	-(R1),@#B.TWC	;Set up word count for next chunk
+	BEQ	30$		;Done, go to transfer address
+	MOV	-(R1),@#B.BLKH	;Set high order block number
+	MOV	-(R1),@#B.BLKL	; and low order
+	CALL	@#B.READ	;Do the transfer
+	BCS	40$		;Halt on error
+	ASL	@#B.TWC		;Make word count into byte count
+	ADD	@#B.TWC,@#B.MEML ;Advance memory pointer
+	ADC	@#B.MEMH	; double precision
+	BR	20$		;Now do another piece
+
+30$:	JMP	@#B.JMP		;Enter the program
+
+40$:	HALT			;Error halt
+DSKIOE::
+
+.ENABL	LSB
+
+; The tape boot mainline
+
+TAPIO:	MOV	R1,@#B.CSR	;Put R1 into the CSR hole...		;006
+	MOVB	R0,@#B.UNIT	; ...and the unit also.			;006
+	MOV	PC,SP		;Set up a stack				;006
+	CALL	@#B.RSET	;Initialize the bootstrap		;006
+	CALL	@#B.SPEC	;Do a skip forward			;006
+	CALL	@#B.READ	;Do the read				;006
+	BCS	20$		;Halt on error				;006
+	JMP	@#B.JMP		; and enter the booted code		;006
+
+20$:	HALT			;Error halt
+TAPIOE:
+
+.END

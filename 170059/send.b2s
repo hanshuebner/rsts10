@@ -1,0 +1,338 @@
+1	SUB SEND ( PKT.LEN% , RETRY% )					      &
+\	MODULE$ = "SEND"						      &
+\	ON ERROR GOTO 19000						      &
+\	SUBEXIT IF CC.FLG%						      &
+	!								      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   t i t l e				      &
+	!								      &
+	!	  subprogram : SEND					      &
+	!	     version : V10.1					      &
+	!	        edit : A					      &
+	!	   edit date : 10-MAY-91				      &
+	!	   author(s) : PRL/ACT					      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!		  C O P Y R I G H T				      &
+	!								      &
+	!								      &
+	!		      Copyright (C) 1982, 1991 by		      &
+	!	Digital Equipment Corporation, Maynard, Mass.		      &
+	!								      &
+	!								      &
+	! This software is furnished under a license and may be used and      &
+	! copied  only  in accordance with the terms of such license and      &
+	! with the  inclusion  of  the  above  copyright  notice.   This      &
+	! software  or  any  other copies thereof may not be provided or      &
+	! otherwise made available to any other person.  No title to and      &
+	! ownership of the software is hereby transferred.		      &
+	!								      &
+	! The information in this software is subject to change  without      &
+	! notice  and should not be construed as a commitment by Digital      &
+	! Equipment Corporation.					      &
+	!								      &
+	! DIGITAL assumes no responsibility for the use  or  reliability      &
+	! of its software on equipment that is not supplied by DIGITAL.	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   c a l l   f o r m a t		      &
+	!								      &
+	!	CALL SEND ( PKT.LEN%,RETRY% )				      &
+	!								      &
+	!								      &
+	!	Argument	I/O	Usage				      &
+	!	========	===	=====				      &
+	!	QUE.MGR$	I	queue manager rcvr ID (PBSCMN common) &
+	!	PKT.LEN%	I	no. bytes in packet to send	      &
+	!	RETRY%		I	no. retries to wait (>=0)	      &
+	!	ERRSTS%		O	error status:			      &
+	!				   0 = success			      &
+	!				   n = ERR value		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m o d i f i c a t i o n   h i s t o r y   l o g		      &
+	!								      &
+	!								      &
+	! VER/ED	EDIT DATE	REASON				      &
+	! V9.0-02	27-Jun-83	(PRL) Update for V9.0		      &
+	! V9.0-07	27-Jun-84	(PRL) Add call to SNKPKT routine      &
+	! V9.0-12	17-Feb-85	(PRL) Update DEBUG packet display     &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   d e s c r i p t i o n		      &
+	!								      &
+	!	The SEND subprogram is called to send a packet of data to     &
+	!	the queue manager. The send packet must be properly set up    &
+	!	with the necessary parameters before this subprogram is	      &
+	!	invoked.  If the byte PKT.RTQ$ contains a non-zero value,     &
+	!	then the RCVR.DCLR% flag is checked.  If zero, then any	      &
+	!	message receivers for the job is removed, a new receiver is   &
+	!	declared, and the flag is set.				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	v a r i a b l e s  /  a r r a y s   u s e d		      &
+	!								      &
+	!	name		description				      &
+	!	====		===========				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b r o u t i n e s   u s e d				      &
+	!								      &
+	!	line #/name		description			      &
+	!	===========		===========			      &
+	!	10000			declare message receiver	      &
+	!	11000			display send packet data (DEBUG)      &
+	!	12000			remove all rcvrs in job		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	f u n c t i o n s   u s e d				      &
+	!								      &
+	!	line #	name		description			      &
+	!	======	====		===========			      &
+	!	15000	FN.PKT.ID%	assign unique packet ID		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m a p   d e c l a r a t i o n s				      &
+	!								      &
+	!	line #	name	description				      &
+	!	======	====	===========				      &
+	!	   700	PBSCMN	QUEUE common data (%INCLUDE PBSCMN.B2S)	      &
+	!	   	PBSMAP	Send/Recv/Record fields (%INCLUDE PBSMAP.B2S) &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	c o m m o n   d e c l a r a t i o n s			      &
+	!								      &
+	!	line #	name	description				      &
+	!	======	====	===========				      &
+	!	   700	CUICMN	CUI common data (%INCLUDE CUICMN.B2S)	      &
+	!								      &
+	!******************************************************************** &
+
+700	!	i n c l u d e   r e q u i r e d   M A P s , C O M M O N s     &
+	!								      &
+	!								      &
+	%INCLUDE "SYSTEM:PBSCMN.B2S"		!include QUEUE data section   &
+	%INCLUDE "SYSTEM:PBSMAP.B2S"		!include QUEUE map sections   &
+	%INCLUDE "CUI:CUICMN.B2S"		!include CUI data section     &
+
+1000	!	m a i n   s u b p r o g r a m   l o g i c		      &
+	!								      &
+	!								      &
+	ERRSTS% = 0%				!clear error status	      &
+\	DCLR.RETRY% = 10%			!init no. retries for declare &
+\	TEMP.RETRY% = RETRY%			!init work copy of RETRY%     &
+\	IF ASCII(PKT.RTQ$) THEN			!if ACK requested,	      &
+		IF NOT RCVR% THEN		!  if rcvr not declared,      &
+			GOSUB 12000		!    gosub to remove rcvrs    &
+\			SUBEXIT IF ERRSTS%	!    exit if any errors	      &
+				  OR CC.FLG%	!      or CTRL/C detected     &
+\			GOSUB 10000		!    gosub to declare rcvr    &
+\			SUBEXIT IF ERRSTS%	!    exit if any errors	      &
+				  OR CC.FLG%	!      or CTRL/C detected     &
+\		END IF				!  end if		      &
+\	END IF					!end if			      &
+						!			      &
+\	SEND.ID% = FN.PKT.ID%			!save send packet ID	      &
+\	PKT.CTX% = SEND.ID%			!and load into context word   &
+\	GOSUB 13000				!gosub to send packet	      &
+						!			      &
+\	SUBEXIT					!exit			      &
+
+10000	!	d e c l a r e   m e s s a g e   r e c e i v e r		      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!init error status	      &
+\	GOSUB 12000				!remove any receivers	      &
+\	RCVR.NAM$ = "PBS$" + SEG$(NUM1$(100%+JOB.NO%),2%,3%)		      &
+						!build rcvr I.D. (PB$nnn)     &
+\	ON ERROR GOTO 10200			!trap own errors	      &
+
+10100	Z$ = SYS (PRIV.ON$)			!enable temp privs	      &
+\	Z$ = SYS (				!do declare rcvr sys call:    &
+		CHR.6$ +			!  FIP function		      &
+		CHR$(22%) +			!  send/recv function	      &
+		CHR$(1%) +			!  declare rcvr subfun	      &
+		CHR.0$ +			!  reserved		      &
+		RCVR.NAM$ +			!  receiver name	      &
+		STRING$(10%,0%) +		!  reserved		      &
+		CHR.0$ +			!  no local obj type	      &
+		CHR$(1%+2%) +			!  access (local & priv)      &
+		CHR$(512%) +			!  lsb of buffer max	      &
+		CHR$(SWAP%(512%)) +		!  msb of buffer max	      &
+		CHR$(2%)			!  message max		      &
+		 )				!end of declare rcvr sys call &
+						!			      &
+\	Z$ = SYS (PRIV.OFF$)			!disable temp privs	      &
+\	ON ERROR GOTO 19000			!restore standard error trap  &
+\	RETURN					!exit			      &
+
+10200	IF ERR = ERR.FIEXST% THEN		!if receiver name in use,     &
+		RCVR.NAM$ = SPACE$(6%)		!  blank it out		      &
+\		RESUME 10100			!  and try again	      &
+\	END IF					!end if			      &
+						!			      &
+\	IF ERR = ERR.NOROOM% THEN		!if no room for receiver,     &
+		DCLR.RETRY% = DCLR.RETRY% - 1%	!  decr retry counter	      &
+\		IF DCLR.RETRY% >= 0% THEN	!  if retry non-neg,	      &
+			SLEEP 2%		!    wait two secs	      &
+\			RESUME 10100		!    and try again	      &
+\		END IF				!  end if		      &
+\	END IF					!end if			      &
+						!			      &
+\	GOTO 19000				!skip to standard trap	      &
+
+11000	!	d i s p l a y   s e n d   p a c k e t   d a t a		      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	PRINT #KB.CHNL%				!skip a line		      &
+\	PRINT #KB.CHNL%, "SEND packet header (14 bytes):"		      &
+						!display packet heading	      &
+\	FOR Z% = 1% TO 14%			!for each byte in header:     &
+\		Z1% = ASCII(SEG$(PKT.HDR$,Z%,Z%))			      &
+						!  save byte value	      &
+\		GOSUB 11100			!  gosub to display it	      &
+\	NEXT Z%					!next (header byte)	      &
+\	PRINT #KB.CHNL%				!start new line		      &
+\	PRINT #KB.CHNL%, "SEND packet data ("; NUM1$(PKT.LEN%-14%);	      &
+			 " bytes):"		!display data header line     &
+\	FOR Z% = 1% TO PKT.LEN% - 14%		!for each (data) byte:	      &
+\		Z1% = ASCII(SEG$(PKT.DAT$,Z%,Z%))			      &
+						!  save byte value	      &
+\		GOSUB 11100			!  gosub to display it	      &
+\	NEXT Z%					!next byte		      &
+\	PRINT #KB.CHNL%				!start a new line	      &
+\	RETURN					!and exit		      &
+
+11100	!	d i s p l a y   n e x t   b y t e   i n   p a c k e t	      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	Z$ = "  " + FN.DIGIT$(Z%,3%) + "=" + FN.DIGIT$(Z1%,3%) + " "	      &
+						!build offset/value string    &
+\	IF Z1% >= 32% AND Z1% < 128% THEN	!if printable char,	      &
+		Z$ = Z$ + '"' + CHR$(Z1%) + '"'	!  add character in quotes    &
+	ELSE	Z$ = Z$ + "   "			!else add trailing blanks     &
+\	END IF					!end if			      &
+						!			      &
+\	PRINT #KB.CHNL%				!skip to new line	      &
+		IF CCPOS(KB.CHNL%)+LEN(Z$) >= KB.WIDTH%			      &
+						!  if next zone won't fit     &
+\	PRINT #KB.CHNL%, Z$;			!display byte string	      &
+\	RETURN					!and exit		      &
+
+12000	!	r e m o v e   m e s s a g e   r e c e i v e r		      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	Z$ = SYS (				!do remove rcvr sys call:     &
+		CHR.6$ +			!  FIP function		      &
+		CHR$(22%) +			!  send/recv function	      &
+		CHR.0$ +			!  remove rcvr subfun	      &
+		STRING$(33%,0%) +		!  skip to all ribs flag      &
+		CHR$(-1%)			!  remove all ribs	      &
+		 )				!end of remove rcvr sys call  &
+\	RETURN					!exit			      &
+
+13000	!	s e n d   m e s s a g e   p a c k e t			      &
+	!								      &
+	!								      &
+	ERRSTS% = 0%				!init error status	      &
+\	GOSUB 11000				!go display packet data	      &
+		IF DEBUG%			!  if DEBUG flag set	      &
+\	RETURN IF NOSEND%			!exit if NOSEND flag set      &
+
+13100	Z$ = SYS (PRIV.ON$)			!enable temp privs	      &
+\	CALL SNDPKT BY REF (PKT.HDR$,PKT.LEN%)	!send the packet	      &
+\	Z$ = SYS (PRIV.OFF$)			!disable temp privs	      &
+\	RETURN UNLESS ERRSTS%			!exit unless an error	      &
+						!			      &
+\	IF ERRSTS% = ERR.NOROOM% OR ERRSTS% = ERR.NOBUFS% THEN		      &
+						!if msg queue full or	      &
+						!no buffer space,	      &
+		IF TEMP.RETRY% > 0% THEN	!  if more retries,	      &
+			TEMP.RETRY% = TEMP.RETRY% - 1%			      &
+						!    decr retry counter	      &
+\			SLEEP 2%		!    sleep a few secs	      &
+\			GOTO 13100		!    and try again	      &
+\		END IF				!  end if		      &
+\	END IF					!end if			      &
+						!			      &
+\	U.POS% = 0%				!disable repainting cmd	      &
+						!			      &
+\	SELECT ERRSTS%				!select via error status:     &
+\	CASE = ERR.NOSUCH%			!case = no QMAN rcvr,	      &
+\		CALL DISPLY ("?Print/Batch services not running")	      &
+						!  print error message	      &
+\	CASE = ERR.NOROOM%			!case = msg queue full,	      &
+\		CALL DISPLY ("?Queue manager message queue full")	      &
+						!  print error message	      &
+\	CASE = ERR.NOBUFS%			!case = no buffer space,      &
+\		CALL DISPLY (ERT$(ERRSTS%))	!  print error message	      &
+\	CASE ELSE				!case = else,		      &
+\		FATAL% = TRUE%			!  set fatal error flag	      &
+\		ERRLIN% = 13100%		!  return error line no.      &
+\		ERRNAM$ = MODULE$		!  return bad module name     &
+\	END SELECT				!end select		      &
+						!			      &
+\	RETURN					!exit			      &
+
+15000	!	f n . p k t . i d %					      &
+	!								      &
+	!								      &
+	!inputs:	None.						      &
+	!								      &
+	!outputs:	FN.PKT.ID%	-	unique packet ID	      &
+	!								      &
+	!uses:		Z$		-	work string		      &
+	!								      &
+	!	This function is used to provide a reasonably unique ID for   &
+	!	packet send/receive.  If a packet is received, its ID is      &
+	!	matched against the ID of the last packet sent to insure      &
+	!	that the packets are "paired" properly.			      &
+	!								      &
+	!								      &
+	DEF FN.PKT.ID% =						      &
+		CVT$%(CVTF$(RND))		!return unsigned integer      &
+
+15100	!	f n . d i g i t $ ( number% , digits% )			      &
+	!								      &
+	!								      &
+	!inputs:	NUMBER%		-	integer to convert to string  &
+	!		DIGITS%		-	maximum number of digits      &
+	!								      &
+	!outputs:	FN.DIGIT$	-	string w leading blanks	      &
+	!								      &
+	!uses:		Z$		-	work string		      &
+	!								      &
+	DEF FN.DIGIT$ (NUMBER%,DIGITS%)					      &
+\	Z$ = NUM1$(NUMBER%)			!convert number to string     &
+\	FN.DIGIT$ = SEG$(SPACE$(DIGITS%)+Z$,LEN(Z$)+1%,MAXINT%)		      &
+						!prefix leading blanks	      &
+\	FNEND					!end FN.DIGIT$ function	      &
+
+19000	!	s t a n d a r d   e r r o r   h a n d l i n g		      &
+	!								      &
+	!								      &
+	FATAL% = TRUE%				!set fatal error flag	      &
+\	ERRSTS% = ERR				!save error no.		      &
+\	ERRLIN% = ERL				!save error line no.	      &
+\	ERRNAM$ = ERN$				!save module name	      &
+\	RESUME 32767				!resume to exit		      &
+
+32767	!	e n d   o f   s u b p r o g r a m			      &
+	!								      &
+	!								      &
+	SUBEND

@@ -1,0 +1,167 @@
+.INCLUDE	%CMN:COMMON%
+TITLE	CHKNAM,<VALIDATE PBS NAMES>,0J,27-MAR-92,PRL
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	CHKNAM Edit History
+;+
+; EDIT	BY	DATE		REASON
+; 001	PRL	07-Jul-83	Creation
+; 002	PRL	09-Sep-83	Allow '*' wildcard name
+; 003	PRL	21-Apr-85	Fix bug where name "A*" returned as valid
+; 004	PRL	18-Mar-92	Allow 'xxx*' wildcard construct
+;-
+
+.SBTTL	Program description
+
+;+
+; This routine is called by modules in the PBSMGR progam to validate any of
+; the following names for proper syntax:
+;
+;			queue names
+;			entry names
+;			form names
+;
+; Calling sequence is:
+;
+;		CALL CHKNAM BY REF (NAM$,NAMLEN%,FLAGS%)
+;
+;	where	NAM$	is the name string to be validated
+;		NAMLEN%	is the length of the name string
+;		FLAGS%	is the allow flag bits word:
+;
+;				bit 0 on  -> allow wildcard name
+;				bit 0 off -> don't allow wildcard name
+;
+;				bit 1 on  -> allow special chars in name
+;				bit 1 off -> don't allow special chars in name
+;
+;				bit 2 on  -> allow all-numeric name
+;				bit 2 off -> don't allow all-numeric name
+;
+;				bits 3-15 unused
+;
+; The following rules apply to names:
+;
+;	o Valid characters are {A-Z,a-z,0-9}.  Special characters
+;	  {$,_} are also allowed if bit 1 of the FLAGS% arg is set.
+;
+;	o Lowercase characters are converted to uppercase.
+;
+;	o First character must be alphanumeric (A-Z,a-z,0-9) (or a
+;	  wildcard character, if allowed).
+;
+;	o Wildcard characters (single *, trailing *, or multiple ?'s)
+;	  are allowed if bit 0 of the FLAGS% arg is set.
+;
+;	o All-numeric name is permitted if bit 2 of the FLAGS%
+;	  arg is set.
+;
+; If the name supplied is valid, then the global error status word
+; ERRSTS is returned with the value 0.
+;
+; If the name supplied is invalid, then the global error status word
+; ERRSTS is returned with the value BADNAM.
+;
+;-
+
+.SBTTL	Define Bit Values for ALLOW% argument
+
+	.BSECT	,NOCREF
+ALWWLD:	.BLKB	.		;allow wildcard chars in name
+ALWSPC:	.BLKB	.		;allow special chars in name
+ALWNUM:	.BLKB	.		;allow all-numeric name
+ALLNUM:	.BLKB	.		;internal all-numeric status bit
+
+.SBTTL	Define and order the PSECTS
+
+	DEFORG	CHKNAM
+
+.SBTTL	Main program logic
+
+CHKNAM::CLR	ERRSTS			;clear error status word
+	TST	R1			;null string?
+	BEQ	60$			;yes, exit (success)
+	MOV	 2(R5),R0		;R0 -> string address
+	MOV	R0,R4			;save copy of start addr
+	MOV	@4(R5),R1		;R1 =  no. chars in string
+	MOV	@6(R5),R2		;R2 =  allow flag bits
+	BIC	#^C<ALWWLD!ALWSPC!ALWNUM>,R2 ;clear reserved flag bits
+	BIS	#ALLNUM,R2		;set internal 'all-numeric' bit
+1$:	CMPB	(R0),#'*		;full wildcard char?
+	BNE	2$			;no, continue
+	CMP	R1,#1			;yes, is * the last char?	;004
+	BEQ	3$			;yes, check wildcards flag
+	BR	25$			;no, error
+
+2$:	CMPB	(R0),#'?		;wildcard char?
+	BNE	10$			;no, continue
+3$:	BIT	#ALWWLD,R2		;yes, allow wildcards in name?
+	BEQ	25$			;no, error
+	BR	27$			;yes, on to next char
+
+10$:	CMPB	(R0),#'a		;is char < a?
+	BLO	20$			;yes, continue
+	CMPB	(R0),#'z		;is char > z?
+	BHI	40$			;yes, try spec chars
+	BICB	#40,(R0)		;no, convert to uppercase
+	BR	27$			;skip to clear all-numeric flag
+
+20$:	CMPB	(R0),#'0		;is char < 0?
+	BLO	40$			;yes, try spec chars
+	CMPB	(R0),#'9		;is char > 9?
+	BLOS	30$			;no, on to next char
+	CMPB	(R0),#'A		;is char < A?
+	BLO	40$			;yes, try spec chars
+	CMPB	(R0),#'Z		;is char > Z?
+	BHI	40$			;yes, try spec chars
+	BR	27$			;no, skip to clear all-numeric flag
+
+25$:	BISB	#BADNAM,ERRSTS		;return BADNAM error
+27$:	BIC	#ALLNUM,R2		;clear all-numerics name flag bit
+30$:	INC	R0			;point to next char
+	SOB	R1,1$			;continue for all chars
+	BIT	#ALLNUM,R2		;all-numeric name?
+	BEQ	60$			;no, so exit
+	BIT	#ALWNUM,R2		;yes, allow all-numeric name?
+	BNE	60$			;yes, so exit
+	BISB	#BADNAM,ERRSTS		;NO, return BADNAM error
+	BR	60$			;and exit
+
+40$:	BIT	#ALWSPC,R2		;allow special chars in name?
+	BEQ	25$			;no, so error
+	MOV	#SPCCHR,R3		;yes, R3 -> spec chars list
+50$:	TSTB	(R3)			;null char (end of list)?
+	BEQ	25$			;yes, error (no match)
+	CMPB	(R0),(R3)+		;chars match?
+	BNE	50$			;no, try next spec char
+	CMP	R0,R4			;is spec char 1st char?
+	BNE	30$			;no, on to next char
+	BR	25$			;yes, error
+
+60$:	RTS	PC			;exit
+
+GLOBAL	<ERRSTS,BADNAM>
+
+.SBTTL	define special characters
+
+SPCCHR: .ASCIZ	\_$\			;define special chars
+
+	.END

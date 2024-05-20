@@ -1,0 +1,212 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element DATDR.MAC
+;  *3    18-AUG-1986 11:18:49 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:17:44 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:35:01 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element DATDR.MAC
+	.NLIST							;Edit Level 02
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	DATDR	- Data storage directives
+	.SBTTL	DATDR	- Data storage directives
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Too many people to list here
+;
+;   Created:	From the dust and dirt
+;
+;  Abstract:	DATDR	- Data storage directives
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;	001	Jrw	25-Jul-83	Update for 8-bit support
+;	002	Jrw	12-Dec-85	Add .RADIX 16 for HEX support.
+;--
+
+
+	PURE	PUREI,I
+
+.SBTTL	IDENT - .IDENT Directive handling
+;+
+; IDENT		(Program identification)
+; This routine handles the .IDENT /xxxxxx/ directive. It simply
+; decodes the argument to RAD50 and spits it out as a GSD06.
+;-
+
+IDENT::	CALL	RAD50		;Fetch a RAD50 quantity
+	CLR	$LSPNT		;Init pointer to start of code list
+	MOV	#PRGIDN,R2	;R2 -> .IDENT block
+10$:	NEXT	CODLST		;Fetch next item of code
+	MOV	VALUE,(R2)+	;Store it
+	CMP	R2,#PRGIDN+4	;Processed two words?
+	BLO	10$		;Branch if not, continue
+
+.IF	NDF,XREL	;If relocatable .OBJ output
+
+	MOV	#GSDT06,(R2)+	;Else set GSD type
+
+.ENDC;	NDF,XREL	;If relocatable .OBJ output
+
+	ZAP	CODLST		;Empty the code list
+	RETURN			;Return to caller
+
+
+.SBTTL	BLKB - .BLKB Directive handling
+.SBTTL	BLKW - .BLKW Directive handling
+;+
+; BLKB, BLKW
+; These routines handle the two storage reservation directives
+; .BLKB and .BLKW.
+;
+; Enter with R3=0 for .BLKB, R3=1 for .BLKW
+;-
+
+BLKB::	CALL	SETPF0		;Print the location field
+	EXPR			;Evaluate the expression
+	BNE	10$		;Branch if argument was present
+	INC	@R4		;Else make it default to one.
+10$:	ABSTST			;Must be absolute
+20$:	ADD	R0,@R2		;Update the PC
+	ASR	R3		;Word?
+	BCS	20$		;Branch if so, double the value.
+	RETURN			;
+
+
+.SBTTL	RADIX - .RADIX Directive handling
+;+
+; RADIX
+; This routine handles the directive .RADIX n. Where n may be
+; any valid radix: 2, 8. or 10.   ??cradix should be a byte!
+;-
+
+RADIX::	MOV	CRADIX,R2	;Save previous in case of error
+	MOV	#10.,CRADIX	;Evaluate expression
+	EXPR			; in base 10.
+	BNE	10$		;Branch if not vacuous expression
+	MOV	#8.,@R4		;Else default to 8.
+10$:	ABSTST			;Insure absolute expression
+.IF	DF,YHEX
+	CMP	R0,#16.		;Specified radix 16?
+	BEQ	30$		;Yes, accept it
+.ENDC;	DF,YHEX
+	BIT	#^C12,R0	;Test if legal radix
+	BEQ	30$		;Branch if yes, set the new radix
+20$:	ERROR	A		;Else give A error
+
+	MOV	R2,R0		;Drop back to old radix
+30$:	MOV	R0,CRADIX
+	BEQ	20$		;Oops, 0 is an illegal radix, use previous
+	CALLR	SETPF1		;Return displaying radix set
+
+
+.SBTTL	RAD50 - .RAD50 Directive handling
+.SBTTL	ASCII - .ASCII Directive handling
+.SBTTL	ASCIZ - .ASCIZ Directive handling
+;+
+; RAD50, .ASCII, .ASCIZ
+; This routine handles the following three directives:
+;
+;	.RAD50	/xxx/		;Pack RAD50 string
+;	.ASCII	/string/	;String only
+;	.ASCIZ	/string/	;String + zero byte
+;
+; Enter with R3=0 if .RAD50, R3=1 if .ASCII, and R3=2 if .ASCIZ
+;-
+
+RAD50::	DEC	R3		;R3=0 Implies .ASCII
+				;R3=1 Implies .ASCIZ
+	CALL	140$		;Init regs
+10$:	MOV	R5,R2		;Set terminator
+	BEQ	80$		;Branch if EOL, error!
+20$:	CMP	R5,#CH.LAB	; "<", Expression?
+	BEQ	100$		;Branch if so
+30$:	CALL	GETCH8		;Else get next character
+	MOV	R5,R0		;Copy work register
+	BEQ	80$		;Branch if EOL, error!
+	CMP	R5,R2		;Terminator?
+	BEQ	60$		;Branch if so, done.
+	TST	R3		;Else check what directive this is
+	BPL	50$		;Branch if .ASCIx
+40$:	TSTR50			;Test for Radix 50
+50$:	CALL	110$		;Process the item
+	BR	30$		;Back for another
+
+60$:	GETNB			;Bypass the terminator
+70$:	TSTB	CTTBL(R5)	;EOL or Comment?
+	BGT	10$		;Branch if neither
+	BR	90$		;Else time to clean up.
+
+80$:	ERROR	A		;Error, flag and exit
+90$:	CLR	R0		;Zap current character
+	TST	R3		;What directive is this?
+	BEQ	150$		;Normal exit if .ASCII
+	BPL	110$		;One zero byte if .ASCIZ
+	TST	R1		;.RAD50, Anything in progress?
+	BEQ	150$		;Branch if not, done.
+	CALL	110$		;Else process it.
+	BR	70$		;Loop until word completed
+
+100$:	MOV	@R4,-(SP)	;"<Expression>", Save partial
+	ABSTRM			;Absolute term, setting R0
+	MOV	(SP)+,@R4	;Restore partial
+	CALL	110$		;Process byte
+	BR	70$		;Test for end
+
+110$:	TST	R3		;.RAD50?
+	BPL	130$		;Branch if not
+	CMP	R0,#50		;Else is character within range?
+	BLO	120$		;Branch if so, OK.
+	ERROR	Q		;Else, Error -- non-rad50 character
+
+120$:	MOV	R0,-(SP)	;Save current char
+	MOV	@R4,R0		;Get partial
+	CALL	MULR50		;Multiply
+	ADD	(SP)+,R0	;Add in current
+	MOV	R0,@R4		;Save
+	INC	R1		;Bump count
+	CMP	R1,#3		;Word complete?
+	BNE	150$		;Branch if not, continue.
+130$:	MOV	R0,@R4		;Stuff in value
+
+.IF	DF,RT11		;If RT-11
+	CLR	MODE		;Zero out mode bits
+.ENDC;	DF,RT11		;If RT-11
+
+	SETIMM			;Convert to .OBJ mode
+	STCODE			;Stow it
+140$:	CLR	R1		;Clear loop count
+	CLR	@R4		; and value
+150$:	RETURN			;
+
+
+	.END

@@ -1,0 +1,218 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element INIFL.RSX
+;  *3    18-AUG-1986 11:22:12 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:25:35 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:38:22 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element INIFL.RSX
+	.NLIST							;Edit Level 00
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	INIFL - Input file initialization
+	.SBTTL	INIFL - Input file initialization
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Too many people to list here
+;
+;   Created:	From the dust and dirt
+;
+;  Abstract:	INIFL - Input file initialization
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;--
+
+
+	.MCALL	CSI$SW,CSI$SV,NMBLK$,FDRC$R,FDOP$R
+	.MCALL	OFID$R
+	.MCALL	CSI$
+	CSI$
+
+;
+; LOCAL DATA
+;
+; DEFAULT NAME BLOCKS
+;
+
+	.PSECT	MIXED,D,RW	;++017
+
+SRCNAM::NMBLK$	,MAC,,SY	;SOURCE FILE
+
+
+; SWITCH AND VALUE CONTROL LISTS
+
+	PURE	DPURE,D		;++017
+
+; SWITCH CONTROL LIST
+
+SRCSWT:				;++003 SOURCE SWITCHES
+	CSI$SW	PA,PAMSK,,SET,,PAVAL ;++003 /PA SWITCH
+	CSI$SW	ML,MLMSK,,SET	;++007 /ML SWITCH
+
+	CSI$SW	EN,ENMSK,,SET,,ENVAL ;++003 /EN SWITCH
+	CSI$SW	DS,DSMSK,,SET,,DSVAL ;++003 /DS SWITCH
+	.WORD	0		;++003 END OF SOURCE & OBJECT SWT TABLE
+
+; VALUE CONTROL LIST
+
+DSVALS=11.			;++022
+	.IRP	$X,<ABS,PIC,CDR,FPT,PNC,LC,CRF>  ;++022
+	.IIF DF XED'$X,DSVALS=DSVALS-1 ;++003
+	.ENDM			;++003
+ENVALS=DSVALS			;++003 NUMBER OF "EN" VALUES
+PAVALS=1.			;++003 NUMBER OF "PA" VALUES
+
+; VALUE TABLES
+
+PAVAL:				;++003 /PA SWITCH VALUE TABLE
+	CSI$SV	NUMERIC,PASSSW,2 ;++003
+	.WORD	0		;++003 END OF /PA VALUE TABLE
+
+
+ENVAL:				;++003 /EN SWITCH VALUE TABLE
+TMP=0				;++003
+	.REPT	ENVALS		;++003
+	CSI$SV	ASCII,ENADDR+TMP,3 ;003
+TMP=TMP+4			;++003
+	.ENDR			;++003
+	.WORD	0		;++003 END OF /EN VALUE TABLE
+
+
+DSVAL:				;++003 /DS SWITCH VALUE TABLE
+TMP=0				;++003
+	.REPT	DSVALS		;++003
+	CSI$SV	ASCII,DSADDR+TMP,3 ;++003
+TMP=TMP+4			;++003
+	.ENDR			;++003
+	.WORD	0		;++003 END OF /DS VALUE TABLE
+
+
+	PURE	PUREI,I
+
+;+
+; **-$INIFL-INITIALIZE INPUT FILE
+;
+; INPUTS:
+;
+;	NONE.
+;
+; OUTPUTS:
+;
+;	R0=PL IF REQUEST SUCESSFUL.
+;	R0=MI IF ANOTHER COMMAND LINE SHOULD BE READ.
+;-
+
+$INIFL::CALL	SAVREG		;SAVE REGISTERS
+	CLR	PASSSW		;++003 CLEAR VALUE OF LAST PASS SWITCH
+	MOVB	#CS.INP,CSIBLK+C.TYPR ;SET INPUT REQUEST
+	MOV	#SRCCHN,R1	;SET CHANNEL NUMBER
+	MOV	#SRCSWT,R2	;SET ADDRESS OF SWITCH LIST
+	MOV	FDBTBL+SRCCHN,R0  ;++017 PUT SOURCE FILE FDB ADDR IN R0
+	BNE	100$		;++022 IF NE FDB ALREADY ALLOCATED
+	CALL	$GTFDB		;++022 ELSE, GET NEXT AVAILABLE FDB
+	MOV	R0,FDBTBL+SRCCHN  ;++022 STORE ADDR IN FDB TABLE
+100$:	FDRC$R	R0,,#LINBUF,#LINLEN  ;++017 SET MOVE MODE PARAMETERS
+	FDOP$R	R0,#5,,#SRCNAM	;++017 SET FILE OPEN PARAMETERS
+
+; See if .INCLUDE file available to use
+
+	MOV	INCSP,R5	;R5 -> Next .INCLUDE stack frame
+	BEQ	199$		;Branch if none, do CSI$2 to get next.
+;;;	TST	-(R5)		;Skip MACLVL
+
+	CMP	-(R5),MACLVL	;Same macro nesting depth?	***DEBUG***
+	BEQ	110$		;branch if so, OK.		***DEBUG***
+	HALT			;				***DEBUG***
+110$:				;				***DEBUG***
+	MOV	R0,R1		;Copy FDB address
+	ADD	#F.FNB+N.FID+6,R1 ;-> Past File ID field.
+	MOV	-(R5),N.UNIT-<N.FID+6>(R1)	;Restore unit number
+	MOV	-(R5),N.DVNM-<N.FID+6>(R1)	;Restore device name
+	MOV	-(R5),-(R1)	;Restore the
+	MOV	-(R5),-(R1)	;.. FILE
+	MOV	-(R5),-(R1)	;... ID
+	OFID$R			;Open the source file for READ
+	BCS	130$		;Branch on open error.
+	MOV	-(R5),R1	;Setup for .POINT
+	MOV	-(R5),R2	;....
+	MOV	-(R5),R3	;...
+	MOV	R5,INCSP	;Save new .INCLUDE stack pointer.
+	CMP	R5,#INCSTK	;Is this the last file in the stack?
+	BNE	120$		;Branch if not, OK.
+	CLR	INCSP		;Else clear it, no more .INCLUDE files
+120$:	CALL	.POINT		;Setup to the correct record
+
+; We don't check for errors here because .INCLUDE line of last pushed file
+; could have been the last line in the file, causing a IE.EOF error here.
+
+;;;	BCS	130$		;Branch on error
+	MOVB	#IO.OPN,IOFTBL+SRCCHN ;Set file open.
+	BR	18$		;Done, exit.
+
+130$:	MOV	#CSIM6,R3	;<-F-Input file error>
+	CALLR	OPSWT2		;Print out the error, return to my caller.
+	
+199$:	CALL	OPENCH		;OPEN CHANNEL
+	BMI	20$		;++007 JUST RETURN IF NOT SUCCESSFUL
+	.IF NDF	XFCSQN		;++024
+	CLR	F.SEQN(R0)	;++024 INIT RECORD SEQUENCE NUMBER
+	.ENDC			;++024
+	SEC			;++013 ASSUME DEVICE CHARS ARE WRONG
+	MOV	R0,R3		;++017 PUT SOURCE FILE FDB ADDR IN R3
+	BITB	#FD.SQD,F.RCTL(R3)  ;++017 IS SRC FROM A SEQUENTIAL DEV?
+	BNE	1$		;++017 YES, NO RE-READ SUPPORT
+	BITB	#FD.DIR,F.RCTL(R3)  ;++017 IS SRC FROM A DIRECTORY DEV?
+	BEQ	1$		;++017 NO, NO RE-READ SUPPORT
+	CLC			;++013 DEVICE CHARS ARE O.K. (NOTE: THE
+1$:				;++013 ... C-BIT NOT AFFECTED BY 'BITB')
+	BIT	#MLMSK,C.MKW1(R5) ;++007 WAS /ML SWITCH SPECIFIED?
+	BEQ	18$		;++021 IF EQ NO
+10$:	BCC	11$		;++013 SKIP IF /ML VALID ON THIS DEVICE
+	JMP	OPSWT1		;++013 ELSE, FILE IS NOT RANDOM ACCESS
+11$:	MOV	#LIBLST,R0	;++021 SETUP TO USE LIBRARY FILE LIST
+	MOV	#3,PASSSW	;INSURE FILE WILL BE CLOSED		;JR
+15$:				; THE ABOVE FLAG IS CHECKED IN "GETPLI"	;JR
+	TST	PASS		;++007 IS THIS THE FIRST PASS?
+	BNE	20$		;++013 NO, JUST RETURN
+	MOV	#SYMBOL,R2	;++007 PUT ADDR OF SYMBOL AREA IN R2
+	ADD	#F.FNB+N.FID,R3	;++017 PUT ADDR OF SOURCE FILE ID IN R3
+	MOV	(R3)+,(R2)+	;++007 SAVE ...
+	MOV	(R3)+,(R2)+	;++007 ... THE ...
+	MOV	(R3)+,(R2)+	;++007 ... FILE ID
+	MOV	N.DVNM-<N.FID+6>(R3),(R2)+  ;++007 SAVE DEVICE NAME
+	MOV	N.UNIT-<N.FID+6>(R3),(R2)+  ;++007 SAVE UNIT NUMBER
+	CALL	APPEND		;++013 SAVE FILE INFO IN PROPER ROLL
+18$:	CLR	R0		;++019 SET FILE SUCCESS INDICATOR
+20$:	RETURN			;
+
+
+	.END

@@ -1,0 +1,614 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.INCLUDE	/CUI:CUIPFX.MAC/
+.INCLUDE	/CMN:KERNEL.MAC/					;028
+.INCLUDE	/CMN:KBDEF.MAC/						;028
+.TITLE	CUIRD,<CUI Terminal Read Routines>,01,17-NOV-88,CEK/JFM/SDL/BTB
+
+;
+;		COPYRIGHT (c) 1974, 1988 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+
+.SBTTL	EDIT HISTORY FOR CUIRD
+;+
+;
+;  001	CEK  16-APR-82	Added edit history
+;  002	CEK  16-APR-82	Removed @# notation
+;  003	CEK  16-APR-82	Call PPARSE in new way.
+;  004	CEK  16-APR-82	Changed ORG statements
+;  005	CEK  16-APR-82	Changed name from DCLIN to CUIRD
+;  006	CEK  15-MAY-82	Made CCL entry accept comments and continuations
+;  007	CEK  01-JUL-82	Use U.QUIT error on CTRL/Z
+;  008	CEK  05-JUL-82	Made U$RDCMD accept prompt as parameter.
+;  009	CEK  17-Aug-82	Use modified message facility.
+;  010	JFM  10-Feb-83	Moved U$CONP from CUIMSG to here.
+;  011	JFM  11-Nov-83	Handled user ^C input.  Flag it as an EOF.
+;  012  SDL  11-Nov-83  Made CMD.BSIZ global
+;  013	JFM  18-Jan-84	CUI no longer strips parity bit 
+;			//need to check non-printable chars in 8-bit range//
+;  014  SDL  23-Mar-84  Added a check for an EOF condition in ICFs
+;  015	JFM  08-May-84	DCL will parse blank lines
+;  016	JFM  12-May-84	Used new .CMDLN directive
+;  017	JFM  17-Jul-84	Even CCL netry uses .CMDLN directive. Also placed
+;			new address into COMADR (comment address)
+;  018	JFM  18-Aug-84	Fix Non-printable character for 8-bit terminals
+;  019	JFM  18-Dec-84	No extraneous CRLF's
+;  020  GMB  03-Sep-85	Rearranged CMDBUF & LINBUF so a composite 512. byte
+;			buffer could exist starting at LINBUF.
+;
+;			[RSTS/E V9.7]
+;  021	JFM  16-Sep-88	Don't use CALB for LX.BLA or LX.EOS.  Unglobalized
+;			U$CONP and U$RDCONT.
+;
+;			[RSTS/E V10.0]
+;  022	BTB  11-Jan-90	Add calls to truncate and concatenate for Command Line
+;			Recall.  Add XRMOD bit to flag RUN entry
+;  023  BTB  16-Feb-90  Ignore errors in CONCAT and TRUNC
+;  024	JFM  02-Mar-90  Add another entry into U$RDMOR, to skip concatenation 
+;  025  BTB  23-Mar-90  Handle continuation lines correctly
+;  026  BTB  16-Apr-90  Gloabalized U$RDCONT (used for parameter lists)
+;  027	JFM  16-Aug-90  Fixed bug where R1 isn't getting set up for CONCAT 
+;			routine.  Also removed unused U$RDCONT routine.
+;
+;			[RSTS/E V10.1]
+;  028	JFM  21-Jun-91  Include KBDEF and KERNEL, add RDMOD read modifier, and
+;			don't prompt for continue if TI.NCH set in RDMOD
+;  029	JFM  12-Jul-91  Add DCLFLG, clear it right before the .READ
+;-
+
+
+	.PSECT	CUIRD,RO,REL,LCL,CON
+	DEFORG	CUIRD
+
+.SBTTL	Constants
+CMD.BSIZ ==:	255.		;Maximum length of a command string 
+				;(including continuation lines)
+CMN.SIZ	=:	1.+127.		;Size of core common.
+LIN.BSIZ ==:	255.+2.		;Maximum length of a command line (with CRLF)
+.ASSUME	512.	LE CMD.BSIZ+LIN.BSIZ
+
+.SBTTL	Variables
+	TMPORG	IMPURE
+
+	.EVEN			;LINBUF must begin on an even boundary because
+				;... LINBUF+CMDBUF is used as a disk buffer
+				;... for CUI & DCL error message files.
+	.BLKW			;Null bytes right before beginning
+				;of LINBUF.  (Simplifies scanning.)
+LINBUF::.BLKB	LIN.BSIZ	;Buffer for single command line, continuation
+				;line, or response to subprompt.
+	.EVEN
+CMDBUF::.BLKB	CMD.BSIZ	;Buffer for input command string we're 
+				;processing.  (Including continuation lines
+				;and inputs from subprompts.)
+	.EVEN
+CMDNEX::.BLKW			;Address of next free slot in CMDBUF.  MUST
+				;BE WORD DIRECTLY AT END OF CMDBUF
+CMDLEN::.BLKW			;Number of chars in use in CMDBUF.
+RDMOD::	.BLKW			;1-shot read modifier			;028
+CNTINU:	.BLKB			;Flag for continuation line		;022
+DCLFLG::.BLKB			;DCL flags: TO BE USED BY DCL ONLY	;029
+	.EVEN								;022
+	UNORG
+
+	TMPORG	U$TEXT
+U$CONP:	.ASCIC	<"Continue:  ">		;Prompt for continuation line.	;021
+	UNORG
+
+.SBTTL	$RDCMD--read command string 
+;+
+; $RDCMD--read command string 
+;
+; INPUTS:
+;	U.CMN+U.ENT=0 => we're supposed to read the command from the keyboard
+;			with KB read (RUN entry)
+;		=32. => we're supposed to read the command from the keyboard
+;			with ^C read (P.NEW entry)
+;		other => we're supposed to read the command from core common
+;	prefix	->	string to print before prompt, in ASCIC format
+;	prompt	->	prompt string, in ASCIC format.  This string
+;			includes no embedded <CR><LF>.
+;	KBM		present if a keyboard monitor (^C) read should be used,
+;			rather than a normal (KB) read.
+;		
+; THREADED USAGE:
+;	$RDCMD	[KBM], [PREFIX=prefix,] PROMPT=prompt 
+;
+; OUTPUTS:
+; C=1 if error
+;	R0	=	EOF (user typed CTRL/Z)
+; C=0 if success
+;	CMDBUF	contains command string.  Delimiter is trimmed off.
+;		Parity bit is not trimmed.
+;	CMDLEN	=	length of command string.
+;	CMDNEX	->	next free slot in CMDBUF.
+;
+; DESCRIPTION:
+;	$RDCMD is used in a threaded routine.
+;
+;	On a CCL, DCL, or chain entry, $RDCMD copies the text from 
+;	core common into CMDBUF. On other entry, $RDCMD
+;		o Cancels ^O effect.  
+;		o Prints <CR><LF> if cursor not already at left margin.
+;		o Print prefix string and prompt string.
+;		o Reads command from keyboard on channel 0, 
+;		  and trims delimiter but leaves parity.
+;		o Prints <CR><LF> again if cursor not already at left margin.
+;		o If user typed a null line, prints prompt string again
+;		  (but not prefix string), and reads again.
+;		o Returns an error status if user typed any garbage characters.
+;
+;	In any case, $RDCMD trims off a comment if present, and if the line
+;	ends with a hyphen, $RDCMD prompts for a continuation line (this is
+;	handled just like prompting for a command line, except that the prompt
+;	is "Continue:" and a KB read is used).
+;
+; SIDE EFFECTS:
+;	XRB	clobbered.
+;	Parser reinitialized.
+;	Byte 0 of FIRQB clobbered.
+;-
+; BINARY:
+;	.WORD	U$RDCMD
+;	.WORD	prefix | 0
+;	.WORD	prompt
+;	.WORD	0 | -1		; 0 => KB read
+;				; -1 => ^C read
+
+
+.MACRO	$RDCMD	KBM,PREFIX=0,PROMPT
+	.IF	B	KBM
+	 .WORD	U$RDCMD,PREFIX,PROMPT,0
+	.IFF
+	 .WORD	U$RDCMD,PREFIX,PROMPT,-1
+	.ENDC
+	.GLOBL	U$RDCMD
+	.ENDM	$RDCMD
+
+
+; INPUTS:
+;	R3	->	first inline argument
+;	R4	->	CUI common
+;	R0	=	0
+;	U.CMN+U.ENT =	entry type code
+;
+; OUTPUTS:
+;	R3	->	past end of inline arguments
+;	R0	=	status
+
+.ENABL	LSB
+
+U$RDCMD::BIT	#1!2!16.,U.ENT(R4)
+				;Is it a CCL, DCL, or CHAIN entry?
+	IFNZ			;If so then
+	TST	(R3)+		;  Bump past prefix string.
+	CMP	U.ENT(R4),#3	;  Is read a NOP?
+	BEQ	20$		;  Yes, DCL uses this when it already has put a
+				;  command in CMDBUF because user ran .COM file
+	CLR	CMDLEN		;  Buffer is empty so far.
+	MOV	#CMDBUF,CMDNEX	;  Point at first free slot in buffer.
+	CALB	DOREAD <#1>	;  Read line from core common.
+	;BCS	20$		;  Error. Quit.
+	ELSE			;Else 	
+	MOV	(R3)+,R2	;  Is there a prefix string?
+	IFNZ			;  If so then
+	CALBX	U$PMT <R2>	;    Print out the prefix string.
+	ENDIF			;  Endif
+
+; Repeat until he types something non-null.
+
+10$:	TST	(R3)		;  Prompt text given?
+	IFNZ			;  If so then
+	CALBX	U$PMT <(R3)>	;    Print out the prompt.
+	ENDIF			;  Endif
+	CLR	CMDLEN		;  Buffer is empty so far.
+	MOV	#CMDBUF,CMDNEX	;  Point at first free slot in buffer.
+	CALB	DOREAD <2(R3)>	;  Read a line.
+	BCS	20$		;  Error. Quit.
+
+; Check for line consisting only of spaces and tabs.
+
+	TST	2(R3)		;  Is this a KBM read?
+	BNE	20$		;  Yes, then DCL can handle blank lines.
+	CALBX	LX.INI <#CMDBUF,#CMDLEN>
+	CALLX	LX.BLA		;  No, parse out blank lines		;021
+	CALLX	LX.EOS		;  Are we at end of string?		;021
+	MOV	#0,LX.ERP	;  Error position is of no interest.
+				;  (But don't affect carry bit.)
+	BCC	10$		;  Nothing on the line. Go reprompt.
+	CLR	R0		;  Flag no error.
+	ENDIF			;Endif
+20$:	CMP	(R3)+,(R3)+	;Bump past remaining inline arguments.
+	RETURN	
+
+.DSABL	LSB
+GLOBAL	<EOF,LX.ERP>
+
+.SBTTL	U$RDMOR--read additional line from keyboard
+;+
+; U$RDMOR--read additional line from keyboard
+;
+; INPUTS:
+;	prmtstr	->	prompt string, which is in counted
+;			ASCII format (first byte is exclusive char count).
+;	CMDBUF	contains command as typed so far.
+;	CMDLEN	=	length of command string.
+;	CMDNEX	->	next free slot in CMDBUF.
+;
+; CALB	U$RDMOR <prmtstr>
+;
+; OUTPUTS:
+;	CMDLEN	=	length of command string.
+;	CMDNEX	->	next free slot in CMDBUF.
+;	R0	=	return status:
+;			0 if successful
+;			U.LONG (?Command too long) if line didn't fit into 
+;				CMDBUF
+;			U.QUIT (quit silently) if user typed CTRL/Z
+;
+; DESCRIPTION:
+;	U$RDMOR is just like U$RDCMD except that it uses the prompt string
+;	passed as an argument, and uses a normal (KB) read.
+;
+; SIDE EFFECTS:
+;	XRB	clobbered.
+;	Byte 0 of FIRQB clobbered.
+;-
+
+.ENABL	LSB
+
+U$RDM1::SUBR	<PRMSTR>	;Another entry into U$RDMOR		;024
+	MOV	R1,-(SP)	;//needed?  V10.0, sanity - save this//	;027
+	MOV	PC,-(SP)	;Flag to indicate - don't concatenate	;024
+	BR	5$		;Join up				;024
+
+U$RDMOR::SUBR	<PRMTSTR>
+	MOV	R1,-(SP)	;//needed?  V10.0, sanity - save this//	;027
+	CLR	-(SP)		;Flag to indicate - do the concat	;024
+5$:	CALBX	U$PMT <PRMTSTR(R5)>
+				;Print out the prompt.
+
+; Put space into CMDBUF.
+
+	INC	CMDLEN		;Leave room for space.
+	CMP	CMDLEN,#CMD.BSIZ;Too long?
+	BLE	10$		;No					;022
+	MOV	#U.LONG,R0	;Yes - ?Command too long.		;022
+	BR	30$		;And quit.				;022
+
+10$:	MOVB	#SPACE,@CMDNEX	;Put in the space.			;022
+	INC	CMDNEX
+	CALB	DOREAD <#0>	;Read a line using normal (KB) read.
+				;Returns R1 = number of characters read	;027
+	CMP	R0,#EOF		;Did user type CTRL/Z?
+	BNE	20$		;No					;022
+	MOV	#U.QUIT,R0	;Yes - quit silently.			;022
+	BR	30$		;And exit				;022
+
+20$:	TST	(SP)		;Do the concatenate?			;024
+	BNE	30$		;No, skip it!				;024
+	MOV	#1,R2		;Set flag to put a space between segments ;022
+	CALL	CONCAT		;Concatenate it				;022
+30$:	TST	(SP)+		;Pop our flag				;024
+	MOV	(SP)+,R1	;//needed?  V10.0, sanity - save this//	;027
+	RETURN								;022
+
+.DSABL	LSB
+GLOBAL	<EOF,U.QUIT>
+
+.SBTTL	DOREAD--Read a line from the keyboard.
+;+
+; DOREAD--read a command line from the keyboard.
+;
+; INPUTS:
+;	CMDBUF	contains command as typed so far.
+;	CMDLEN	=	length of string already in CMDBUF.
+;	CMDNEX	->	next free slot in CMDBUF.
+;	how 	<0	=> do a subprompt (KB read)
+;		= 0 	=> do a main prompt for a command (^C read) 
+;		>0	=> get command from core common
+;
+; CALB	DOREAD <how>
+;
+; OUTPUTS:
+;	R0	=	return status:
+;		0 if successful
+;		U.LONG (?Command too long) if line didn't fit into CMDBUF
+;		EOF if user typed ^Z or nothing left in core common.
+;	LINBUF	contains the line, with delimiter stripped off.
+;	CMDBUF	updated.
+;	CMDLEN	=	length of string in CMDBUF.
+;	CMDNEX	->	next free slot in CMDBUF.
+; 
+; If DOREAD reads from core common, it clears out core common so that the
+; next attempt to read from core common will return EOF.
+; 
+; The line is read in and appended to what is currently in CMDBUF.
+; The routine checks for control characters, and returns an error
+; if any are found, except within a quoted string.
+; Trailing spaces and tabs are stripped off.
+; If the last non-blank character is a hyphen, it is stripped off,
+; and DOREAD prompts for a continuation line, using the "Continue:" prompt
+; and a KB read.  This continues indefinately.
+;
+; Comments are also stripped off.  The comment delimiter is !, but
+; only if preceeded by an even number of quote (") characters
+; (or zero).
+;-
+
+
+; INTERNAL VARIABLES:
+; R1 	=	number of chars in LINBUF
+; R2	->	last char in LINBUF
+; R5	=	value to use for XRTIME
+
+.ENABL	LSB
+
+DOREAD:	SUBR	<HOW>
+	CLRB	CNTINU		;First segment isn't a continuation	;025
+	MOV	HOW(R5),R5	;Get instructions on how to do this.
+10$:	MOV	#LINBUF-1,R2	;Get address of buffer, minus one.
+	CLRB	(R2)+		;Put a null right before beginning of
+				;LINBUF, to simplify scanning.
+				;Now R2 -> LINBUF
+	CALLX	CLRXRB		;Clear the XRB
+	MOV	#LIN.BSIZ,XRB+XRLEN
+				;Max length of input
+	MOV	R2,XRB+XRLOC	;Address of buffer (1st byte is for length)
+	TST	R5		;How are we doing this?
+	IFGT			;If we're reading the line from core common 
+				;  Do .CMDLN to retrieve command
+	;CLR	XRB+XRBC	;  Indicate a .CMDLN read
+	SYS	.CMDLN		;  Read command line
+	CMPB	FIRQB+0,#NOSUCH	;  Was error NOSUCH?
+	BEQ	15$		;  Yes, return EOF
+	MOV	XRB+XRBC,R1	;  R1 = number of characters in command line 
+	ELSE			;Else we're reading from terminal.
+	;MOV	#2*0,XRB+XRCI	;  Read on channel 0.
+	MOV	R5,XRB+XRTIME	;  Specify KB or ^C read.
+	MOV	RDMOD,XRB+XRMOD	;  Modifer for ECHO			;028
+	MOV	CMNADR,R4	;  Point at CUI common			;022
+	TST	U.ENT(R4)	;  Was this a RUN entry?		;022
+	BEQ	12$		;  Yes					;022
+	BIS	#10000,XRB+XRMOD ; No - set flag for Monitor buf handlng ;022
+12$:	BICB	#200,DCLFLG	;  Clear DCL's LASTCC flag		;029
+	SYS	.READ		;  Do the read				;029
+	MOV	FIRQB+0,R0	;  Get error code.  			;028
+	CMP	R0,#EOF		;  Did we get an EOF?
+	BEQ	16$		;  Yes. Return.				;028
+	CALLX	U$CHKE		;  Abort if other error.  Shouldn't happen.
+	MOV	XRB+XRBC,R1	;  R1 = number of characters in command line 
+
+; Trim off delimiter.
+;
+; Notice that as we trim off trailing stuff, we don't have to make
+; a special check for an empty buffer, because we know the char 
+; right before the start of the buffer is a NUL.
+
+	TST	R1		;  Did we get any input?
+	BNE	17$		;  Yes.  Continue.
+15$:	MOV	#EOF,R0		;  No.  User typed ^C, flag it as an EOF.
+16$:	BR	100$		;  Quit.				;028
+
+17$:	DEC	R1		;  Trim off the last char (delimiter).	
+	MOV	R2,R0		;  Point at first char in buffer.
+	ADD	R1,R0		;  Point at delimiter.
+				;  Check for <CR><LF> delimiter.
+	CMPB	(R0),#LF	;  Is last char a <LF>?
+	IFEQ			;  If so then
+	CMPB	-(R0),#CR	;    Is next to last char a <CR>?
+	IFEQ			;    If so then
+	DEC	R1		;      Decrement char count.
+	ENDIF			;    Endif
+	ENDIF			;  Endif
+	ENDIF			;Endif
+
+
+; Now R1 = number of chars in LINBUF
+; R2	-> first character in LINBUF
+;	
+; Check for control chars, discard comment.
+;
+; VARIABLES:
+; R4 = -1 (YES) if we're within a quoted string, 0 (NO) otherwise.
+; R0 = char now being processed
+
+; If an end-of-file condition has been read in an Indirect Command File, then 
+; the monitor indicates this by passing us a dollar sign, followed by a null
+; character, followed by the actual error code.  This is passed on to CMDTBL
+; which handles it accordingly.
+
+	CLR	R4		;We're not in a quoted string.
+	MOV	R1,R3		;Copy char count.
+	IFNZ			;While there are chars to process do
+20$:	MOVB	(R2)+,R0	;  Get character.
+	IFZE			;  If it is the null character
+	MOV	CMNADR,R4	;    Point at CUI common
+	MOVB	(R2),U.STAT(R4)	;    Get error code passed by the monitor
+	MOV	#-1,R0		;    Indicate an error
+	BR	100$		;    Return
+	ENDIF			;  Endif
+
+	CMPB	R0,#'"		;  Is char a quote?
+	IFEQ			;  If so then
+	COM	R4		;    Reverse the "in a quoted string" flag.
+	ENDIF			;  Endif
+
+	TST	R4		;  Are we in a quoted string?
+	IFZE			;  If not then
+	CMPB	R0,#'!		;    Is char a comment delimiter?
+	BEQ	50$		;    Yes: exit loop.
+	ENDIF			;  Endif
+
+40$:	SOB	R3,20$		;  Loop onward while more chars in buffer.
+	ENDIF			;Endif
+
+				;R3 = number of characters in comment.
+50$:	MOV	R1,R4		;Store number of characters in entire line
+	SUB	R3,R1		;Get number of characters not in comment.
+	MOV	R1,TOS.R1(SP)	;Save number of characters in this line	;027
+
+; Strip off trailing spaces and tabs.  (Don't worry about empty buffer;
+; char before buffer is an ASCII 0.)
+
+60$:	CMPB	LINBUF-1(R1),#TAB;Is last non-comment char a tab?
+	BEQ	70$		;Yes. Strip it off, and loop onward.
+	CMPB	LINBUF-1(R1),#SPACE
+				;No. Is last char a space?
+	BNE	80$		;No. Exit loop.
+70$:	SOB	R1,60$		;Loop while more chars in buffer.
+
+80$:	TST	R3		;Was there a comment?			;022
+	BEQ	82$		;No - don't need to truncate		;022
+	CALL	TRUNC		;Go truncate it				;022
+	MOV	R1,TOS.R1(SP)	;Save number of characters in this line	;027
+
+; Check for continuation character.  
+; Set CNTINU = NO if no continuation char,
+;     CNTINU = YES if continuation char.
+
+82$:	CMPB	LINBUF-1(R1),#'-;Is last non-blank char a hyphen?	;022
+	BEQ	84$		;Yes					;022
+	TSTB	CNTINU		;No - were we already continuing?	;025
+	BEQ	88$		;No - all set				;025
+	CLRB	CNTINU		;No - clear flag			;022
+	BR	85$		;And go on				;025
+
+84$:	DEC	R1		;Decrement char count.
+	CALL	TRUNC		;Truncate hyphen			;022
+	MOV	R1,TOS.R1(SP)	;Save number of characters in this line	;027
+	TSTB	CNTINU		;Was this already a continuation?	;022
+	BEQ	86$		;No - just set flag			;022
+85$:	CLR	R2		;Don't insert space between segments	;025
+	CALL	CONCAT		;Concatenate this segment		;022
+	BR	88$		;Continue				;022
+
+86$:	COMB	CNTINU		;Flag continuation char.		;022
+
+; Move text into CMDBUF.
+
+88$:	CLR	R0		;Assume no error
+	ADD	R1,CMDLEN	;Update length of command line.
+	CMP	CMDLEN,#CMD.BSIZ;Too long?
+	IFHI			;If so then
+	MOV	#U.LONG,R0	;  Say ?Command too long.
+	MOV	#CMD.BSIZ,CMDLEN;  Take maximum line length
+	ENDIF			;Endif
+
+	MOV	#LINBUF,R2	;Point at text to move.
+	TST	R1		;Any chars to move?
+	IFNZ			;If so then
+90$:	MOVB	(R2)+,@CMDNEX	;  Move char into CMDBUF.
+	INC	CMDNEX		;  Point at next free slot.
+	CMP	CMDNEX,#CMDNEX	;  Did we jsut insert our last character?
+	BGE	95$		;  Yes, insert no more
+	SOB	R1,90$		;  Continue until no more chars to move.
+	ENDIF			;Endif
+
+95$:	TST	R0		;Have we had enough?  (Is error Line too long?)
+	BNE	100$		;Yes, quit now ...
+	TSTB	CNTINU		;Should we get a continuation line?	;022
+	IFNZ			;If so then
+	TSTB	RDMOD		;  Are we in quiet mode (noecho=200)?	;028
+.ASSUME	TI.NCH	EQ 200		;  NOECHO mode is 200			;028
+	BMI	97$		;  Yes. don't print prompt		;028
+	CALBX	U$PMT <#U$CONP>	;  Print the "Continue:" prompt		;028
+97$:	CLR	R5		;  Specify normal (KB) read.		;028
+	JMP	10$		;  Get another line.
+	ENDIF			;Endif
+
+	MOVB	R4,LINBUF-1	;Insert number of characters before LINBUF
+	CLR	R0		;Flag no error.
+100$:	MOV	#TI.CUI,RDMOD	;Default back to CUI mode		;028
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<EOF,U.LONG,U$CONP,CMNADR,NOSUCH>
+
+.SBTTL	TRUNC -- Truncate the end of a line in Recall buffer
+;+
+; TRUNC -- Truncate the end of a line in Recall buffer
+;
+; INPUTS:
+;	R1 = count of valid characters in command
+;
+; CALL	TRUNC
+;
+; OUTPUTS:
+;	R1 is unchanged
+;	FIRQB and XRB are random
+; 
+; TRUNC issues the syscall to truncate an input line.  It is used to
+; remove comments and continuation characters from the RECALL buffers'
+; copy of the command.
+;
+;-
+.ENABL	LSB
+
+TRUNC:	CALLX	CLRFQX			;Clear the FIRQB and XRB
+	MOV	#15,FIRQB+FQFIL		;Function is 15, recall
+	MOV	#<0*400>+4,FIRQB+FQPPN	;Set operation = truncate, and
+					;Don't add space or delete last cmd
+	MOV	R1,FIRQB+FQNAM1		;Set truncation point
+	.MESAG				;Go do truncation (no error possible)
+	CLR	R0			;Only possible error means "ignored" ;023
+	RETURN				;Return
+
+.DSABL	LSB
+
+
+.SBTTL	; CONCAT -- Concatenate a line in recall buffer
+;+
+; CONCAT -- Concatenate a line in recall buffer
+;
+; INPUTS:
+;	R1 = count of valid characters in command
+;	R2 = 1 if space is to be inserted between previous line and
+;		concatenated segment
+;	     0 if new segment is to be concatenated directly
+;
+; CALL	CONCAT
+;
+; OUTPUTS:
+;	R1 and R2 are unchanged
+;	FIRQB and XRB are random
+; 
+; CONCAT issues the syscall to concatenate an input line.  It is used to
+; build a single command from multi-line input in the RECALL buffers'
+; copy of the command.
+;
+;-
+.ENABL	LSB
+
+CONCAT:	TST	R1			;Are there really chars on this line?
+	BEQ	10$			;No - get out
+	CALLX	CLRFQX			;Clear the FIRQB and XRB
+	MOV	#15,FIRQB+FQFIL		;Function is 15, recall
+	MOVB	#3,FIRQB+FQPPN		;Set operation = concatenate
+	MOVB	R2,FIRQB+FQPPN+1	;Add space if R2 set (other flags
+					; are always 0 for this function)
+	MOV	R1,FIRQB+FQNAM1		;Set concatenation point
+	.MESAG				;Go do truncation
+	CLR	R0			;Only possible error means "ignored" ;023
+10$:	RETURN				;Return
+
+.DSABL	LSB
+
+
+.END

@@ -1,0 +1,465 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.INCLUDE	/CUI:CUIPFX.MAC/
+TITLE	CUITHR,<CUI Thread Interpretor>,0A,10-MAY-91,CEK/JFM/BTB
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR CUITHR
+;+
+;
+;  001	CEK  16-APR-82	Added edit history
+;  002	CEK  16-APR-82	Removed @# notation
+;  003	CEK  16-APR-82	Use addresses rather than offsets for parser variables
+;  004	CEK  30-APR-82	Changed ORG statements
+;  005	CEK  30-APR-82	Changed name from DCLTHR to CUITHR
+;  006	CEK  30-APR-82	Moved routines specific to DCL into DCLTRN.MAC.
+;  007	CEK  02-AUG-82	Changed PSECT attributes
+;  008	JFM  20-AUG-82	Added $IFDEV.
+;  009	CEK  07-SEP-82	Made $IF YES and $IF NO succeed when fetch failed.
+;  010	CEK  06-OCT-82	Added $IF SUCCESS and $IF FAILURE.
+;  011	JFM  03-MAR-83	Changed comment in $IFDEV.
+;  012	JFM  12-MAY-83	Removed $ENDTHR:: symbol, fixed typo.
+;
+;			[RSTS V9.4]
+;  013	JFM  08-MAY-87	Added 9-character logical support in U$IFDEV.
+;
+;			[RSTS V9.7]
+;  014	JFM  15-Sep-88	Recoded U$CALL so it doesn't need the costly CALB.
+;
+;                       [RSTS V10.0]
+;  015  BTB  05-Jun-90	Changed U$IFDEV to allow 15-char logicals
+;-
+
+;+
+; CUITHR -- CUI Thread Interpretor
+;
+; CUITHR interprets (executes) the threaded instructions
+; that the CUSP provides
+; for parsing and validating the command string.
+; These instructions can also include actions 
+; to be carried out as the parse progresses.
+;
+; THREADED INSTRUCTIONS:
+;	Each instruction is a word containing the address of a service
+;	routine, followed by zero or more operands for that service
+;	routine to use.  (The service routine must know how many
+;	operands to expect.)  Macros are used to generate the threaded
+;	instructions.
+;
+; SERVICE ROUTINES:
+;	R3 is used as the virtual program counter.  
+;
+;	ON ENTRY TO A SERVICE ROUTINE:
+;		R3	->	the word following the address of the service 
+;				routine -- ie at the first operand, 
+;				if there are any operands.  
+;		R0	=	0 if previous operation succeeded
+;			=	-1 if previous operation failed
+;		R4	->	CUI common
+;		R2,R5 		random.
+;
+;	ON RETURN FROM A SERVICE ROUTINE:
+;		R0=0 if success
+;		  =-1 if catchable failure (testable by $IF statement)
+;			R3	->	next threaded instruction.  
+;					(The service routine must have 
+;					bumped R3 past all of its
+;					inline operands.)
+;		R0=other value => error to be reported to user
+;			R0	=	error status 
+;		Other registers ignored.
+;-
+
+	.MCALL	$CUI
+	.PSECT	CUITHR,RO,REL,LCL,CON
+	DEFORG	CUITHR
+
+	$CUI	COMMON		;Define layout of CUI common.
+
+.SBTTL	Macros and constants for CUITHR tables
+
+.MACRO	CUITHR
+; Macros for CUITHR tables
+
+.MACRO	$RETURN	ERR=0
+	.IF	IDN <ERR>,<FAILURE>
+	 .WORD	U$RETURN,-1
+	.IFF
+	 .WORD	U$RETURN,ERR
+	.ENDC
+	.GLOBL	U$RETURN
+	.ENDM	$RETURN
+
+.MACRO	$THR
+	.DSABL	CRF
+	.IIF	NE $STACK-0	.ERROR	;Previous $THR unbalanced.
+$STACK	=	0
+	.ENABL	CRF
+	.ENABL	LSB
+	.ENDM	$THR
+
+.MACRO	$CALL	SUBR
+	 .WORD	U$CALL,SUBR
+	.GLOBL	U$CALL
+	.ENDM
+
+.MACRO	$NOP
+	 .WORD	U$NOP
+	.GLOBL	U$NOP
+	.ENDM
+
+.MACRO	$ENDTHR
+	 .WORD	U$ENDTHR
+	.GLOBL	U$ENDTHR
+	.DSABL	LSB
+	.ENDM	$ENDTHR
+
+.MACRO	$QUIT
+	 .WORD	U$QUIT
+	.GLOBL	U$QUIT
+	.ENDM
+
+.MACRO	$IF	COND,NET
+	.IF	NB COND
+	 .WORD	U$IF'COND
+	.GLOBL	U$IF'COND
+	.IFF	;NB COND
+	 .WORD	U$IFNET,NET
+	.GLOBL	U$IFNET
+	.ENDC
+	.DSABL	CRF
+	GET.SYM	$$$END
+	$PUSH	$$$END
+	GET.SYM	$$$NEX
+	$PUSH	$$$NEX
+	.RADIX	10.
+	.IRP	N,\$$$NEX
+	 .WORD	N'$
+	.ENDR
+	.RADIX	8.
+	.ENABL	CRF
+	.ENDM	$IF
+
+.MACRO	$IFDEV	DEVTYP
+	 .WORD	U$IFDEV
+	.GLOBL	U$IFDEV
+	 .WORD	DEVTYP'HND
+	.DSABL	CRF
+	GET.SYM	$$$END
+	$PUSH	$$$END
+	GET.SYM	$$$NEX
+	$PUSH	$$$NEX
+	.RADIX	10.
+	.IRP	N,\$$$NEX
+	 .WORD	N'$
+	.ENDR
+	.RADIX	8.
+	.ENABL	CRF
+	.ENDM	$IFDEV
+
+.MACRO	$ELSE
+	.DSABL	CRF
+	$POP	$$$NEX
+	$TOS	$$$END
+	.RADIX	10.
+	.IRP	E,\$$$END
+	 .WORD	U$GOTO,E'$
+	.ENDR
+	.RADIX	8.
+	.GLOBL	U$GOTO
+	.RADIX	10.
+	PUT.SYM	\$$$NEX,LIST
+	.RADIX	8.
+	$PUSH	$$$END
+	.ENABL	CRF
+	.ENDM	$ELSE
+
+.MACRO	$ENDIF
+	.DSABL	CRF
+	$POP	$$$NEX
+	.RADIX	10.
+	PUT.SYM	\$$$NEX,LIST
+	.RADIX	8.
+	$POP	$$$END
+	.RADIX	10.
+	.IIF	NE $$$NEX-$$$END	PUT.SYM	\$$$END,LIST
+	.RADIX	8.
+	.ENABL	CRF
+	.ENDM	$ENDIF
+
+.MACRO	$GOTO	DEST
+	 .WORD	U$GOTO,DEST
+	.GLOBL	U$GOTO
+	.ENDM	$GOTO
+
+.MACRO	$DO
+	.DSABL	CRF
+	GET.SYM	$$$END
+	$PUSH	$$$END
+	.RADIX	10.
+	.IRP	E,\$$$END
+	 .WORD	U$DO,E'$
+	.ENDR
+	.RADIX	8.
+	.GLOBL	U$DO
+	.ENABL	CRF
+	.ENDM	$DO
+
+.MACRO	$ENDDO
+	 RTS	PC
+	.DSABL	CRF
+	$POP	$$$END	
+	.RADIX	10.
+	PUT.SYM	\$$$END,LIST
+	.RADIX	8.
+	.ENABL	CRF
+	.ENDM	$ENDDO
+
+.SBTTL	Internal macros for CUITHR tables
+.MACRO	$PUSH	QTY
+	.DSABL	CRF
+$STACK	=	$STACK + 1
+	.RADIX	10.
+	$$PUSH	\$STACK,QTY
+	.RADIX	8.
+	.ENABL	CRF
+	.ENDM	$PUSH
+
+.MACRO	$$PUSH	STACK,QTY
+B$'STACK =	QTY
+	.ENDM	$$PUSH
+
+.MACRO	$POP	QTY
+	.DSABL	CRF
+	.RADIX	10.
+	$$POP	\$STACK,QTY
+	.RADIX	8.
+$STACK	=	$STACK - 1
+	.ENABL	CRF
+	.ENDM	$POP
+	
+.MACRO	$$POP	STACK,QTY
+	.IIF	LT STACK-1	.ERROR;	Stack underflow.
+QTY	=	B$'STACK
+	.ENDM	$$POP
+
+.MACRO	$TOS	QTY
+	.DSABL	CRF
+	.RADIX	10.
+	$$TOS	\$STACK,QTY
+	.RADIX	8.
+	.ENABL	CRF
+	.ENDM	$TOS
+
+.MACRO	$$TOS	STACK,QTY
+	.IIF	LT STACK-1	.ERROR;Stack underflow.
+QTY	=	B$'STACK
+	.ENDM	$$TOS
+
+; Initialize "stack".
+
+$STACK	=	0
+
+	.ENDM	CUITHR
+	CUITHR			;Expand the macro to define the op codes.
+
+.SBTTL	CUITHR--Interpret threaded command descriptions
+;+
+; CUITHR--Interpret threaded command descriptions
+;
+; INPUTS:
+;	thrblk	->	threaded control block to interpret.
+;	CMDBUF		contains the command string.
+;	CUITRE		contains representation of the command string.
+;
+; USAGE:
+;	CALB	CUITHR <thrblk>		;from outside a $THR block
+;	$CALL	<thrblk>		;from within a $THR block
+;
+; OUTPUTS:
+;	Threads have been executed.
+;	C=1 if error.
+;		R0	=	return status, as set by the $RETURN construct 
+;				or by $DO blocks.
+;	C=0 if success.
+;		R0	=	0
+;-
+
+.ENABL	LSB
+
+CUITHR::SUBR	<.THRBLK>
+	CLR	R0		;Start off with a clean slate.
+	MOV	.THRBLK(R5),R3	;Point at THR control block.
+20$:	MOV	CMNADR,R4	;Point at CUI common.
+	CALL	@(R3)+		;Dispatch to service routine.
+25$:	TST	R0		;Error?
+	BEQ	20$		;No error, continue.
+	CMP	R0,#-1		;Yes it was an error. Is it recoverable?
+	BEQ	20$		;Yes, continue.
+	RETURN			;Unrecoverable error, quit.
+
+; The U$ENDTHR op-code gets us out of the above loop.
+
+U$ENDTHR::.ASSERT (SP) EQ #25$	;We got here from the above CALL.
+	POP			;Pop return address to above CALL.
+	CLR	R0		;Exit without error.
+	RETURN			;Return
+
+; The U$CALL op-code puts us into the middle of the CUITHR block.	;014
+
+U$CALL::.ASSERT	(SP) EQ #25$	;We got here from above CALL.		;014
+	CLR	R0		;Preset no error			;014
+	MOV	R3,-(SP)	;Save current R3 pointer		;014
+	MOV	(R3),R3		;Point to threaded block to call	;014
+	CALL	20$		;Go into CUITHR routine			;014
+	MOV	(SP)+,R3	;Restore return address			;014
+	TST	(R3)+		;Skip routine address we just called	;014
+	RETURN			;All done				;014
+
+; The $RETURN construct can also get us out of the above loop.
+; $RETURN includes a return status, which could be an error code but
+; could also be -1 (failure) or 0 (success).
+
+U$RETURN::.ASSERT (SP) EQ #25$	;We got here from the above CALL.
+	POP			;Pop return address to above CALL.
+	MOV	(R3)+,R0	;Get error code.
+	RETURN
+
+
+; By moving U.QUIT into R0, this threaded instruction will cause CUI to
+; stop processing threaded code
+
+U$QUIT::MOV	#U.QUIT,R0
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<CMNADR,U.QUIT>
+
+.SBTTL	Flow Control for Threaded Blocks
+;+
+; Flow Control for Threaded Blocks
+;
+; INPUTS:
+;	R0	= 0	if latest fetch was successful
+;		= -1	otherwise
+;	R3	->	first argument (if any)
+;	R4	->	CUI common
+;
+; USAGE:			BINARY:
+;
+; $IF	PRESENT			.WORD	U$IFPRESENT,<address of else>
+; $IF	ABSENT			.WORD	U$IFABSENT,<address of else>
+; $IF	SUCCESS			.WORD	U$IFSUCCESS,<address of else>
+; $IF	FAILURE			.WORD	U$IFFAILURE,<address of else>
+; $IF	NO			.WORD	U$IFNO,<address of else>
+; $IF	YES			.WORD	U$IFYES,<address of else>
+; $IF	NET={YES|NO}		.WORD	U$IFNET,{YES|NO},<address of else>
+; $IFDEV devicetype		.WORD	U$IFDEV,<device handler index>
+;				.WORD	<address of else>
+; $ELSE				.WORD	U$GOTO,<address of endif>
+; $GOTO	label			.WORD	U$GOTO,<label>
+; $DO				.WORD	U$DO
+; $CALL	subroutine		.WORD	U$CALL,<subroutine>
+; $NOP				.WORD	U$NOP
+; $RETURN [errorcode]		.WORD	U$RETURN,<errorcode>
+;
+; OUTPUTS:
+;	R0	=	completion status for $DO block or $CALL or $RETURN, 
+;			unchanged otherwise
+;	R3	->	next instruction
+;-
+
+.ENABL	LSB
+
+U$IFPRESENT::
+U$IFSUCCESS::
+	TST	R0		;Was latest fetch successful?
+	BEQ	CONTIN		;Yes: continue inline.
+	BR	U$GOTO		;No: skip to matching $ELSE or $ENDIF.
+
+U$IFFAILURE::
+U$IFABSENT::
+	TST	R0		;Was latest fetch successful?
+	BEQ	U$GOTO		;Yes: skip to matching $ELSE or $ENDIF.
+	BNE	CONTIN		;No: continue inline.
+
+U$IFNO::TST	U.NO(R4)	;Was there a /NO prefix?
+	BNZ	CONTIN		;Yes. Continue inline.
+	BR	U$GOTO		;No. skip to matching $ELSE or $ENDIF.
+
+U$IFYES::TST	U.NO(R4)	;Was there a /NO prefix?
+	BZE	CONTIN		;No.  Continue inline.
+	BR	U$GOTO		;Yes. Skip to matching $ELSE or $ENDIF.
+
+U$IFNET::CMP (R3)+,NET		;Does the command have the specified 
+				;network-ness?
+	BEQ	CONTIN		;Yes: continue inline.
+	BR	U$GOTO		;No: skip to matching $ELSE or $ENDIF.
+
+U$IFDEV::SUB	#16.,SP		;Make a 16-character buffer.		;015
+	MOV	SP,R1		;Point to the buffer.
+	MOV	R4,R2		;Point to CUI common.
+	ADD	#U.STR,R2	;Point to the device name.
+	MOV	U.LEN(R4),R5	;Get number of characters in device name.
+	CMP	R5,#15.		;More than 15?				;015
+	IFHI			;If so then
+	MOV	#15.,R5		;  Trim it to 15.			;015
+	ENDIF
+	MOV	R5,R4		;Copy number of characters.
+	.ASSERT	R5 NE #0	;We have at least one character.
+70$:	MOVB	(R2)+,(R1)+	;Move device name
+	SOB	R5,70$		;into buffer.
+	MOVB	#':,(R1)+	;Add a colon to the end.
+	INC	R4		;Inc number of characters to allow for colon.
+	MOV	SP,R1		;Point to the buffer.
+	CALBX	U$FSS <R4,R1>	;FSS the device name.
+	ADD	#16.,SP		;Deallocate the buffer.			;015
+	.ASSERT	R0 EQ #0	;No error possible.
+	CMPB	(R3),XRB+14	;Is the device the one specified?
+	BNE	80$		;No.  Go to matching $ENDIF or $ELSE.
+	TST	(R3)+		;Yes. We skip over handler index and
+	BR	CONTIN		;  continue inline.
+
+80$:	TST	(R3)+		;Skip over handler index and
+	.BR	U$GOTO		;  goto too matching $ENDIF or $ELSE.
+
+U$GOTO::MOV	(R3),R3		;Jump to requested label.
+	RETURN
+
+U$DO::	PUSH	(R3)+		;Save address of end of $DO block.
+	CLR	R0		;Preset no error.
+	CALL	@R3		;Call the $DO block.
+				;(Return status is in R0.)
+				;(All other registers may be random.)
+	POP	R3		;Get address of end of $DO block 
+				;(virtual PC).
+	RETURN
+
+U$NOP::	RETURN
+
+; Continue inline when IF condition succeeds.
+
+CONTIN:	TST	(R3)+		;Skip over branch address.
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<NET>
+.END

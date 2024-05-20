@@ -1,0 +1,1180 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:LATDEF/
+TITLE	LATSUB,<LAT Process Subroutines>,0D,02-AUG-91,SRC/DWF/KPH/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for LATSUB
+
+;+
+;
+;			[RSTS/E V9.6]
+;  000  KPH  20-Oct-87	Creation for RSTS/E from SRC's and DWF's efforts
+;  001  KPH  07-Dec-87	Fix virtual circuit flow control problems
+;  002	DWF  05-Feb-88	Fix WAK queue problems
+;  003	JFM  15-Feb-88	Change so counters use 32-bit counter routine.
+;			Store server name length in virtual circuit block.
+;  004	DWF  19-Feb-88	Don't zero-pad minimum-length packets,
+;			add idle circuit block queue.
+;  005	JFM  03-Mar-88	Fix bug in buffer allocation
+;			Use INC32 instead of COU32 (saves code)
+;			Added UPDMCT routine, to refresh the multicast message
+;  006	DWF  07-Apr-88	Fix stack handling in FNDVCB and RETWAK
+;  007	JFM  11-Apr-88	Separate SNDMCT into two routines, SNDMCT and MCTDDB
+;  008	DWF  18-Apr-88	Fix message pointer in STPCIR
+;  009	DWF  21-Apr-88	Conform to LAT architecture spec for buffer management
+;  010	JFM  05-May-88	Check for matching server name in FNDVCB
+;  011	JFM  18-May-88	Add initialization of pending transmit queue in INIVCB
+;			Made upcase routing global.
+;  012	JFM  07-Jun-88	Keep track of number of idle communication buffers
+;
+;			[RSTS/E V9.7]
+;  013	JFM  09-Mar-89	Clean up comments, rewrite RETWAK routine to delink
+;			buffers as they are returned to system.
+;
+;			[RSTS/E V10.0]
+;  014	DRP  13-Nov-89	Add solicitation support
+;
+;			[RSTS/E V10.1]
+;  015	DRP  31-Jul-91	Change the symbol name L.FLAG to L.FLG
+;-
+
+	DEFORG	LATSUB							
+
+.SBTTL	GTCBLK - Allocate a circuit block
+;+
+; GTCBLK - Allocate a circuit block
+;                 
+; Inputs:
+;	R0 -> Received message CCB
+;	R2 -> Message type code in buffer (mapped)
+;
+; Format:
+;	CALL	GTCBLK
+;
+; Outputs:
+;	R1 -> Circuit block
+;-
+.ENABL	LSB
+
+GTCBLK::MOV	R2,-(SP)	;Get work registers
+	MOV	R4,-(SP)	; ...
+	CALL	CKAVCB		;Check for an active VCB		;004
+	BCC	15$		;Found - R1 is set up			;004
+	CALL	CKIVCB		;Check for an idle VCB			;004
+	BCC	15$		;Found - get out			;004
+	BUFFER	GETLRG,C.LEN+2,60.,MONPOL ;Allocate the buffer         	;005
+	BCS	20$		;None, give our caller an energy
+	TST	(R4)+		;Advance past buffer size field
+	MOV	R4,R1		;Now copy the pointer
+	CALL	INIVCB,R4,C.LEN	;Initialize the entire VCB 		;011
+	ADD	#C.ZTIM,R4	;And point to date/time cell
+	CALLM	INIZTM,GENAP5	;Update the date time block
+15$:	MOV	R1,@LATCTL+L.AVCB+2 ;Put block on end of list		;004
+	MOV	R1,LATCTL+L.AVCB+2 ;We are now end of list	
+	CLC			;Indicate success
+20$:	MOV	(SP)+,R4	;Restore registers
+	MOV	(SP)+,R2	; ...
+	RETURN			;All done here
+
+GLOBAL	<LATCTL,MONPOL>
+
+.DSABL	LSB
+
+.SBTTL	CKIVCB - Check the idle queue for re-use of a VCB
+;+
+; CKIVCB - Check the idle queue for re-use of a VCB
+;                 
+; Inputs:
+;	R0 -> Received message CCB
+;	R2 -> Message type code in buffer (mapped)
+;
+; Format:
+;	CALL	CKIVCB
+;
+; Outputs:
+;	If found,
+;		C=0
+;		R1 -> Circuit block
+;	Else,
+;		C=1
+;		R1 random
+;-
+.ENABL	LSB
+
+CKIVCB:	MOV	#LATCTL+L.IVCB,R1 ;Set address of idle queue		;004
+	CALL	FNDVCB		;Is there a VCB to match this START?	;004
+	BCS	10$		; Nope, return with status		;004
+	DECB	LATCTL+L.ICNT	;One less idle VCB, now			;004
+	CALL	INIVCB,R4,C.ZTIM ;Re-init VCB and return with success	;011
+	CLC			;Indicate success			;004
+10$:	RETURN			;All done!				;004
+
+.DSABL	LSB
+
+.SBTTL	CKAVCB - Check the active queue for re-use of a VCB
+;+
+; CKAVCB - Check the active queue for re-use of a VCB
+;                 
+; Inputs:
+;	R0 -> Received message CCB
+;	R2 -> Message type code in buffer (mapped)
+;
+; Format:
+;	CALL	CKAVCB
+;
+; Outputs:
+;	If found,
+;		C=0
+;		R1 -> Circuit block
+;	Else,
+;		C=1
+;		R1 random
+;-
+.ENABL	LSB
+
+CKAVCB:	MOV	#LATCTL+L.AVCB,R1 ;Point to the active VCB queue	;004
+	CALL	FNDVCB		;Is there one that matches the START?	;004
+	BCS	40$		; Nope, exit with status		;004
+	;
+	; Remove all sessions that were active on this circuit
+	;
+	MOV	R3,-(SP)	;I need this				;004
+	MOV	R5,-(SP)	; and this				;004
+	MOV	C.SESQ(R1),R3	;Get the first session block		;004
+	BEQ	20$		;No active sessions?  Just move on	;004
+10$:	CALLX	REMSES		;Remove the session			;004
+	MOV	C.SESQ(R1),R3	;Get the next session block		;004
+	BNE	10$		;Loop till done				;004
+	;
+	; Return the current transmit buffer (if any)
+	;
+20$:	MOVB	C.NXBF(R1),R5	;Get # of xmt buffs associated w/server	;012
+	SUB	R5,ICBFMN	;Don't count them as part of our minimum;012
+	MOV	C.CXMT(R1),R5	;Get the current transmit CCB		;004
+	BEQ	30$		;None, that's easy.			;004
+	CLR	C.CXMT(R1)	;Show none allocated			;004
+	CALLX	COMRET		; and toss the buffer			;004
+	;
+	; Return any unacknowledged transmits
+	;
+30$:	CALL	RETWAK		;Easy!					;004
+	CALL	INIVCB,R4,C.ZTIM ;Now go re-init the VCB!		;011
+	CLC			;Indicate success			;004
+	MOV	(SP)+,R5	;Restore				;004
+	MOV	(SP)+,R3	;   "					;004
+40$:	RETURN			;All done!				;004
+
+GLOBAL	<ICBFMN>							;012
+
+.DSABL	LSB
+
+.SBTTL	FNDVCB - Find a VCB that matches a server VC START
+;+
+; FNDVCB - Find a VCB that matches a server VC START
+;
+; Inputs:
+;	R0 -> Received message CCB
+;	R1 -> Listhead of queue to search
+;
+; Format:
+;	CALL	FNDVCB
+;
+; Outputs:
+;	If found,
+;		C=0
+;		R1 -> Virtual circuit block dequeued
+;	Else,
+;		C=1
+;		R1 = Random
+;-
+.ENABL	LSB
+
+FNDVCB:	MOV	R0,-(SP)	;Get some scratch registers		;004
+	MOV	R2,-(SP)	;	"	"			;004
+	MOV	R3,-(SP)	;	"	"			;004
+	MOV	R4,-(SP)	;	"	"			;004
+	MOV	R1,-(SP)	;Save the listhead address		;004
+10$:	SEC			;Assume no match will be found		;004
+	MOV	R1,R4		;Hang on to the previous block address	;004
+	MOV	(R1),R1		;Pick up a VCB from the list		;004
+	BEQ	40$		;No more, exit with "no-match" status	;004
+	MOV	#140000+BUFHDR+EP.SRC,R2 ;Point to the source address	;004
+	MOV	R1,R3		;Copy VCB pointer			;004
+	ADD	#C.SADD,R3	;Point to the Ethernet address in VCB	;004
+	MOV	#3,R0		;'Tis three words long			;004
+.ASSUME	<EP.SRC-EP.DST> EQ 6						;004
+20$:	CMP	(R3)+,(R2)+	;This word match?			;004
+	BNE	10$		; Nope, move on				;004
+	SOB	R0,20$		;Keep checking				;004
+
+	MOV	#140000+BUFHDR+<EP.SIZ-2>+24,R2 ; Point to VC header,	;010
+				; then point to SLAVE_NODE_LEN in start ;010
+				; message (24 bytes into message)	;010
+	CLR	R0		; Clear length of slave name		;010
+	BISB	(R2)+,R0	; Get length, point to SLAVE_NODE_NAME	;010
+	ADD	R0,R2		; Skip slave, point to MASTER_NAME_LEN	;010
+	CLR	R0		; Clear length of master name		;010
+	BISB	(R2)+,R0	; Get length, point to MASTER_NODE_NAME	;010
+	
+.ASSUME	C.NAML	EQ C.SADD+7	; 6 bytes for Ether Addr, and reserved	;010
+	INC	R3		; Skip past reserved byte		;010
+	CMPB	(R3)+,R0	; Are lengths the same			;010
+	BNE	10$		; Nope, move on				;010
+	CALL	CKNAME		; Compare the two names			;010
+	BCS	10$		; If names don't match, try next one	;010
+
+	;
+	; A match was found - dequeue this Virtual Circuit Block
+	;
+	MOV	(SP)+,R0	;Get saved listhead address		;006
+	MOV	(R1),(R4)	;Put the next pointer from this block	;004
+				;  into the previous block		;004
+	BNE	30$		;If NE, we're done			;004
+	MOV	R4,2(R0)	;We removed the tail - change the tail ptr ;004
+30$:	TST	(PC)+		;Skip the next instruction (clears C)	;004
+40$:	INC	(SP)+		;Toss listhead address (preserving C)	;004
+	MOV	(SP)+,R4	;Restore saved registers		;004
+	MOV	(SP)+,R3	;	"	"			;004
+	MOV	(SP)+,R2	;	"	"			;004
+	MOV	(SP)+,R0	;	"	"			;004
+	RETURN			;Whew!					;004
+
+.DSABL	LSB
+
+.SBTTL	CKNAME - Check two names against each other for likeness
+;+
+; CKNAME - Check two names against each other for likeness		;010
+;									;010
+; Inputs:								;010
+;	R0  = Count of characters in both names.			;010
+;	R2 -> First name						;010
+;	R3 -> Second name						;010
+;									;010
+; Format:								;010
+;	CALL	CKNAME							;010
+;									;010
+; Outputs:								;010
+;	C=0 implies names match						;010
+;	C=1 implies names do not match					;010
+;									;010
+;	All registers preserved						;010
+;	
+;-
+.ENABL	LSB								;010
+
+CKNAME::REGSCR			; Save all the registers	 	;010
+10$:	MOVB	(R2)+,R1	; Copy character from first name	;010
+	CALL	UPCASE		; Make the character upper case		;010
+	MOV	R1,R4		; Store character away			;010
+	MOVB	(R3)+,R1	; Copy character from second name	;010
+	CALL	UPCASE		; Make that character upper case too	;010
+	CMPB	R4,R1		; Are characters the same?		;010
+	BNE	20$		; Branch if not 			;010
+	SOB	R0,10$		; Check next character until done	;010
+	TST	(PC)+		; Indicate success, skip next line	;010
+20$:	SEC			; Indicate failure			;010
+	RETURN			; Return with status			;010
+
+.DSABL	LSB								;010
+
+.SBTTL	UPCASE - Upper case a character
+;+
+; UPCASE - Upper case a character					;010
+;									;010
+; Inputs:								;010
+; 	R1  = character to uppercase.					;010
+;									;010
+; Format:								;010
+;	CALL	UPCASE							;010
+;									;010
+; Outputs:								;010
+;	R1 =  uppercased if alphabetic, else left alone			;010
+;									;010
+; NOTE:  THIS ROUTINE ONLY WORKS WITH CHARACTERS IN RANGE a TO z.	;010
+;	 MUST FIX FOR 8-bit CHARACTERS.					;010
+;-
+.ENABL	LSB								;010
+.ENABL	LC								;010
+
+UPCASE::CMPB	R1,#'a		; Is letter a 7 bit lower case?		;011
+	BLO	10$		; No, get out				;010
+	CMPB	R1,#'z		; Is it?				;010
+	BHI	10$		; No, get out				;010
+	BIC	#40,R1		; Convert to lower case			;010
+10$:	RETURN								;010
+
+.DSABL	LSB								;010
+
+.SBTTL	INIVCB - Reinitialize a Virtual Circuit Buffer for re-use
+;+
+; INIVCB - Reinitialize a Virtual Circuit Buffer for re-use
+;
+; Inputs:
+;	R1 -> Virtual Circuit Block
+;
+; Format:
+;	CALL	INIVCB,R4,<Length>					;011
+;
+; Outputs:
+;	All registers preserved
+; 
+; Description:
+;	The circuit block is initialized, up to the length specified.	;011
+;	INIVCB can be used with length C.ZTIM to initialize up to the	;011
+;	counter field, or C.LEN for the entire circuit block. The rest	;011
+;	of the Virtual Circuit START sequence will fill in everything.	;011
+;
+;-
+.ENABL	LSB
+
+INIVCB:	MOV	R1,-(SP)	;Save the circuit block address		;004
+	MOV	R2,-(SP)	;Get one more scratch register		;004
+	MOV	R1,R2		;Calculate the ending address		;004
+	ADD	(R4)+,R2	;   of the region we wish to clear	;011
+10$:	CLR	(R1)+		;Zap a word				;004
+	CMP	R1,R2		;Are we at the end, yet?		;004
+	BLO	10$		; Nope, keep going.			;004
+	MOV	(SP)+,R2	;Restore scratch			;004
+	MOV	(SP)+,R1	;Restore circuit block address		;004
+	MOV	R1,C.SESQ+2(R1)	;Set up listhead for session queue	;004
+	ADD	#C.SESQ,C.SESQ+2(R1) ; ...				;004
+	MOV	R1,C.XMTQ+2(R1)	;Set up listhead for retransmit queue	;004
+	ADD	#C.XMTQ,C.XMTQ+2(R1) ; ...				;004
+	MOV	R1,C.OUTQ+2(R1)	;Set up listhead for pending transmit	;011
+	ADD	#C.OUTQ,C.OUTQ+2(R1) ; queue. 				;011
+  	MOVB	#-1,C.LXMT(R1)	;Set up lowest transmit number		;004
+	RETURN	R4		;All done				;011
+
+.DSABL	LSB
+
+.SBTTL	SUPBFR - Supply a receive buffer to the Datalink Layer
+;+
+; SUPBFR - Supply a receive buffer to the Datalink Layer
+;
+; Inputs:
+;	R5 -> CCB
+;		CC.DDB(R5) = Offset in L.EDDB/EPDB/NRCV tables
+;
+; Format:
+;	CALL SUPBFR
+;-
+.ENABL	LSB
+
+SUPBFR::MOV	R1,-(SP)	; Preserve this!			;009
+	MOV	CC.DDB(R5),R1	; Pick up L.NRCV offset			;009
+	ADD	#LATCTL+L.NRCV,R1 ; Point to the L.NRCV entry		;009
+	CMPB	(R1)+,(R1)	; Are we at or above quota?		;009
+	BLO	10$		;  No, go supply it to the datalink	;009
+	MOV	(SP)+,R1	; Restore whatever this was		;009
+	CALLRX	COMRET		; Yes, return the buffer to the system	;009
+
+10$:	INCB	-(R1)		; Count the supplied buffer		;009
+	MOV	(SP)+,R1	; Restore whatever this was		;009
+	MOVB	#FC$BUF,R2	; Set function for the DLL
+	.BR	DSPDLL		; Go give the buffer to it, and get out
+
+.ASSUME	R.NUM	EQ	0						;009
+.ASSUME R.QTA	EQ	R.NUM+1						;009
+
+.DSABL	LSB
+
+.SBTTL	DSPDLL - Dispatch request to Datalink Layer
+;+
+; DSPDLL - Dispatch request to Datalink Layer
+;
+; Inputs:
+;	R2 =  Function Code
+;	R5 -> CCB to dispatch
+;		CC.DDB(R5) = Offset in L.EDDB/EPDB/NRCV tables
+;
+; Format:
+;	CALL	DSPDLL
+;
+; Outputs:
+;	R0-R5	preserved
+;-
+.ENABL	LSB
+
+DSPDLL::REGSCR			; Save all the registers		
+	MOVB	R2,CC.FC(R5)	; Store it in the CCB, too		
+	MOV	CC.DDB(R5),R1	; Pick up table offset			;009
+	MOV	LATCTL+L.EPDB(R1),R1 ; and get PDB address for the driver;009
+	MOV	R1,CC.DDB(R5)	; Store PDB address in CCB for goodness	;009
+	MOVB	DDUNT(R1),R0	; Get the unit number			
+	ASL	R0		; Make it unit * 2 for driver		
+	;CLC			; Not a redo (clr from ASL above)	
+	CALLX	DVRDSP,R4,$SERTBL ; Dispatch to the driver!		
+	RETURN			; Get out (restoring registers)		
+
+GLOBAL	<$SERTBL>
+
+.DSABL	LSB
+
+.SBTTL	FNDBLK - Find server block for this message
+;+
+; FNDBLK - Find server block for this message
+;
+; Inputs:
+; 	R2 -> Slot count in message
+; 	R5 -> Receive CCB 
+;
+; Outputs:
+;	R1 -> Server block for this message if found
+;	R2 -> MSG_SEQ_NBR in message
+;	R5 -> Receive CCB
+;-
+.ENABL	LSB
+
+FNDBLK::MOVB	(R2)+,CC.SLT(R5)	; Save number of slots		
+	MOV	LATCTL+L.AVCB,R1	; Get pointer to first server block 
+	BEQ	40$			; If EQ, No circuits active!
+10$:	CMP	C.LCID(R1),(R2)		; Find block for this server
+	BEQ	20$			; If EQ, We found it
+	MOV	(R1),R1			; Get link to next block
+	BNE	10$			; If NE, Check next block
+	BR	40$			; Exit with error	
+           
+20$:	TST	(R2)+			; Skip to next field
+	CMP	C.RCID(R1),(R2)+	; Does source ID compare?
+	BEQ	30$			; If EQ, Yes
+	CLR	R1			; Show no block
+30$:	TST	R1			; Set condition code
+40$:	RETURN
+                
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	SNDMCT - Send the multicast message
+;+
+; SNDMCT - Send the multicast message
+;
+; Inputs:
+;	
+;   If called to send Solicit Information Multicast:
+;
+;	R5 - CCB address of CCB/LDB
+;	LF.SOL Set in L.FLG					;015
+;
+; Outputs:
+;	R5 -> Transmit buffer CCB address
+;
+; Registers modified:
+;	R0,R1,R2,R3,R5
+;-
+.ENABL	LSB
+
+SNDMCT::MOV	#LATLIN,R2		; Get the max number of lines	
+	MOV	#LATCTL+L.EDDB,R3 	; Point to LAT device DDB table
+10$:	TST	(R3)			; Is there a DDB here?		
+	BEQ	50$			; If EQ, No - check next entry	
+	CALL	MCTDDB			; Multicast to this line	;007
+	BCS	60$			; If CS, allocation failure	;007
+50$:	TST	(R3)+			; Advance to next DDB address	
+	SOB	R2,10$			; One down, go back if any more	
+
+60$:	BITB	#LF.SOL,LATCTL+L.FLG	; Was this a solicit?		;015
+	BNE	70$			; If yes, don't play with	;014
+					;  multicast timer		;014
+    	MOV	LATCTL+L.MCTP,R3	; Get pointer to multicast message 
+	MOVB	M.MCTV(R3),LATCTL+L.MCTT ; Refresh multicast timer	
+70$:	RETURN				; Return to caller 
+
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	MCTDDB - Send multicast message to a single line		;007
+;+
+; MCTDDB - Send multicast message to a single line			;007
+;
+; Inputs:								;007
+;	R3 -> DDB of Ethernet portal to send multicast message on.	;007
+;	If we are to send solicit information multicast:		;007
+;		R5 -  CCB address of CCB/LDB				;007
+;		LF.SOL Set in L.FLG 					;015
+;
+; Outputs:								;007
+;	C = 0 -> success and 						;007
+;		R5 -> Transmit buffer CCB address			;007
+;	C = 1 -> resource allocation failure, try again later.		;007
+;
+; Registers modified:							;007
+;	R0,R1,R5							;007
+; Registers preserved:							;007
+;	R2,R3								;007
+;-
+.ENABL	LSB								;007
+
+MCTDDB::								;007
+	BITB	#LF.SOL,LATCTL+L.FLG	; Are we soliciting?		;015
+	BNE	20$			; Yes, don't get another buffer	;014
+					; Create multicast message for this line
+	CALLX	COMGET			; Get a comm buffer		
+	BCS	60$			; If CS, Allocation failure - try later
+20$:	PUSH	<R2,R3>			; Save device count and DDB pointer 
+	SUB	#LATCTL+L.EDDB,R3	; Compute L.EDDB/EPDB/NRCV offset;009
+	MOV	R3,CC.DDB(R5)		; Store the offset for DSPDLL	;009
+	BITB	#LF.SOL,LATCTL+L.FLG	; Soliciting?			;015
+    	BNE	40$			; Yes, don't use standard multicast ;014
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Map the buffer           
+	MOV	LATCTL+L.MCTP,R3	; Get a pointer to multicast data 
+	MOV	M.MCTL(R3),R0		; Get the length of the data
+	MOV	R0,@#140000+BF.CNT	; Set the message length
+	MOV	#140000+BUFHDR,R2	; And point to the ethernet header
+	ASR	R0			; Get multicast length in words
+
+; // The below won't work when multicast message is in XBUF.  This 	;007
+; // will require a call to MOVMEM to avoid mapping problems.		;007
+30$:	MOV	(R3)+,(R2)+		; Move the data to buffer
+    	SOB	R0,30$			; Loop till done
+
+40$:	CALL	XMTMG1			; Dispatch request to DLL
+	POP	<R3,R2>			; Restore device count and pointer 
+	CLC				; Indicate success		;007
+60$:	RETURN				; Return 
+
+.DSABL	LSB								;007
+
+.SBTTL	UPDMCT - Update multicast message if changes made		;005
+;+
+; UPDMCT - Update multicast message if changes made
+;
+; Inputs:
+;	R3 -> Multicast message
+;
+; Description:
+;	This is called only when a change has been made in the multicast
+;	mesasge.  It then goes on to call SNDMCT to actually send the
+;	new multicast message.
+;
+;-
+.ENABL	LSB
+
+UPDMCT::REGSCR			; Save all the registers	 	;005
+	MOV	@#LATCTL+L.MCTP,R3 ;Get pointer to multicast message	;005
+	ADD	#M.VAR,R3	; Start with the variable fields	;005
+	MOV	@#LATCTL+L.NODE,R1 ; Get pointer to node block		;005
+	BEQ	30$		; Quit if node block not created	;005
+				; ( We can live with no service, but 	;005
+				;   not without node info.)		;005
+	MOV	R1,R2		; R2 -> Node block			;005
+.ASSUME	N.GRPL	EQ 0		; First thing in node block is bitmask	;005
+.ASSUME	N.GRP	EQ N.GRPL+1	; Bitmask immediately follows length	;005
+	CALL	COPY		; Copy the bitmask			;005
+
+	MOV	R1,R2		; Get pointer to node block again	;005
+	ADD	#N.NAML,R2	; Point to node name length		;005
+.ASSUME	N.NNAM	EQ N.NAML+1	; Node name follows length		;005
+	CALL	COPY		; Copy the node name			;005
+
+	MOV	R1,R2		; Get pointer to node block again	;005
+	ADD	#N.DESL,R2	; Point to node description length	;005
+.ASSUME	N.DESC	EQ N.DESL+1	; Description follows length		;005
+	CALL	COPY		; Copy the node id string		;005
+
+	; Insert service block(s) into the multicast message
+
+	MOVB	@#LATCTL+L.NSVC,R4 ; Get number of services offered	;005
+	MOVB	R4,(R3)+	; Set count into multicast message	;005
+	BEQ	20$		; None?  Multicast message all done	;005
+	MOV	#LATCTL+L.SRVC,R1 ; Get pointer to first service block	;005
+.ASSUME	S.SLNK	EQ 0		; Service block links have offset 0	;005
+10$:	MOV	(R1),R1		; Point to service block		;005
+	BEQ	35$		; There MUST be a block here, crash	;005
+				;   (else count is wrong)		;005
+	MOV	R1,R2		; Copy pointer to service block		;005
+	ADD	#S.RATE,R2	; Point to service rating		;005
+	MOVB	(R2)+,(R3)+	; Insert rating in mutlicast message	;005
+.ASSUME	S.NAML	EQ S.RATE+1	; Next comes name 			;005
+.ASSUME	S.NAME	EQ S.NAML+1	;   ... and length			;005
+	CALL	COPY		; Copy the service name 		;005
+
+	MOV	R1,R2		; Get pointer to service block again	;005
+	ADD	#S.DESL,R2	; Point to description length		;005
+.ASSUME	S.DESC	EQ S.DESL+1	; Service ID follows length		;005
+	CALL	COPY		; Copy the service ID			;005
+	SOB	R4,10$		; Try the next one			;005
+
+	; The last thing in the multicast message is the service class list
+
+20$:	MOVB	#1,(R3)+	; Insert service class list length	;005
+	MOVB	#1,(R3)+	; Insert service class list		;005
+	INC	R3		; Round up				;005
+	BIC	#1,R3		; To an even boundry			;005
+	MOV	R3,R2		; Copy pointer to next free byte	;005
+	MOV	LATCTL+L.MCTP,R3 ; Get pointer to multicast message	;005
+	SUB	R3,R2		; Get the length of the message		;005
+	MOV	R2,M.MCTL(R3)	; And set it for us to use		;005
+	CALL	SNDMCT		; Send the multicast message		;005
+30$:	RETURN			; Return (restoring all registers)	;005
+
+35$:	CRASH			; BUG CHECK -- Crash 			;005
+
+;+
+; Inputs:
+;	R2 -> ASCIC string to copy
+;	R3 -> Destination
+;
+; Outputs:
+;	R2 -> character after ASCIC string
+;	R3 -> Next character in destination
+;	R0 =  random (0)
+;-
+
+COPY:	MOVB	(R2)+,R0	; Get length of ASCIC string		;005
+	MOVB	R0,(R3)+	; Insert length into destination	;005
+	BEQ	50$		; Branch if nothing to copy		;005
+40$:	MOVB	(R2)+,(R3)+	; Copy data				;005
+	SOB	R0,40$		;  ... until all done			;005
+50$:	RETURN			; Return				;005
+
+.DSABL	LSB
+
+.SBTTL	SNDSTR - Sends a start message back to a server
+;+
+; SNDSTR - Sends a start message back to a server
+;                                                                   
+; Inputs:                                                              
+;	R1 -  Server table pointer 
+;	R2 -> Pointer into received start message at DST_CIR_ID
+;	R5 -> CCB for this received buffer
+;               
+; Outputs:
+;	
+;-
+.ENABL	LSB
+
+SNDSTR::MOV	R1,CC.LLB(R5)	;Save server table pointer
+	MOV	CC.DDB(R5),C.DOFF(R1) ;Save PDB pointer
+	MOV	#140000+BUFHDR+EP.SRC,R0 ; Point to the source address
+	MOV	(R0)+,C.SADD(R1) ; Save the Ethernet address	
+	MOV	(R0)+,C.SADD+2(R1) ; ...				
+	MOV	(R0)+,C.SADD+4(R1) ; ...				
+	MOV	LATCTL+L.NCIR,C.LCID(R1) ; Fill in local circuit ID	
+	INC	LATCTL+L.NCIR	; Set up next circuit ID	
+	BNE	10$		; Check for zero
+	INC	LATCTL+L.NCIR	; Can't have a zero ID		
+10$:	MOV	#MT.STR,-2(R2)	; Fill in message type (and zero slots)
+	BIS	#CF.RRF,C.FLAG(R1) ; Set response requested flag
+	MOV	2(R2),C.RCID(R1) ; Save remote circuit ID
+	MOV	C.RCID(R1),(R2)+ ; Turn message around
+	MOV	C.LCID(R1),(R2)+ ; ...
+	MOVB	(R2),C.SEQ(R1)	 ; Save message SEQ number
+	MOVB	(R2)+,(R2)+	 ; Copy to ACK number in message
+	CLRB	C.NXMT(R1)	 ; Start message counter at zero
+	MOVB	#-1,C.LXMT(R1)	 ; Start last acked at -1
+	;
+	; Negotiate buffer size to use
+	;
+	MOV	(R2),R0		 ;Pick up their buffer size
+	CMP	R0,#CBFSIZ-BUFHDR ;Bigger than ours?
+	BLOS	20$		 ;No, use theirs
+	MOV	#CBFSIZ-BUFHDR,R0 ;Yes, use our size instead
+20$:	CMP	R0,#576.	 ;Legal buffer size?
+	BHIS	30$		 ;Yes, use it
+	MOV	#576.,C.BEND(R1) ;Set buffer end for STPCIR
+	CALLX	COMRET		;Return this buffer to the system
+	MOV	#ER.IVM,R3	;Call it invalid message
+	CALLR	STPCIR		;Send stop message and return circuit block
+
+30$:	MOV	R0,(R2)+	;Store negotiated buffer size
+	ADD	#140000+BUFHDR,R0 ;Convert buffer size to end address
+	MOV	R0,C.BEND(R1)	;And save it in the circuit block
+	MOVB	#PROVER,(R2)+	;Supply protocol version
+	MOVB	#PROECO,(R2)+	;Supply protocol version ECO
+	MOVB	#MAXSES,(R2)+	;Set our maximum number of sessions
+	CLRB	(R2)+		;No extra buffers for now
+	TST	(R2)+		;Skip the timers
+	MOV	#FACNUM,(R2)+	;Supply facility number
+	MOV	#PROCDE,(R2)+	;Fill in product type code
+	CLR	R4		;Get ready to get slave name length (ours)
+	MOVB	(R2)+,R4	;Pick it up
+	ADD	R4,R2		;And advance past it
+	MOVB	(R2)+,R0	;Get length of system name
+	BEQ	50$		;None, leave it blank
+	MOV	R2,-(SP)	;Save pointer to start of master length
+	ADD	R0,(SP)		;Now save pointer to location code
+	MOV	R1,R4		;Copy pointer to circuit block
+	ADD	#C.NAML,R4	;And point to name length field		;003
+	CMP	R0,#C.NMAX	;Will server name fit in circuit block?	;003
+	BLOS	35$		;If so, branch				;003
+	MOV	#C.NMAX,R0 	;Else truncate to length of name field	;003
+35$:	MOVB	R0,(R4)+	;Set length into circuit block		;003
+.ASSUME	C.NAM	EQ C.NAML+1						;003
+40$:	MOVB	(R2)+,(R4)+	;Save the server name
+	SOB	R0,40$		;Loop till done
+	MOV	(SP)+,R2	;Restore pointer to location length
+50$:	CLRB	(R2)+		;Clear location_length
+	CLRB	(R2)+		;And Parameter_code
+	SUB	#140000+BUFHDR,R2 ;Get the message length
+	MOV	R2,@#140000+BF.CNT ;And set that in the buffer
+	.BR	XMTMSG 		;Now transmit the message
+
+.DSABL	LSB
+
+.SBTTL	XMTMSG - Transmit a message
+;+
+; XMTMSG - Transmit a message
+;
+; Inputs:                
+;	R1 -> Server Table
+;	R5 -> Transmit CCB
+;		CC.DDB(R5) -> Ethernet PDB
+;
+;               
+; Outputs:
+;	CCB queued to DLL
+;
+; Registers Modified:
+;	R0,R2
+;                        
+;-
+.ENABL	LSB
+
+XMTMSG::MOV	R1,CC.LLB(R5)		; Save server table pointer	
+	MOV	C.DOFF(R1),CC.DDB(R5)	;Set up PDB address
+	MOV	#140000+BUFHDR,R2	; Point to the ethernet header
+	MOV	C.SADD(R1),EP.DST(R2)	; Set up ethernet address to send to 
+	MOV	C.SADD+2(R1),EP.DST+2(R2); ...				
+	MOV	C.SADD+4(R1),EP.DST+4(R2); ...				
+	ADD	#EP.SIZ-2+2,R2		; Skip to destination circuit ID
+	MOV	C.RCID(R1),(R2)+	; Store destination circuit ID
+	MOV	C.LCID(R1),(R2)+	; and local ID                      
+	MOVB	C.NXMT(R1),(R2)		; Set up sequence number
+	MOVB	C.NXMT(R1),CC.SEQ(R5)	; Save sequence number in CCB	
+	INCB	C.NXMT(R1)		; Ready for next time
+	MOVB	(R2)+,C.HXMT(R1)	; Show highest seq number assigned
+10$:	MOVB	C.SEQ(R1),(R2)+		; Show last message number received
+	MOV	R1,R3			; Set up for counter routine
+	CALL	INC32,R1,C.MXMT		; Increment msgs sent on circuit;005
+	MOV	@#140000+BF.CNT,R0	; Get byte count of message
+	SUB	#EP.SIZ-2,R0		; Don't include ethernet overhead
+	CALL	COU32,R1,C.BXMT		; Count bytes sent
+	INC	C.OXMT(R1)		; Show another transmit outstanding
+					; for this circuit
+	BISB	#DF.NSP!DF.WAK,CC.DFL(R5) ;Mark waiting for an ACK	;001
+	TST	(R5)+			; Point to CC.WAK		;001
+.ASSUME	CC.WAK	EQ	2
+	MOV	R5,@C.XMTQ+2(R1) 	; Link to end of queue		;001
+	MOV	R5,C.XMTQ+2(R1)		; New last entry in queue	;001
+	CLR	(R5)			; Mark the end of the list	;002
+	TST	-(R5)			; Point to start of buffer	;001
+.ASSUME	CC.WAK	EQ	2
+;
+; Count in node counters as well
+;                        
+XMTMG1::				; Alternate entry for multicast message 
+	MOV	#LATCTL,R3		; Set up for counter routine	
+	CALL	INC32,R1,L.MXMT		; Increment messages transmitted;005
+	MOV	@#140000+BF.CNT,R0	; Get size of message
+	SUB	#EP.SIZ-2,R0		; Don't include ethernet overhead   
+	CALL	COU32,R1,L.BXMT		; Count bytes transmitted
+	CMP	@#140000+BF.CNT,#60.	; Is this the minimum req'd length? ;004
+	BHIS	30$			; Yes, it's fine as it is	;004
+	MOV	#60.,@#140000+BF.CNT	; Set the minimum length
+30$:	MOVB	#FC$XMT,R2		; Function code is Transmit	
+	CALLR	DSPDLL			; Send it to the Datalink Layer	
+
+.DSABL	LSB
+
+.SBTTL	XMTRTY - Retry outstanding transmits
+;+  
+; XMTRTY - Retry outstanding transmits
+;
+; Inputs:                
+;	R1 -> Server table                                                  
+;
+;
+; Outputs:
+;	R1 -> Server table
+;
+; Registers Modified:
+;	None
+;-
+.ENABL	LSB
+                
+XMTRTY::PUSH	<R2,R5>		;Save registers used           
+5$:	MOV	C.XMTQ(R1),R5	;Get first entry from the queue		;001
+	BEQ	20$		;None, no entries to do
+7$:	TST	-(R5)		;Point to start of buffer		;001
+.ASSUME	CC.WAK	EQ	2
+	BITB 	#DF.NSP,CC.DFL(R5) ;Transmit still in progress?		;001
+	BNE	20$		;Yes, get out				;001
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Map the buffer           
+	MOV	C.DOFF(R1),CC.DDB(R5) ;Set the PDB pointer
+	MOV	#140000+BUFHDR+<EP.SIZ-2>,R2 ;Point to VC header
+	BISB	#BIT00,(R2)	;Set the response required bit
+	MOVB	C.SEQ(R1),7(R2)	;Update the sequence number
+	INC	C.OXMT(R1)	;Show another outstanding transmit 
+	BISB	#DF.NSP,CC.DFL(R5) ;Mark this as transmit in progress	;002
+	MOVB	#FC$XMT,R2	;Function is a transmit
+	CALL	DSPDLL		;So issue that request
+	PUSH	<R3,R0>		; Save registers			;003
+	MOV	#LATCTL,R3	; Get pointer to LAT control region	;003
+	CALL	INC32,R1,L.RXMT	; Increment host retransmitted msg count;003
+	MOV	R1,R3		; Get pointer to virtual circuit block	;003
+	CALL	INC32,R1,C.RXMT	; Increment VC retransmitted msg count	;003
+	POP	<R0,R3>		; Restore registers 			;003
+	MOV	CC.WAK(R5),R5	;Get next CCB				;001
+	BNE	7$		;Got one, go process it			;001
+20$:	POP	<R5,R2>		;Restore registers             
+	RETURN			;All done
+
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	CHKACK - Return ACKed transmits
+;+
+; CHKACK - Return ACKed transmits
+;                      
+; Note - It is assumed that the transmit queue will be in order. 
+;
+; Inputs:                             
+;	R1 -> Circuit block
+;                                                                       
+; Outputs:
+;	Any transmits that have been acknowledged are returned to the system
+;
+; Register modified:
+;	R5
+;-              
+.ENABL	LSB
+
+CHKACK::MOV	C.XMTQ(R1),R5	; Get next transmit	
+	BEQ	20$		; If EQ, All done
+	TST	-(R5)		;Point to start of CCB			;001
+	CLR	-(SP)  		; Make room for ACK number
+	BISB	C.LXMT(R1),(SP)	; Get ACK number
+	CLR	-(SP)		; Same for sequence number
+	BISB	CC.SEQ(R5),(SP)	; ...			
+	SUB	(SP)+,(SP)	; Compute difference
+	BIC	#^C<377>,(SP)	; Check low byte for range
+	TSTB	(SP)+		; Is it positive?       
+	BMI	20$		; If MI, No - all done
+	MOV	CC.WAK(R5),C.XMTQ(R1) ;New first in listhead		;001
+	BNE	10$		; If NE, More to go
+	MOV	R1,C.XMTQ+2(R1)	; Close the listhead
+	ADD	#C.XMTQ,C.XMTQ+2(R1) ; ...
+10$:	BICB	#DF.WAK,CC.DFL(R5) ;No longer waiting for an ACK	;001
+	BITB	#DF.NSP,CC.DFL(R5) ;Transmit finished?			;001
+	BNE	15$		;No, let transmit complete return it	;001
+ 	CALLX	COMRET		;Return the buffer to RSTS                  
+15$:	CLRB	C.XMTC(R1)	;Reset retransmit counter- new		;001
+	BR	CHKACK		;Try for another
+
+20$:	RETURN			;All done
+
+.DSABL	LSB
+
+.SBTTL	STPCIR - Stop a circuit
+;+
+; STPCIR - Stop a circuit
+;                                                                       
+; Inputs:
+;	R1 -> Server table
+;	R3 -  Reason code for stop or flag for no stop message
+;
+; Outputs:      
+;	R1 -> Server table
+;         
+; Registers Modified:
+;	R2      
+;-              
+.ENABL	LSB
+                
+STPCIR::PUSH	<R5,R3>			; Save register and input parameter 
+	MOVB	C.NXBF(R1),R3		; Get number of transmit buffers;012
+					;  associated with server	;012
+	SUB	R3,ICBFMN		; Don't count them as part of 	;012
+					;  our minimum			;012
+	MOV	C.DOFF(R1),R3		; Get L.EDDB/EPDB/NRCV offset 	;009
+	DECB	LATCTL+L.NRCV+R.QTA(R3)	; Reduce rcv buffer quota by one;009
+	MOV	C.SESQ(R1),R3		; Get first session table pointer
+	BEQ	20$			; If EQ, No active sessions
+	;
+	; Stop all sessions for this circuit
+	;
+10$:	MOV	#ER.SHT,R2		; Reason code
+	CALL	STPSES			; Go stop the session
+	MOV	C.SESQ(R1),R3		; Get next session block address
+	BNE	10$			; Loop till done
+
+20$:	MOV	C.CXMT(R1),R5		; Get any current transmit CCB	
+	BEQ	50$			; If EQ, None allocated
+	;
+	; Send our last message for this circuit
+	;  (Note that this results in one more entry in the WAK queue)
+	;       
+	CLR	C.CXMT(R1)		; Show none allocated
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Map the buffer           
+	MOV	CC.FIL(R5),R2		; Get pointer to end of buffer	
+	SUB	#140000+BUFHDR,R2	; Calculate the byte count
+	MOV	R2,@#140000+BF.CNT	; and set it			
+	MOV	#140000+BUFHDR+<EP.SIZ-2>,R2 ; Point to message header
+	MOVB	#MT.RUN,(R2)+		; Set message type
+	MOVB	CC.SLT(R5),(R2)+ 	; Set number of slots		
+	CALL	XMTMSG			; Send the message
+	CLR	CC.LLB(R5)		; Clear circuit block pointer	
+	BICB	#DF.WAK,CC.DFL(R5) 	; Mark not waiting for an ACK	;001
+	;
+	; Now return any outstanding transmits
+	;
+50$:	CALL	RETWAK			; Looks easy, doesn't it?	;004
+	;
+	; Send a stop circuit message
+	;
+	TST	(SP)			; Valid reason code?
+	BMI	60$			; If MI, No - Don't send STOP message
+	CALL	GETCBF			; Get a transmit buffer		
+	BCS	60$			; If CS, can't get one - can't send one
+	MOV	C.CXMT(R1),R5		; Get transmit CCB address	
+	CLR	C.CXMT(R1)		; Show none available
+	;               
+	; Format STOP circuit message 
+	;
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Map the buffer           
+	MOV	#140000+BUFHDR+<EP.SIZ-2>,R2 ; Point to message header	;008
+	MOVB	#MT.STP,(R2)+		; Set message type
+	CLRB	(R2)+			; No slots
+	ADD	#6,R2			; Point to reason code field
+	MOVB	(SP),(R2)+		; Set reason code
+	CLRB	(R2)+			; No reason text byte count
+	SUB	#140000+BUFHDR,R2	; Calculate byte count
+	MOV	R2,@#140000+BF.CNT	; and store it
+	CLR	C.LCID(R1)		; Show no source circuit ID
+	CALL	XMTMSG			; Go send the message
+	CLR	CC.LLB(R5)		; Show no circuit block address	
+	BICB	#DF.WAK,CC.DFL(R5)	; Mark not waiting for an ACK	;001
+60$:	POP	<R3,R5>			; Restore registers             
+	MOV	#LATCTL+L.AVCB,R0	; Point to server list
+70$:	CMP	R1,(R0)			; Look for next pointer to this block
+	BEQ	80$			; If EQ, We found it!
+	MOV	(R0),R0			; Get next block address
+	BNE	70$			; Loop till found
+	CRASH				; Circuit block not found in list
+
+80$:	MOV	(R1),(R0)		; Put next pointer from our block into
+					; previous block
+	BNE	90$			; If NE, We are done
+	MOV	R0,LATCTL+L.AVCB+2 	; Put as end of list
+	;
+	;	Place this now idle circuit block on the idle queue
+	;
+90$:	CLR	(R1)		;Clear the link word			;004
+	MOV	R1,@LATCTL+L.IVCB+2 ;Put block on end of idle list	;004
+	MOV	R1,LATCTL+L.IVCB+2 ;We are now end of the list		;004
+	INCB	LATCTL+L.ICNT	;Count it				;004
+	CMPB	LATCTL+L.ICNT,#MAXIDL ;Do we need to release one?	;004
+	BLOS	100$		;No, just exit nicely			;004
+	MOV	R5,-(SP)	;Save R5				;004
+	MOV	#LATCTL+L.IVCB,R0 ;Point to the list head		;004
+	CALLX	POPQUE		;Pop off the oldest entry		;004
+	BCS	110$		;If nothing there, die!			;004
+	MOV	R5,R4		;Copy circuit block pointer		;004
+	TST	-(R4)		;Point to start of buffer
+	BUFFER	RETURN		;Now return it to RSTS
+	DECB	LATCTL+L.ICNT	;One less, now				;004
+	MOV	(SP)+,R5	;Restore R5				;004
+100$:	RETURN			;And we're done
+
+110$:	CRASH			;Idle circuit block queue is corrupt	;004
+
+GLOBAL	<ICBFMN>							;012
+
+.DSABL	LSB
+
+.SBTTL	RETWAK - Return any unacknowledged transmits
+;+
+; RETWAK - Return any unacknowledged transmits
+;
+;	R1 -> Virtual circuit block
+;
+;	CALL	RETWAK
+;
+;	All registers preserved
+;-
+.ENABL	LSB
+
+RETWAK::PUSH	<R5,R1>		;Save registers				;013
+	ADD	#C.XMTQ,R1	;Point to oustanding transmit queue	;013
+10$:	MOV	(R1),R5		;Get outstanding transmit		;013
+	BEQ	40$		;No more				;013
+20$:	MOV	(R5),-(SP)	;Save next outstanding transmit		;013
+	TST	-(R5)		;Point to start of buffer		;013
+.ASSUME	CC.WAK	EQ	2						;013
+	CLR	CC.LLB(R5)	;Clear circuit block pointer		;013
+	BITB	#DF.NSP,CC.DFL(R5) ;Transmit in progress?		;013
+	BNE	30$		;Yes, don't return this buffer		;013
+	CALLX	COMRET		;Return the buffer to the system 	;013
+	MOV	(SP)+,(R1)	;Restore next outstanding transmit	;013
+	BR	10$		;Loop					;013
+
+30$:	MOV	(R1),R1		;Point to next transmit in list		;013
+	MOV	(SP)+,R5	;Restore next outstanding transmit	;013
+	BNE	20$		;Loop if there is another		;013
+
+40$:	;								;013
+	; No more transmits in list.  Fix tail pointer and get out	;013
+	;								;013
+	; 	R1 -> Last transmit still in progress, 			;013
+	;		or at virtual circuit block + C.XMTQ if none	;013
+	;								;013
+	MOV	R1,R5		;Save tail pointer			;013
+	POP	<R1>		;Restore pointer to VC block		;013
+	MOV	R5,C.XMTQ+2(R1)	;Fix tail pointer			;013
+	POP	<R5>		;Restore R5				;013
+	RETURN			;All done				;013
+
+.DSABL	LSB
+
+.SBTTL	STPSES - Stop a session
+;+
+; STPSES - Stop a session
+;
+; Inputs:
+;	R1 -> Server table
+;	R2 =  Reason code                 
+;	R3 -> Session block
+;
+; Format:
+;	CALL	STPSES
+;
+; Outputs:
+;	R0 =  Undefined
+;	R2 =  Undefined
+;-
+.ENABL	LSB
+
+STPSES::CALL	GETCBF		;Go get a buffer to send stop slot in 
+	BCS	20$		;Can't get one, just clean up
+	MOV	R5,-(SP)	;Get a work register
+	MAP	PUSH,APR=6,DATA	;And save DPAR6 mapping
+	MOV	C.CXMT(R1),R5	;Get transmit buffer pointer
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ;Map the buffer           
+	MOV	CC.FIL(R5),R0	;Get virtual pointer		
+	ADD	#STPLEN,R0	;Add in size of stop slot
+	CMP	R0,C.BEND(R1)	;Is there room for this slot?
+	BHI	10$		;No, not this time
+	SUB	#STPLEN,R0	;Yes, point back to header
+	MOVB	S.RSID(R3),(R0)+ ;Fill in remote slot ID
+	CLRB	(R0)+		;Source ID must be zero!
+	CLRB	(R0)+		;No status byte count
+	BIS	#ST.STP,R2	;Set slot type 
+	MOVB	R2,(R0)+	;Set in reason and slot type codes
+	MOV	R0,CC.FIL(R5)	;Reset address of next slot	
+	INCB	CC.SLT(R5)	;Show another slot in buffer	
+10$:	MAP	POP,APR=6,DATA	;Restore DPAR6 mapping
+	MOV	(SP)+,R5	;And work register
+20$:	CALLRX	REMSES		;Exit removing the session
+
+.DSABL	LSB
+
+.SBTTL	COU32 - 32 bit counter routine
+.SBTTL	INC32 - 32 bit increment-by-one routine				;005
+;+                                        
+; COU32 - 32 bit counter routine                
+; INC32 - 32 bit increment-by-one routine			
+;
+; Inputs:
+;	R0 - amount to add to counter (COU32 only)
+;	R3 - Pointer to table where counter resides
+;
+; Format:
+;	CALL	COU32,R1,offset  -or-  	CALL 	INC32,R1,offset
+;	where 'offset' is the offset off R3 where counter resides
+;                             
+; Outputs:
+;	R0 - Unchanged for COU32, set to 1 for INC32
+;	R1,R3 - Unchanged
+;-
+.ENABL	LSB
+
+INC32::	MOV	#1,R0			; Increment counter by one	;005
+COU32::	PUSH	<R3>			; Save a register               
+	ADD	(R1)+,R3		; Add offset to counter
+	ADD	R0,(R3)+		; Add value to counter
+	ADC	(R3)			; Add the carry bit 
+	BCC	10$			; If CC, no overflow
+	MOV	#-1,(R3)		; Latch at all ones
+	MOV	(R3),-(R3)		; ...
+10$:	POP	<R3>			; Restore the register          
+	RETURN	R1			; Return
+
+.DSABL	LSB
+
+.SBTTL	GETCBF - Get a communications buffer (CCB/Buffer pair)
+;+
+; Inputs:
+;	R1 -> Circuit block
+;
+; Format:
+;	CALL GETCBF                       
+;
+; Outputs:
+;	R1 -> Circuit block
+;		C.CXMT - Transmit CCB address
+;
+;	CC.FIL field in CCB set up to point to first slot in message
+;
+;	CC - Success
+;	CS - Failure
+;-
+.ENABL	LSB
+
+GETCBF::TST	C.CXMT(R1)		; Make sure it's zero for now
+	BNE	20$			; If NE, Already have one
+	MOV	R5,-(SP)		; Don't mung R5 permanently	
+	CALL	COMGET			; Get a communications buffer!	
+	BCS	10$			; If CS, Couldn't get one
+	MOV	R5,C.CXMT(R1)		; Save address			
+	;CLRB	CC.SLT(R5)		; Start at zero slots		
+	MOV	#140000+BUFHDR+<EP.SIZ-2>+MSGLEN,CC.FIL(R5) ;Set fill pointer
+10$:	MOV	(SP)+,R5		; Restore whatever this is	
+20$:	RETURN	
+
+.DSABL	LSB
+
+.SBTTL	COMGET - Get a communcations buffer from the monitor
+;+
+; Inputs:
+;
+; Format:
+;	CALL	COMGET
+;
+; Outputs:
+;	R5 -> CCB all set up
+;	(unlike COMBUF, R0 and R4 are preserved)
+;-
+.ENABL	LSB
+
+COMGET::MAP	PUSH,APR=6,DATA	;Save DPAR6 mapping
+	PUSH	<R0,R4>		;Save these				
+	CALLX	COMBUF		;Now get that buffer!			
+	POP	<R4,R0>		;Restore the registers			
+	MAP	POP,APR=6,DATA	;Restore DPAR6 mapping
+	RETURN			;Return with Carry set appropriately	
+
+.DSABL	LSB
+
+.END       

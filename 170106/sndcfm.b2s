@@ -1,0 +1,165 @@
+1	SUB SNDCFM
+	!								 &
+	!		MODULE		: SNDCFM.B2S			 &
+	!		VERSION		: V10.1
+	!		EDIT		: A
+	!		EDIT DATE	: 10-MAY-91
+	!****************************************************************&
+	!								 &
+	!		  C O P Y R I G H T				 &
+	!								 &
+	!								 &
+	!		      Copyright (C) 1989, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.		 &
+	!								 &
+	!								 &
+	! This software is furnished under a license and may be used and &
+	! copied  only  in accordance with the terms of such license and &
+	! with the  inclusion  of  the  above  copyright  notice.   This &
+	! software  or  any  other copies thereof may not be provided or &
+	! otherwise made available to any other person.  No title to and &
+	! ownership of the software is hereby transferred.		 &
+	!								 &
+	! The information in this software is subject to change  without &
+	! notice  and should not be construed as a commitment by Digital &
+	! Equipment Corporation.					 &
+	!								 &
+	! DIGITAL assumes no responsibility for the use  or  reliability &
+	! of its software on equipment that is not supplied by DIGITAL.	 &
+	!								 &
+	!****************************************************************&
+
+	! ++
+	! This module is called to send a confirmation message to the	 &
+	! receiver name/job stored in the OMSREQ string.		 &
+	! &
+	! The REPLY.TEXT parameter is the text of a reply message if	 &
+	! the confirmation is being done on behalf of a REPLY command.	 &
+	! A null string should be passed in all other cases.		 &
+	! --
+
+
+	OPTION	TYPE = EXPLICIT
+
+	%INCLUDE "SYSTEM:CMNDEF.B2S"
+	%INCLUDE "SYSTEM:OMSCMN.B2S"
+
+	EXTERNAL WORD CONSTANT	PRVIOL, NOSUCH, NOROOM, NOBUFS
+
+	DECLARE WORD	RETRY.CNT
+	DECLARE STRING	ABORT.TXT, TEMP
+
+	%IF %DEBUG
+	%THEN
+	  JUNK = DBG("SNDCFM Entered", 1%)	! Hello world.
+	%END %IF
+
+	RETRY.CNT = 0%				! Initialize retry counter
+	FQB = STRING$(40%, 0%)			! Clear out the FIRQB
+	FQJOB = 6%				! Call to FIP
+	FQFUN = 22%				! Local interjob communication
+	FQFIL = -1%				! Local send sub function
+	FQBCFM.RCVJ = REQ.JOB * 2%		! Local recipients job number
+	FQBCFM.RCVN = REQ.RTN			! with receiver name
+	FQBCFM.CTX = REQ.CTX			! Give em the context value too
+	FQBCFM.ERR = CFM.ERR			! Command error status
+	FQBCFM.CODE = CFM.FLD			! Seq #/Field code in error
+	FQBCFM.STS = REP.STS			! Current request status
+	FQBCFM.JOB = REP.JOB			! Replying job #
+	FQBCFM.KB = REP.KB			! Replying KB #
+	FQBCFM.PPN = REP.PPN			! Replying [p,pn]
+
+	ON ERROR GOTO SEND_ERR			! Set up an error trap
+
+
+ SEND_LOCAL_MSG:
+
+	TEMP = SYS(FQB + LEFT$(REP.TXT,REP.LEN))! Attempt the send
+						! (Don't destroy FQB string)
+	GOTO SEND_END				! All done
+
+
+ SEND_ERR:					! Error handler for confirmation
+
+	SELECT ERR				! Select the error code
+	CASE	PRVIOL,NOSUCH
+	  RESUME SEND_FAILED			!   Ignore PRVIOL and NOSUCH
+	CASE	NOROOM
+	  JUNK = 5%				!   5 retries for NOROOM
+	CASE	NOBUFS
+	  JUNK = 20%				!   20 retries for NOBUFS
+	CASE	ELSE
+	  ON ERROR GO BACK			!   Give up on anything else
+	END SELECT
+
+	RESUME SEND_RETRY			! Still here?  Must need retry
+
+
+ SEND_RETRY:
+
+	IF RETRY.CNT < JUNK			! Any retries left?
+	THEN
+	  RETRY.CNT = RETRY.CNT + 1%		! Yes, bump the retry counter
+	  SLEEP 0%				!   Get a fresh time slice
+	  GOTO SEND_LOCAL_MSG			!   And try it again
+	END IF
+
+
+ SEND_FAILED:
+
+	GOTO SEND_END IF (SLOT.NUM = 0%)	! Exit if not replying to or
+						! confirmimg a request
+
+	IF OMS.CMD = OC.REP			! If the last command was reply
+	THEN
+	  GOTO SEND_END IF (REP.STS <> STS.PEN)	!  Exit if answered or aborted &
+		AND ((REP.FLG AND FLG.OPR)=0%)	!    by the user
+	END IF
+	CFM.ERR = NOSUCH			! Tell caller what happened
+	JUNK = REQ.NUM				! Save seq#
+	OMSREQ = OMSINT				! Load default OMS reply info
+	REQ.NUM = JUNK				! Restore seq#
+	CALL GETDAT BY REF(REQ.DTM BY DESC,TRUE)! Load current date
+	REQ.FLG = FLG.BEL OR FLG.OMS		! Ring a bell, tell-em we did it
+	REQ.TYP = (ML.REQ OR ML.REP)		! Make our reply the right type
+	REQ.STS = STS.ABO			! Tell them we aborted
+	SELECT	ERR				! Why did the send fail?
+
+	  CASE = NOROOM
+	    ABORT.TXT = "Confirmation receiver queue is full"
+
+	  CASE = NOSUCH
+	    ABORT.TXT = "Confirmation receiver not found"
+
+	  CASE = PRVIOL
+	    ABORT.TXT = "Confirmation receiver does not allow local senders."
+
+	  CASE = NOBUFS
+	    ABORT.TXT = "Insufficient small buffers available on system"
+
+	END SELECT
+
+	%IF %DEBUG
+	%THEN
+	  JUNK = DBG(ABORT.TXT, 0%)		!
+	%END %IF
+
+	REQ.TXT = ABORT.TXT			! Load the text
+	REQ.LEN = LEN(ABORT.TXT)		! Load the text length
+	CALL PUTREQ BY REF(OMSREQ) IF KEEP.REQ	! Write reply to log file
+	CALL BRDCST				! Now do the broadcast
+	REP.KB = 0%				! KBs broadcast to is useless
+	REQ.NUM = 0%				! Mark slot data as invalid
+	CALL PUTSYS BY REF(SLOT.NUM,OMSREQ)	! Update the sys file
+	PNDREQ(SLOT.NUM) = 0%			! Make this slot available
+	UPD.ACT = TRUE				! Need to compute new event time
+
+
+ SEND_END:
+
+	%IF %DEBUG
+	%THEN
+	  JUNK = DBG("SNDCFM Exit", -1%)	! Buy bonds, bye-bye.
+	%END %IF
+
+	END SUB

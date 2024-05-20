@@ -1,0 +1,3425 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.INCLUDE	/CMN:KERNEL.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.LIBRARY	/DCL:DCLMAC.MLB/
+.LIBRARY	/CMN:NETDEF.SML/
+.NLIST
+.INCLUDE	/CMN:PFBDEF.MAC/
+.INCLUDE	/CMN:KBDEF.MAC/
+.INCLUDE	/DCL:DCLPFX.MAC/
+.LIST
+TITLE	DCLFUN,<DCL Functions>,0I,31-JAN-92,REJK/JFM/GMB/SDL/BTB/DLS
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DCLFUN
+;+
+;
+;  001	REJK 19-DEC-83	CREATION
+;  002	REJK 19-JAN-84	ADDED STOLEN CVT$$
+;  003	REJK 23-JAN-84	Change Invalid Argument message to U.IARG
+;  004	JFM  28-FEB-84	Changed comments, added F$MID
+;  005	JFM  01-MAR-84	Added F$ACCESS
+;  006	JFM  06-MAR-84	Added F$PARSE, F$CVTIME
+;  007	JFM  08-MAY-84	Fixed F$ACCESS, F$EDIT and F$PARSE. Added F$VERIFY
+;  008	GMB  25-Jun-84	Fixed F$MESSAGE. Fixed F$PARSE. Added untranslatable
+;			logicals and INVALID FILE bit of FLAGS to F$PARSE.
+;			Made F$ACCESS use table look up.
+;  009  GMB  03-Jul-84	Fixed F$NODE, F$PARSE, F$SEARCH.
+;  010	SDL  27-Jul-84	Changed FILE keyword to NAME keyword in F$PARSE
+;  011	SDL  01-Aug-84	Fixed F$SEARCH to return error for all non-disk files
+;  012	SDL  02-Aug-84	An argument specified in a DCL function where none
+;			are allowed returns "?Argument not allowed"
+;  013	SDL  06-Aug-84	Set up the error position if F$INTEGER function errors
+;  014	SDL  07-Aug-84	Fixed F$SEARCH to position the up-arrow correctly
+;  015	SDL  07-Aug-84	Fixed F$EDIT to take any integer argument as legal
+;  016	SDL  13-Aug-84	Removed an earlier fix in NOARG routine that checks for
+;			a closing parenthesis when there is no opening parens
+;  017	SDL  22-Aug-84	Keep track of all PFB channels being used by F$SEARCH
+;			functions when in command files
+;  018	SDL  10-Sep-84	Changed message text of various messages
+;  019	JFM  12-Sep-84	F$SEARCH is no longer allowed at interactive level
+;  020	SDL  17-Sep-84	Close (don't reset) the I/O channel in F$SEARCH
+;  021	SDL  15-Nov-84	Make CLSF$S routine callable by EXIT command also
+;  022	JFM  20-Dec-84	F$SEARCH incorrectly closed PFB channel, 
+;			F$CHR(-num) bug is fixed
+;  023	JFM  30-Jan-85	F$TYPE returns "", not "UNDEFINED".  F$LEN --> F$LENGTH
+;  024  GMB  09-Jul-85	Fixed F$PARSE("",,"FLAGS") to return 0
+;
+;			[V9.4]
+;  025  GMB  16-Mar-87	Fixed end-of-string check in CVT$$
+;  026  JFM  18-May-87	Fixed F$PARSE bug (file=SY:, default=CR: result=NK$:)
+;
+;			[V10.0]
+;  027	BTB  02-Nov-89	Added F$ENVIRONMENT
+;  028	JFM  02-Mar-90	Added the rest of the F$ENVIRONMENT functions, fixed
+;			bugs in others.
+;  029	BTB  25-May-90	Fixed looping bug in F$ENVIRONMENT("PROCEDURE")
+;  030	JFM  08-Aug-90	Fixed bugs in F$ENV("LOG_FILE") regarding timestamps, 
+;			enable/disable.  
+;
+;			[V10.1]
+;  031	DLS  20-Jun-91	Fixed F$ENV("FREE_CHANNELS") for interactive level
+;  032	DLS  20-Jun-91	Fixed F$ENV("MAX_DEPTH") should be 14 was 13
+;  033	DLS  15-Jul-91	Changed FLOGFI and FPROCE to use store logfile and
+;			procedure file filespec.  Also fixed scan position
+;			problem.
+;  034	DLS  15-Jul-91	Added global entry point (label) GETNAM:: so that
+;			others can get the current ICF filespec.
+;  035	DLS  15-Jul-91	Fixed F$SEARCH("*.*") after 13 open channels bug
+;  036	DLS  02-Aug-91	PROFIL indexs off of LCAPTR (bug introduced in 033)
+;  037	DLS  31-Jan-92	Check the first word of the log file spec instead of
+;			the logfile active flag, so that we can get the logfile
+;			name even if it is disabled.
+;-
+
+.MACRO	F$ENTRY PSECT NAME
+
+$$$$$$ = .			;Define address of the function
+	TMPORG TEXT
+$$$$$1 =.			;Define address for text ('NAME')
+	.ASCIC	NAME
+	UNORG
+	TMPORG PSECT
+.=.-2
+	 .WORD $$$$$1,$$$$$$,0	;Load NAME string and function addresses
+	UNORG
+.ENDM
+
+.MCALL	$CUI,$MSGFUN,$NETFQB
+
+	$CUI			;CUI interface macros
+	$MSGFUN			;NSP .MESAG definitions
+	$NETFQB			;network FIRQB definitions
+
+
+	.PSECT	FUNTBL,RO,D	;FUNCTION TABLE PSECT
+
+; Below is the what the function table will look like after this module is
+; assembled and linked.  The functions are in alphabetic order.  New functions
+; should probably be added so as to maintain the alphabetic order.
+;
+;F$TBL::
+;	.WORD address of "AC-CESS"	, F$ACCESS
+;	.WORD address of "AS-CII"	, F$ASCII
+;	.WORD address of "CH-R"		, F$CHR
+;	.WORD address of "CV-TIME"	, F$CVTIME
+;	.WORD address of "ED-IT"	, F$EDIT
+;	.WORD address of "EN-VIRONMENT"	, F$ENVIRONMENT
+;	.WORD address of "INS-TR"	, F$INSTR
+;	.WORD address of "INT-EGER"	, F$INTEGER
+;	.WORD address of "JO-B"		, F$JOB
+;	.WORD address of "LEF-T"	, F$LEFT
+;	.WORD address of "LEN-GTH"	, F$LEN
+;	.WORD address of "ME-SSAGE"	, F$MESSAGE
+;	.WORD address of "MI-D"		, F$MID
+;	.WORD address of "NO-DE"	, F$NODE
+;	.WORD address of "PA-RSE"	, F$PARSE
+;	.WORD address of "PR-IVILEGE"	, F$PRIVILEGE
+;	.WORD address of "RI-GHT"	, F$RIGHT
+;	.WORD address of "SEA-RCH"	, F$SEARCH
+;	.WORD address of "ST-RING"	, F$STRING
+;	.WORD address of "TE-RMINAL"	, F$TERMINAL
+;	.WORD address of "TI-ME"	, F$TIME
+;	.WORD address of "TY-PE"	, F$TYPE
+;	.WORD address of "US-ER"	, F$USER
+;	.WORD address of "VE-RIFY"	, F$VERIFY
+;	.WORD 0	End of table
+
+.IF DF $DEBUG
+;SKPASC:		;Skip assemble of F$ASCII routine
+;SKPCHR:		;Skip assemble of F$CHR routine
+;SKPCVT:		;Skip assemble of F$CVTIME routine
+;SKPEDI:		;Skip assemble of F$EDIT routine
+;SKPENV:		;Skip assemble of F$ENVIRONMENT routine
+;SKPINS:		;Skip assemble of F$INSTR routine
+;SKPINT:		;Skip assemble of F$INTEGER routine
+;SKPJOB:		;Skip assemble of F$JOB routine
+;SKPLEF:		;Skip assemble of F$LEFT routine
+;SKPLEN:		;Skip assemble of F$LENGTH routine
+;SKPMES:		;Skip assemble of F$MESSAGE routine
+;SKPMID:		;Skip assemble of F$MID routine
+;SKPPAR:		;Skip assemble of F$PARSE routine
+;SKPPRI:		;Skip assemble of F$PRIVILEGE routine
+;SKPRIG:		;Skip assemble of F$RIGHT routine
+;SKPSEA:		;Skip assemble of F$SEARCH routine
+;SKPSTR:		;Skip assemble of F$STRING routine
+;SKPTYP:		;Skip assemble of F$TYPE routine
+;SKPUSE:		;Skip assemble of F$USER routine
+;SKPVER:		;Skip assemble of F$VERIFY routine
+.ENDC
+F$TBL::	.WORD 0			;Empty table gets filled at the F$???? routines
+
+	DEFORG	DCLFUN,,RO,I	;DCL-FUNCTION PSECT
+
+.NLIST	MEB			;No need to waste paper
+
+	TMPORG	TEXT
+DEV$K:	.ASCIC	"DEVICE"	;Keyword for F$PARSE
+PPN$K:	.ASCIC	"PPN"		;Keyword for F$PARSE
+NAM$K:	.ASCIC	"NAME"		;Keyword for F$PARSE
+TYP$K:	.ASCIC	"TYPE"		;Keyword for F$PARSE
+STA$K:	.ASCIC	"STATUS"	;Keyword for F$PARSE
+FLA$K:	.ASCIC	"FLAGS"		;Keyword for F$PARSE
+LOC$K:	.ASCIC	"LOCAL"		;Return value for F$ACCESS
+NET$K:	.ASCIC	"NETWORK"	;Return value for F$ACCESS
+DIA$K:	.ASCIC	"DIALUP"	;Return value for F$ACCESS
+BAT$K:	.ASCIC	"BATCH"		;Return value for F$ACCESS
+UNK$K:	.ASCIC	"UNKNOWN"	;Return value for F$ACCESS		;027
+SER$K:	.ASCIC	"SERVER"	;Return value for F$ACCESS
+INT$K:	.ASCIC	"INTEGER"	;Return value for F$TYPE
+STR$K:	.ASCIC	"STRING"	;Return value for F$TYPE
+;UND$K:	.ASCIC	"UNDEFINED"	;Return value for F$TYPE
+CAP$K:	.ASCIC	"CAPTIVE"	;Keyword for F$ENVIRONMENT		;027
+CON$K:	.ASCIC	"CONTROL"	;Keyword for F$ENVIRONMENT		;027
+CONC$K:	.ASCIC	"ON_CONTROL_C"	;Keyword for F$ENVIRONMENT		;027
+DATA$K:	.ASCIC	"DATA"		;Keyword for F$ENVIRONMENT		;027
+DEF$K:	.ASCIC	"DEFAULT"	;Keyword for F$ENVIRONMENT		;027
+DEP$K:	.ASCIC	"DEPTH"		;Keyword for F$ENVIRONMENT		;027
+ECH$K:	.ASCIC	"ECHO"		;Keyword for F$ENVIRONMENT		;027
+FREE$K:	.ASCIC	"FREE_CHANNELS"	;Keyword for F$ENVIRONMENT		;027
+INTE$K:	.ASCIC	"INTERACTIVE"	;Keyword for F$ENVIRONMENT		;027
+..logf == .
+LOGF$K:	.ASCIC	"LOG_FILE"	;Keyword for F$ENVIRONMENT		;027
+LOGP$K:	.ASCIC	"LOGFILE_PROMPT" ;Keyword for F$ENVIRONMENT		;028
+MAXD$K:	.ASCIC	"MAX_DEPTH"	;Keyword for F$ENVIRONMENT		;027
+NOC$K:	.ASCIC	"NOCONTROL"	;Keyword for F$ENVIRONMENT		;027
+SEV$K:	.ASCIC	"ON_SEVERITY"	;Keyword for F$ENVIRONMENT		;027
+..proc == .
+PROC$K:	.ASCIC	"PROCEDURE"	;Keyword for F$ENVIRONMENT		;027
+PROM$K:	.ASCIC	"PROMPT"	;Keyword for F$ENVIRONMENT		;027
+PROT$K:	.ASCIC	"PROTECTION"	;Keyword for F$ENVIRONMENT		;027
+TIME$K:	.ASCIC	"TIME_STAMP"	;Keyword for F$ENVIRONMENT		;027
+VER$K:	.ASCIC	"VERIFY"	;Keyword for F$ENVIRONMENT		;027
+
+TRUE$K:	.ASCIC	"TRUE"		;Return value for F$ENVIRONMENT		;027
+FALS$K:	.ASCIC	"FALSE"		;Return value for F$ENVIRONMENT		;027
+C$K:	.ASCIC	"C"		;Return value for F$ENVIRONMENT		;028
+NVER$K:	.ASCIC	"NOVERIFY"	;Return value for F$ENVIRONMENT		;028
+DEB$K:	.ASCIC	"/DEBUG"	;Return value for F$ENVIRONMENT		;028
+WAT$K:	.ASCIC	"/WATCH"	;Return value for F$ENVIRONMENT		;028
+NCHW$K:	.ASCIC	"NOECHO/WARNING";Return value for F$ENVIRONMENT		;028
+NCHN$K:	.ASCIC	"NOECHO/NOWARNING";Return value for F$ENVIRONMENT	;028
+NDAT$K:	.ASCIC	"NODATA"	;Return value for F$ENVIRONMENT		;028
+DATX$K:	.ASCIC	"DATA/END_OF_DATA=" ;Return value for F$ENVIRONMENT	;028
+NONE$K:	.ASCIC	"NONE"		;Return value for F$ENVIRONMENT		;028
+ERR$K:	.ASCIC	"ERROR"		;Return value for F$ENVIRONMENT		;028
+WARN$K:	.ASCIC	"WARNING"	;Return value for F$ENVIRONMENT		;028
+SEVE$K:	.ASCIC	"SEVERE"	;Return value for F$ENVIRONMENT		;028
+	UNORG
+.LIST	MEB			;Turn expansions back on ...
+
+	TMPORG	IMPURE		;Variables
+ARGPOS::.BLKW			;Position of argument in user's string
+	UNORG
+
+
+.SBTTL	F$ACCESS	- Returns Job "class"
+;+
+; The F$ACCESS function returns a keyword string that identifies the
+; current job's access mode.  It permits a command procedure to behave
+; differently, based on the mode in which it accesses the system.
+;
+; The format of the F$ACCESS function is:
+;	
+;	F$ACCESS()
+;
+; CALL:		CALL	F$ACCESS
+; RESULT:	*** string ***  
+;
+; INPUT:	R5 -->	character in string after F$ACCESS
+;
+; OUTPUT:  C=0 if success
+;		R0 =	0
+;		R1 =	address of keyword string
+;		R2 =	length of keyword string
+;		R3 =	job access type number, from table below
+;		R4 =	random
+;		R5 -->	next character in expression
+;		$TYPE = 0 (string)
+;
+;	     C=1 if failure
+;		R0 =	error code 
+;		R1-R5	random
+;
+; Job access type - values as returned from UU.SYS, subfunction 2
+;		 0 = Local	"LOCAL"
+;		 1 = Dial-up	"DIALUP"
+;		 2 = Batch	"BATCH"
+;		 4 = Net	"NETWORK"
+;		 6 = Server	"SERVER"
+;		 other = Error	"UNKNOWN"
+;
+; EFFECTS:
+;	FIRQB and XRB are clobbered
+;-
+.ENABL	LSB
+				;Access class table
+A.CLASS:.WORD	LOC$K		; 0 Local 
+	.WORD	DIA$K		; 1 Dialup
+	.WORD	BAT$K		; 2 Batch
+	.WORD	UNK$K		; 3 Unassigned
+	.WORD	NET$K		; 4 Network
+	.WORD	UNK$K		; 5 Unassigned
+	.WORD	SER$K		; 6 Server
+
+
+	F$ENTRY FUNTBL,"AC-CESS"	;F$ACCESS
+F$ACCE:	CALL	NOARG		;No arguments allowed
+	BCS	20$		;An error occurred
+DOACCE::CALLX	CLRFQB		;Clear the FIRQB
+	MOVB	#UU.SYS,FIRQB+FQFUN ;Return job parameters
+	MOVB	#2,FIRQB+FQSIZM	;Subfunction 2
+	;CLRB	FIRQB+FQFIL	;This job number
+	.UUO			;Do sys call
+	CLR	R0		;No error so far
+	BISB	FIRQB+0,R0	;Any error?
+	BEQ	10$		;Branch if none
+	SEC			;Indicate error
+	BR	20$		;Quit
+
+10$:	CLR	R3		;
+	BISB	FIRQB+FQBUFL,R3	;Get job's access type
+	MOV	#UNK$K,R1	;Guess an unknown type
+	CMP	R3,#6		;Is type in range 0-6?
+	BHI	15$		;No, type is UNKNOWN
+	MOV	R3,R1		;Get type
+	ASL	R1		; * 2 for word offset
+	MOV	A.CLASS(R1),R1	;Get pointer to type string
+
+15$:	MOVB	(R1)+,R2	;Set up pointer to string and length here
+	CLRB	$TYPE		;Type is string, clear C-bit
+20$:	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<$TYPE>
+
+.SBTTL	F$ASCII 	- Convert the first char of argument to ASCII code
+.IF NDF SKPASC		;Skip this routine for ODT build?
+;+
+; The F$ASCII function returns as an integer the ASCII (binary) value 
+; of the specified string's first character.  This function is similar
+; to the BASIC-PLUS ASCII function.
+;
+; The format of the F$ASCII function is:
+;	
+;	F$ASCII(string)
+;
+; F$ASCII(string)  takes the first character of the argument string and 
+; returns that character's ASCII code.  The NULL STRING ("") returns 0.
+; The NULL ARGUMENT () returns an error.
+;
+; CALL: 	CALL	F$ASCII
+; RESULT:	*** integer ***
+;
+; INPUT:	R5 -->	character in string after F$ASCII
+;
+; OUTPUT:  C=0 if success
+;		R0 =	0
+;		R1 =	ASCII code of first Character of String
+;		R2 =	clear
+;		R3-R4	random
+;		R5 -->	next character in expression
+;		$TYPE = 1 (integer)
+;
+;	     C=1 if failure
+;		R0 =	error code 
+;		R1-R5	random
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"AS-CII"	;F$ASCII
+F$ASCI:	CALL	ONEARG		;Fetch the argument
+	BCS	30$		;Error.  Pass it up
+	CALLX	NM2STR		;Make it string
+	TST	R2		;Null string? (zero length)
+	BNE	10$		;No.  Continue
+	CLR	R1		;Null string is null char
+	BR	20$		;Join common code
+	
+10$:	MOVB	(R1),R1		;Get first character of string
+	BIC	#^C<377>,R1	;Defeat sign extension of MOVB
+	CLR	R2		;No high order word 
+20$:	MOVB	#1,$TYPE	;Now type is integer
+30$:	RETURN			;Return	
+
+.DSABL	LSB
+
+GLOBAL	<$TYPE>
+.ENDC			;End conditional assembly of F$ASCII routine
+
+.SBTTL	F$CHR 		- Convert an integer to one ASCII character
+.IF NDF SKPCHR		;Skip this routine for ODT build?
+;+
+; The F$CHR function returns as a string value the character whose ASCII
+; value matches the specified integer.  It takes an integer and converts
+; it to a one-byte ASCII character.  The integer is taken mod 256, and if
+; negative, the two's complement is taken before converting it to ASCII.
+; This function is similar to the BASIC-PLUS CHR$ function.
+;
+; The format of the F$CHR function is:
+;	
+;	F$CHR(integer)
+;
+; CALL:		CALL	F$CHR
+; RESULT:	*** string ***
+;
+; INPUT:	R5 -->	(argument)
+;
+; OUTPUT:   C=0 if success
+;		R0 =	0
+;		R1 =	address of converted integer
+;		R2 =	length of string (=1)
+;		R3-R4	random
+;		R5 -->	next character in expression
+;		$TYPE = 0 (string)
+;
+; 	    C=1 if failure
+;		R0 =	error code
+;		R1-R5	random
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"CH-R"	;F$CHR
+F$CHR:	CALL	ONEARG		;Check and fetch the argument
+	BCS	20$		;Error.  Pass it up
+	CALLX	STR2NM		;Else, make it integer
+	BCS	20$		;Pass any error on up
+10$:	BIC	#^C<377>,R1	;Get rid of all but character portion
+				;(this is (R2,R1)modulo(256))
+	MOV	STRBUF,R3	;Get address of place for character
+	MOVB	R1,(R3)		;Stash the character away
+	MOV	R3,R1		;Point to the string
+	INC	STRBUF		;Correct the buffer pointer
+	MOV	#1,R2		;Now we have a string of length one
+	CLRB	$TYPE		;Indicate string
+20$:	RETURN			;Return	
+
+
+.DSABL	LSB
+GLOBAL	<$TYPE,STRBUF>
+.ENDC			;End conditional assembly of F$CHR routine
+
+.SBTTL	F$CVTIME	- Convert date/time to yy.mm.dd hh:mm form
+.IF NDF SKPCVT		;Skip this routine for ODT build?
+;+
+; The F$CVTIME function converts a standard DCL date/time string 
+; (dd-mmm-yy hh:mm am/pm) or the date/time string returned by the F$TIME 
+; function to a date/time string in the form yy.mm.dd hh:mm.  If no
+; argument is supplied, the current system date is used.
+;
+; The format of the F$CVTIME function is:
+;	
+;	F$CVTIME([date/time])
+;
+; CALL:		CALL	F$CVTIME
+; RESULT:	*** string ***
+;
+; INPUT:	R5 -->  character in string after F$CVTIME
+;
+; OUTPUT:	CC --	success		CS --	failure
+;		R0 =	0		R0 =	error code (from elsewhere)
+;		R1 -->	yy.mm.dd hh.mm	R1-R4	random
+;		R2 =	14.		R5	random- error position set
+;		R3-R4	random
+;		R5 -->	first char past argument, if one exists
+;
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"CV-TIME"	;F$CVTIME
+F$CVTI:	CALL	OPTARG		;Parse an optional argument
+	BCS	80$		;An error occured, quit
+	TST	ARGPOS		;Was an argument specified?
+	BEQ	20$		;No, use current date/time
+	CALLX	NM2STR		;Ensure result is a string from ONEARG
+	TST	R2		;Did he give us the null string?
+	IFEQ			;If so then use current date/time
+20$:	CLR	R0		;  Clear error (OPENP put error code into R0)
+	CALLX	CLRFQB		;  Clear out the FIRQB.
+	INC	FIRQB+FQPPN	;  Want date as yy.mm.dd
+	INC	FIRQB+FQFLAG	;  Want time as 24 hour format.
+	CALL	DOTIM2		;  Get current date & time.
+	BCS	80$		;  An error occurred, quit.
+	ENDIF			;Endif
+
+; R1,R2 --> Date and time string to convert
+
+	MOV	#270,R3		;Edit 8 + 16 + 32 + 128 reduce blanks to 1 
+	CALL	INEDIT		;Strip leading & trailing blanks & make it UC
+				;Now format it for CUI--LX.TIME
+	MOV	R1,R4		;Copy the string pointer
+	MOV	R2,R3		;Copy the returned length
+40$:	CMPB	(R4)+,#SPACE 	;Is this the first blank?
+	BEQ	50$		;Yes, so check it out
+	SOB	R3,40$		;Else, cycle
+	BR	60$		;Found end but no space. continue
+				;Check char after space for time keywords
+50$:	CMPB	#'A,(R4)	;AM?
+	BEQ	60$		;Yes--go edit out ALL blanks
+	CMPB	#'P,(R4)	;PM?
+	BEQ	60$		;Yes--go edit out ALL blanks
+	CMPB	#'M,(R4)	;M?
+	BEQ	60$		;Yes--go edit out ALL blanks
+	MOVB	#':,-(R4)	;Else, replace this blank with a colon
+				;Edit the string. R1 still points to it.
+60$:	MOV	#2,R3		;Remove all spaces and tabs remaining
+	CALL	INEDIT		;Edit the string "no error possible"
+	MOV	@LX.LEN,-(SP)	;Store away this vital CUI information
+	MOV	LX.STR,-(SP)	;String length and address
+	MOV	#1,LX.POS	;Start scan at begining of time
+	MOV	R2,@LX.LEN	;Set command length time length
+	MOV	R1,LX.STR	;Make CUI think time address is command address
+	MOV	STRBUF,R1	;Make room for the two words
+	INC	R1		;Ensure 
+	BIC	#1,R1		; we're on an even boundary
+	ADD	#5,STRBUF	;Four bytes used up for date/time storage, plus
+				; one to ensure word boundary = five byte max
+	CALBX	LX.TIME <R1>	;Let CUI handle the date/time conversion
+	MOV	(SP)+,LX.STR	;Restore CUI information
+	MOV	(SP)+,@LX.LEN	;Command length and address
+	BCS	70$		;An error occurred in U$TIME, ?Invalid time
+	CMP	LX.POS,R2	;Did we look at all the characters?
+	BLT	70$		;No, ?Invalid time
+	CALLX	CLRFQB		;Clear the FIRQB
+	INC	FIRQB+FQPPN	;Make date flag positive
+	INC	FIRQB+FQFLAG	;Make time flag positive
+	MOV	(R1)+,FIRQB+FQFIL;Put in date in RSTS/E format
+	MOV	(R1),FIRQB+FQMODE;Put in time in RSTS/E format	
+	CALL	DOTIM2		;Do the time function with this info
+	BCS	80$		;Quit if error (can we have one?)
+	MOV	#10+20+200,R3	;Edit out all leading, trailing spaces and tabs
+	CALL	INEDIT		; replace all multiple spaces with one space
+	BR	80$		;Done
+
+70$:	MOV	#U.ITIM,R0	;?Invalid time
+	MOV	ARGPOS,R5	;Point at argument
+	CALLX	SETERR		;Set up error position
+80$:	RETURN			;Finito
+
+.DSABL	LSB
+
+GLOBAL	<LX.POS,LX.LEN,LX.STR,STRBUF,U.ITIM,NOOP.E,U.NARG,GOTST>
+.ENDC			;End conditional assembly of F$CVTIME routine
+
+.SBTTL	F$EDIT 		- Edit a string according to the numbers
+.IF NDF SKPEDI		;Skip this routine for ODT build?
+;+
+; The F$EDIT function performs one or more string editing functions, 
+; based on its integer argument.  F$EDIT edits a string just like the
+; BASIC-PLUS CVT$$ function.  Any integer argument specified as the
+; second argument is legal; only the bits corresponding to valid 
+; editing functions are analyzed.
+;
+; The format of the F$EDIT function is:
+;	
+;	F$EDIT(string,integer)
+;
+;
+; CALL:		CALL	F$EDIT
+; RESULT:	**** string ****
+;
+; INPUT:	R5 -->	character in string after F$EDIT
+;
+; OUTPUT:     C=0 if success
+;		R0 =	0
+;		R1 --> 	string	
+;		R2 =	len of string
+;		R3-R4	random
+;		R5 -->  next character in expression
+;	      C=1 if failure
+;		R0 =	error code 
+;		R1-R5	random
+;
+;-
+
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"ED-IT"		;F$EDIT
+F$EDIT:	CALL	TWOARG		;Fetch the arguments
+	BCS	50$		;Quit on any error
+.ENDC			;End conditional assembly of F$EDIT routine
+
+.IF NDF SKPCVT & SKPEDI & SKPPRI	;Skip this routine for ODT build?
+
+INEDIT:	BIC	#^C<776>,R3	;Ignore all bits other than the legal bits
+				; (and ignore the high word in R4)
+	TST	R2		;If string is null,
+	BEQ	35$		; nothing to do under any circumstances
+	MOV	R3,R0		;Mask is now in R0 for CVT$$
+	PUSH	R5		;Save Current position
+	MOV	R1,R5		;Point to input string for CVT$$
+	MOV	STRBUF,R1	;Point to clean string for CVT$$ output
+	CALL	CVT$$		;Trim it. "no error possible"
+	POP	R5		;Restore position
+	ADD	R2,STRBUF	;Account for new string
+35$:	CLRB	$TYPE		;Ensure result is string
+	CLR	R0		;And not mistaken for an error
+50$:	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<STRBUF,$TYPE>
+
+.SBTTL	CVT$$ 		- Trim a string  	ABC/REJK
+;+
+;
+; CVT$$  - TRIM A STRING
+;
+; CALL:	R0 = TRIM MASK 
+;	R1 -> Output ASCII string
+;	R2 = Length of ASCII string
+;	R5 -> Input ASCII string
+;
+; BACK:	R1 -> New ASCII string (may be shorter)
+;	R2 = Length of new ASCII string
+;	R5 same as call
+;
+;	MASK	TRIMS
+;	   2	DISCARD ALL SPACES & TABS
+;	   4	DISCARD CR LF FF ESC DEL NULL
+;	  10	DISCARD LEADING SPACES & TABS
+;	  20	REDUCE SPACES & TABS TO A SINGLE SPACE
+;	  40	CONVERT LC TO UC
+;	 100	CONVERT [ TO ( AND ] TO )
+;	 200	DISCARD TRAILING SPACES & TABS
+;	 400	PRESERVE QUOTED SUBSTRINGS (DISABLE EDITING OF CHARACTERS
+;		 WITHIN QUOTATION MARKS)
+;-
+.ENABL	LSB
+
+CVT$$:	CALLX	SAVREG,R5	;SAVE REGISTERS
+	CLR	-(SP)		;NOT IN QUOTES YET
+	ASH	#7,R0		;SHIFT THE MASK
+10$:	DEC	R2		;Count down the bytes
+	BMI	120$		;DONE, SO EXIT
+	MOVB	(R5)+,R4	;GET A BYTE
+	TST	R0		;KEEP QUOTED BYTES?
+	BPL	40$		;NO, QUOTES ARE NORMAL
+	TSTB	(SP)		;YES, ARE WE WITHIN QUOTES?
+	BEQ	20$		;NO
+	CMPB	R4,(SP)		;YES, IS THIS THE ENDING QUOTE?
+	BNE	110$		;NO
+	CLRB	(SP)		;YES, CLEAR THE INSIDE FLAG
+	BR	110$		;AND KEEP THE CLOSING QUOTE
+
+20$:	CMPB	R4,#''		;START OF QUOTED STRING?
+	BEQ	30$		;YES
+	CMPB	R4,#'"		;MAYBE THIS KIND?
+	BNE	40$		;NO
+30$:	MOVB	R4,(SP)		;YES, START THE QUOTATION
+	BR	110$		;AND KEEP THE OPENING QUOTE
+
+40$:	BIT	R0,#4*200	;DISCARD TERMINATORS AND JUNK?
+	BEQ	60$		;NO
+	MOV	#160$,R3	;Yes, get the list pointer
+
+50$:	CMPB	R4,(R3)+	;DOES THE BYTE MATCH THE LIST?
+	BLO	50$		;NO, KEEP CHECKING
+	BEQ	10$		;YES, DISCARD IT
+	;BHI	60$		;NO, DON'T CHECK FURTHER
+60$:	CMPB	R4,#40		;IS THIS A SPACE?
+	BEQ	70$		;YES
+	CMPB	R4,#11		;NO, MAYBE A TAB
+	BNE	80$		;NOPE
+70$:	BIT	R0,#2+10*200	;DISCARD ALL AND/OR LEADING ONES?
+	BNE	10$		;YES, DISCARD THIS BYTE
+	BIT	R0,#20*200	;REDUCE SPACES/TABS?
+	BEQ	110$		;NO, JUST OUTPUT IT
+	MOVB	#40,R4		;YES, THIS WILL BE A SPACE
+	CMP	R1,1*2+2+2(SP)	;HAVE WE OUTPUT ANYTHING YET?
+	BEQ	110$		;NO, CONVERT TO A SPACE AND OUTPUT IT
+	CMPB	R4,-1(R1)	;YES, IS THE PRECEDING A SPACE?
+	BEQ	10$		;IF SO, DISCARD THIS ONE
+	BR	110$		;OUTPUT IT
+
+80$:	BIT	R0,#40*200	;CONVERT LC TO UC?
+	BEQ	90$		;NO
+	CMPB	R4,#'A+40	;IS IT LC ALPHA?
+	BLO	90$		;NO
+	CMPB	R4,#'Z+40	;MAYBE?
+	BLOS	85$		;Yes
+	CMPB	R4,#340		;Is it LC multi-national alpha?
+	BLO	90$		;No
+	CMPB	R4,#377		;Maybe?
+	BEQ	90$		;No
+
+85$:	BICB	#40,R4		;YES, DOWNCASE IT
+	BR	110$		;AND OUTPUT UC
+
+90$:	BIT	#100*200,R0	;CONVERT [] TO ()?
+	BEQ	110$		;NO
+	CMPB	R4,#'[		;YES, IS IT [?
+	BEQ	100$		;YES
+	CMPB	R4,#']		;IS IT ]?
+	BNE	110$		;NO
+	DECB	R4		;IT IS ], SO ] = 135-64 = ) = 51
+100$:	SUB	#'[-'(,R4	;AND         [ = 133-63 = ) = 50
+110$:	MOVB	R4,(R1)+	;OUTPUT ONE BYTE TO NEW STRING
+	BIC	#10*200,R0	;TURN OFF LEADING SPACE/TAB
+	BR	10$		;LOOP FOR ANOTHER BYTE
+
+120$:	TSTB	(SP)+		;WERE WE INSIDE QUOTES AT THE END?
+	BNE	150$		;YES, DON'T TRIM TRAILING STUFF
+	ASL	R0		;NO, DO WE DISCARD TRAILING SPACES/TABS?
+	BPL	150$		;NO
+130$:	MOVB	-(R1),R4	;GET LAST BYTE STORED
+	CMP	R1,1*2+2(SP)	;BACK TOO FAR?
+	BLO	140$		;YES, RETURN NULL STRING
+	CMPB	R4,#40		;NO, IS IT SPACE?
+	BEQ	130$		;YES, DISCARD IT
+	CMPB	R4,#11		;MAYBE TAB?
+	BEQ	130$		;DISCARD TAB
+140$:	INC	R1		;KEEP LAST BYTE REMOVED
+150$:	SUB	1*2+2(SP),R1	;Compute length of new string
+	MOV	R1,2*2+2(SP)	;Set up return of length in R2
+	RETURN			;FINISHED
+
+160$:	.BYTE	177,33,15,14,12,0
+
+.DSABL	LSB
+.ENDC			;End conditional assembly of INEDIT routine
+
+.SBTTL	F$ENVIRONMENT - Return DCL Environment information
+.IF NDF SKPENV		;Skip this routine for ODT build?
+;+
+; The F$ENVIRONMENT function takes a keyword, and returns the requested
+; information.  Some subfunctions return an integer, others return a string, 
+; depending on the information requested.  
+; 
+; The format of the F$ENVIRONMENT function is:
+;
+;	F$ENVIRONMENT("KEYWORD")
+;
+;-
+.ENABL	LSB
+
+; ENVKEY contains the table of F$ENVIRONMENT keyword tags and their 
+; corresponding routine names.
+
+ENVKEY:
+	.WORD	CAP$K,FCAPTI		; Captive
+	.WORD	CON$K,FCONTR		; Control
+	.WORD	CONC$K,FCTRLC		; Control-C
+	.WORD	DATA$K,FDATA		; Data
+	.WORD	DEF$K,FDEFAU		; Default
+	.WORD	DEP$K,FDEPTH		; Depth
+	.WORD	ECH$K,FECHO		; Echo
+	.WORD	FREE$K,FFREE		; Free Channels
+	.WORD	INTE$K,FINTER		; Interactive
+	.WORD	LOGF$K,FLOGFI		; Log File
+	.WORD	LOGP$K,FLOGP		; Logfile_Prompt
+	.WORD	MAXD$K,FMAXDE		; Max Depth
+	.WORD	NOC$K,FNOCON		; No Control-C
+	.WORD	SEV$K,FSEVER		; On Severity
+	.WORD	PROC$K,FPROCE		; Procedure
+	.WORD	PROM$K,FPROMT		; Prompt
+	.WORD	PROT$K,FPROTE		; Protection
+	.WORD	TIME$K,FTIMES		; Time Stamp
+	.WORD	VER$K,FVERIF		; Verify
+	.WORD	0
+
+	F$ENTRY	FUNTBL,"ENV-IRONMENT"	;F$ENVIRONMENT			;016
+F$ENVI:	CALL	ONEARG		;Fetch the argument
+	BCS	90$		;Error, return it to caller
+	TSTB	$TYPE		;Is this a string?
+	BNE	60$		;No, give an error
+	MOV	#ENVKEY,R4	;Point to start of keyword pointer table
+10$:
+	MOV	(R4)+,R3	;Pick up a keyword
+	BEQ	60$		;No more, we didn't find a match
+	CMPB	(R3)+,R2	;Does the length match?
+	BNE	50$		;No, off to next keyword
+	MOV	R1,-(SP)	;Save string pointer
+	MOV	R2,-(SP)	;And save length
+20$:
+	MOVB	(R1)+,R0  	;Length matches, so compare strings
+	BIC	#40,R0		;Force upcase
+	CMPB	R0,(R3)+	;Do the characters match?
+	BNE	40$		;No, on to the next keyword
+	SOB	R2,20$		;Yes, loop for the full string
+
+	;
+	; We've found a match!
+	;
+	MOV	(SP)+,R2	;Restore length
+	MOV	(SP)+,R1	;Restore string pointer
+	MOV	(R4)+,R3	;Pick up the routine address and type flag
+	CLR	R0		;Preset no error			;028
+	;CLRB	$TYPE		;Preset TYPE is string (must be already);028
+	CALLR	(R3)		;Dispatch to the routine (return when done)
+
+	;
+	; No match, try next!
+	;
+40$:	MOV	(SP)+,R2	;Restore length
+	MOV	(SP)+,R1	;Restore string pointer
+50$:	TST	(R4)+		;Skip past dispatch address
+	BR	10$		;And loop
+
+60$:	MOV	#U.IARG,R0	;?Invalid argument error
+	MOV	ARGPOS,R5	;Position of argument is position of error
+	CALLRX	SETERR		;Set up error position and exit failing
+
+90$:	RETURN			;Now exit
+
+.DSABL	LSB
+
+GLOBAL	<$TYPE>
+
+.SBTTL	FCAPTI - F$Environment CAPTIVE subfunction
+;+
+; The F$ENVIRONMENT CAPTIVE subfunction returns the string "TRUE" if the
+; job is running from a captive account, or "FALSE" if it is not.
+;
+; The F$ENVIRONMENT INTERACTIVE subfunction returns the string "TRUE" if the
+; job is running interactively (regardless of network), or "FALSE" if it 
+; running in batch mode, or as a NETWORK server.
+;
+; The format of the subfunction is:
+;
+;	F$ENVIRONMENT("CAPTIVE")
+;	F$ENVIRONMENT("INTERACTIVE")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** string ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0 (no error)
+;		R1 ->	string ("TRUE" or "FALSE")
+;		R2 =	length of string
+;		R5 -->	next character in expression
+;		$TYPE = 0 (string)
+;
+; EFFECTS:
+;	FIRQB and XRB are clobbered
+;
+;-
+.ENABL	LSB
+
+FCAPTI:	CALLX	JBFPFB		;Get job flags				;028
+	MOV	#TRUE$K,R1	;Assume we are in a captive account	;028
+	BIT	#J2CAPT,FIRQB+FQBUFL ;Are we?				;028
+	BNE	20$		;Yes, we were right			;028
+	BR	10$		;No, join up				;028
+
+FINTER:	CALLX	JBFPFB		;Get job flags				;028
+	MOV	#TRUE$K,R1	;Assume we are interactive		;028
+	BIT	#J2BAT,FIRQB+FQBUFL ;Are we batch (or network server?)	;028
+	BEQ	20$		;Yes, we were interactive		;028
+10$:	MOV	#FALS$K,R1	;No, indicate false			;028
+20$:	MOVB	(R1)+,R2	;R1 -> string, R2 = length		;028
+	CLC			;Indicate success			;028
+	RETURN			;All done				;028
+
+.DSABL	LSB
+
+
+.SBTTL	FCONTR - F$Environment CONTROL subfunction
+.SBTTL	FNOCON - F$Environment NOCONTROL subfunction
+;+
+; The F$ENVIRONMENT CONTROL subfunction returns a string containing the
+; control bits which are currently enabled (C, R, T, and/or X), separated 
+; by commas.  The NOCONTROL subfunction returns the control characters
+; which are currently disabled.
+; 
+; The format of the Control subfunction is:
+;
+;	F$ENVIRONMENT("CONTROL")
+;
+; The format of the No Control subfunction is:
+;
+;	F$ENVIRONMENT("NOCONTROL")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** string ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0
+;		R1 =	address of output string
+;		R2 =	length of output string
+;		R5 -->	next character in expression
+;		$TYPE = 0 (string)
+;
+; EFFECTS:
+;	FIRQB and XRB are clobbered
+;
+;-
+.ENABL	LSB
+
+FNOCON:	CLR	-(SP)		;Flag that this is a NOCONTROL call	;028
+	BR	10$		;Join up
+
+FCONTR:	MOV	PC,-(SP)	;Flag that this is a CONTROL call	;028
+10$:	CLR	R2		;Assume ICF not active, and return null	;028
+	BIT	#ICFACT,ICFFLG	;Is ICF active?				;028
+	BEQ	40$		;No, then return a null			;028
+	MOV	LCAPTR,R1	;Get pointer to local context area	;028
+	TSTB	LCCFLG(R1)	;Is SET CONTROL=C state set?		;028
+	BNE	20$		;Yes, check our state			;028
+	TST	(SP)		;NOCONTROL=C. Was this a nocontrol call?;028
+	BNE	40$		;No, return null string			;028
+	BR	30$		;Otherwise, return "C"			;028
+
+20$:	TST	(SP)		;CONTROL=C.  Was this a control call?	;028
+	BEQ	40$		;No, return null string			;028
+30$:	MOV	#C$K,R1		;Return the "C" keyword			;028	
+	MOVB	(R1)+,R2	;R1 -> string, R2 = length		;028
+40$:	TST	(SP)+		;Pop our stack, and clear C (success)	;028
+	RETURN			;Exit the F$ENV function		;028
+
+.DSABL	LSB
+
+GLOBAL	<LCCFLG,LCAPTR>							;028
+
+.rem	*	;This is not what we wanted, but might be useful someday. ;028
+.ENABL	LSB
+
+FNOCON:	CLR	R1			;Flag that this is a NOCONTROL call
+FCONTR:	CALLX	CLRFQB			;Clear the FIRQB
+	MOVB	#UU.TRM,FIRQB+FQFUN	;Terminal Characteristics function
+	MOVB	#1,FIRQB+FQFIL		;Current char's subfunction
+	MOVB	#-1,FIRQB+FQSIZM	;Current KB
+	.UUO				;Get the characteristics
+	CALLX	U$CHKE			;Error here means serious problem
+	MOVB	FIRQB+FQDEV,R0		;Copy the control bits
+	TST	R1			;Is this a NOCONTROL call?
+	BNE	5$			;No
+	COMB	R0			;Yes - flip the bits
+
+5$:	MOV	STRBUF,R1		;Point to buffer for string
+	CLRB	(R1)			;Clear first char in case result is null
+	CLR	R2			;Initialize length of string
+	BIT	#TTCTRC,R0		;Is Control-C bit set?
+	BEQ	10$			;No
+	MOVB	#'C,(R1)+		;Yes - put a "C" in the buffer
+	INC	R2			;and up the counter
+10$:	BIT	#TTCTRR,R0		;Is Control-R bit set?
+	BEQ	20$			;No
+	MOVB	#',,(R1)+		;Yes - put in comma in the buffer
+	MOVB	#'R,(R1)+		;followed by a "R"
+	ADD	#2,R2			;and up the counter
+20$:	BIT	#TTCTRT,R0		;Is Control-T bit set?
+	BEQ	30$			;No
+	MOVB	#',,(R1)+		;Yes - put in comma in the buffer
+	MOVB	#'T,(R1)+		;followed by a "T"
+	ADD	#2,R2			;and up the counter
+30$:	BIT	#TTCTRX,R0		;Is Control-X bit set?
+	BEQ	40$			;No
+	MOVB	#',,(R1)+		;Yes - put in comma in the buffer
+	MOVB	#'X,(R1)		;followed by a "X"
+	ADD	#2,R2			;and up the counter
+
+40$:	MOV	STRBUF,R1		;Point to start of buffer
+	CMPB	(R1),#',		;Is the first char a comma?
+	BNE	50$			;No - we're all set
+	TSTB	(R1)+			;Yes - skip past it
+	DEC	R2			;And adjust length
+50$:	CLR	R0			;No error
+	CLRB	$TYPE			;Type is string, clear C-bit
+	RETURN				;Exit F$ENVI
+
+GLOBAL	<STRBUF,$TYPE>
+
+.DSABL	LSB
+*
+
+.SBTTL	FCTRLC - F$Environment CONTROL_C subfunction
+;+
+; The F$ENVIRONMENT ON_CONTROL_C subfunction returns the string "TRUE" if
+; the user has specified an ON CONTROL THEN command, and FALSE otherwise.
+; 
+; The format of the subfunction is:
+;
+;	F$ENVIRONMENT("ON_CONTROL_C")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** string ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0
+;		R1 =	address of output string
+;		R2 =	length of output string
+;		R5 -->	next character in expression
+;		$TYPE = 0 (string)
+;
+; EFFECTS:
+;	FIRQB and XRB are clobbered
+;
+;-
+.ENABL	LSB
+
+FCTRLC:	MOV	#FALS$K,R1	;Assume none was specified		;028
+	BIT	#ICFACT,ICFFLG	;ICF active?				;028
+	BEQ	10$		;No, the return false			;028
+	MOVB	#CCTYP,TYPE	;Make type "control/c"			;028
+	MOV	LCAPTR,SCOPE	;Only use local symbol table		;028
+	CALLX	GETVAL		;Get the symbol entry for "control/c"	;028
+	BCS	10$		;Couldn't find it			;028
+	MOV	#TRUE$K,R1	;Found one, then it's true!		;028
+10$:	MOVB	(R1)+,R2	;Set up pointer to string and length	;028
+	CLC			;Return success				;028
+	RETURN			;Exit F$ENVI				;028
+
+GLOBAL	<LCAPTR,TYPE,SCOPE,ICFFLG>
+
+.DSABL	LSB
+
+.SBTTL	FDATA - F$Environment DATA subfunction
+;+
+; The F$ENVIRONMENT DATA subfunction returns a string containing the
+; current SET [NO]DATA status
+; 
+; The format of the Data subfunction is:
+;
+;	F$ENVIRONMENT("DATA")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** string ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0
+;		R1 =	address of output string
+;		R2 =	length of output string
+;		R5 -->	next character in expression
+;		$TYPE = 0 (string)
+;
+; EFFECTS:
+;	FIRQB and XRB are clobbered
+;
+;-
+.ENABL	LSB
+
+FDATA:	MOV	#NDAT$K,R1	;Assume NODATA				;028
+	CLR	R2		;First check for interactive level	;028
+	BIT	#ICFACT,ICFFLG	;Is a command file active?		;028
+	BEQ	50$		;Yes, then return the null string	;028
+	CALLX	JBFPFB		;Get job status flags			;028
+	BIT	#J2NDAT,FIRQB+FQBUFL ;Nodata set?			;028
+	BNE	40$		;Yes, then we were right		;028
+	MOV	#DATA$K,R1	;No, assume DATA/END_OF_DATA=$	 	;028
+	CALLX	CLRFQB		;Clear the FIRQB			;028
+	MOV	#PF$ICF*2,FIRQB+FQNAM1 ;Load PFB channel number * 2	;028
+	MOVB	#FLG.PF,FIRQB+FQFIL ;'Set/Clear' job flags subfunction	;028
+	.PFB			;Do PFB function, no errors possible	;028
+	CMPB	FIRQB+FQPROT,#'$ ;Is data character a "$"?		;028
+	BEQ	40$		;Yes, then our 2nd assumption correct	;028
+	MOV	#DATX$K,R1	;Point to DATA/END_OF_DATA= string	;028
+	MOV	STRBUF,R0	;Get pointer to our buffer		;028
+	MOV	R0,-(SP)	;Save buffer pointer			;028
+	ADD	#18.,STRBUF	;Allocate the next 18 bytes to us	;028
+	;// Should ensure we didn't go too far in STRBUF//		;028
+	CALL	COPYIT		;Now copy the string			;028
+	MOVB	FIRQB+FQPROT,(R0)+ ;Plug in the EOD character		;028
+	BR	30$		;And join up with common exit		;028
+
+GLOBAL	<ICFFLG>							;028
+
+.SBTTL	FECHO - F$Environment ECHO subfunction
+
+FECHO:	MOV	#ECH$K,R1	;Assume just plain ECHO			;028
+	CALLX	JBFPFB		;Get current job settings		;028
+	BIT	#J2NCHO,FIRQB+FQBUFL ;SET ECHO currently in effect?	;028
+	BEQ	40$		;Yes, we were right			;028
+	MOV	#NCHW$K,R1	;Now assume NOECHO/WARNING		;028
+	BIT	#J2NERR,FIRQB+FQBUFL ;Were we right?			;028
+	BEQ	40$		;Yes, do that one			;028
+	MOV	#NCHN$K,R1	;Make it NOECHO/NOWARNING		;028
+	BR	40$		;Join up				;028
+
+.SBTTL	FVERIF - F$Environment VERIFY subfunction
+
+FVERIF:	MOV	#NVER$K,R1	;Set up to return NOVERIFY by default	;028
+	CALLX	JBFPFB		;Get current settings			;028
+	BIT	#J2VFY,FIRQB+FQBUFL ;SET VERIFY currently in effect?	;028
+	BEQ	40$		;No, so we were right			;028
+	MOV	#VER$K,R1	;Yes, now assume VERIFY			;028
+	BITB	#DEBUG!WATCH,WATFLG ;Either /WATCH or /DEBUG set?	;028
+	BEQ	40$		;No, nothing special to do		;028
+	MOV	STRBUF,R0	;Get address of buffer to use		;028
+	ADD	#18.,STRBUF	;Allocate maximum size, for our use	;028
+	;// Should ensure we didn't go too far in STRBUF//		;028
+	MOV	R0,-(SP)	;Get a copy of the buffer		;028
+	CALL	COPYIT		;Copy the characters of the string	;028
+	BITB	#DEBUG,WATFLG	;Was special thing /DEBUG?		;028
+	BEQ	20$		;No, must have been /WATCH		;028
+	MOV	#DEB$K,R1	;Yes, get pointer to /DEBUG string	;028
+	CALL	COPYIT		;Copy the characters of the string	;028
+20$:	BITB	#WATCH,WATFLG	;How about /WATCH?			;028
+	BEQ	30$		;No, set things up now			;028
+	MOV	#WAT$K,R1	;Yes, get pointer to /WATCH string	;028
+	CALL	COPYIT		;Copy the characters of the string	;028
+30$:	MOV	R0,STRBUF	;Indicate actual amount of buffer used	;028
+	MOV	(SP)+,R1	;R1 -> string to use			;028
+	MOV	R0,R2		;R2 -> end of the string		;028
+	SUB	R1,R2		;Now R2 = length of the string		;028
+	BR	50$		;And get out				;028
+
+40$:	MOVB	(R1)+,R2	;R1 -> string, R2 = length		;028
+50$:	CLR	R0		;Indicate no error (C=0 for success)	;028
+	RETURN			;And return from F$ENVIR		;028
+
+COPYIT:	MOVB	(R1)+,R2	;R1 -> string, R2 = length		;028
+60$:	MOVB	(R1)+,(R0)+	;Copy string ...			;028
+	SOB	R2,60$		; Until all copied			;028
+	RETURN			;And get out				;028
+
+GLOBAL	<WATFLG>
+
+.DSABL	LSB
+
+.SBTTL	FDEFAU - F$Environment DEFAULT subfunction
+;+
+; The F$ENVIRONMENT DEFAULT subfunction returns a string containing the
+; current default directory.  At present, this is always the login account.
+; 
+; The format of the Default subfunction is:
+;
+;	F$ENVIRONMENT("DEFAULT")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** string ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0
+;		R1 =	address of output string
+;		R2 =	length of output string
+;		R5 -->	next character in expression
+;		$TYPE = 0 (string)
+;
+; EFFECTS:
+;	FIRQB and XRB are clobbered
+;
+;-
+
+;
+; See F$USER, since this subfunction returns exactly what F$USER returns
+;
+
+
+.SBTTL	FDEPTH - F$Environment DEPTH subfunction
+;+
+; The F$ENVIRONMENT DEPTH subfunction returns as an integer the current 
+; command procedure depth level (0 at the interactive level).
+; 
+; The format of the Depth subfunction is:
+;
+;	F$ENVIRONMENT("DEPTH")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** integer ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0
+;		R1 =	Current command procedure depth
+;		R2 =	0 (high order word)
+;		R5 -->	next character in expression
+;		$TYPE = 1 (integer)
+;
+;-
+.ENABL	LSB
+
+FDEPTH:	MOV	CMDLVL,R1	;Get the command procedure level
+	BR	20$		;Do common integer type thing		;028
+
+GLOBAL	<CMDLVL>
+
+.SBTTL	FFREE - F$Environment FREE_CHANNELS subfunction
+;+
+; The F$ENVIRONMENT FREE_CHANNELS subfunction returns as an integer the 
+; number of free channels available to the user.
+; 
+; The format of the Free Channels subfunction is:
+;
+;	F$ENVIRONMENT("FREE_CHANNELS")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** integer ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0
+;		R1 =	Number of channels available
+;		R2 =	0
+;		R5 -->	next character in expression
+;		$TYPE = 1 (integer)
+;
+;-
+
+FFREE:	MOV	#16.,R1		;Start with all channels free
+	MOV	PFBCHN,R0	;Get channel mask
+	TSTB	CMDLVL		;Are they at the interactive level?	;031
+	BNE	10$		;No, go figure it out			;031
+	INC	R1		;Yes, add 1 before we figure it out	;031
+10$:	ASL	R0		;Shift the bitmask			;028
+	SBC	R1		;Can't count this channel if bit set	;028
+	TST	R0		;All done?				;028
+	BNE	10$		;No, loop				;028
+	BR	20$		;Do common integer type thing		;028
+
+GLOBAL	<PFBCHN>
+
+.SBTTL	FMAXDE - F$Environment MAX_DEPTH subfunction
+;+
+; The F$ENVIRONMENT MAX_DEPTH subfunction returns as an integer the 
+; maximum number of channels available to the user (always 14.).	;032
+; 
+; The format of the Max Depth subfunction is:
+;
+;	F$ENVIRONMENT("MAX_DEPTH")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** integer ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0
+;		R1 =	14.						;032
+;		R2 =	0
+;		R5 -->	next character in expression
+;		$TYPE = 1 (integer)
+;
+;-
+
+FMAXDE:	MOV	#14.,R1		;Maximum depth is 14			;032
+	BR	20$		;Do common integer type thing		;028
+
+.SBTTL	FPROTE - F$Environment PROTECTION subfunction
+;+
+; The F$ENVIRONMENT PROTECTION subfunction returns as an integer the user's
+; default protection code.  If the user does not have a default protection
+; defined, then the system default protection of 60 is returned.
+; 
+; The format of the Protection subfunction is:
+;
+;	F$ENVIRONMENT("PROTECTION")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** integer ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0
+;		R1 =	Default Protection code
+;		R2 =	0
+;		R5 -->	next character in expression
+;		$TYPE = 1 (integer)
+;
+;-
+
+FPROTE:	MOV	#USRPRT,R2	;Get address of protection flag
+	MOV	#60.,R1		;Assume we use system default		;028
+	TSTB	(R2)+		;Is there a user-defined protection?
+	BEQ	20$		;No, use system default			;028
+	CLR	R1		;Yes, start with a clear slate		;028
+	BISB	(R2),R1		;Then set in the default protection code;028
+20$:	INCB	$TYPE		;Set type = Integer			;028
+	CLR	R2		;Clear high byte, and C bit (success)	;028
+	RETURN			;Return from F$ENVI
+
+.DSABL	LSB
+
+GLOBAL	<USRPRT,$TYPE>
+
+.SBTTL	FSEVER - F$Environment ON_SEVERITY Subfunction
+
+.ENABL	LSB
+
+LEVEL:	.WORD	WARN$K		;Level 0, Warning
+	.WORD	ERR$K		;Level 2, Error
+	.WORD	SEVE$K		;Level 4, Severe error
+
+FSEVER:	MOV	#NONE$K,R1	;Assume none, or at interactive level	;028
+	BIT	#ICFACT,ICFFLG	;Is an ICF active?			;028
+	BEQ	10$		;No, then we were right!		;028
+	MOV	LCAPTR,R2	;Get local context pointer		;028
+	TSTB	LERFLG(R2)	;Set NOON in effect?			;028
+	BEQ	10$		;Yes, then our assumption was correct	;028
+	MOVB	LSEVLV(R2),R2	;Get severity level			;028
+	MOV	LEVEL(R2),R1	;Get the appropriate keyword		;028
+10$:	MOVB	(R1)+,R2	;R1 -> string, R2 = length		;028
+	CLC			;Indicate success			;028
+	RETURN			;All done!				;028
+
+GLOBAL	<LCAPTR,LERFLG,LSEVLV>						;028
+
+.DSABL	LSB
+
+.SBTTL	FLOGFI - F$Environment LOGFILE subfunction
+.SBTTL	FPROCE - F$Environment PROCEDURE subfunction
+
+.ENABL	LSB
+
+
+FLOGFI:	CLR	R2		;Default to return nothing 		;033
+	TST	LOGFIL		;Is logfile open (/ENABLE or /DISABLE)?	;037
+	BEQ	30$		;No, so give em nothing			;033
+	MOV	#LOGFIL,R2	;Get logfile filespec location		;033
+	BR	10$		;Join up				;033
+FPROCE:	CLR	R2		;Default to return nothing 		;033
+	BIT	#ICFACT,ICFFLG	;Is an ICF active?			;033
+	BEQ	30$		;No, then all done			;033
+.ENDC
+GETNAM::MOV	LCAPTR,R2	;Point to beginning of local symbol tbl	;036
+	ADD	#PROFIL,R2	;Get Procedure file filespec location	;036
+	; After moving the logfile or procedure file location into R2	;033
+	; we have:							;033
+	; 	(R2)	= PPN						;033
+	;	2(R2)	= Name (two words of RAD50)			;033
+	;	6(R2)	= Type (one word of RAD50)			;033
+	;	10(R2)	= Device name					;033
+	;	12(R2)	= Unit number and real flag			;033
+
+10$:	CALLX	CLRFQX		;Clear the FIRQB and the XRB
+	MOV	#FIRQB+FQPPN,R4 ;Point to PPN field			;033
+	MOV	(R2)+,(R4)+	;Load PPN into FIRQB			;033
+	MOV	(R2)+,(R4)+	;Load name (first word) into FIRQB	;033
+	MOV	(R2)+,(R4)+	;Load name (second word) into FIRQB	;033
+	MOV	(R2)+,(R4)	;Load type into FIRQB			;033
+	MOV	#FIRQB+FQDEV,R4	;Now point to Dev field			;033
+	MOV	(R2)+,(R4)+	;Load the Device			;033
+	MOV	(R2),(R4)	;Load the Unit number and real flag	;033
+	CLR	R3		;Clear expansion flag			;033
+	.CALLR	UNFSS		;Finish from UNFSS			;033
+
+.SBTTL	UNFSS - Convert FSSed filespec to a string			;033
+;
+; INPUTS:								;033
+;	FIRQB contains FSSed filespec					;033
+;	R3	Expantion desired					;033
+; OUTPUTS:								;033
+;	R0	Cleared							;033
+;	R1	Address of the string					;033
+;	R2	Length of the string					;033
+;	R3	Munged							;033
+
+UNFSS:	MOV	#F2DEV!F2PPN!F2NAM!FQEXT,XRB+XRBLK			;033
+				;This open next returns all parts of the;033
+				;filespec: DEVICE, PPN, NAME, and TYPE.	;033
+	CALLX	INITRN		;Initialize TRNBUF to copy file into it ;033
+	MOV	R3,-(SP)	;Flag for DOFIL				;033
+	MOV	SP,R3		;Point R3 at flag			;033
+	MOV	R5,-(SP)	;Remember R5, DOFIL steps on it		;033
+	CALLX	DOFIL		;Put filespec into TRNBUF		;033
+	MOV	(SP)+,R5	;Get R5 back again			;033
+	TST	(SP)+		;Pop the stack				;033
+	MOV	TRNLEN,R2	;R2 =  number of characters in string	;033
+	BEQ	30$		;Nothing there so go back now		;033
+	MOV	#TRNBUF,R3	;R3 -> TRNBUF				;033
+	MOV	STRBUF,R1	;R1 -> into SUBBUF			;028
+20$:	MOVB	(R3)+,(R1)+	;Copy them all				;028
+	SOB	R2,20$		; done?					;028
+	MOV	TRNLEN,R2	;R2 = number of characters		;033
+	SUB	R2,R1		;R1 -> string				;033
+	ADD	R2,STRBUF	;Update string buffer allocater		;033
+	CALLX	INITRN		;Re-initialize TRNBUF			;033
+
+30$:	CLR	R0		;Indicate no error, clear C (success)	;033
+	RETURN			;Done					;033
+
+.DSABL	LSB
+
+GLOBAL	<ICFFLG,PROFIL,LOGFIL,TRNBUF,TRNLEN,STRBUF>			;033
+.IF NDF SKPENV		;Skip this routine for ODT build?		;033
+
+.SBTTL	FPROMT - F$Environment PROMPT subfunction
+.SBTTL	FLOGP  - F$Environment LOGFILE_PROMPT subfunction
+;+
+; The F$ENVIRONMENT PROMPT, or LOGFILE_PROMPT subfunction returns as a string 
+; the current DCL prompt with or without a logfile open.
+;
+; The format of the Prompt subfunction is:
+;
+;	F$ENVIRONMENT("PROMPT")
+;	F$ENVIRONMENT("LOGFILE_PROMPT")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** string ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0
+;		R1 =	address of prompt string
+;		R2 =	length of prompt string
+;		R5 -->	next character in expression
+;		$TYPE = 0 (string)
+;
+; EFFECTS:
+;	FIRQB and XRB are clobbered
+;
+;-
+.ENABL	LSB
+
+FLOGP:	MOV	@LOGPMT,R1	;Get pointer to logfile prompt		;028
+	BR	10$		;Join up				;028
+
+FPROMT:	MOV	@DCLPMT,R1	;Get pointer to normal DCL prompt	;028
+10$:	ADD	#S.SLEN,R1	;Adjust pointer to point at string len	;028
+	MOVB	(R1)+,R2	;R1 -> string, R2 = length		;028
+	;CLC			;Indicate success (C=0 from ADD)	;028
+	RETURN			;All done				;028
+
+.DSABL	LSB
+
+GLOBAL	<S.SLEN,DCLPMT,LOGPMT,$TYPE>
+
+.SBTTL	FTIMES - F$Environment TIME_STAMP subfunction
+;+
+; The F$ENVIRONMENT TIME_STAMP subfunction returns the string "TRUE" if
+; log file time stamps are enabled, or "FALSE" if they are disabled.
+; 
+; The format of the Time_Stamp subfunction is:
+;
+;	F$ENVIRONMENT("TIME_STAMP")
+;
+; CALL:		Called through Dispatch table in F$ENVI
+; RESULT:	*** string ***  
+;
+; OUTPUT:  C=0 (no error possible)
+;		R0 =	0
+;		R1 =	address of output string
+;		R2 =	length of output string
+;		R5 -->	next character in expression
+;		$TYPE = 0 (string)
+;
+; EFFECTS:
+;	FIRQB and XRB are clobbered
+;
+;-
+.ENABL	LSB
+
+FTIMES:	MOV	#FALS$K,R1		;Assume false			;028
+	BIT	#LOGACT,ICFFLG		;Is a log file active?
+	BEQ	10$			;No - return False
+	CALLX	CLRFQB			;Clear the FIRQB
+	MOVB	#STA.PF,FIRQB+FQFIL	;Get channel status
+	MOVB	#PF$LOG*2,FIRQB+FQNAM1	;Log file channel number
+	.PFB				;Get the status
+	BITB	#PF.TIM,FIRQB+FQFLAG	;Are time stamps enabled?
+	BEQ	10$			;No - return False
+	MOV	#TRUE$K,R1		;Get keyword
+10$:	MOVB	(R1)+,R2		;Set up pointer to string and length
+	CLC				;Indicate no error		;028
+	RETURN				;Exit F$ENVI
+
+GLOBAL	<ICFFLG>
+
+.DSABL	LSB
+.ENDC			;End conditional assembly of F$ENVIRONMENT routine
+
+.SBTTL	F$INSTR 	- Search for the substring in the given string
+.IF NDF SKPINS		;Skip this routine for ODT build?
+;+
+; The F$INSTR function locates a substring within a specified string.
+; This function is similar to the BASIC-PLUS INSTR function.  The
+; function returns as an integer the position of the located substring,
+; or zero if the substring was not found.
+;
+; The format of the F$INSTR function is:
+;	
+;	F$INSTR(position,string,substring)
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"INS-TR"	;F$INSTR
+F$INST:	CALL	OPENP		;Get opening parenthesis
+	BCS	110$		;Not there
+	CALL	$GTARG		;Get position argument
+	BCS	110$		;An error occurred
+	CALL	$COMMA		;Get separator
+	BCS	110$		;Not there
+	CALLX	STR2NM		;Convert to integer
+	BCS	110$		;?Number too big
+	PUSH	<R1,R2>		;Store position argument results
+	CALL	$GTARG		;Get string argument
+	POP	<R4,R3>		;Restore position argument results
+	BCS	110$		;An error occurred getting string argument
+	CALL	NM2STR		;Convert to string
+	CALL	$COMMA		;Get separator
+	BCS	110$		;Not there
+	TST	R4		;R1,R2=string  R3,R4=position
+	BNE	5$		;If not zero then check for positive
+	CMP	R3,R2		;Starting position vs. String length
+5$:	BGT	30$		;Starting position past end of string, return 0
+	MOV	R1,-(SP)	;Save string address
+	MOV	R2,-(SP)	;Save string length
+	MOV	R3,-(SP)	;Save starting position
+	BEQ	10$		;Position is zero, use 1		
+	TST	R4		;Is position negative?
+	IFLT			;If so then
+10$:	MOV	#1,(SP)		;  Use 1 as starting position
+	ENDIF			;Endif
+	CALL	$GTARG		;Get next argument
+	BCC	40$		;No error
+	CMP	(SP)+,(SP)+	;Readjust stack
+	COM	(SP)+		; and ensure C-bit set
+	BR	110$		;Go away with the error
+
+30$:	CALL	$GTARG		;We don't care about this, zero returned
+	BCS	110$		;An error occurred
+	CALL	CLOSEP		;Get closing parenthesis	
+	BCS	110$		;Not there
+	BR	80$		;Give zero result
+
+40$:	MOV	(SP)+,R0	;Starting position
+	MOV	(SP)+,R4	;String length
+	MOV	(SP)+,R3	;String address
+	CALLX	NM2STR		;Ensure 3rd argument is a string
+
+;+ 
+;      I N T E R N A L   V A R I A B L E S
+;
+; R0 = Starting position within the original string to begin search
+; R1 = Substring address
+; R2 = Substring length
+; R3 = Original string address
+; R4 = Original string length
+; R5 = maximum number of tries to locate substring
+;
+;-
+
+	CALL	CLOSEP		;Make sure there's a closing parenthesis
+	BCS	110$		;Oh well, let him know about error
+	TST	R2		;Null target string?	
+	BEQ	90$		;Result is starting position
+	SUB	R0,R4		;Start with original string length,
+	INC	R4		; Cut it down by starting position,
+	SUB	R2,R4		; and then by
+	INC	R4		; length of substring (R5 = #tries to make)
+	BLE	80$		;There is nothing to do, substring won't fit
+	ADD	R3,R0		;R0 -> starting character 
+	DEC	R0		;      in original string
+50$:	MOV	R1,-(SP)	;Store pointer to substring 
+	MOV	R2,-(SP)	;Store substring length (nonzero)
+	MOV	R0,-(SP)	;Store pointer to character to inspect
+60$:	CMPB	(R0)+,(R1)+	;Are characters the same?
+	BNE	70$		;No, try next position	
+	SOB	R2,60$		;Yes, try next character
+	MOV	(SP)+,R1	;Starting address
+	CMP	(SP)+,(SP)+	;Give back stack space
+	SUB	R3,R1		;Subtract original address to get position 
+	INC	R1		;Adjustment needed from subtraction
+	;CLR	R2		;R2 (high order) is clear from SOB
+	BR	100$		;Done
+
+70$:	MOV	(SP)+,R0	;Restore pointer to character to inspect
+	MOV	(SP)+,R2	;Restore substring length
+	MOV	(SP)+,R1	;Restore substring address
+	INC	R0		;Try the character after the starting position
+	SOB	R4,50$		;Keep it up until we have tried them all
+80$:	CLR	R1		;Result is zero
+	CLR	R2		;Clear high order as well
+	BR	100$		;Done
+
+90$:	MOV	R0,R1		;Original string position is answer
+	;CLR	R2		;R2 is already zeroed out
+100$:	MOVB	#1,$TYPE	;Type is integer
+	CLR	R0		;No error, clear C-bit 
+110$:	RETURN			;And we are done	
+
+.DSABL	LSB
+
+GLOBAL	<$TYPE>
+.ENDC			;End conditional assembly of F$INSTR routine
+
+.SBTTL	F$INTEGER 	- Convert string to integer, (or Boolean)
+.IF NDF SKPINT		;Skip this routine for ODT build?
+;+
+; F$INTEGER converts a string expression to an (decimal) integer as follows:
+; A string of numeric characters is converted to a decimal number.
+; If this numeric string was prefixed by a unary +/-, it is interpreted
+; as appropriate.  If the string is not completely numeric, it is 
+; converted to False (=0) unless the initial character is Y,y,T,or t.
+; In the latter case, it becomes True (=1).
+;
+; The format of the F$INTEGER function is:
+;	
+;	F$INTEGER(string)
+;
+;
+; CALL:		CALL	F$INTEGER
+; RESULT:	**** integer ****
+;
+; INPUT:	R5 --> character after F$INTEGER
+;
+; OUTPUT:    C=0 if success
+;		R0 =	0
+;		R1 =	low order integer
+;		R2 =	high order integer
+;		R3-R4   random
+;		R5 -->	next character in string
+;		$TYPE=	1 (integer)
+;	     C=1 if failure
+;		R0 =	error code
+;		R1-R5 -	random
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"INT-EGER"	;F$INTEGER
+F$INTE:	CALL	ONEARG		;Fetch the argument
+	BCS	10$		;Pass an error on up
+	CALLX	STR2NM		;Else, convert string to number
+	BCC	10$		;Exit if no error occurred
+	MOV	ARGPOS,R5	;Point at argument
+	CALLX	SETERR		;Set up the error position
+10$:	RETURN			; and return
+
+.DSABL	LSB
+.ENDC			;End conditional assembly of F$INTEGER routine
+
+.SBTTL	F$JOB 		- Return current job number
+.IF NDF SKPJOB		;Skip this routine for ODT build?
+;+
+; The F$JOB function returns as an integer the user's current job number.
+; It provides a way for a command procedure to use its own job number, as
+; input to a task, or in extracting job information from a file.
+;
+; The format of the F$JOB function is:
+;	
+;	F$JOB()
+;
+;
+; CALL:		CALL	F$JOB
+; RESULT:	**** integer ****
+;
+; INPUT:	R5 -->  character in string after F$JOB
+;
+; OUTPUT:   C=0 if success	
+;		R0 =	0		
+;		R1 =	job number
+;		R2 =	clear		
+;		R3-R4	random
+;		R5 -->	first char past F$JOB() 
+;
+;	    C=1 if failure
+;		R0 =	error code 
+;		R1-R5	random
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"JO-B"		;F$JOB
+F$JOB:	CALL	NOARG		;No arguments expected
+	BCS	10$		;Pass the error on back
+	CALLX	U$USYS		;Perform the UU.SYS, Subfunction 0
+	MOVB	FQJOB+FIRQB,R1	;Take job no.*2
+	BIC	#^C<377>,R1	;Defeat sign extension
+	ASR	R1		;Divide by 2
+	CLR	R2		;We deal in longwords
+	MOVB	#1,$TYPE	;Say this is an integer
+10$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<$TYPE>
+.ENDC			;End conditional assembly of F$JOB routine
+
+.SBTTL	F$LEFT 		- Extract a substring from a string
+.IF NDF SKPLEF		;Skip this routine for ODT build?
+;+
+; The F$LEFT function extracts a sub-string from a specified string,
+; starting from position 1 through a specified position.  This function
+; is similar to the BASIC-PLUS LEFT function.  F$LEFT takes a string 
+; and a position (integer) and extracts the substring from position 1 
+; (beginning of the string) to and including the character at the 
+; position specified.  If the position is 0 or less, the null string 
+; is returned.  If the position is greater than the string length, the 
+; entire string is returned, unchanged.
+;
+; The format of the F$LEFT function is:
+;	
+;	F$LEFT(string,position)
+;
+;
+; CALL:		CALL	F$LEFT
+; RESULT:	**** string ****
+;
+; INPUT:	R5 -->	character in string after F$LEFT
+;
+; OUTPUT:     C=0 if success
+;		R0 =	0
+;		R1 --> 	string	
+;		R2 =	len of string
+;		R3-R4	random
+;		R5 -->  next character in expression
+;	      C=1 if failure
+;		R0 =	error code 
+;		R1-R5	random
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"LEF-T"		;F$LEFT
+F$LEFT:	CALL	TWOARG		;Get those arguments!
+	BCS	30$		;Pass the error on up
+	CLRB	$TYPE		;Type is string
+	TST	R4		;What size integer?
+	BLT	20$		;Negative? Null string
+	BGT	10$		;Positive? Original string, huge number
+	CMP	R2,R3		;Is string length bigger than integer?
+	BLOS	10$		;Branch if not
+	MOV	R3,R2		;New length
+10$:	TST	(PC)+		;Don't clear length
+20$:	CLR	R2		;Null string
+30$:	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<$TYPE>
+.ENDC			;End conditional assembly of F$LEFT routine
+
+.SBTTL	F$LENGTH 		- Return the length of a string
+.IF NDF SKPLEN		;Skip this routine for ODT build?
+;+
+; F$LENGTH returns as an integer the length of a specified string.
+; This function is similar to the BASIC-PLUS LEN function.
+;
+; The format of the F$LENGTH function is:
+;	
+;	F$LENGTH(string)
+;
+;
+; CALL:		CALL	F$LENGTH
+; RESULT:	**** integer ****
+;
+; INPUT:	R5 -->  character after F$LENGTH
+;
+; OUTPUT:    C=0 if success
+;		R0 =	0
+;		R1 =	low order integer
+;		R2 =	high order integer
+;		R3-R4 	random
+;		R5 -->	next character in expression
+;		$TYPE =	1 (integer)
+;	     C=1 if failure
+;		R0 =	error code
+;		R1-R5 -	random
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"LEN-GTH"	;F$LEN
+F$LEN:	CALL	ONEARG		;Get argument
+	BCS	10$		;Error.  Pass it on up
+	CALLX	NM2STR		;Make argument a string
+	MOV	R2,R1		;Put length in correct place
+	CLR	R2		;Length must be < 255, so no high order word
+	MOVB	#1,$TYPE	;Now it's an integer
+10$:	RETURN			;Quit
+
+.DSABL	LSB
+GLOBAL	<$TYPE>
+.ENDC			;End conditional assembly of F$LENGTH routine
+
+.SBTTL	F$MESSAGE 	- Return the error message for this error number
+.IF NDF SKPMES		;Skip this routine for ODT build?
+;+
+; The F$MESSAGE function returns as a string the message text associated
+; with the specified RSTS/E error number.  F$MESSAGE looks up the RSTS/E 
+; error message associated with the integer argument and returns it as a 
+; string.  It is useful in command procedures that display the system 
+; installation name (error number 0) or any other error message.
+;
+; The format of the F$MESSAGE function is:
+;	
+;	F$MESSAGE(error-number)
+;
+; CALL:		CALL	F$MESSAGE
+; RESULT:	**** string ****
+;
+; INPUT:	R5 --> ( expr ) etc.
+;
+; OUTPUT:
+;	C=0 if success	
+;		R0 =	0	
+;		R1 -->	string 	
+;		R2 =	string len
+;		R3-R4 	random	
+;		R5 -->	ext character in string
+;		$TYPE	string (=0)
+;	C=1 if failure
+;		R0 =	error code
+;		R1-R5  	random
+;			error position set	
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"ME-SSAGE" ;F$MESSAGE
+F$MESS:	CALL	ONEARG		;Get argument
+	BCS	50$		;Error.  Pass it on up
+	CALLX	STR2NM		;Make it an integer
+	BCS	50$		;An error occurred
+	TST	R2		;We want an integer between 0 and 255
+	BNE	30$		;High word is non-zero return null str
+	CMP	R1,#255.	;Is integer too large?
+	BHI	30$		;Yes.  Return null string
+	CALLX	CLRFQB		;Integer within range.  Clear out FIRQB
+	MOVB	#UU.ERR,FQFUN+FIRQB ;Function: Return Error Messages
+	MOVB	R1,FQERNO+FIRQB	; for this error number
+	.UUO			;Do it.  
+	CLR	R0		;No errors possible
+	MOV	STRBUF,R1	;Take buffer pointer
+	MOV	R1,R3		;Copy it
+	MOV	#<FQERNO+FIRQB>,R4 ;Take pointer to message
+	MOV	#28.,R2		;Upper limit on message length
+
+10$:	MOVB	(R4)+,(R3)+	;Copy it to the buffer
+	TSTB	(R4)		;Message is null padded
+	BEQ	20$		;Exit if done
+	SOB	R2,10$		;Loop if more to transfer
+
+20$:	MOV	R3,R2		;Take ending pointer
+	SUB	R1,R2		;Make string length
+	MOV	R3,STRBUF	;Adjust buffer pointer
+	BR	40$		;Go finish up
+
+30$:	MOV	STRBUF,R1	;Point to buffer
+	CLR	R2		;Null string has length 0
+40$:	CLRB	$TYPE		;Make type = string
+50$:	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<$TYPE,STRBUF>
+.ENDC			;End conditional assembly of F$MESSAGE routine
+
+.SBTTL	F$MID 		- Extract a desired portion of a string
+.IF NDF SKPMID		;Skip this routine for ODT build?
+;+
+; The F$MID function extracts a substring from a specified string,
+; starting at a specified position.  This function is similar to the 
+; BASIC-PLUS MID function.  
+;
+; The format of the F$MID function is:
+;	
+;	F$MID(string,position,length)
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"MI-D"	;F$MID
+F$MID:	CALL	OPENP		;Get open parenthesis
+	BCS	60$		;An error occurred
+	CALL	$GTARG		;Get string argument
+	BCS	60$		;An error occurred
+	CALLX	NM2STR		;Make sure it's a string
+	CALL	$COMMA		;Get comma
+	BCS	60$		;An error occurred
+	MOV	R1,-(SP)	;Save string pointer
+	MOV	R2,-(SP)	;Save string length
+	CALL	$GTARG		;Get position argument 
+	MOV	(SP)+,R4	;Restore string length
+	MOV	(SP)+,R3	;Restore pointer to string
+	BCS	60$		;An error occurred getting the argument
+	CALLX	STR2NM		;Make sure it's an integer
+	CALL	$COMMA		;Get comma
+	BCS	60$		;An error occurred
+	TST	R2		;Look at the position
+	BLT	10$		;Negative, use string from the start
+	BGT	30$		;Positive, result is null string
+	CMP	R1,R4		;Is position within string?
+	BGT	30$		;Nope, result is null string
+	DEC	R1		;Adjust for add/subtract
+	BLE	10$		;Number was or is 0.  Don't do anything
+	ADD	R1,R3		;Position ourselves within string
+	SUB	R1,R4		;Adjust the length to the shortened string
+10$:	MOV	R4,-(SP)	;Save string length
+	MOV	R3,-(SP)	;Save pointer to string	
+	CALL	$GTARG		;Get length argument
+	MOV	(SP)+,R3	;Restore pointer to string
+	MOV	(SP)+,R4	;Restore string length
+	BCS	60$		;An error occurred getting the argument
+	CALLX	STR2NM		;Make sure it's an integer
+	TST	R2		;Look at the string's length
+	BLT	40$		;Negative.  Result is null string
+	BGT	20$		;Positive, take entire string
+	CMP	R1,R4		;Desired length vs. String length
+	BGE	20$		;Want the whole string
+	MOV	R1,R4		;Want only part of string
+20$:	MOV	R3,R1		;String position
+	MOV	R4,R2		;String length
+	BR	50$		;Finish up	
+
+30$:	CALL	$GTARG		;Get argument, even though we know result 
+				;is null
+	BCS	60$		;An error occurred
+40$:	CLR	R2		;Length is null
+	MOV	R3,R1		;Point to original string anyway
+50$:	CLRB	$TYPE		;Result is string
+	CALL	CLOSEP		;Get closing parenthesis
+60$:	RETURN			;Done
+
+.DSABL	LSB
+
+GLOBAL	<$TYPE>
+.ENDC			;End conditional assembly of F$MID routine
+
+.SBTTL	F$NODE 		- Find executor name, if DECnet/E is present
+.IF NDF SKPNOD		;Skip this routine for ODT build?
+;+
+; The F$NODE function returns as a character string the node name of
+; the system where the job is running.  It returns the name of the 
+; local (executor) node.  If the system does not have DECnet/E installed 
+; and enabled, then the null string is returned.  Otherwise, the current 
+; node name is returned with the trailing characters '::' appended.
+;
+; The format of the F$NODE function is:
+;	
+;	F$NODE()
+;
+;
+; CALL:		CALL	F$NODE
+; RESULT:	**** string ****
+;
+; INPUT:	R5 --> next character in string
+;
+; OUTPUT:
+;	C=0 if success	
+;		R0 =	0	
+;		R1 -->	string 	
+;		R2 =	string len
+;		R3-R4 	random	
+;		R5 -->	ext character in string
+;		$TYPE	string (=0)
+;	C=1 if failure
+;		R0 =	error code
+;		R1-R5  	random
+;			error position set	
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"NO-DE"	;F$NODE
+F$NODE:	CALL	NOARG		;Check for no arguments or ().
+	BCS	60$		;If error, pass it on up
+	CALLX	CLRFQB		;Clean it out
+	MOVB	#SR$EXE,FQ$FUN+FIRQB	;Function: Get Exe Info
+	MOVB	#SF$LNN,FQ$SUB+FIRQB	;Subfunction: Local Node Name
+	.MESAG			;Ask NSP for the info
+	TSTB	FIRQB		;Was NSP there?
+	BNE	30$		;Maybe not.  Check further
+	MOV	STRBUF,R1	;Get string buffer space
+	MOV	R1,R2		;Copy it for transfer
+	MOV	#6,R4		;Node names are 6 characters max
+	MOV	#<FQ$NOD+FIRQB>,R3;Point to name
+10$:	MOVB	(R3)+,(R2)+	;Copy a character
+	CMPB	#SPACE,(R3)	;Is it a blank?
+	BEQ	20$		;Yes.  Name was short
+	SOB	R4,10$		;Else cycle for next char
+20$:	MOVB	#':,(R2)+	;Insert a colon
+	MOVB	#':,(R2)+	;Complete the delimiter
+	MOV	R2,STRBUF	;Update buffer pointer
+	SUB	R1,R2		;Take length of new string
+	BR	50$		;Set up for return
+
+30$:	CMPB	FIRQB,#NORTS	;Was the error "NSP not present?"
+	BEQ	40$		;Yes, return null string
+	CMPB	FIRQB,#ERRERR	;Was the error "DECnet not installed?"
+	BNE	45$		;No, was some other error...
+40$:	MOV	STRBUF,R1	;Return null string
+	CLR	R2		;With zero length
+	BR	50$		;And set up for return.
+
+45$:	CLR	R0		;Ensure high byte is clear
+	BISB	FIRQB,R0	;FIRQB has error code.  Move it to R0
+	SEC			;Indicate error detected
+	BR	60$		;And exit
+
+50$:	CLRB	$TYPE		;Indicate we return a string
+	CLR	R0		;Clean up, in case 
+60$:	RETURN			;And exit
+
+.DSABL	LSB
+
+GLOBAL	<$TYPE,NORTS,ERRERR,STRBUF>
+.ENDC			;End conditional assembly of F$NODE routine
+
+.SBTTL	F$PARSE 	- Returns a complete RSTS file spec
+.IF NDF SKPPAR		;Skip this routine for ODT build?
+;+
+; The F$PARSE function returns as a character string a complete RSTS/E
+; file-spec, or, if an optional field keyword is included, a specified
+; field within the file-spec.  This function provides the same basic 
+; functions as the standard BASIC-PLUS File Name String Scan SYS call.
+;
+; The format of the F$PARSE function is:
+;	
+;	F$PARSE(file-spec)[,default-spec][,field])
+;
+;-
+.ENABL	LSB
+
+	TMPORG	IMPURE
+STACK:	.BLKW
+	UNORG
+
+	F$ENTRY	FUNTBL,"PA-RSE"	;F$PARSE
+F$PARS:	PUSH	<STACK>		;Save saved stack pointer
+	MOV	SP,STACK	;Save current stack pointer
+	CLR	-(SP)		;Reserve space on stack for saving ARGPOS
+	CALL	OPENP		;Get opening parenthesis
+	BCS	999$		;Not there
+	CALL	$GTARG		;Get filespec
+	BCS	999$		;An error occurred
+	MOV	ARGPOS,(SP)	;Save ARGPOS in case of error which can't be
+				; detected until later.
+	CALLX	NM2STR		;Convert to string
+
+	MOV	R5,R4		;Save scan location
+	CALL	$COMMA		;Parse comma
+	BCC	10$		;Found it
+	CMP	R0,#ADDA.E	;Did we hit closing paren already?
+	BNE	998$		;No, something else, quit
+	MOV	R4,R5		;Restore scan position
+10$:	PUSH	<R1,R2>		;Save results of first argument
+	CALL	$GTARG		;Get second argument
+	BCS	999$		;An error occurred
+	CALLX	NM2STR		;Convert to string
+	TST	R2		;Was a non-null argument specified?
+	BEQ	15$		;No, but it's not required
+	MOV	#U.IFIL,R0	;Guess at ?Invalid file spec
+	CALL	YAFSS 		;FSS the filespec
+	BNE	991$		;Not a good one
+15$:	MOV	R5,R4		;Save scan location
+	CALL	$COMMA		;Parse comma
+	BCC	20$		;Found it
+	CMP	R0,#ADDA.E	;Did we hit closing paren already?
+	BNE	998$		;No, something else, quit
+	MOV	R4,R5		;Restore scan position
+20$:	PUSH	<R1,R2>		;Save results of second argument
+	CALL	$GTARG		;Get third argument
+	BCS	999$		;An error occurred
+	TSTB	$TYPE		;Was result integer?
+	BNE	990$		;Yes, this must be an error then
+	CALL	CLOSEP		;Get closing parenthesis
+	BCS	999$		;An error occurred
+	PUSH	<R1,R2>		;Save results of third argument
+	PUSH	<R5>		;Save scan pointer
+	CALL	DOPARS		;Get results from our parsing
+	BCS	990$		;Error? Must have been invalid third argument
+	BNE	800$		;Error. First filename invalid.
+	POP	<R5>		;Get back scan pointer
+	BR	999$		;Finish up
+
+800$:	MOV	#U.IFIL,R0	;?Invalid file specification 
+	MOV	14.(SP),R5	;Get saved first ARGPOS
+	BR	992$		;Set up the error
+
+990$:	MOV	#U.IARG,R0	;?Invalid argument
+991$:	MOV	ARGPOS,R5	;Position of argument is position of error
+992$:	CALLX	SETERR		;Set up error position
+998$:	SEC			;Error occurred
+999$:	MOV	STACK,SP	;Give back all of the stack space.
+	MOV	(SP)+,STACK	;Restore old saved stack pointer.
+	RETURN			;Done, what a relief!
+
+;+
+; DOPARS - do parsing 
+;
+; This is the current setup of the stack
+;
+;		____________________
+; Current SP ->	|  return address  | 0	(return back from DOPARS call)
+;		--------------------
+; 		|  Scan position   | 2
+;		--------------------
+;		|  3rd arg length  | 4	The 3rd argument is the field text, 
+;		--------------------    like DEVICE, or PPN.
+;		| 3rd arg position | 6
+;		--------------------
+;		|  2nd arg length  | 10	The 2nd argument is the default file
+;		--------------------    spec to be used.  The position is 0 if
+;		| 2nd arg position | 12 none specified
+;		--------------------
+;		|  1st arg length  | 14	The 1st argument is the file to parse,
+;		--------------------    this is a required parameter.
+;		| 1st arg position | 16
+;		--------------------
+; STACK ->	| return address   | 20	(return back from F$PARS call)
+;		--------------------
+;
+; Like here is what we return in the way of status:
+;	C = 0 & Z = 1
+;		No error!
+;
+;	C = 0 & Z = 0
+;		Error - First arg file name is invalid
+;
+;	C = 1
+;		Error - Third arg is invalid
+;-
+
+	TMPORG	IMPURE
+PARERR:	.BLKW
+	UNORG
+
+DOPARS:	CALLX	CLRFQX		;Clear the FIRQB and XRB
+	CLR	PARERR		;Clear place for saving FIRQB error codes
+	CLR	R3		;R3 = important bits from FSS flag
+	MOV	10(SP),R2	;2nd arg length
+	BEQ	35$		;No default was specified	
+	MOV	12(SP),R1	;2nd argument position
+	CALL	NXTFSS		;Do FSS
+	.ASSERT FIRQB EQ #0	;No error can occur
+	MOV	XRB+XRBLK,R3	;Get flag word
+	BIC	#^C<F2NAM!F2EXT!F2PPN!F2DEV!F2DEVI>,R3
+				;Strip off non-essential bits
+35$:	CLR	R4		;R4 = important bits from 1st argument
+	MOV	14(SP),R2	;1st argument length
+	BEQ	37$		;First argument was null
+	MOV	16(SP),R1	;1st argument position
+	BEQ	37$		;First argument was null
+	CALLX	CLRXRB		;Clear the XRB, LEAVE THE FIRQB ALONE!
+	CALL	NXTFSS		;Do FSS, put new results over old in FIRQB.
+	MOV	FIRQB,PARERR	;Save FIRQB error code (if any) for later.
+	MOV	XRB+XRBLK,R4	;Get flag word
+	BIC	#^C<F2NAM!F2EXT!F2PPN!F2DEV!F2DEVI>,R4
+				;Strip off non-essential bits
+	BIT	#F2DEV,R4	;Was a device name specified in 1st arg?    ;026
+	BEQ	37$		;Branch if not				    ;026
+	BIC	#F2DEV!F2DEVI,R3;Yes, ignore the device in the default file ;026
+
+37$:	BIS	R3,R4		;Now have all the important facts and figures
+	CMP	FIRQB+FQNAM1,#134745 ;Was file name all question marks?
+	BNE	45$		;No
+	CMP	FIRQB+FQNAM1+2,#134745 ;Maybe
+	BNE	45$		;No
+	BIS	#F2NAMS,R4	;Indicate name was a star
+45$:	CMP	FIRQB+FQEXT,#134745 ;Was file type all question marks?
+	BNE	46$		;No
+	BIS	#F2EXTS,R4	;Indicate file type a star
+46$:	TST	4(SP)		;Was there a third argument specified?
+	BEQ	41$		;No, don't parse keywords
+	MOV	#DEV$K,R5	;Are we looking for a device?
+	CALL	CMPSTR		;
+	BCS	38$		;No
+	BIC	#^C<F2DEV!F2DEVI>,R4	;Only do device
+	BR	41$		;Go for it!
+
+38$:	MOV	#PPN$K,R5	;Are we looking for a PPN?
+	CALL	CMPSTR		;
+	BCS	39$		;No
+	BIC	#^C<F2PPN>,R4	;Only do PPN
+	BR	41$		;Go to it!
+
+39$:	MOV	#NAM$K,R5	;Are we looking for a file name?
+	CALL	CMPSTR		;
+	BCS	40$		;No
+	BIC	#^C<F2NAM>,R4	;Only print out file name
+	BR	41$		;Go do it!
+
+40$:	MOV	#TYP$K,R5	;Are we looking for a file type?
+	CALL	CMPSTR		;
+	BCS	41$		;No
+	BIC	#^C<F2EXT>,R4	;Only do file type
+41$:	MOV	R4,XRB+XRBLK	;Use this for resulting filespec
+	CALLX	INITRN		;Initialize TRNBUF
+	CLR	-(SP)		;Flag for DOFIL (don't translate unless nec)
+	MOV	SP,R3		;Point R3 at flag
+	CALLX	DOFIL		;Put filespec into TRNBUF (Routine in DCLTRN)
+	TST	(SP)+		;Give back stack space
+	MOV	#TRNBUF,R2	;Copy filespec from TRNBUF to STRBUF
+	MOV	STRBUF,R1	;
+	MOV	TRNLEN,R3	;
+	MOV	R1,-(SP)	;Remember position of string
+	MOV	R3,-(SP)	;Remember number of characters
+	BEQ	50$		;No characters to copy!
+49$:	MOVB	(R2)+,(R1)+	;
+	SOB	R3,49$		;Copy them all	
+	CALLX	INITRN		;Initialize TRNBUF
+50$:	MOV	(SP)+,R2	;Number of characters
+	MOV	(SP)+,R1	;Position of STRBUF
+	ADD	R2,STRBUF	;Update string buffer
+	;CLRB	$TYPE		;Type is now string, but it might change
+	TST	4(SP)		;Third argument been looked at yet?
+	BEQ	60$		;Yes, or was none
+	MOV	#STA$K,R5	;Is third argument STATUS?
+	CALL	CMPSTR		;
+	BCS	52$		;No
+	TST	PARERR		;Was first arg bad?
+	BNE	54$		;Yes, return an error.
+	TST	R2		;Is length zero?
+	BEQ	521$		;Yes, Don't do FSS, just return value of zero.
+	CALL	YAFSS		;Do FSS again
+	BNE	61$		;Got an error
+	MOV	XRB+XRMOD,R1	;Get STATUS word
+	CLR	R2		;High order word is zero
+	BR	54$		;Result is integer
+
+52$:	MOV	#FLA$K,R5	;Is third argument FLAGS?
+	CALL	CMPSTR		;
+	BCS	60$		;No, leave C-bit set to indicate third arg bad
+	TST	PARERR		;Was first arg bad?
+	BNE	520$		;Yes, return -1
+	TST	R2		;Is length zero?
+	BEQ	521$		;Yes, Don't do FSS, just return value of zero.
+	CALL	YAFSS		;Do FSS again
+	BEQ	53$		;No error
+520$:	MOV	#-1,R2		;Got error so return a value of -1.
+521$:	MOV	R2,R1		;Value returned is 0 or -1
+	BR	531$		;Return with no error.
+
+53$:	CLR	R2		;Set high order bits to zero
+	MOV	XRB+XRBLK,R1	;Move in flag word 2
+531$:	CLR	PARERR		;Force no error (C = 0 & Z = 1 on exit)
+54$:	MOVB	#1,$TYPE	;Type is integer
+60$:	BIT	#-1,PARERR	;Setup Z bit without touching carry
+61$:	RETURN			;Done
+
+YAFSS:	CALLX	CLRFQX		;Clear the FIRQB and XRB
+NXTFSS:	MOV	R2,XRB+XRLEN	;Pass string length
+	MOV	R2,XRB+XRBC	;Pass string length again
+	MOV	R1,XRB+XRLOC	;Pass string address
+	.FSS			;FSS the string
+	TSTB	FIRQB+0		;Test for an error
+	;CLC			;Clear C-bit
+	RETURN			;Return with test results
+
+CMPSTR:	MOV	R2,-(SP)	;Save register
+	MOV	10(SP),R3	;Get number of characters in argument
+	BEQ	120$		;No characters, this keyword is not it
+	CMPB	(R5),R3		;Are the lengths the same?
+	BNE	120$		;No, this keyword is not the one
+	MOV	12(SP),R3	;Get pointer to string
+	MOVB	(R5)+,R0	;R0 = number of characters
+100$:	MOVB	(R3)+,R2	;Make the input character
+	BIC	#40,R2		; upper case
+	CMPB	(R5)+,R2	;Are they the same?
+	BNE	120$		;No, then this keyword is not the one
+	SOB	R0,100$		;Try all characters
+	CLR	10(SP)		;We don't want to look at this again
+	TST	(PC)+		;This was the keyword, Clear C-bit
+120$:	SEC			;Not it, set C-bit
+	MOV	(SP)+,R2	;Restore register
+	RETURN			;Done
+
+.DSABL	LSB
+
+GLOBAL	<U.IFIL,U.IARG,TRNBUF,TRNLEN,STRBUF,$TYPE,ADDA.E>
+.ENDC			;End conditional assembly of F$PARSE routine
+
+.SBTTL	F$PRIVILEGE	- Check the privilege keyword settings
+.IF NDF SKPPRI		;Skip this routine for ODT build?
+;+
+; The F$PRIVILEGE function returns the integer value 1 (true) or
+; 0 (false), depending on whether the user job's current privileges
+; match those specified in the list of privilege keywords.  If the
+; user's job has all of the privileges as specified, then the value 1
+; is returned; otherwise the value 0 is returned.
+;
+; F$PRIVILEGE takes a single string composed of privilege keywords
+; separated by commas and checks with the monitor on the setting
+; of each keyword one at a time.  Since any keyword may be prefixed
+; with a "NO", the expected state of the privilege is saved to
+; be compared with the actual setting.  If ALL the privileges are
+; set as expected, TRUE (=1, integer) is returned.  In any other
+; case, FALSE (=0, integer) is returned.  If a keyword is misspelled
+; the monitor will return the error NOSUCH, and this routine will
+; translate that into "Invalid Argument".
+;
+; The format of the F$PRIVILEGE function is:
+;	
+;	F$PRIVILEGE("priv[,...]")
+;
+;
+; CALL:		CALL	F$PRIV
+; RESULT:	*** integer ***
+;
+; INPUT:	R5 -->	( string )
+;
+; OUTPUT:	Carry Clear implies SUCCESS	Carry Set implies FAILURE
+;		R0 --	clear			R0 -- 	error code set
+;		R1 --	low word of integer	R1-R5 	random
+;		R2 =	high word of integer	error position set
+;		R3-R4	random
+;		R5 -->	1st non-blank character past argument list
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"PR-IVILEGE"	;F$PRIVILEGE
+F$PRIV:	CALL	ONEARG		;Fetch Privilege Keyword
+	BCS	90$		;An error occurred
+	TSTB	$TYPE		;Keywords cannot be integers
+	BNE	80$		;Invalid Argument Exit
+	MOV	#2+40,R3	;Edit string, strip all(?) spaces,tabs LC -> UC
+	CALL	INEDIT		;String is in R1 and R2
+	TST	R2		;Null string?
+	BEQ	80$		;Yes, say ?Invalid argument
+	MOV	#1,-(SP)	;TRUE/FALSE flag (remains TRUE until FALSE)
+10$:	CALLX	CLRFQB		;Clear the FIRQB
+	MOVB	#UU.CHK,FIRQB+FQFUN ;Check Privileges function
+	INCB	FIRQB+FQFIL	;And subfunction
+	CLR	R0		;Init flag to "expect SET"
+	CMPB	(R1),#'N	;Check for "NO" prefix
+	BNE	20$		;Not this time
+	CMPB	1(R1),#'O	;Try second char of prefix
+	BNE	20$		;If not "no", continue as is
+	INC	R0		;Else, Set flag to "expect NOT SET"
+	ADD	#2,R1		;Eat the NO
+	SUB	#2,R2		;Count the NO
+20$:	MOV	#FIRQB+FQNAM1,R4 ;Keywords need to be stuffed here
+	MOV	#6,R3		;Put a six char limit on keywords
+				;Start of Internal Loop
+30$:	CMPB	#COMMA,(R1)	;Have we found a delimiter?
+	BNE	40$		;No, so count and continue
+	INC	R1		;Yes, so skip the comma
+	DEC	R2		;And count it down
+	BR	50$		;And go ask about this Privilege
+
+40$:	MOVB	(R1)+,(R4)+	;Copy this character
+	DEC	R2		;Count it
+	BEQ	50$		;If it's the last char, test the keyword
+	SOB	R3,30$		;Count down one keyword max length
+	CMPB	#COMMA,(R1)	;We copied six chars
+	BEQ	30$		;And got the correct delimiter, so continue
+	BR	70$		;Else,we got something else, so error
+
+50$:	.UUO			;Go inquire about this privilege
+	TSTB	FIRQB		;Error (NOSUCH)?
+	BNE	70$		;Yes--Invalid argument error
+	CMPB	R0,FIRQB+FQERNO ;Else, was the privilege as expected?
+	BEQ	60$		;Yes, not FALSE this time
+	CLR	(SP)		;No, flag FALSE 
+60$:	TST	R2		;Yes, so try next keyword
+	BHI	10$		;Until we run out
+	CLR	R2		;Clear the high word of the integer
+	CLR	R0		;Ensure no weird errors
+	MOV	(SP)+,R1	;Load in TRUE or FALSE value
+	MOVB	#1,$TYPE	;Set Integer
+	BR	90$		;And  Exit
+
+70$:	TST	(SP)+		;Give back stack space
+80$:	MOV	#U.IARG,R0	;?Invalid argument error
+	MOV	ARGPOS,R5	;Position of argument is position of argument
+	CALLX	SETERR		;Set up error position
+90$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.IARG,$TYPE>
+.ENDC			;End conditional assembly of F$PRIVILEGE routine
+
+.SBTTL	F$RIGHT 	- Extract a substring from a string
+.IF NDF SKPRIG		;Skip this routine for ODT build?
+;+
+; The F$RIGHT function extracts a sub-string from a specified string,
+; starting at a specified position and extending to the rightmost 
+; position of the string.  This function is similar to the BASIC-PLUS
+; RIGHT function.  F$RIGHT takes a string and a position (integer) and 
+; extracts the substring from the specified position and including this 
+; character to the end of the string.  If the position is 0 or less, the 
+; entire string is returned.  If the position is greater than the string 
+; length, the null string is returned.
+;
+; The format of the F$RIGHT function is:
+;	
+;	F$RIGHT(string,position)
+;
+; CALL:		CALL	F$RIGHT
+; RESULT:	**** string ****
+;
+; INPUT:	R5 -->	character in string after F$RIGHT
+;
+; OUTPUT:    C=0 if success
+;		R0 =	0
+;		R1 --> 	string	
+;		R2 =	len of string
+;		R3-R4	random
+;		R5 -->  next character in expression
+;	      C=1 if failure
+;		R0 =	error code 
+;		R1-R5	random
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"RI-GHT"	;F$RIGHT
+F$RIGH:	CALL	TWOARG		;Get those arguments!
+	BCS	30$		;Pass the error on up
+	CLRB	$TYPE		;Type is string
+	TST	R4		;What size integer?
+	BLT	10$		;<0 -> negative integer, entire string
+	BGT	20$		;>0 -> huge integer, return null string
+	CMP	R2,R3		;Is string length bigger than integer?
+	BLO	20$		;Branch if not
+	DEC	R3		;Decrease position for ADD/SUB 
+	BLT	10$		;R3 was 0, return entire string
+	ADD	R3,R1		;Point to position in string
+	SUB	R3,R2		;Calculate new string length
+10$:	TST	(PC)+		;Clear C-bit, don't clear length
+20$:	CLR	R2		;Null string
+30$:	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<$TYPE>
+.ENDC			;End conditional assembly of F$RIGHT routine
+
+.SBTTL	F$SEARCH	- Find the "next" occurrence of the filename
+.IF NDF SKPSEA		;Skip this routine for ODT build?
+;+
+; F$SEARCH searches a disk directory for a specified file and returns as 
+; a string the complete RSTS/E filespec of the next occurrence of the file.
+; Wildcard fields may appear in the filename string.  A null argument means 
+; find the NEXT (sequential) occurrence of this filename, so a null argument
+; may not appear in the initial invocation of this function else an error is 
+; returned. 
+;
+; A null string is returned the first time no more occurrences of a "next" 
+; are found.  Errors will be returned for invalid filespecs. DISK FILES ONLY.  
+;
+; The format of the F$SEARCH function is:
+;	
+;	F$SEARCH([file-spec])
+;
+; CALL:		CALL	F$SEARCH
+; RESULT:	*** string ***
+;
+; INPUT:	R5 -->	( [string evaluating to a filename] ) etc
+;		F$SCHN = bit mask of PFB channels currently open via F$SEARCH
+;			 (at any level of ICF)
+;
+; OUTPUT:	C=0 if success	
+;			R0 =	0
+;			R1 ->	String
+;			R2 =	String length
+;			R5 ->	Next character in command string
+;			F$SCHN = updated bit mask of PFB channels currently
+;				 open via F$SEARCH functions
+;			
+;		C=1 if failure
+;			R0 =	error code
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"SEA-RCH"	;F$SEARCH
+F$SEAR:	CALL	OPTARG		;Parse an optional argument
+	IFCS			;If an error occurred
+	JMP	80$		;  Quit
+	ENDIF			;Endif
+
+	MOV	R5,-(SP)	;Save scan position
+	MOV	LCAPTR,R5	;Get pointer to local context area
+	BIT	#ICFACT,ICFFLG	;Is a command file active?
+	IFEQ			;If not then
+	MOV	FUNPOS,R5	;  Point at function name
+	MOV	#ILVL.E,R0	;  ?Invalid at interactive level
+	CALLX	SETERR		;  Indicate failure
+18$:	JMP	70$		;  Done
+	ENDIF			;Endif
+
+	TST	ARGPOS		;Was an argument supplied?
+	BEQ	10$		;No, use previous filespec, if any
+	CALLX	NM2STR		;Convert argument to a string
+	TST	R2		;Is length of string null?
+	IFEQ			;If so then
+10$:	TST	SLPFB(R5)	;  Have we set up an IOB channel yet?
+	BLE	25$		;  No, and previous filespec had no wildcards
+	CALLX	CLRFQX		;  Clear FIRQB and XRB
+	MOV	SLPFB(R5),FIRQB+FQNAM1;PFB channel to close
+	MOV	#2*2,FIRQB+FQPPN;  IOB channel to open (*2)
+	MOVB	#P2I.PF,FIRQB+FQFIL;Function .. move PFB to IOB
+	.PFB			;  Do the move
+15$:	CALLX	CLRFQB		;  Clear the FIRQB
+	MOV	#SLFILE,R1	;  Get ready to load up next file to search
+	ADD	R5,R1		;  Point into the local context area
+	MOV	#FIRQB+FQFIL,R2	;  Point into FIRQB
+	MOV	(R1)+,(R2)+	;  Move PPN index
+	MOV	(R1)+,(R2)+	;  Move PPN
+	MOV	(R1)+,(R2)+	;  Move file name (1st 3 chars)
+	MOV	(R1)+,(R2)+	;  Move file name (2nd 3 chars)
+	MOV	(R1)+,(R2)+	;  Move file type
+	MOV	(R1)+,12(R2)	;  Move device name
+	MOV	(R1)+,14(R2)	;  Move device unit number
+	MOV	#-1,R4		;  Indicate that this is a wildcard filespec
+				;  (otherwise we wouldn't have saved it)
+	BR	20$		;  Go attempt to find next IOB
+	ENDIF			;Endif
+
+;We have a non-null argument
+
+	CALB	CLSF$S		;Return and close PFB channel if necessary
+	CALL	DOFSS		;FSS filespec
+	BCS	18$		;An error occurred
+	.ASSUME	DSKHND EQ 0	;Assume disk handler index is 0
+	TSTB	XRB+XRMOD	;
+	IFNZ			;If it's not a disk file 
+	MOV	#U.IFIL,R0	;  "?Invalid file specification"
+	SEC			;  Set C-bit
+	BR	18$		;  Exit since an error occurred
+	ENDIF			;Endif
+
+	BIT	#F2NAM,XRB+XRBLK;
+	IFEQ			;If no name was specified
+	BIS	#F2NAM!F2NAMS,XRB+XRBLK
+				;  Make it a wildcard name.
+	MOV	#134745,FIRQB+FQNAM1
+	MOV	#134745,FIRQB+FQNAM1+2
+	ENDIF			;Endif
+
+	BIT	#F2EXT,XRB+XRBLK;
+	IFEQ			;If no extension was specified
+	BIS	#F2EXT!F2EXT1!F2EXTS,XRB+XRBLK
+				;  Make it a wildcard extension.
+	MOV	#134745,FIRQB+FQEXT
+	ENDIF			;Endif
+
+	CLR	SLFILE(R5)	;Set initial PPN index.
+	BIT	#F2PRJW!F2PRGW,XRB+XRBLK
+	IFZE			;If no wildcard PPNs then
+	DEC	SLFILE(R5)	;  Set flag saying no wildcard PPNs
+	ENDIF			;Endif
+
+	CLR	R4		;R4 = 0 if no wildcards, -1 if wildcard
+	BIT	#F2PRJW!F2PRGW!F2NAMS!F2NAMQ!F2EXTS!F2EXTQ,XRB+XRBLK
+	IFNZ			;If anything else is wildcard
+	COM	R4		;  Indicate wildcard present
+	MOV	#FIRQB+FQPPN,R1	;  Point to FIRQB PPN field
+	MOV	#SLFILE+2,R2	;  Point to symbol table context block
+	ADD	R5,R2		;  ... in the local context area
+	MOV	(R1)+,(R2)+	;  Save PPN
+	MOV	(R1)+,(R2)+	;  Save file name to search (first 3 chars)
+	MOV	(R1)+,(R2)+	;  Save file name (next 3 chars)
+	MOV	(R1)+,(R2)+	;  Save file extension
+	MOV	12(R1),(R2)+	;  Save device
+	MOV	14(R1),(R2)+	;  Save device unit number
+	ENDIF			;Endif
+	
+;+
+; With the FIRQB set up, do an open next call.  We use IO channel 2 which
+; is generally used for creating tentative files.  (GENCHN=2 in CUILOK, 
+; which is not a global symbol).  If this channel is open then we are trying 
+; to find the next matching filespec, otherwise we are trying to find the 
+; first.
+;-
+
+20$:	CMP	SLFILE(R5),#-1	;Do we need to lookup a PPN?
+	BEQ	26$		;No, just a file
+	
+	MOVB	#UU.PPN,FIRQB+FQFUN	;Look for the PPN
+	.UUO
+	CMPB	FIRQB,#NOSUCH	;Was PPN found?
+	IFEQ			;If not then
+25$:	CALB	CLSF$S		;  Return and close PFB channel if necessary
+	CLR	R1		;  Return null string
+	CLR	R2		;  Null length
+	BR	65$		;  Finished
+	ENDIF			;Endif
+	CALLX	U$CHKE		;Handle any stray errors
+
+26$:	MOVB	#UU.ONX,FIRQB+FQFUN	;Look for the file
+	MOV	#2*2,FIRQB+FQFIL	;Channel number * 2
+	MOV	#100000!40,FIRQB+FQMODE
+	.UUO			;Do open next call
+	CMPB	FIRQB,#NOSUCH	;Was file found?
+	IFEQ			;If not then
+	INC	SLFILE(R5)	;  Try next PPN index
+	BEQ	25$		;  If EQ then no wild PPNs, so quit.
+	BR	15$		;  Go get it.
+	ENDIF			;Endif
+
+	CLR	R0		;No error so far ...
+	BISB	FIRQB+0,R0	;Set any error
+	IFNE			;If there was an error, 
+	MOV	ARGPOS,R5	;  Point to offending filespec
+	CALLX	SETERR		;  Set the error position
+	BR	70$		;  Quit	
+	ENDIF			;Endif
+
+	MOV	R4,-(SP)	;Save R4
+	MOV	#F.FULL,R3	;Fully expand filespec			;033
+	CALL	UNFSS		;Get filespec 				;033
+	MOV	(SP)+,R4	;Restore wildcard flag, any specified?	;033
+	IFEQ			;If not then
+63$:	CALLX	CLRFQB		;  Clear the FIRQB
+	MOVB	#CLSFQ,FIRQB+FQFUN;Close a channel
+	MOV	#2*2,FIRQB+FQFIL;  IO channel 2 (*2)
+	CALFIP			;  Close the channel
+	MOV	#-1,SLPFB(R5)	;  Indicate no channel on PFB and no wildcards
+	ELSE			;Else
+	TST	SLPFB(R5)	;  Have we already set up a PFB channel?
+	IFLE			;  If not then
+	MOV	PFBCHN,R4	;    Set up PFB channel number bit mask
+	MOV	R1,-(SP)	;    Save R1 (used for channel number here)
+	CALLX	GETCHN		;    Get PFB channel
+	MOV	(SP)+,R3	;    Restore register
+	BCS	63$		;    Quit if an error occurred
+	MOV	PFBCHN,R5	;    Get PFB bit mask prior to the cal	;035
+	MOV	R4,PFBCHN	;    Update PFB channel number bit mask
+	XOR	R4,R5		;    Save only the bit representing the PFB
+				;     channel just allocated
+	BIS	R5,F$SCHN	;    Set this channel in F$SEARCH bit mask
+				;     to keep track of (so can close them all
+				;     when returning to interactive level)
+	MOV	LCAPTR,R5	;    Get local context pointer back again
+	MOV	R1,SLPFB(R5)	;    Indicate which channel file is stored on
+	MOV	R3,R1		;    Restore R1
+	ENDIF			;  Endif
+	CALLX	CLRFQX		;  Clear FIRQB and XRB
+	MOV	SLPFB(R5),FIRQB+FQNAM1;PFB channel (*2) to open
+	MOV	#2*2,FIRQB+FQPPN;  IOB channel (*2) to close 
+	MOVB	#I2P.PF,FIRQB+FQFIL;Function .. move IOB to PFB
+	.PFB			;  Do the move
+	ENDIF			;Endif 
+	CALLX	INITRN		;Re-initialize TRNBUF
+	MOVB	#1,LCLNFG	;Local context area was changed by all this
+65$:	CLRB	$TYPE		;Indicate this is a string
+70$:	MOV	(SP)+,R5	;Reset scan position
+80$:	TST	R0		;Did an error occur?
+	BEQ	90$		;No, exit with C-bit clear indicating success
+	SEC			;Yes, set C-bit indicating error
+90$:	RETURN			;And return 
+
+DOFSS:	CALBX	U$FSS <R2,R1>	;Do FSS (this clears the FIRQB)
+	BCC	100$		;No error occurred
+	MOV	#U.IFIL,R0	;?Invalid file specification
+100$:	RETURN			;Return with status
+
+.DSABL	LSB
+
+GLOBAL	<NOSUCH,U.WLD,SLFILE,SLPFB,PFBCHN,LCLNFG,ILVL.E,FUNPOS,LCAPTR>
+GLOBAL	<U.IFIL,$TYPE,TRNBUF,TRNLEN,STRBUF,F$SCHN,ICFFLG,U$CHKE>
+.ENDC			;End conditional assembly of F$SEARCH routine
+
+.SBTTL	F$STRING 	- Convert integer to string
+.IF NDF SKPSTR		;Skip this routine for ODT build?
+;+
+; F$STRING converts an integer expression to a string.
+; E.G. 8 becomes "8", and 99 becomes "99".
+;
+; The format of the F$STRING function is:
+;	
+;	F$STRING(expression)
+;
+;
+; CALL:		CALL	F$STRING
+; RESULT:	**** string ****
+;
+; INPUT:	R5 -->  character after F$STRING
+;
+; OUTPUT:   C=0 if success
+;		R0 =	0
+;		R1 =	address of string
+;		R2 =	length of string
+;		R3-R4   random
+;		R5 -->	next character in expression
+;		$TYPE=  0 (string)
+;	     C=1 if failure
+;		R0 =	error code
+;		R1-R5	random
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"ST-RING"	;F$STRING
+F$STRI:	CALL	ONEARG		;Fetch the argument
+	BCS	10$		;Pass an error on up
+	CALLX	NM2STR		;Convert to string
+10$:	RETURN			; and return
+
+.DSABL	LSB
+.ENDC			;End conditional assembly of F$STRING routine
+
+.SBTTL	F$TERMINAL 	- Return keyboard number as an integer
+;+
+; The F$TERMINAL function returns as an integer the number of the current
+; job's terminal.  It is useful in a command procedure that needs to
+; determine its job's keyboard number, or to determine if its job is
+; currently detached.  If the job is detached, the keyboard number will 
+; be the negative (two's complement) of the keyboard from which it detached.
+;
+; The format of the F$TERMINAL function is:
+;	
+;	F$TERMINAL()
+;
+;
+; CALL:		CALL	F$TERM
+; RESULT:	**** integer ****
+;
+; INPUT:	R5 -->	character in string after F$TERMINAL
+;
+; OUTPUT:    C=0 if success
+;		R0 =	0
+;		R1 --> 	string	
+;		R2 =	len of string
+;		R3-R4	random
+;		R5 -->  next character in expression
+;	      C=1 if failure
+;		R0 =	error code 
+;		R1-R5	random
+;
+; DOTERM insists we have an integer result in R1
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"TE-RMINAL"	;F$TERMINAL
+F$TERM:	CALL	NOARG		;No arguments wanted.
+	BCS	30$		;Something wasn't nice.
+DOTERM::CALLX	U$USYS		;Do the syscall (no error possible)
+	CLR	R2		;Prepare high word of longword
+	MOVB	FQSIZM+FIRQB,R1	;Take keyboard number
+	BGE	10$		;If negative, further work is necessary
+	INC	R1		;Make low word two's complement
+	SXT	R2		;Make high word two's complement
+	COM	R2		;Negate upper half -- 1's complement
+	BR	20$		;And convert to string.
+
+10$:	BIC	#^C<377>,R1	;Defeat sign extension if positive
+20$:	MOVB	#1,$TYPE	;Insist we have integer
+30$:	RETURN			;and go on
+	
+.DSABL	LSB
+
+GLOBAL	<$TYPE>
+
+.SBTTL	F$TIME 		- Get current system time in system default format
+;+
+; F$TIME returns the current system date/time in a string formatted
+; according to the current system default format.
+;
+; The format of the F$TIME function is:
+;	
+;	F$TIME()
+;
+;
+; CALL:		CALL	F$TIME
+; RESULT:	**** string ****
+;
+; INPUT:	R5 -->	character in string after F$TIME
+;
+; OUTPUT:    C=0 if success
+;		R0 =	0
+;		R1 --> 	string	
+;		R2 =	len of string
+;		R3-R4	random
+;		R5 -->  next character in expression
+;	      C=1 if failure
+;		R0 =	error code 
+;		R1-R5	random
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"TI-ME"	;F$TIME
+F$TIME:	CALL	NOARG		;No argument expected
+	BCS	10$		;Something parsed wrong.
+DOTIME::CALLX	CLRFQB		;Clean it out
+DOTIM2: MOVB	#UU.CNV,FQFUN+FIRQB ;Set up for date and time conversion
+	.UUO			;Want current values and system defaults
+				;No error possible except for GIGO
+	MOV	STRBUF,R1	;Point to the string storage
+	MOV	R1,R3		;Copy it
+	MOV	#<FQNAM1+FIRQB>,R4 ;Point to string 
+	CALL	COPNUL		;Copy string until null
+	MOVB	#SPACE,(R3)+	;Insert a blank between date and time
+	MOV	#<FQPFLG+FIRQB>,R4 ;Take start of time string
+	CALL	COPNUL		;  copy it
+	MOV	R3,R2		;Copy ending pointer
+	SUB	R1,R2		;Take length of string
+	MOV	R3,STRBUF	;Adjust string buffer pointer
+	CLR	R0		;Remove FIRQB address
+	CLRB	$TYPE		;Say we have string
+10$:	RETURN			;And go on
+
+;+
+;  COPNUL - copy until a null is found -- local subroutine
+;-
+
+COPNUL:	MOV	#10.,R0		;A maximum
+20$:	MOVB	(R4)+,(R3)+	;Copy the time over
+	TSTB	(R4)		;Do we have a null?
+	BEQ	30$		;Yes, all done with copying characters
+	SOB	R0,20$		;Else, continue copying
+30$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<$TYPE,STRBUF>
+
+.SBTTL	F$TYPE		- Return string TYPE of symbol or expression
+.IF NDF SKPTYP		;Skip this routine for ODT build?
+;+
+; F$TYPE returns the result of an expression (or symbol name, etc) as a string
+; keyword.  The possible keywords are "STRING", "INTEGER", or "" indicating 
+; that at least one UNDEFINED symbol was present in the expression.  
+; No other error is trapped, therefore, any other error which occurs in the
+; expression will get printed.  
+;
+; The format of the F$TYPE function is:
+;	
+;	F$TYPE(symbol)
+;	F$TYPE(expression)
+;
+;
+; CALL:		CALL	F$TYPE
+; RESULT:	**** string ****
+;
+; INPUT:	R5 -->	character in string after F$TYPE
+;
+; OUTPUT:     C=0 if success
+;		R0 =	0
+;		R1 --> 	string	
+;		R2 =	len of string
+;		R3-R4	random
+;		R5 -->  next character in expression
+;	      C=1 if failure
+;		R0 =	error code 
+;		R1-R5	random
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"TY-PE"	;F$TYPE
+F$TYPE:	PUSH	<R5>		;Save scan position
+	CALL	ONEARG		;Parse one argument
+	BCC	10$		;No error occurred
+	CMP	R0,#USYM.E	;Was the error "?Undefined symbol"
+	BNE	30$		;No, return with error
+	MOV	(SP),R5		;Reset scan position
+	CLRB	GOTST		;Clear the end of string indicator, if set
+				; so the following calls succeed
+	CALL	OPENP		;Skip past the open paren (it must be there)
+	CALL	RIGHTP		;Find the closing paren
+	BCS	30$		;Not found, return with error
+	CLR	R2		;Return null string ""
+	BR	25$		;And we're done
+	;;MOV	#UND$K,R1	;Return "UNDEFINED"
+	;;BR	20$		;
+
+10$:	MOV	#STR$K,R1	;Guess "STRING"
+	TSTB	$TYPE		;Was type string?
+	IFNE			;If not then
+	MOV	#INT$K,R1	;  "INTEGER"
+	ENDIF			;Endif
+20$:	MOVB	(R1)+,R2	;Load length, point R1 at keyword
+25$:	CLRB	$TYPE		;This is a string (clear C-bit)
+	BR	40$		;Skip around
+
+30$:	SEC			;Indicate an error
+40$:	DEC	(SP)+		;Pop the stack, leaving the C-bit alone
+	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<USYM.E,$TYPE,GOTST>
+.ENDC			;End conditional assembly of F$TYPE routine
+
+.SBTTL	F$USER 	- Return string [p,pn]
+.IF NDF SKPUSE		;Skip this routine for ODT build?
+;+
+; The F$USER function returns as a character string (in the form "[p,pn]")  
+; the project-programmer number of the current job.  It provides a way for 
+; a command procedure to use its own job's PPN, as input to a task, or in 
+; extracting account information from a list.
+;
+; The format of the F$USER function is:
+;	
+;	F$USER()
+;
+;
+; CALL:		CALL	F$USER
+; RESULT:	**** string ****
+;
+; INPUT:	R5 -->	character in string after F$USER
+;
+; OUTPUT:     C=0 if success
+;		R0 =	0
+;		R1 --> 	string	
+;		R2 =	len of string
+;		R3-R4	random
+;		R5 -->  next character in expression
+;	      C=1 if failure
+;		R0 =	error code 
+;		R1-R5	random
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"US-ER"	;F$USER
+F$USER:	CALL	NOARG		;No arguments 
+	BCS	10$		;An error occurred
+.ENDC			;End conditional assembly of F$USER routine
+
+.IF DF F$ENVI ! F$USER		;F$ENVIRONMENT and F$USER both use this code
+
+FDEFAU:	CALLX	U$USYS		;Go fetch some data 
+	MOV	STRBUF,R3	;Take string buffer
+	PUSH	R3		;Save it
+	ADD	#11,STRBUF	;Advance buffer to avoid conflict
+	MOVB	#'[,(R3)+	;Insert open bracket
+	MOVB	FQPROT+FIRQB,R1	;Get project number
+	BIC	#^C<377>,R1	;Clean it up, if necessary
+	CALL	CONPPN		;Convert and copy project no.
+	MOVB	#COMMA,(R3)+	;Insert comma into output string
+	MOVB	FQPFLG+FIRQB,R1	;Take programmer number
+	BIC	#^C<377>,R1	;Clean it up
+	CALL	CONPPN		;Convert and insert programmer no.
+	MOVB	#'],(R3)+	;Insert closing bracket
+	POP	R1		;Point to start of string
+	MOV	R3,R2		;Get set to take length
+	SUB	R1,R2		;R2 now has length of string
+	MOV	R3,STRBUF	;Update string buffer
+	CLRB	$TYPE		;Ensure we are now string
+	CLR	R0		;Clean out error pointer
+10$:	RETURN			;And go on
+
+;+
+; Local subroutine to transfer characters once converted to string
+;-
+
+CONPPN:	CLR	R2		;Longword precaution
+	MOVB	#1,$TYPE	;Set that we're integer
+	CALLX	NM2STR		;Convert it to string
+20$:	MOVB	(R1)+,(R3)+	;Copy it to the output string
+	SOB	R2,20$		;It's this long
+	RETURN			;Continue
+
+.DSABL	LSB
+GLOBAL	<$TYPE,STRBUF>
+.ENDC			;End conditional assembly of FDEFAU routine
+
+.SBTTL	F$VERIFY 	- Return VERIFY status and optionally set one
+.IF NDF SKPVER		;Skip this routine for ODT build?
+;+
+; The F$VERIFY function returns as an integer the current verification
+; status (SET VERIFY or SET NOVERIFY).  Additionally, if an argument is
+; specified, it saves the current verification status and then turns
+; verification on or off.  This provides an easy way to enable or disable
+; verification for a group or commands and then restore verification to
+; its previous status.  The value 1 (true) is returned if SET VERIFY is
+; in effect; the value 0 (false) is returned if SET NOVERIFY is in effect.
+;
+; The format of the F$VERIFY function is:
+;	
+;	F$VERIFY([value])
+;
+;-
+.ENABL	LSB
+
+	F$ENTRY	FUNTBL,"VE-RIFY";F$VERIFY
+F$VERI:	CALL	OPTARG		;Parse an optional argument
+	BCS	20$		;An error occurred
+	MOV	R1,R4		;Save the argument result, if any
+
+; Get set up to check the current setting.  Set value if arguement was 
+; supplied.
+
+	CALLX	JBFPFB		;Get current settings
+	MOVB	#1,$TYPE	;Type is integer
+	CLR	R1		;Clear integer (assume NOVERIFY is in effect)
+	BIT	#J2VFY,FIRQB+FQBUFL
+				;SET VERIFY currently in effect?
+	IFNZ			;If so then
+	INC	R1		;  Indicate VERIFY is SET
+	ENDIF			;Endif		
+
+	TST	ARGPOS		;Was an argument supplied?
+	IFNE			;If so then
+	CALLX	CLRFQB		;  Clear the FIRQB
+	CALLX	STR2NM		;  Convert argument to integer
+	BCS	20$		;  An error occurred
+	BIT	#1,R4		;  Is argument odd (meaning SET VERIFY)?
+	IFNZ			;  If so then
+	MOV	#J2VFY,FIRQB+FQFLAG; Indicate SET VERIFY
+	ELSE			;  Else
+	MOV	#J2VFY,FIRQB+FQBUFL; Indicate SET NOVERIFY
+	BICB	#DEBUG!WATCH!NOP,WATFLG; Clear out "watch" bits
+	MOVB	#1,GBLNFG	;    We updated global context
+	ENDIF			;  Endif
+	CALLX	JBFPF2		;  Set/clear the flag
+	ENDIF			;Endif
+
+	CLR	R2		;Clear high order word and C-bit
+20$:	RETURN			;And we're done
+
+.DSABL	LSB
+
+GLOBAL	<$TYPE,WATFLG,GBLNFG>
+.ENDC			;End conditional assembly of F$VERIFY routine
+
+.SBTTL	PARSING SUBROUTINES FOR DCL-FUNCTION ARGUMENT LISTS
+.SBTTL	NOARG 		- Subroutine to check zero arguments
+
+.IF DF F$JOB ! F$NODE ! F$TERM ! F$USER
+;+
+;
+; NOARG called by DCL function routines that require NO arguments
+; to ensure that the function name is followed by either () or more
+; expression, but not arguments.
+;
+; CALL:		CALL	NOARG
+;
+; INPUTS:	R5-->first unexamined character in command buffer 
+;
+; OUTPUT:	if CC,	R5-->first unexamined character in command buffer
+;			    past the (), if present.
+;		if CS,	R5-->error position, and error pos. is set.
+;			R0 = error code 
+;
+;-
+.ENABL	LSB
+					
+NOARG:	TSTB	GOTST		;Are we at end of string?
+	BLT	10$		;Yes, all done
+	CALLX	$GNBLK		;Skip blanks
+	BCS	3$		;EOS, no error
+	CMPB	(R5),#'(	;Do we have an open paren?
+	BEQ	5$		;Yes, go for it
+3$:	CLR	R0		;Parens are optional
+       ;CLC			;C-bit cleared, no error occurred
+	BR	10$		;Done
+
+5$:	CALLX	$GTCHR		;Yes, get a next character
+	CALLX	$GNBLK		;Make sure it's not blank
+	CALL	CLOSEP		;Next char should be ")"
+	BCC	10$		;Continue on if no error occurred
+	TSTB	GOTST		;At end of string ?
+	BLT	8$		;Yes,8$
+	MOV	#U.ARGA,R0	;No, so "?Argument not allowed" error
+				; (next character was not a closing parens)
+8$:	SEC			;Reset the C-bit since it got cleared
+10$:	RETURN			;Whatever happens, return
+
+.DSABL	LSB
+
+GLOBAL	<GOTST,U.ARGA>
+.ENDC			;End conditional assembly of NOARG routine
+
+.SBTTL	ONEARG		- Parse one argument and including parenthesis
+.IF DF F$ASCI ! F$CHR ! F$CVTI ! F$ENVI ! F$INTE ! F$LEN ! F$MESS ! F$PRIV ! F$SEAR ! F$STRI ! F$TYPE ! F$VERI
+;+
+;
+; ONEARG parses "( expr )"  for errors in the first argument or in
+; the "(".  If there are none, R1 and R2 will point to the
+; result of the evaluation of the expression, which is dependent on
+; the type of argument.
+;
+; CALL:		CALL	ONEARG
+;
+; INPUT:	R5 -->	( argument ... ) etc
+;
+; OUTPUT:	CC --	success		CS --	failure
+;		R0 --	random		R0 --	error code
+;		R1 --	argument	R1-R4	random
+;		R2 --	argument	R5 --	unreliable--error
+;		R3-R4	random			position set up
+;		R5 -->	first char past first argument
+;
+;-
+.ENABL	LSB
+
+ONEARG:	CALL	OPENP		;Get opening parenthesis
+	BCS	20$		;Pass bad result on back
+	CALL	$GTARG		;Else parse argument
+	BCS	20$		;Error in argument
+	TSTB	$TYPE		;What type?
+	BNE	10$		;Integer, fine
+	TST	R1		;Null pointer?
+	BNE	10$		;No
+	MOV	#U.NARG,R0	;?Argument required
+	CALLX	SETERR		;Set up error position, set C-bit
+	BR	20$
+	
+10$:	CALL	CLOSEP		;Get closing paren
+20$:	RETURN			;Return with status
+
+.DSABL	LSB
+
+GLOBAL	<$TYPE,U.NARG>
+.ENDC			;End conditional assembly of ONEARG routine
+
+.SBTTL	OPTARG		- Parse a single optional argument 
+.IF DF F$CVTI ! F$SEAR ! F$VERI	;Skip this routine for ODT build?
+
+;+
+;
+; OPTARG parses "( [expr] )"  for errors in the first argument if specified
+; or in the "(".  If there are none, R1 and R2 will point to the
+; result of the evaluation of the expression, which is dependent on
+; the type of argument.
+;
+; CALL:		CALL	OPTARG
+;
+; INPUT:	R5 -->	( argument ... ) etc
+;
+; OUTPUT:	C=0 if success
+;			R5 -->	first char past first argument
+;			R1,R2 = argument value or pointers to string
+;			ARGPOS= 0 if no argument specified or points to arg
+;
+; 		C=1 if failure
+;			R0 = error code
+;
+;-
+.ENABL	LSB
+
+OPTARG:	MOV	R5,R4		;Save current scan position
+	CLR	ARGPOS		;Assume no argument specified
+	CALL	NOARG		;Parse zero arguments
+	BCC	10$		;We did it, no errors!
+	CMP	R0,#U.ARGA	;Got an error: Was it ?Arg not allowed ?
+	IFNE			;If not then
+	SEC			;  Indicate error
+	ELSE			;Else
+	MOV	R4,R5		;  Reset scan position
+	CALL	ONEARG		;  Parse one argument and set up all outputs
+	ENDIF			;Endif
+10$:	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<U.ARGA>
+.ENDC			;End conditional assembly of OPTARG routine
+
+.SBTTL	TWOARG		- Parse two arguments
+.IF DF F$EDIT ! F$LEFT ! F$RIGH
+;+
+;
+; TWOARG parses "( expr , expr"  for errors in the argument list or in
+; the "(".  If there are none, the result of evaluating the first 
+; (string) argument will be in R1 and R2, as usual.  The result of the 
+; evaluation of the second (integer) expression will be in the
+; registers R3 and R4.  An error is generated for the
+; cases where either argument is missing: " ( ,... " , " ( ) " --
+; I.E. this routine passes the case of TWO NON-NULL arguments,
+; of the form (string expr, integer expression)
+;
+; CALL:		CALL	TWOARG
+;
+; INPUT:	R5 -->	Position in the string,	( arg1 , arg2 ) etc
+;
+; OUTPUT:
+;	C = 0 if success
+;		R0 = 0 
+;		R1 = string (first) argument position
+;		R2 = string (first) argument length	
+;		R3 = integer (second) argument low order word
+;		R4 = integer (second) argument high order word
+;		R5 -> new position in the string
+;	C = 1 if failure
+;		R0 = error code
+;-
+.ENABL	LSB
+
+TWOARG:	CALL	OPENP		;Get opening parenthesis
+	BCS	50$		;Pass bad result on back
+	CALL	$GTARG		;Get argument
+	BCS	50$		;An error occurred
+	TSTB	$TYPE		;What type?
+	BNE	10$		;Integer, go convert it
+	TST	R1		;Null pointer?
+	BNE	15$		;No.  Go on
+	CMP	-(SP),-(SP)	;Yes.  Waste 2 words for now
+	BR	30$		;?Argument  required
+
+10$:	CALLX	NM2STR		;Convert to string.
+15$:	PUSH	<R1,R2>		;Save result from first argument
+	CALL	$COMMA		;Parse an argument separator
+	BCS	40$		;Pass bad result on back
+	CALL	$GTARG		;Else parse argument
+	BCS	40$		;An error occurred
+	TSTB	$TYPE		;Test for missing...
+	BNE	20$		;Integers never missing...	
+	TST	R1		;Null string pointer?
+	BEQ	30$		;Yes--report missing argument
+	CALLX	STR2NM		;Else, convert it to integer
+	BCS	40$		;Return any error 
+20$:	MOV	R1,R3		;Move the integer
+	MOV	R2,R4		;Over to make room 
+	CALL	CLOSEP		;Get closing parenthesis
+	BR	40$		;Return to work
+
+30$:	MOV	#U.NARG,R0	;?Argument required
+	CALLX	SETERR		;Point to the place the argument is missing?
+40$:	POP	<R2,R1>		;Put back stack space
+50$:	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<U.NARG,$TYPE>
+.ENDC
+
+.SBTTL	$COMMA		- Search for valid argument separator
+.IF DF F$INST ! F$MID ! F$PARS ! TWOARG
+;+
+; $COMMA checks the current character in the command line.  If it
+; is anything other than a comma, an error "comma needed" is returned.
+; On successful completion, the command line pointer is advanced,
+; but not checked.
+;
+; CALL:		CALL	$COMMA
+;
+; INPUT:	R5 --> next non-blank unparsed character in command line
+;
+; OUTPUT:	CC --	success		CS --	failure
+;		R0-R4	untouched	R0 =	error code
+;		R5 -->	first non-	R1-R4	untouched
+;		blank character past	R5 --	unreliable--error pos. set
+;		the comma
+;
+;-
+.ENABL	LSB
+
+$COMMA:	TSTB	GOTST		;Calling routine must fetch next character
+	BNE	20$		;Premature EOS, missing comma
+	CMPB	(R5),#COMMA	;This character should be a comma
+	BEQ	10$		;Was. 
+	CMPB	(R5),#')	;Was it closing paren?
+	BNE	20$		;No.  report missing comma
+	MOV	#ADDA.E,R0	;?Additional argument required
+	BR	30$		;Quit with error
+
+10$:	CALLX	$GTCHR		;Else, get a character and ensure
+	CALLX	$GNBLK		;That a non-blank character was got
+	BR	40$		;And return any result without looking
+
+20$:	MOV	#NOCM.E,R0	;?Comma required
+30$:	CALLX	SETERR		;Set error pointer
+40$:	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<GOTST,NOCM.E,ADDA.E>
+.ENDC
+
+.SBTTL	$GTARG		- Subroutine to get one argument 
+.IF DF ONEARG ! TWOARG ! $COMMA
+;+
+;
+; $GTARG fetch one argument from the command line using the
+; expression handler.  Null arguments are also reported.
+;
+; CALL:		CALL	$GTARG
+;
+; INPUT:	R5 -->	the next unparsed non-blank character in command.
+;			NOTE:  A NULL argument returns ARGPOS=0
+; OUTPUT:
+;	  C=0 if success
+;		R5 -->	next unparsed non-blank character after the argument
+;		$TYPE	1==>integer, 0==> string
+;		STRBUF	next available byte in buffer for string storage
+;		R1 = 	low order value or address of string
+;		R2 =	high order value or length of string
+;		ARGPOS =position of the argument in the scan string, 0 if none
+;
+;	  C=1 if failure
+;		R0 =	error code
+;
+;-
+.ENABL	LSB
+
+$GTARG:	TSTB	GOTST		;Are we aleady at the end of the string?
+	BNE	15$		;Yes, indicate null argument
+	MOV	R5,ARGPOS	;Set arg position, guess there is one
+	CMPB	(R5),#',	;Null arg?
+	BEQ	15$		;Yes, go report it
+	CMPB	(R5),#')	;Do we have null final argument?
+	BEQ	15$		;Arg is null by omission, don't scan character
+	CALLX	$EXPR		;Parse the argument expression
+	BR	20$		;Return any result.
+
+15$:	CLR	R1		;Indicate null argument
+	CLR	R2		;Length is zero
+	CLRB	$TYPE		;A string pointer null means null arg
+	CLR	ARGPOS		;Argument position is null
+20$:	RETURN			;Return the results
+
+.DSABL	LSB
+
+GLOBAL	<$TYPE,GOTST>
+.ENDC
+
+.SBTTL	CLOSEP		- Check for closing parenthesis on argument list
+.IF DF NOARG ! $GTARG
+;+
+; CLOSEP checks for a closing parenthesis ")" on any argument list.
+; If R5 is pointing to it, all is ok, and R5 is updated, if possible.
+; Otherwise, an error (parenthesis out of balance) is reported, and
+; an error is returned with the error position set to the prior position
+; of R5.
+;
+; CALL:		CALL	CLOSEP
+;
+; INPUT:	R5 --> first non-blank character past argument list
+;
+; OUTPUT:	CC --	success		CS --	failure
+;		R0-R4	untouched	R0 =	error code
+;		R5 -->	first non-	R1-R4	untouched
+;		blank character past	R5 --	unreliable--error pos. set
+;		the closed arg list
+;
+;-
+.ENABL	LSB
+
+CLOSEP:	TSTB	GOTST		;Calling routine must fetch next character
+	BNE	20$		;Premature EOS, missing close parenthesis
+	CMPB	(R5),#')	;This character should be close parenthesis
+	BEQ	10$		;Was. 
+	CMPB	(R5),#COMMA	;Is this a comma?
+	BNE	20$		;No. report missing close paren
+	MOV	#U.TOOA,R0	;?Too many arguments
+	BR	30$		;Quit with error
+
+10$:	CALLX	$GTCHR		;Else, get next character
+	CLC			;Not an error
+	BR	40$		;And return
+
+20$:	MOV	#NOCP.E,R0	;?Unbalanced parentheses
+30$:	CALLX	SETERR		;Set error pointer
+40$:	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<NOCP.E,GOTST,U.TOOA>
+.ENDC
+
+.SBTTL	RIGHTP		- Check for matching closing parenthesis on arg list
+.IF DF F$TYPE
+;+
+; RIGHTP checks for a matching closing parenthesis ")" on any argument list.
+; If R5 is pointing to it, all is ok, and R5 is updated, if possible.
+; Otherwise, we start looking for a closing paren on the same level as
+; the opening paren was. We ignore parens in quotes. If no matching closing
+; paren was found an error (parenthesis out of balance) is reported, and
+; an error is returned with the error position set to the prior position
+; of R5.
+;
+; CALL:		CALL	RIGHTP
+;
+; INPUT:	R5 --> first non-blank character past open paren
+;
+; OUTPUT:	CC --	success		CS --	failure
+;		R0-R4	untouched	R0 =	error code
+;		R5 -->	first non-	R1-R4	untouched
+;		blank character past	R5 --	unreliable--error pos. set
+;		the closed arg list
+;
+;-
+.ENABL	LSB
+
+RIGHTP:	PUSH	<R1,R2>		;Save some registers
+	TSTB	GOTST		;Calling routine must fetch next character
+	BNE	60$		;Premature EOS, missing close parenthesis
+	CLR	R1		;Clear paren level
+	CLR	R2		;Clear inside quotes flag
+	BR	20$		;Join the party
+
+10$:	CALLX	$GTCHR		;Get the next character
+	BCS	60$		;EOS string, missing closing parenthesis
+20$:	CMPB	(R5),#'"	;Is char a quote (") ?
+	BNE	30$		;No, continue
+	COM	R2		;Yes, toggle quote flag
+30$:	TST	R2		;Are we in quotes?
+	BLT	10$		;Yes, go get next character
+	CMPB	(R5),#'(	;Is char an open paren?
+	BNE	40$		;No, try next
+	INC	R1		;Yes, inc paren level
+40$:	CMPB	(R5),#')	;Is char a close paren?
+	BNE	10$		;No, go get another character
+	DEC	R1		;Yes, dec paren level
+50$:	TST	R1		;Have we found the matching close paren?
+	BGE	10$		;No, go get another character
+	CALLX	$GTCHR		;Yes, get next char after closing paren
+	CLC
+	BR	70$		; and return
+
+60$:	MOV	#NOCP.E,R0	;?Unbalanced parentheses 
+	CALLX	SETERR		;Set error pointer
+70$:	POP	<R2,R1>		;Restore registers
+	RETURN			;Done
+
+.DSABL	LSB
+GLOBAL	<NOCP.E,GOTST>
+.ENDC
+
+.SBTTL	OPENP		- Check for opening parenthesis on argument list
+.IF DF F$CVTI ! $GTARG
+;+
+; OPENP checks for an OPENING parenthesis "(" on any argument list.
+; If R5 is pointing to it, all is ok, and R5 is updated, if possible.
+; Otherwise, an error (parenthesis out of balance) is reported, and
+; an error is returned with the error position set to the prior position
+; of R5.
+;
+; CALL:		CALL	OPENP
+;
+; INPUT:	R5 --> first non-blank character past function name
+;
+; OUTPUT:	CC --	success		CS --	failure
+;		R0-R4	untouched	R0 =	error code
+;		R5 -->	first non-	R1-R4	untouched
+;		blank character past	R5 --	unreliable--error pos. set
+;		the open parenthesis.
+;
+;-
+.ENABL	LSB
+
+OPENP:	PUSH	<R3>		;Save a register to play with
+	TSTB	GOTST		;Calling routine must fetch next character
+	BLT	10$		;Premature EOS, missing open parenthesis
+	CALLX	$GNBLK		;Make sure we're looking at a non-blank char
+	BCS	10$		;Premature EOS, missing open parenthesis
+	CMPB	(R5),#'(	;This character should be open parenthesis
+	BNE	10$		;Wasn't. report missing open parenthesis
+	MOV	R5,R3		;Save the scan position
+	CALLX	$GTCHR		;Else, get next character and ensure
+	CALLX	$GNBLK		;That it is a non-blank character 
+	BCC	20$		;No problems, just return.
+	MOV	#NOCP.E,R0	;EOS seen - ?Unbalanced parentheses
+	MOV	R3,R5		;Restore scan pos of open paren
+	BR	15$		;Set the error
+
+10$:	MOV	#NOOP.E,R0	;?Missing open parenthesis 
+15$:	CALLX	SETERR		;Set error pointer
+20$:	POP	<R3>		;Restore the register
+	RETURN			;Done
+
+.DSABL	LSB
+
+GLOBAL	<NOOP.E,GOTST,NOCP.E>
+.ENDC
+
+.SBTTL	CLSF$S - Close F$SEARCH PFB channel 
+;+
+; CLSF$S - Close F$SEARCH PFB channel 
+; 
+; FORMAT:
+;	CALBX	CLSF$S
+; 
+; Closes the PFB channel found in SLPFB (local search PFB channel * 2)
+; This routine is used by the EXIT command also.
+;
+; All registers perserved
+;-
+.ENABL	LSB
+
+CLSF$S::MOV	LCAPTR,R2	;Get pointer to local context area
+	MOV	SLPFB(R2),R1	;PFB channel (*2) to close
+	IFGT			;If there is one to close then
+	CALBX	CLSPFB	<R1,#CLSFQ>;  Close the PFB channel
+	MOV	PFBCHN,R4	;  Get current PFB channels bit mask
+	MOV	R4,R5		;  Save original PFB bit mask over the call
+				;   (R1 = channel # (*2) to return to pool)
+	CALLX	RTNCHN		;  Return the PFB channel
+	MOV	R4,PFBCHN	;  Update the bit mask
+	CLR	SLPFB(R2)	;  We closed this channel
+				;   (clear out the channel # in local context)
+	XOR	R4,R5		;  Save only the bit representing the PFB
+				;   channel just returned
+	BIC	R5,F$SCHN	;  Clear this channel in F$SEARCH bit mask
+				;   since it's been closed (so won't close it
+				;   again when returning to interactive lvl)
+	MOVB	#1,GBLNFG	;  Global context area was changed
+	ENDIF			;Endif
+	CLR	R0		;Indicate no error
+	RETURN			;Done
+
+.DSABL	LSB
+
+GLOBAL	<SLPFB,PFBCHN,GBLNFG,F$SCHN,LCAPTR>
+
+.END

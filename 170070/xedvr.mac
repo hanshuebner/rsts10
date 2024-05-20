@@ -1,0 +1,5498 @@
+.INCLUDE	%CMN:COMMON.MAC%
+.INCLUDE	%CMN:KERNEL.MAC%
+.INCLUDE	%EDV:NIDEF.MAC%
+.INCLUDE	%EDV:XEDEF.MAC%
+.LIBRARY	%CMN:NETDEF.SML%
+
+TITLE	XEDVRM,<The UNA driver>,00,15-JUN-85,JHC/DBM/DSD
+
+;
+;		COPYRIGHT (c) 1974, 1985 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR XEDVRM
+;+
+;
+;  000	JHC 14-Jun-85	CREATION -- Modelled after a small African Anarchy
+;  001  MNB 14-Nov-85	Boke gets in on the action.
+;  002	DBM 12-Sep-86	DDB definition (UNA/LUA & default physical address)
+;  003	JHC 22-Oct-86	Fix transmit failure to timeout.
+;  004	JHC 29-Oct-86	Repair Ethernet REQ COUNTERS function to handle
+;			[stupid] multi-buffer packet
+;  005	JHC 12-Nov-86	Stop logging RCV failed for multicast receptions
+;			at unknown frame destinations.
+;  006	JHC 26-Nov-86	Changes to Recieve packet handling to drop CRC
+;			bytes off of message packets (esp. user interface)
+;  007  JHC 12-May-87	Bug fixes: Transmits dropped.  Illegal Multicast 
+;			reception, SPCERR error.  Repair reversed L3Q bits.
+;			change Xmit limit checking on short messages.
+;			Bug fix ALOBUF to keep E.XTRA correctly
+;  008  JHC 12-May-87	Change OPEN to use EP.STS instead of EPSTS.
+;			Standardize Bit descriptions.
+;
+;			[RSTS/E V9.5 -- DECnet V4]
+;
+;  011  JHC 25-Jun-87	Fix problems.  Stop Disable Crash.  Fix
+;			Circuit Counters.  Disable CDCF check, and
+;			use default SYSID. Force word alignment in
+;			SETPHY
+;
+;			[RSTS/E V9.6 -- DECnet V4]
+;
+;  012	DSD 19-Jan-87	Clear CC.DFL for system supplied buffers
+;  013	DSD 25-Feb-88	Allow DECnet to set same address with LAT
+;			(to allow DECnet restarts from LAT server)
+;  014  JHC 01-Mar-88   Free up some space in the driver
+;			Change MPENET and calls.
+;			Fix up physical address reg convention
+;  015  JHC 06-Jun-88	Repair race condition in XEREAD:
+;
+;			[RSTS/E V9.7 -- DECnet V4.2]
+;
+;  016  JHC 10-Nov-88	Fix MOP Counters response message and
+;		 	Request Counters validation
+;  017	JHC 01-Dec-88	Cleanup headers, allow multiple xmits.
+;  018  JHC 19-Apr-89	Fix Timeout problem -- synchronize xmits
+;  019  JHC 02-May-89	Block TIM.XE when closing, remove PDB double
+;			return timing problem.  Squeeze more space
+;			out of driver....  MPENT2 and more....
+;-
+
+
+.SBTTL	Define needed symbols
+ 
+.MCALL	$CCB,$NETDDB,$NETDEF,$COUNT,$NETFQB,$EVTCOD,$EVTTYP,$EVLDEF,$NICE
+ 
+	$CCB			;Define CCB layout
+	$NETDDB			;Define network device fixed DDB layout
+	$NETDEF			;Define miscellaneous DECnet constants
+	$COUNT			;Define the counter maintenance macros
+	$NETFQB			;Define network FIRQB layouts
+
+	$EVTCOD			;\
+	$EVTTYP			; \ Used For
+	$EVLDEF			; / Event Logging
+	$NICE			;/
+
+.SBTTL	DDB -- UNA DDB layout
+;  The last 4 words of ethernet DDB's are jammed by INIT.SYS to
+;  contain the controller type (UNA vs LUA in this case) and the
+;  controller's default physical address.  INIT.SYS assumes these
+;  to always be the last four words of the DDB, so any additions
+;  must be made before these words.
+;
+.DSECT	L.DDEP			;Start device dependent DDB after DECNET   ;002
+.EVEN				;For sanity's sake			   ;002
+UNALUA:	.BLKW			;DEUNA/DELUA designator (RAD50 of UNA/LUA) ;002
+UNADPA:	.BLKB	6		;Default Physical Address		   ;002
+
+.SBTTL	*************************************************
+
+	DEFORG	XEDVRM
+.SBTTL	ASN$XE -- Device assignment, and disable. 
+
+;+
+; ASN$XE --
+;	Nothing special.
+;	Normal assignments are ignored, we clear R0 to make
+;	 sure that the device is still available
+;	R0=3 on entry means UU.CFG wants us to disable the controller.
+;	For TRNJOB we fail the open if other portals are already open.
+;
+; On Entrance --
+;	R0 = Job number times two (or SYSJOB)
+;	R1 -> PMM DDB (DECnet DDB, the fake)
+;-
+
+	TMPORG	ASNTBL,10
+
+	.WORD	ASN$XE
+
+	UNORG
+
+ASN$XE::NOP		; for debugging
+	CMP	#3,R0		; disable call?
+	BNE	10$		; no, we're all done
+	CALL	MPENET	; save current mapping, map enet region		;014
+	MOVB	DDUNT(R1),R3	; get the unit number
+	MOV	XECDB+XECORE(R3),R3 ;to get a CDB pointer
+	MOVB	R0,DDJBNO(R1)	; mark DDB of controller disabled,
+	CALL	DISABL		; reset the controller
+	MAP	POP,APR=6,DATA		; restore DPAR6 mapping
+10$:	CLR	R0			; keep monitor from assigning it,
+	RETURN				; and return.
+
+GLOBAL	<XECORE>
+
+
+.SBTTL	REINIT -- re-init a controller
+
+;+
+; REINIT --
+;	Couple of ways to get here:
+;	 - call from INT$ if things get bad
+;	 - UU.CFG will enter through DEA$XE
+;	Re-enables and initializes a controller that was 
+;	disabled by the user or by the driver.  
+;
+;	Since we run this code to reset a controller behind the user's
+;	back, care must be taken not to lose any context about his
+;	requests.
+;
+;	If the driver calls this, we run the one-shot CDB setup
+;	at PR5.  This means that no user calls will occur until we
+;	are in E$INI state or E$RST state.  Our queues are tolerant
+;	at this point and user functions will simply be put off 'til
+;	we get a chance.
+;
+;	A call from CFG to assign or deassign the device as disabled,
+;	results in a Call to FIPWAT, which we can do as ASN/DEA service
+;	are FIP level.
+;
+; On Entrance:
+;	Always running at PR5
+;	Always mapping the enet through APR6
+;	R3 -> CDB
+;	CDB in Disabled or running state	
+;-
+ 
+REINIT:	PUSH	R2		;; save R2 (CSRs at interrupt)
+	CLR	E.XTMO(R3)	;; cleanup transmit timeout
+	CLR	E.PTMO(R3)	;; and port command timeout
+	CMP	E.STAT(R3),#E$DIS ;; better be disabled or running
+	BLE	10$		;; okay, start up the reinit. (running/disabled)
+.ASSUME	E$RUN	EQ 0		;; double reinit results in disabled controller.
+.ASSUME	E$DIS	EQ 2
+	CALL	DISABL		;; disable the controller, return reqs dead.
+	SEC			;; set carry, things is bad.
+	BR	20$		;; on the way out.
+
+10$:	CALL	RSTCNT		;; start reinitializing the controller 
+			;; this should shut it up.
+	CALL	INICDB		;; re-init our structures (CDB and rings)
+	CLC			;; is this important?
+
+20$:	POP	R2		;; restore the CSR pointer
+	RETURN			;; and exit all okay
+
+
+GLOBAL	<NOBUFS>
+
+.SBTTL	*************************************************
+
+.SBTTL	DEA$XE -- the deassign code
+
+;+
+; DEA$XE --
+;	Normally just as useless as ASN$.
+;	R0 = 3 means attempt to bring the controller online again
+;	  (if it was disabled, and not hardware disabled)
+;	First Call (determined by value of XECNTL in XECORE)
+;	  XECNTL = #controllers on first call
+;	  XECNTL < 0 on all other calls to DEA$
+;	  Enable all controllers on the system
+;
+; On Entrance --
+;	R0 -- Job number * 2
+;	R1 -- DDB
+;
+; On Exit -- 
+;	DEASSIGN the device call.  No change. Regs preserved.
+;	CFG Enable Call --
+;	  CDB inited, initialization started.  Regs are random.
+;	  Caller is FIP stalled until init completes.
+;	ONE-SHOT Call --
+;	  Called on system startup.
+;	  All controller inits started.  Regs are random
+;	  Caller is FIP stalled until init completes.
+;	
+;-
+
+	TMPORG	DEATBL,10
+
+	.WORD	DEA$XE
+
+	UNORG
+
+	.ENABL	LSB
+
+DEA$XE::
+	TST	XECNTL+XECORE	;first pass?
+	BPL	30$		; Yeah, so let's get started
+	CMP	#CFGJOB,R0	; Is this a UU.CFG enable call?
+	BNE	20$		; nope, so nothing special
+	CMPB	R0,DDJBNO(R1)	; maybe, is this controller marked disabled?
+	BNE	20$		; no, so pretend that this didn't happen
+	MOVB	DDUNT(R1),R2	; yes, Get Unit number times 1
+	ASL	R2		; and unit number times 2
+	MOV	XECDB+XECORE(R2),R3 ; get a pointer to the CDB
+	SPLC	5		;; punch up ro PR5
+	CALL	MPENET		; save current mapping, map enet region ;014
+;+
+; the following check should never fail given that we have checked that
+; the 'real' DDB is marked disabled.
+;	CMP	#E$DIS,E.STAT(R3) ;; is this baby marked disabled?
+;	BNE	10$		;; no, so don't do any of this
+; Also worthy of note; when disabling a controller, we don't discard
+; receive buffers (they are logically associated with the portal, not
+; the channel) so we shouldn't need to get any now.  CLOSEing a portal
+; will get the buffers returned.
+;-
+	CALL	REINIT		;; go off to re-initialize
+	BCS	10$		;; failure.  Don't bother stalling.
+	CLRB	DDJBNO(R1)	;; allow I/O to start up --
+			;; may just get disabled again, but let's open fire.
+	BIS	#C$QFIP,E.STS(R3) ;; set CFG bit to remember to QFIP	;008
+	MAP	(SP),APR=6,DATA ;; restore FIP mapping for FIPWAT
+	CALLX	FIPWAT		;; stalling FIP 'til it's done.
+10$:	MAP	POP,APR=6,DATA	;; restore mapping on entry (for real)
+	SPLC	3		; back to priority three
+20$:	RETURN			; done.  May work.  May not.
+
+;+
+; SOFTWARE ONE-SHOT --
+;    Keep current E-net region position pointer in R4
+;    Allocate the structures for all controllers:
+;	Map E-net region
+;	Get space for rings, stack this information 	(init)
+;	Keep current E-net region pointer
+;	Allocate space for CDBs				(init)
+;	  Keep current E-net region pointer
+;	  Update XECDB in XECORE
+;	Initialize CDB's -- 				(init/reinit)
+;	  ring info popped in last one first.
+;	  Then the other stuff (note: memory need not be zeroes initially)
+;	  using XECDB pointers
+;	Initialize rings --				(init/reinit)
+;	Allocate MOP buffers				(init/reinit)
+;
+; This code was designed to allow any combination of units 0-3 to
+; exist.  It has never been tested, but should be close to working
+; for just unit 0 or 1, for units (0,1,2), for units (0,3) in any
+; combination.
+;
+; The Ethernet Region layout was designed so that the Ethernet region
+; need only be partially UMR mapped.  This can result in a savings of one
+; UMR for systems with Ethernet and MSCP.
+;
+; Layout:
+;
+;		+--------------------+
+;		| RCV rings unit #0  |   \
+;		+--------------------+    \
+;		| XMIT rings unit #0 |     |
+;		+--------------------+     |   Must be UMR mapped
+;		:		     :     |   to allow device access
+;		+--------------------+    /
+;		| XMIT rings unit #n |   /
+;		+--------------------+
+;		|  CDB of unit #0    |
+;		:		     :   No UMR mapping required.
+;		:		     :
+;		|  CDB of unit #n    |
+;		+--------------------+
+;-
+
+
+30$:	CALL	MPENET		; save current mapping, map enet region	;014
+	MOV	#140000,R4	; initialize E-reg pointer to ..
+				; .. virtual start of region.
+
+;+
+; Calculate/save xmt/rcv device ring buffer addresses.
+; Stack 'em in this order:
+;	RCV TOP
+;	RCV BOT = XMIT TOP
+;	XMIT BOT
+; Do it once for each controller, saving space in E-region, and
+; Virtual addresses on the stack 'til CDBs are defined
+;-
+
+	MOV	#MAX.XE,R0	; get max number of controllers 
+	MOV	#XERCXM+XECORE,R1 ; get the XMIT/RCV ring jam table
+35$:	MOV	(R1)+,R2	; Pick up the XMIT/RCV entry
+	BEQ	40$		; zero? Controller disabled or not there
+	PUSH	R4		;Save virtual RCV ring top (E.TOPR)
+	MOVB	R2,R3		;R3 = # of rcv rings for this controller
+;		# of rings is < 127 so sign bit MUST be clear in byte
+	MUL	#UN$SIZ,R3	; mult by ring size (into R3 only)
+	ADD	R3,R4		; update the virtual pointer
+	PUSH	R4		;Save virtual RCV ring bottom (E.BOTR = E.TOPX)
+	SWAB	R2		; get XMIT rings into low byte
+	MOVB	R2,R3		;R3 = # of XMIT rings for controller
+;		# of rings is < 127 so sign bit MUST be clear in byte
+	MUL	#UN$SIZ,R3	; mult by ring size (into R3 only)
+	ADD	R3,R4		; update the virtual pointer
+	PUSH	R4		;Save virtual XMIT ring bottom (E.BOTX)
+40$:	SOB	R0,35$		; so much for this one, check next (if any)
+
+;+
+; Now allocate space for CDBs, remembering locations in XEDCTL.
+; Only allocate CDB's for existing controllers, be sure to fill in 
+; low core pointers correctly.
+;-
+	MOV	#MAX.XE,R0	; get maximum number of controllers
+	MOV	#XECDB+XECORE,R2 ; get the CDB virtual address table
+	MOV	#XERCXM+XECORE,R3 ; use INIT jam words to see if a given
+				; controller exists
+50$:	TST	(R3)+		; does this one exist (<> 0)?
+	BEQ	60$		; no, try for next
+	MOV	R4,(R2)		; save address of first CDB
+	ADD	#CDBOFF,(R2)+	; offset to link word (point to next XECDB)
+	ADD	#UNASIZ,R4	; and update the R4 pointer
+	BCC	60$		; Better not carry out...
+	CRASH			; carried out, something bad.
+60$:	SOB	R0,50$		; set up the next CDB address (if any)
+
+;+
+; Now initialize the CDBs.
+;	R2 -> just past the end of XECDB words
+;	(SP) = start address of First CDB (E.BOTX of last xmit rings)
+;	Start by clearing region of all CDBs to save CLEARING during 
+;	  initialization
+;	We start with the last CDB to unload the Desc Ring Pointers
+;	  in the correct order.
+;	While we're at it, we set-up the CDB,
+;	  First we clear the whole CDB space,
+;	  Then init CDB contents that are special during First Init,
+;	  Finally init CDB contents that are always reset (INICDB)
+;-
+
+	MOV	(SP),R3		; get start address of region to clear.;014
+	MOV	XECNTL+XECORE,R1 ; get the number of controllers.
+	MUL	#UNASIZ/2,R1	; times word length of CDB
+65$:	CLR	(R3)+		; start clearing CDB region,
+	SOB	R1,65$		; the whole thing.  Now to init the CDB.
+70$:	MOV	-(R2),R3	; get last CDB pointer filled in
+	BEQ	80$		; nothing for this controller, check next
+	POP	E.BOTX(R3)	; XMIT - pop ring info in to CDB -- bottom
+	MOV	(SP),E.TOPX(R3)	; XMIT - top, (same as bottom RCV)
+	POP	E.BOTR(R3)	; RCV - pop ring bottom into CDB
+	POP	E.TOPR(R3)	; RCV - pop top and get some stuff zeroed
+	MOV	R3,E.RRBT(R3)	; ... set up the tail too
+	ADD	#E.RRB,E.RRBT(R3) ; ... to point to the head
+	MOV	R3,E.XRBT(R3)	; ... and set up the tail
+	ADD	#E.XRB,E.XRBT(R3) ; ... to point to the head
+	MOV	R3,E.XPBT(R3)	; ... set up the tail too
+	ADD	#E.XPB,E.XPBT(R3) ; ... to point to the head
+	MOV	R3,R4		; get ready to init Date/Time Last Zeroed
+	ADD	#E.DTZR,R4	; ..into the CDB counter area
+	CALLM	UPDZTM,GENAP5	; ..and do it.
+	PUSH	R2		; save current XEDCTL position
+	SUB	#XECDB+XECORE,R2 ; get controller # * 2 into R2
+	MOVB	R2,E.UNT(R3)	; save controller number times 2 in CDB
+	ASL	R2		; Controller # * 4
+	ASL	R2		; .. times 8 for 8 byte PCBB
+	ADD	#XEPCBB+XECORE,R2 ; and make it a real address.
+	MOV	R2,E.PCBB(R3)	; save PCBB address in the CDB
+	MOV	#MOP.BF,R2	; get minimum MOP buffers
+	CALL	ALOBUF		; acquire MOP buffers
+	BCC	75$		; no trouble with EXTPOL
+	CALL	DISABL		; can't get buffers.  Don't start controller.
+	BR	78$		; this one is gone, see about more
+
+75$:	MOV	R2,E.MOPB(R3)	; got 'em, keep at it
+	CALL	INICDB		; initialize the CDB and the rings
+	CALL	RSTCNT		; and RESET -- starting controller interaction
+		; RSTCNT doesn't need to be called at PR5.  Don't	 ;014
+		; forget that controller does a NOP for 100 microseconds ;014
+		; on low byte access.  Careful of changes.		 ;014
+78$:	POP	R2		; restore R2 to XECORE + value
+80$:	CMP	#XECDB+XECORE,R2 ; more controllers?
+	BNE	70$		; maybe, check it out
+	MAP	POP,APR=6,DATA	; nope, the init is started, restore mapping
+	CALLRX	FIPWAT		; Let noone else into FIP (L3Bit set in CON$)
+;	RETURN			; .. and never return because ..
+				; .. all controllers are goin' or disabled.
+
+GLOBAL	<XECORE>
+
+	.DSABL	LSB
+
+.SBTTL	INICDB -- initialize the CDB
+
+;+
+; INICDB --
+;	set up all of the volatile segments of the CDB
+;	E.TOPX,E.BOTX,E.TOPR,E.BOTR should be okay under any conditions
+;	lots of other stuff can be a mess.
+;	So we just figure it out again.
+;
+; On Entrance --
+;	R3 -> CDB at link word
+;	Called at PR5 if controller is/was working.  Called at PR3, when
+;	we're just thinking about tickling the thing.
+;
+; On Exit --
+;	All Registers preserved
+;		Only R2,R3 must be preserved.
+;	Rings all cleared (for a brief instant)
+;	CDB initialized, and RCV active rings loaded up.
+;	All of our MOP buffers have been previously acquired -- this guy
+;	  locates one (on RCV or XMIT rings) and gets it onto E.CNCQ for
+;	  init's scratch UDBB
+;-
+
+INICDB:	REGSCR			; save all of our registers (only to save words)
+	CALL	INIRNG		; first, clean up the rings.
+	ADD	#E.LNK,R3	; offset to top of CDB
+	CLR	(R3)+		; clear link word
+	CMP	(R3)+,(R3)+	; skip over controller number * 2 and Portal
+				; .. list head
+		.ASSUME	E.UNT 	EQ	<E.LNK+2>
+		.ASSUME	E.PRTL	EQ	<E.UNT+2>
+	BIC	#^C<C$PHYS!C$DCNT!C$QFIP>,(R3)+ ; get rid of funky status ;008
+			; But remember: 
+			;	If we have a physical address 		(PHYS)
+			; 	If we have a DECnet Portal    		(DCNT)
+			;	and if we need to queue FIP later	(QFIP)
+		.ASSUME	E.STS	EQ	<E.PRTL+2>
+	MOV	#E$INI,(R3)+	; really one-shot, but interrupt expects INI
+		.ASSUME	E.STAT	EQ	<E.STS+2>
+	CLR	(R3)+		; clear the last message length field
+		.ASSUME	E.MSGL	EQ	<E.STAT+2>
+	CLR	(R3)+		; And the STR1 byte (plus high byte RESERVED)
+		.ASSUME	E.STR1	EQ	<E.MSGL+2>
+	CLR	(R3)+		; and the STR2 byte
+		.ASSUME	E.STR2	EQ	<E.STR1+2>
+	TST	(R3)+		; Just skip past CCB queue for now.
+		.ASSUME	E.CNCQ	EQ	<E.STR2+2>
+		.ASSUME	E.DSP	EQ	E.CNCQ	; just remember this one.
+	CLR	(R3)+		; Clear E.QLNK
+		.ASSUME	E.QLNK	EQ	<E.DSP+2>
+	CLR	(R3)+		; and following scratch word
+	CLR	(R3)+		; and finally, clear E.CONQ
+		.ASSUME	E.CONQ	EQ	<E.QLNK+4>
+	MOV	TOS.R3(SP),R3	; Now, Get the CDB zero pointer back
+	
+;+
+; don't do any of the following if this is first init
+;-
+	TST	XECNTL+XECORE	; first init?
+	BPL	10$		; Yeah, so this stuff has been done
+	CLR	E.XTMO(R3)	; no more timeouts (if there were any)
+	CLR	E.PTMO(R3)	; whatever they were.
+	MOV	E.RRB(R3),R0	; get any buffers on receive rings
+	CLR	E.RRB(R3)	; .. off of the rings (Remember INIRNG?)
+	MOV	R3,E.RRBT(R3)	; .. and set the Tail to
+	ADD	#E.RRB,E.RRBT(R3) ; .. point to the head
+	CALL	DSCRCV		; put 'em back into the Free List (if anything)
+; Same for the transmit buffers
+	MOV	E.XRB(R3),R0	; and move head into it
+	CLR	E.XRB(R3)	; .. forget that they've been sent
+	MOV	R3,E.XRBT(R3)	; .. and set the Tail of the ring list to...
+	ADD	#E.XRB,E.XRBT(R3) ; .. point to the head (offset+virt)
+	CALL	DSCXMT		; put 'em back on the Transmit Pending list
+				; [preserve request sequentiality]
+;+
+; If we got this far, we have MOP buffers.  Either because we just got them,
+; or because they were gotten days ago and never get returned.
+; Hopefully they are still on the Receive Free list (E.RFRE, as on first INIT),
+; but it is possible that all three of them are in use on various MOP requests
+; and thus are on the now defunct xmit pending list.
+;   We are going to get one for our init sequence.
+;-
+10$:	TST	E.MOPB(R3)	; any MOP buffers on RCV rings?
+	BEQ	30$		; No, must be tied up on xmit queue
+	MOV	E.RFRE(R3),R5	; some are available, just grab one...
+	MOV	(R5),E.RFRE(R3) ; .. off of the Receive Free List
+	CLR	(R5)		; forget about its past and...
+	BR	40$		; merge in to common code
+;+
+; this code is only called during reinit if there are no MOP buffers on the
+; RCV rings anywhere.  Since I know that they exist by now, they must be in
+; use for loop back or request counters stuff that I pretend I didn't hear.
+; Remember, to pull him out of the queue, I need previous, and current.
+; Also chained xmits, and finally, if I come here, THEY HAVE TO BE HERE
+; or the driver is sick beyond sick and I deserve to walk off of the end of
+; the world and crash.
+;
+; Idea here is that we cannot fail a reinit due to a buffer shortage
+; because we are doing it behind everyone's back.
+;-
+
+30$:	MOV	R3,R4		; set up pointer to first buffer in list
+	ADD	#E.XPB,R4	; (in the CDB silly)
+32$:	MOV	(R4),R5		; R4 -> previous, R5 -> current
+	BITB	#DF.MOP,CC.DFL(R5) ; active for MOP?
+	BNE	35$		; yeah, this is it!
+	MOV	R5,R4		; nope, current becomes previous, and repeat
+	BR	32$		; by getting a new current
+
+35$:	PUSH	R5		; save head of packet for a second
+36$:	BICB	#DF.MOP,CC.DFL(R5) ; clear the mop bit. 
+	INC	E.MOPB(R3)	; remark that we found another mop buffer
+			; recovering a MOP buffer from xmit is finding one.
+	BITB	#DF.CNT,CC.DFL(R5) ; end of packet?
+	BEQ	37$		; yeah, sigh and go.
+	CLRB	CC.DFL(R5)	; nope, but forget about DF.CNT too
+			; this is our buffer, so the context is okay
+	MOV	(R5),R5		; and check next for end of packet
+	BR	36$
+
+37$:	MOV	(R5),(R4)	; R5 -> last in buffer, R4 -> previous buffer
+	BNE	38$		; not at the end, how kind
+	MOV	R4,E.XPBT(R3)	; our buffer is the end, update the tail
+38$:	CLR	(R5)		; our packet without any followers
+	POP	R5		; restore first buffer in packet
+	MOV	(R5),R0		; return any chain to receive free list
+	CALL	DSCRCV		; remember that DSCRCV doesn't mind no buffers.
+	CLR	(R5)		; anyway, finally got the buffer by himself.
+	.BR	40$		; merge into common code.
+
+40$:	MOV	E.CNCQ(R3),(R5)	; place this CCB on CON$ port process queue
+	MOV	R5,E.CNCQ(R3)	; and make it the head of the list.
+	CLR	CC.NOB(R5)	; Make sure PDB pointer is null		;011
+				; .. to indicate internal PDB		;011
+;+
+; CC.SEC is where .SPEC UDBB buffers live, and CC.BUF is where XMIT/RCV
+; buffers live.  Refer to REQCNT and handle line counters for most of the
+; reason that this is done this way.  Doing this here saves me oodles of
+; headaches.
+;-
+	MOV	BF.ADR+CC.BUF(R5),BF.ADR+CC.SEC(R5) ; we keep UDBB in CC.SEC
+	MOV	BF.VIR+CC.BUF(R5),BF.VIR+CC.SEC(R5) ; and RCV buff in CC.BUF
+	MOV	BF.MMU+CC.BUF(R5),BF.MMU+CC.SEC(R5) ; we use MOP buff for UDBB
+	MOV	BF.END+CC.BUF(R5),BF.END+CC.SEC(R5) ; during init.
+	RETURN			; REGSCR coroutine return
+
+GLOBAL	<XECORE>
+
+
+.SBTTL	INIRNG -- Initialize a controllers rings (again)
+
+;+
+; INIRNG --
+;	Nothing special.  Given a CDB pointer,
+;	clean out the rings so we can begin 
+;	interaction with the controller.
+;
+;	Reset all volatile pointers
+;	Resetting the rings consists of zeroing everything.
+;
+;	We also exploit the fact that Receive Rings and Transmit Rings
+;	for a given controller are contiguous.
+;
+; On entrance --
+;	R3 -> CDB
+; On Exit --
+;	R0,R1 random
+;	R2,R3,R4,R5 incidentally preserved (none need to be)
+;-
+
+INIRNG:	MOV	E.TOPR(R3),R0		; get the top of the section to clear
+	MOV	R0,E.EMPR(R3)		; first the RCV ring pointers
+	MOV	R0,E.FILR(R3)		; ...both of them
+	MOV	E.TOPX(R3),E.EMPX(R3)	; and then the XMIT pointers
+	MOV	E.TOPX(R3),E.FILX(R3)	; ...both of them
+	MOV	E.BOTX(R3),R1		; and the bottom...
+10$:	CLR	(R0)+			; and start clearing the region
+	CMP	R0,R1			; end yet?
+	BNE	10$			; Nope, fly on.
+	RETURN				; C'mon, give me something HARD.
+
+
+.SBTTL	RSTCNT -- Do a controller Reset
+
+;+
+; RSTCNT --
+;	Normally we do a RESET to start initializing a controller.
+;	We also do a RESET if a user issues the UU.CFG call to disable
+;	the controller.  We do this to get the device off of the cable,
+;	in the event that the user detects a problem that we don't notice
+;	and the UNA is running rampant.
+;
+;	Always called at PR5
+;
+; Registers --
+;	R3 -> CDB
+;	all registers preserved
+;-
+
+	.ENABL	LSB
+
+RSTCNT:	PUSH	<R0,R2>		;; save work registers
+;	MOV	#E$RST,E.STAT(R3) ;; we go into controller reset state
+;	  already done in INICDB before interrupt can occur
+10$:	MOVB	E.UNT(R3),R2	;; get the controller number times 2
+	MOV	#-1,TIM.XE(R2)	;; check once a second...
+	MOV	#15.,E.PTMO(R3)	;; ... to see if we've got a dead port.
+	MOV	CSR.XE(R2),R2	;; get pointer to PCSR0
+	MOV	#C0$RST,(R2)	;; assert DEVICE RESET
+	MOV	#C0$IE,(R2)	;; have it interrupt when it is done.
+		;; flap to make sure that noone tries a port command for
+		;; a little while.  This flap is calculated to take at least
+		;; 125 microseconds on an 11/84 with fast memory.
+	MOV	#12.,R2		;; set up for 125 micro second flap
+20$:	SOB	R2,20$		;; do it. (NOPs and DEUNAs are scary.)
+	POP	<R2,R0>		;; clean up
+	RETURN			;; and leave
+
+;+
+; DISABL --
+;	Called at PR3 or at PR5.  Be careful
+;	Disable the device.  We set CDB with disabled state, 
+;	We set DECnet DDB with JBNO #3
+;	Set disabled state in the controller, and do a reset
+;
+; Registers --
+;	R3 -> CDB
+;-
+
+DISABL:	PUSH	@#PS			; save current priority
+	SPLC	5			;; PR5. We're using INT$ structures
+	CALL	RSTCNT			;; controller RESET.  Stop this sucker.
+	MOV	#E$DIS,E.STAT(R3) 	;; make sure that we drop the interrupt.
+	BIC	#C$PDMD,E.STS(R3)	;; forget any Polling Demand Pending 
+	CALL	DRAIN			;; Dump EVERYTHING for this controller
+	CLR	E.PTMO(R3)		;; no more port timeouts
+	CLR	E.XTMO(R3)		;; and no more transmit timeouts.
+	MOVB	E.UNT(R3),R2		;; get controller number * 2
+	MOV	DEV.XE(R2),R2		;; get the physical DDB
+	MOV	#3,DDJBNO(R2)		;; and mark it assigned to disabled.
+;+
+;  DECnet doesn't do anything with any of this.  It saves a lot of space
+;  but it would sure be nice if DECnet used it.  What this does is give 
+;  DECnet an FC$ERR packet with failure info in it.  DECnet doesn't use
+;  it, and we can use the space.  NOP here too.
+;
+;	BIT	#C$DCNT,E.STS(R3)	;; DECnet here?
+;	BEQ	40$			;; no, so no hassles.
+;	  this saved time, but not space. Out for now.
+;	MOV	E.PRTL(R3),R0		;; Yes, we gotta find the DECnet PDB
+;20$:	BIT	#P$DNT,EP.STS(R0)	;; is this it?
+;	BNE	30$			;; yep.
+;	MOV	(R0),R0			;; nope
+;	BNE	20$			;; Still more, keep going.
+;	BR	40$			;; Didn't find it. Must've been closed.
+
+;30$:	MOV	#FC$ERR,R2		;; R2 gets loaded in CC.FC
+;	CALL	ALOCCB			;; Get/Load CCB -- CC.ERR=0, CC.FC=$ERR
+;	BCS	40$			;; No smalls, bag it.  Too bad.(we tried)
+;	MOV	R0,R4			;; get PDB pointer into R4
+;	MOV	EPJBNO(R4),R0		;; get the job number, and 
+;	CALL	PSTSYS			;; Post it to TRNQUE
+;-
+40$:	TST	XECNTL+XECORE		;; is this system startup?
+	BMI	50$			;; no.
+	DEC	XECNTL+XECORE		;; yeah, mark this controller GONE.
+	BNE	60$			;; We're not done yet
+	COM	XECNTL+XECORE		;; we're done, set the sign bit
+	BIS	#C$QFIP,E.STS(R3)	;; make sure we QFIP
+			; this isn't as silly as it looks.
+			; just set it for a second to fall through to QFIP
+			; to finish up the oneshot code
+50$:	BIT	#C$QFIP,E.STS(R3)	;; are we supposed to QFIP?
+	BEQ	60$			;; nope.
+	L3QSET	QFIP			;; yeah.
+	BIC	#C$QFIP,E.STS(R3)	;; and clear the bit.
+60$:	POP	@#PS			; restore current priority
+	RETURN				; go back where we was.
+
+	.DSABL	LSB
+
+GLOBAL	<CSR.XE>
+
+
+.SBTTL	DRAIN -- Post out all pending Xmit and Port Command activity
+
+;+
+; DRAIN --
+;	This routine is called when a controller has been determined
+;	unfit for service.  During the act of disabling it, we will
+;	dump all pending transmit requests back to the issuer, and
+;	we will post out all .SPEC functions requiring Port commands.
+;
+;	We don't do anything with the individual portals.  .READs are
+;	still legal, except that we will not stall any requests.
+;
+;	This routine is never called when the driver is in a running
+;	state.  We only disable when an attempt to reinitialize the
+;	controller fails.
+;
+; On Entrance --
+;	Call this routine at PR5
+;	R3 -> CDB
+;	Enet Region is mapped in APR6
+;
+; On Exit --
+;	R3 -> CDB
+;	Enet Region is mapped in APR6
+;
+; No other guarantees from nobody about nothing, incoming or outgoing.
+;-
+
+DRAIN:	PUSH	R3			;; save CDB pointer.
+	ADD	#E.RRB,R3		;; offset to RCV subblock
+	CALL	DMPSUB			;; Dump the subblock.
+			;; on return:
+			;; R3 -> CDB @E.RFRE
+			;;  all RCV buffs in the driver are on the free list.
+			;; E.RRB cleared/ tail updated
+			;; E.RFRT -> CDB @E.RFRE (inited rings)
+			;;   this operation doesn't automatically return
+			;;   ANY buffers, even the MOP buffers, they all remain
+			;;   on the free list in case of a reinitialize call.
+	ADD	#E.XRB-E.RFRE,R3	;; offset to XMIT subblock
+	CALL	DMPSUB			;; clean out the subblock
+			;; on return:
+			;; R3 -> CDB @E.XPB
+			;;  all transmits on pending que (order preserved)
+			;; E.XRB cleared/E.XRBT inited
+			;; E.XPBT -> CDB @E.XPB (like at init)
+	POP	R3			;; restore CDB pointer
+;+
+;; now we take all pending transmits and post them out one at a time
+;; to appropriate jobs.
+;-
+10$:	MOV	E.XPB(R3),R5		;; get a CCB from the queue
+	BEQ	60$			;; done? good. see about port commands
+	MOV	(R5),E.XPB(R3)		;; update the queue
+	CLR	(R5)			;; forget what this was hooked to.
+	MOV	CC.DDB(R5),R4		;; get the PDB
+	BNE	40$			;; found one, post it.
+	MOV	R5,R0			;; none, internal
+	CALL	DISCRD			;; .. just toss 'em back
+	BR	10$			;; and go for more.
+
+40$:	MOVB	#FC$XER,CC.FC(R5)	;; Transmit failed.
+	MOVB	#HNGDEV,CC.ERR(R5)	;; give him dev hung error
+	CALL	XMTPST			;; Post to system or user.
+	BR	10$			;; and try for another
+
+60$:	MOV	E.CNCQ(R3),R5		;; get any port command pending
+	BEQ	110$			;; none.  Declare completion
+	MOV	(R5),E.CNCQ(R3)		;; dequeue it.
+	CLR	(R5)			;; and clear tail.
+	MOV	CC.NOB(R5),R4		;; get a PDB pointer
+	BNE	70$			;; got something
+	CALL	PRTCMP			;; internal, dump CCB/UDBB pair
+	BR	60$			;; and see about more
+
+70$:	MOV	EPJBNO(R4),R0		;; get the job number
+	BIT	#BIT0,R0		;; system job?
+	BEQ	100$			;; no.
+	MOV	#HNGDEV,CC.ERR(R5)	;; sysjob, with a HNGDEV error
+	CMPB	#NI$EML,CC.FC(R5)	;; enable multicast?
+	BNE	80$			;; no.  Set Physical Address then
+	MOVB	#FC$MUL,CC.FC(R5)	;; posting multicast end.
+	BR	90$
+
+80$:	MOVB	#FC$PHY,CC.FC(R5)	;; say posting set physical address
+90$:	CALL	PSTSYS			;; post to system job.
+	BR	60$			;; and try for another
+
+100$:	MOV	R0,R4			;; job number * 2 in R4
+	MOV	JOBTBL(R4),R1		;; get a JDB pointer
+	BIS	#JFIOKY,JDFLG(R1)	;; make sure we post back an error
+	MOVB	#HNGDEV,JDIOST(R1)	;; stick in HNGDEV 
+	CALLX	IOFIN4,R5,JS.SY!JSTIM	;; and post it out.
+	CALL	PRTCMP			;; return CCB/UDBB pair
+	BR	60$			;; and try for another
+
+110$:	RETURN
+
+GLOBAL	<JOBTBL,IOFIN4,HNGDEV,XECORE>
+
+.SBTTL	DISCRD -- dump Combuffers just as fast as you can
+
+;+
+; Only called from DRAIN.
+;
+;  R0 head of a list of comm buffers to trash.
+;  mapping is enet region
+;  
+;  R5,R4 munged.
+;  other registers undisturbed
+;-
+
+DISCRD:	MOV	R0,R5		;; set up list (is it empty?)
+	BEQ	20$		;; empty. This is easy
+10$:	PUSH	(R5)		;; not empty, save any next
+	CALLX	COMRET		;; return CCB/Buffer pair
+	POP	R5		;; pop next into R5
+	BEQ	20$		;; quit if that's the end
+	BR	10$		;; else do it again
+
+20$:	RETURN			;; done with that batch
+
+.SBTTL	DMPSUB -- clean up subblock on REINIT.
+
+;+
+; DMPSUB
+;	ALWAYS PR5
+;
+; On Entrance:
+;	R3 -> Buffer Control Subblock
+;
+; On Exit:
+;	R3 -> Buffer Control Subblock + E.PND
+;	All On Ring buffers are on front of Pending Queue
+;	 (sequentiality protected),
+;	E.RNG/E.RNGT inited
+;	E.PND -> buffer list
+;	E.PNDT -> E.PND (as though list is empty)
+;-
+
+DMPSUB:	MOV	(R3),R0		;; get head of oustanding list
+.ASSUME	E.RNG EQ 0
+	CLR	(R3)		;; tell him the outstanding list is empty.
+	CALL	DSCALL		;; discard ring list to pending list (front)
+	MOV	R3,E.RNGT-E.RNG(R3) ;; make E.RNGT -> E.RNG
+	CMP	(R3)+,(R3)+	;; bump past E.RNG list to E.PND list
+.ASSUME E.PND EQ <E.RNG+4>
+	MOV	R3,E.PNDT-E.PND(R3) ;; make E.PNDT -> E.PND (E.PND <> 0 tho)
+	RETURN			;; go back.
+
+.SBTTL	*************************************************
+
+.SBTTL	OPN$XE -- Open a portal on a channel
+
+;+
+; OPN$XE --
+;	Allocate a PDB from MONPOL
+;	  - if fails, return NOBUFS
+;	Initialize PDB, Set Open Mode bits
+;	Allocate RCV buffers
+;	  - if he wants more than 127(8), then BADCNT
+;	  - if not enough buffers, return NOBUFS
+;	Make sure Portal is legal
+;	  - if not, return INUSE
+;	We're done.  If we got this far, it worked
+;
+;	The Reason that we do validation last is because we insert
+;	the guy on the list where he fits as soon as he's validated.
+;	It's easier to verify and insert in one smooth move, and we
+;	have to be able to undo everything anyway.
+;
+; On Entry --
+;	R0 = Unit Number times 2
+;	R1 -> DDB (default, will become PDB if allocated)
+;	R3 = Job number -- Odd if system job
+;	     This baby is mondo important because other context
+;	     is not gauranteed for SYStem jobs.
+;	R4 -> FIRQB
+;	R5 -> Job's IOB entry, must be preserved
+;
+;-
+
+	TMPORG	OPNTBL,10
+
+	.WORD	OPN$XE
+
+	UNORG
+
+HIORD:	HEX	<AA-00-04-00>		;DECnet physical address	;013
+
+OPN$XE:: PUSH	R3			; save the job number for errors
+	CALL	MPENET		; save current mapping, map enet region	;014
+;		MAP	PUSH,APR=6,DATA	; yes, save mapping information
+;		MAP	XEDPR6+XECORE,APR=6,DATA ; map the enet region
+	MOV	XECDB+XECORE(R0),R3	; get the CDB pointer
+	CMP	2(SP),#TRNJOB		; is this job DECnet?
+	BNE	5$			; nope, didn't think so.
+	TST	E.PRTL(R3)		; it is. Other portals open already?
+	BEQ	5$			; nope, we're okay.
+	CMP	E.PHYS(R3),HIORD	;Is the address already DECnet?	;013
+	BNE	3$			;No, skip it			;013
+	CMP	E.PHYS+2(R3),HIORD+2	;Really DECnet?			;013
+	BNE	3$			;No it isn't			;013
+	CMP	E.PHYS+4(R3),MYADDR	;Set to our DECnet node address? ;013
+	BEQ	5$			;Yes, it sure is		;013
+3$:	MOV	#INUSE,R0		; Yes, fail the open.		;013
+	BR	7$			; and give him the error
+
+5$:	PUSH	<R4,R1>			; save FIRQB pointer and DDB pointer
+	BUFFER	GETLRG,PDBSIZ+2,64.,MONPOL ; allocate a PDB out of lowcore
+	BCC	10$			; got it, good start
+	MOV	#NOBUFS,R0		; No room.  Fail the open
+	POP	<R1,R4>			; clean the stack
+7$:	JMP	SPCERR			; and error out appropriately
+
+; initialize the portal -- so it's easy if it's legal
+
+10$:	TST	(R4)+		; Point R4 past BF.SIZ
+				; (we preserve BF.SIZ for PDB return)
+	POP	R1		; restore phys. DDB pointer for a sec
+	MOV	(R1)+,(R4)+	; copy DDSTS/DDIDX
+.ASSUME	DDIDX&1	EQ 0		;  ... making sure of DDB layout	;008
+.ASSUME	DDSTS	EQ DDIDX+1						;008
+	MOV	(R1)+,(R4)+	; .. and DDUNT/DDJBNO into new PDB for CLOSE
+.ASSUME	DDJBNO	EQ DDSTS+1						;008
+.ASSUME DDJBNO&1 EQ 0							;008
+.ASSUME DDUNT	EQ DDJBNO+1						;008
+	MOV	R4,R1		; get PDB pointer into R1
+	PUSH	R1		; save the PDB pointer for a second
+	MOV	#<PDBSIZ-4>/2,R4 ; Get PDBSIZ - 4 bytes into R4 as a word count
+				; (4 bytes accounts for (R4)+ above)
+15$:	CLR	(R1)+		; and clear the PDB   [ it is easier to start ]
+	SOB	R4,15$		; one word at at time [ with a clean buffer   ]
+	POP	R1		; restore PDB pointer, and 
+	ADD	#PDBOFF-4,R1	; ..offset R1 to PDB central
+				; (4 bytes accounts for (R4)+ above)
+	MOV	R3,EP.CDB(R1)	; initialize the CDB pointer
+	MOV	R1,EP.RCT(R1)	; initialize the Received Q Tail
+	ADD	#EP.RCV,EP.RCT(R1) ; to point to the RCV Q HEAD
+	MOV	R1,R4		; get a pointer to the date/time last 
+	ADD	#EP.DTZ,R4	; ..zeroed in the PDB counters
+	CALLM	UPDZTM,GENAP5	; set it to time of startup
+	MOV	#"XE,EP.ID(R1)	; set ASCII 'XE' in to locate PDB easier.
+	MOV	(SP),R4		; Get FIRQB pointer for a second
+	MOV	FQNENT(R4),EP.TYP(R1) ; save the protocol type
+	TSTB	FQMODE(R4)	; Mode bits valid?
+	BPL	20$		; no.
+	MOVB	FQMODE(R4),EP.STS(R1) ; yes, set the mode (padding or not?);008
+20$:	MOV	4(SP),EPJBNO(R1) ; get the stacked JBNO into the portal.
+	MOVB	FQCLUS(R4),R2	; get number of receive buffers to allocate
+	BEQ	40$		; wants none, that is cool
+	BPL	30$		; 127(10) or less, try for it
+				; otherwise, not cool, he wants too many.
+	CALL	DMPPDB		; get rid of the PDB, (part of a close)
+	MOV	#BADCNT,R0	; tell him to calm down
+	BR	35$		; and go out through common error exit
+
+30$:	CALL	ALOBUF		; try to get buffers
+	BCC	40$		; got 'em, looks like we made it.
+	MOV	#NOBUFS,R0	; no way, set NOBUFS error (PDB already gone)
+35$:	POP	R4		; restore FIRQB pointer on way out
+	MAP	POP,APR=6,DATA	; restore mapping
+	JMP	SPCERR		; decide how to dump
+
+;+
+; At this point:
+;	PDB set up, and in R1
+;	Buffers allocated, released to CDB
+; we will see if protocol is legal, and insert in list
+;-
+
+40$:	MOV	R2,EP.BUF(R1)	; got our buffers, so remember it.
+	MOV	R3,R0		; start to get portal list head
+	ADD	#E.PRTL,R0	; get it
+50$:	MOV	(R0),R4		; get the NEXT one, too
+	BEQ	70$		; No NEXT one, 'insert' on end.
+	CMP	EP.TYP(R4),EP.TYP(R1)	; is this our type?
+	BEQ	60$		; Yes, so fail open with INUSE
+	BGT	70$		; no, but next type is greater? Insert here.
+	MOV	R4,R0		; no, still a chance, make NEXT into CURRENT
+	BR	50$		; and go check it out.
+
+60$:	MOV	#INUSE,R0	; Yes, set INUSE error.  This is us.
+	BR	35$		; and go out through SPCERR with good stack
+
+70$:	SPLC	5		;; kick to PR5 to modify portal list
+	MOV	R4,(R1)		;; point new portal to NEXT in list
+.ASSUME	EP.LNK	EQ 0 		;; remember link word is at zero	;008
+	MOV	R1,(R0)		;; Point current at new portal
+	CMP	EPJBNO(R1),#TRNJOB ;; Is it the DECnet portal?
+	BNE	80$		;; nope, don't worry 'bout a thing
+	BIS	#C$DCNT,E.STS(R3)  ;; yes, so remember DECnet on Channel
+	BIS	#P$DNT,EP.STS(R1) ;; and that this is DECnet Portal
+80$:	SPLC	3		; restore PR3 operation
+	SUB	#PDBOFF,R1	; back to top of PDB
+	POP	R4		; restore FIRQB pointer
+	MAP	POP,APR=6,DATA	; restore mappping at entrance
+	POP	R3		; restore the Job Number
+	RETURN			; successful open.
+				; R1 -> PDB pointer (PDB initialized)
+				; R3 = Job number times 2
+				; R4 -> FIRQB
+				; R5 -> IOB
+
+GLOBAL	<INUSE,NOBUFS,BADCNT,XECORE,NSPAP5,UPDZTM,TRNJOB>	
+GLOBAL	<MYADDR>							;013
+
+.SBTTL	*************************************************
+
+.SBTTL	CLS$XE -- Close a portal and return buffers 
+
+;+
+; CLS$XE --
+;	Close a Portal.  Deallocate PDB and RCV buffers.
+;
+; No special cases.
+;
+;  R0 = Unit number times 2
+;  R1 -> PDB
+;  R5 -> PDB (must be preserved)
+;-
+
+	TMPORG	CLSTBL,10
+
+	.WORD	CLS$XE
+
+	UNORG
+
+	.ENABL	LSB
+
+CLS$XE:: CALL	MPENET		; save current mapping, map enet region	;014
+	ADD	#PDBOFF,R1	; offset to standard spot in PDB
+	MOV	EP.CDB(R1),R3	;get a CDB
+	MOV	EP.RCV(R1),R0	; get chain of buffers awaiting reception
+	MOVB	EPUNT(R1),R5	; and set up fake DDB for return
+	MOV	DEV.XE(R5),R5	; so we can return PDB w/o watching monitor
+	ADD	EP.BUF(R1),E.XTRA(R3) ; save count of available RCV buffers
+				; (these are already on the rings, and will
+				; be returned as possible by LDRCRG)
+	CALL	DMPPDB		; remove/return PDB from portal list
+		; we do this now to prevent any more receptions on this portal
+	PUSH	R5		; save the DDB pointer
+	CALL	DISCRD		; dump any Received Packets back to COMPOL
+	POP	R5		; restore this baby.
+	CMP	#E$DIS,E.STAT(R3) ; was this controller disabled?
+	BNE	10$		; No, so set up for close
+	CLR	E.XTRA(R3)	; Disabled, remember zero buffers,
+	BR	20$		; and exit without controller cleanup
+
+10$:	BIS	#C$CLS,E.STS(R3) ; remark that a close happened, 
+	CALL	QCDBCN		; will get CON$ multicast service
+			; we use CON$ to throw out any multicasts that
+			; may have been defined for the portal.
+20$:	SPLC	5		;; Priority up
+	CALL	LDRCRG		;; get to LDRCRG to clean up E.XTRA.
+	SPLC	3		; down priority.
+			; useful for buffer return on Disabled controller 
+	MAP	POP,APR=6,DATA	; restore mapping to exit.
+	RETURN			; return
+
+GLOBAL	<DEV.XE>
+
+
+.SBTTL	ALOBUF -- Allocate Receive Buffers for portal
+
+;+
+; ALOBUF --
+;
+; Called at PR3 (will not work if called at PR5)
+; Mapping to Enet region.
+; R3 -> CDB
+; R2 = number of buffers wanted
+;
+; all registers preserved.
+; C=1 -- failed to allocate all buffers
+; C=0 -- Buffers allocated and placed on CDB free list
+;-
+
+ALOBUF:	REGSCR				; save registers
+	SPLC	5			;; must protect value E.XTRA
+					;; (modified in LDRCRG at INT$)
+	SUB	E.XTRA(R3),R2		;; count extra available RCV buffers
+	BGT	27$			;; more required.
+			;; enough to fill our needs, update E.XTRA, and exit
+	MOV	TOS.R2(SP),R2		;; restore requested buffer count ;007
+	SUB	R2,E.XTRA(R3)		;; subtract from available extras
+	SPLC	3			; restore current priority
+	BR	35$			; and get out happy
+
+			; get any remaining buffers (R2) from COM pool 
+27$:	CLR	E.XTRA(R3)		;; no extras left if we get here.
+	SPLC	3			; restore normal priority
+	CLR	R1			; keep chain on R1 (empty now)
+	MAP	PUSH,APR=6,DATA		; save current APR6 mapping
+30$:	CALL	COMBUF			; get a CCB/EXTPOL buffer pair
+	BCS	40$			; nothing doing.  Yuck
+	MOV	R1,(R5)			; put on head of list
+	MOV	R5,R1			; make new buffer the head
+	SOB	R2,30$			; keep going 'till we get all buffers
+	MOV	R1,R0			; get buffer chain in R0
+	MAP	POP,APR=6,DATA		; restore current APR6 mapping
+	CALL	DSCRCV			; dump the whole chain to CDB avail list
+35$:	CLC				; return success
+	RETURN				; exit
+
+40$:	MOV	R1,R0			; get buffer chain in R0
+	MAP	POP,APR=6,DATA		; restore mapping
+	CALL	DISCRD			; dump the ruddy things
+	SEC				; note that we failed.
+	RETURN
+
+GLOBAL	<COMBUF>
+
+	.DSABL	LSB
+
+.SBTTL	DMPPDB -- Remove and Drop PDB 
+
+;+
+; DMPPDB --
+;	Called from OPEN if it fails, and always called from
+;	CLOSE to return the PDB to the free list.
+;
+; R3 -> CDB
+; R1 -> PDB to dump (at PDBOFF)
+; Returns the PDB pointed to in R4 to MONPOL, after removing
+; it from the portal list.  Well, not always.  SYSJOBs keep an outstanding
+; transmit request queue, and if it is nonzero then we drop the structure
+; off of lists, waiting to finally return it when the last transmit completes.
+;   Then we just call this back again, 'cause this routine handles it all
+;   even though it looks strange.  Sooner or later the PDB gets returned.
+;
+; R4,R0 preserved.
+;-
+
+DMPPDB:	PUSH	<R4,R0>		; save FIRQB pointer
+	MOV	R3,R0		; get copy of CDB pointer
+	ADD	#E.PRTL,R0	; offset to Portal Chain
+10$:	CMP	(R0),R1		; Is our guy next?
+	BEQ	20$		; yeah, get him out.
+	MOV	(R0),R0		; no, so look at the next one
+	BEQ	30$		; Not in list?  Probably just a failed OPEN
+	BR	10$		; go check for next one.
+
+20$:	SPLC	5		;; kick to five in case it's DECnet
+	MOV	(R1),(R0)	;; drop our PDB off of the queue
+	BIT	#P$DNT,EP.STS(R1) ;; is this DECnet portal?
+	BEQ	30$		;; nope, no beeg deal.
+	BIC	#C$DCNT,E.STS(R3) ;; clear C$DCNT IFF P.DNT is set
+	TST	E.PRTL(R3)	;; any portals left 'active'?		;019
+	BNE	30$		;; yep, so just continue		;019
+	MOVB	E.UNT(R3),R0	;; get unit number in R0 (sign extend ok);019
+	CLR	TIM.XE(R0)	;; stop once a seconding for this unit	;019
+30$:	BIS	#P$CLS,EP.STS(R1) ;; remark that we're waiting to finish close.
+	TST	EP.XMO(R1)	;; any outstanding transmits?
+	BNE	40$		;; yes, let them finish before we drop structures
+	MOV	R1,R4		;; return it from R4
+	SUB	#PDBOFF+2,R4	;; get R4 pointing to start of buffer
+			; REM, we started the PDB at MONPOL buffer +2
+			; to protect the size word.  Now we want to back 
+			; up to the size word.  Also remember that once the 
+			; close bit is set, we can return the buffer from 
+			; interupt level, and block it for a second	;019
+
+	BUFFER	RETURN		;; and give it back to MONPOL
+40$:	SPLC	3		;; restore normalcy			;019
+	POP	<R0,R4>		; restore the FIRQB
+	RETURN			; the PDB is gone (maybe, leastways looks gone)
+
+.SBTTL	*************************************************
+
+.SBTTL	SLP$XE -- Can the User Sleep? 
+
+;+
+; SLP$XE --
+;	If the user has any pending receives, then we
+;	don't let him go to sleep.
+;
+; On Entrance -- 
+;	R1 -> PDB from Job's IOB
+;	R4 -> JOB's IOB @ CH# * 2
+;-
+
+	TMPORG	SLPTBL,10
+
+	.WORD	SLP$XE
+
+	UNORG
+
+SLP$XE:: CMP	#0,EP.RCV+PDBOFF(R1) ; so, any pending receives?
+	RETURN			; return with carry set if anything pending
+
+
+.SBTTL TMO$XE -- Timeout processing. 
+
+;+
+; TMO$XE --
+;	When any commands are outstanding, each UNA/LUA
+;	controller will enter this code once a second to
+;	decrement a Port Command timer, and a transmit timer
+;	as both of these operations take place concurrently.
+;
+;	If ANY request times out, we attempt to reset, and reinitialize
+;	the controller.  Then we attempt to re-issue everything that was
+;	outstanding at the time of the timeout.
+;
+;	We always log an error when we time something out, but so long as
+;	the controller appears to reinitialize successfully, we continue
+;	to reissue all pending and attempted I/O.  We do this because the
+;	selftest is supposed to be very good, and it is part of our init
+;	process.
+;
+; On Entrance --
+;	R0 = Unit number times two
+;	R3 -> CSR
+;-
+
+	TMPORG	TMOTBL,10
+
+	.WORD	TMO$XE
+
+	UNORG
+
+
+TMO$XE:: CALL	MPENET		;; save current mapping, map enet region ;014
+	MOV	R3,R2			;; put CSRs where we're used to 'em
+	MOV	XECDB+XECORE(R0),R3	;; get a CDB pointer
+	DEC	E.PTMO(R3)		;; decrement the port timeout word
+	BEQ	30$			;; We've got a port timeout!
+	BPL	10$			;; no timeout, it is even set? [yes]
+	CLR	E.PTMO(R3)		;; wasn't set, so clear it
+10$:	DEC	E.XTMO(R3)		;; decrement the xmit timeout word
+	BEQ	60$			;; Timeout!
+	BPL	20$			;; no timeout, was it even set?
+	CLR	E.XTMO(R3)		;; wasn't  even set, don't go negative
+20$:	MAP	POP,APR=6,DATA		;; restore APR6 mapping on entry.
+	RETURN				;; ho-humm.
+
+;+
+; Port Command Timeout occurred.
+;-
+
+30$:	COM	E.PTMO(R3)		;; make it -1 so its easy to spot
+	CLR	R5			;; assume no CCB for request [PDMD]
+	MOV	(R2),R4			;; get content of CSR0
+	BIC	#^C<C0$CMD>,R4		;; clear all but command field
+	SUB	#POL.XE,R4		;; Polling Demand?
+			;; set R4 = 0 for no PDB if it is polling demand
+	BEQ	40$			;; yes,
+	MOV	E.CNCQ(R3),R5		;; no, so get CCB associated
+	MOV	CC.NOB(R5),R4		;; and PDB (0 if not available)
+40$:	CLR	TIM.XE(R0)		;; stop once a second timeouts	;003
+					;; R2 -> CSR 
+					;; R3 -> CDB
+					;; R4 -> PDB [=0 if polling demand]
+					;; R5 -> CCB [=0 if polling demand]
+	LOG$XE				;; Log the error
+	CALL	REINIT			;; Start initialization sequence.
+			;; if this is a double restart, we will be disabled.
+50$:	MAP	POP,APR=6,DATA		;; restore mapping on entry
+	RETURN
+
+;+
+; Transmit timeout occurred
+;-
+
+60$:	COM	E.XTMO(R3)		;; make it -1 so its easy to spot
+	MOV	E.XRB(R3),R5		;; get CCB of first XMIT to not succeed
+	MOV	CC.DDB(R5),R4		;; and associated PDB
+	BR	40$			;; merge for error logging and reinit.
+
+GLOBAL	<XECORE,LOG$XE>
+
+
+.SBTTL	ERL$XE -- the error logging entry point 
+
+;+
+;
+; Called (as usual) through the LOG$XE EMT.
+;
+; Registers on entry:
+;	R2 -> CSRs
+;	R3 -> CDB
+;	R4 -> PDB
+;	R5 -> CCB
+; A zero value for any of these indicates that the associated
+; structure was not available at the time the error was detected.
+; (i.e. there is no PDB information available for a receive failure)
+;-
+
+	TMPORG	XEDINT,12
+
+	.WORD	ERL$XE
+
+	UNORG
+
+ERL$XE:	MOV	R3,-(SP)	;;;Save CDB pointer
+	MOV	R5,-(SP)	;;;Save CCB pointer
+	MOV	R4,R1		;;;Use PDB (If any) as DDB pointer
+	BEQ	5$		;;;None, don't bias it
+	SUB	#PDBOFF,R1	;;;Point back to top of PDB
+5$:	MOV	R2,R3		;;;Put CSR pointer in proper place
+	CALLX	ERLDVR,R5	;;;Call the error logger
+	  .BYTE	ERC$XE		;;;Error code
+	  .BYTE	PDBSIZ		;;;PDB size in bytes
+	  .BYTE	0,4		;;;Offset, 4 registers
+	  .BYTE	0,0		;;;End
+;				;;;Timeout?
+;	BNE	10$		;;;No
+;	COMB	(R0)		;;;Yes, indicate it
+10$:	BITB	#1,1(R5)	;;;Owned by TRN?
+	BEQ	20$		;;;Nope, belongs to some job
+	CLRB	1(R5)		;;;Yes, zero out funny TRN job number
+20$:	MOV	#7*400+16.,-2(R2) ;;;CCB is a small buffer, using field 7
+	MOV	(SP)+,(R2)+	;;;Log CCB pointer
+	BNE	30$		;;;There was a CCB, good.
+	CMP	-(R2),-(R2)	;;;No CCB, don't log anything
+30$:	MOV	(SP)+,R3	;;;Restore CDB pointer
+	BEQ	40$		;;;None.  No problem.
+	MOV	#-8.*400+<UNASIZ/2>,(R2)+ ;;;CDB uses field 8, but call us
+	MOV	#50$,(R2)+	;;;...at this address to log it
+40$:	MOV	#-1,(R2)	;;;Terminate control table
+	MOV	(R2)+,(R2)	;;;In both places
+	RETURN			;;;Finish up in error logger
+
+50$:	MOV	#UNASIZ/2,R1	;;;CDB size in words
+	SUB	#CDBOFF,R3	;;;Point to top of CDB
+	MAP	PUSH,APR=6,DATA	;;;Save APR6 mapping
+60$:	MAP	XEDPR6+XECORE,APR=6,DATA ;;;Make sure we're mapped
+	MOV	(R3)+,R0	;;;Grab a word
+	MAP	(SP),APR=6,DATA	;;;Make sure message buffer is mapped
+	MOV	R0,(R5)+	;;;Store the word in the buffer
+	SOB	R1,60$		;;;Fetch another word
+	MAP	POP,APR=6,DATA	;;;Restore APR6 mapping
+	RETURN			;;;All done
+
+.SBTTL	*************************************************
+
+.SBTTL	SPC$XE -- Special Service Entry 
+
+;+
+;
+;
+; Legal functions include:
+;	-4 -- Set Physical Address   		-- DEFCON --
+;	-3 -- Enable Multicast Address		-- DEFCON --
+;	-2 -- Transfer Line Counters
+;	-1 -- Get Line Counters into CDB	-- DEFCON --
+;	 0 -- Get Circuit Counters into DDB
+;	 1 -- Xfer Circuit Counters to buffer
+;	 2 -- Set Receive Buffer Quota -- not legal --
+;
+; On Entry:
+;	R0 -- Controller Number * 2 
+;	R1 -- PDB pointer
+;	R2 -- Special Function Code
+;	R3 -- XRB
+;	R4 -- Calling Job Number * 2
+;	R5 -- (mapped) XRB
+;
+;  Before Dispatch to SYS$ which does the actual request handling,
+;  we only need to put R2 (function code) into the unique Ethernet
+;  offset, and make sure that our other registers are pointing the
+;  right way to dispatch into SYS$.  No SPC$ calls to the XE driver
+;  require stalls or delayed response.  So this is easy.
+;
+;-
+
+	TMPORG	SPCTBL,10
+
+	.WORD	SPC$XE
+
+	UNORG
+
+	.ENABL	LSB
+
+SPC$XE:: MOV	XECDB+XECORE(R0),R0	; get a CDB pointer right now.
+	ADD	#PDBOFF,R1		; offset to customary location in PDB
+	PUSH	R4			; save job number to help give errors
+	CALL	MPENET			; save current mapping, map enet region;014
+	CMP	#E$DIS,E.STAT(R0)	; Disabled Controller?
+	BEQ	20$			; Yes, die miserably
+	MAP	(SP),APR=6,DATA		; No, we're okay, remap (for SYSJOB)
+					; leaving entry mapping on stack.
+	ASL	R2			; function times 2 for word offset 
+	CMP	R2,#LOWSPC		; Is this a legal function?
+	BLT	10$			; no, we're talking error here
+	CMP	R2,#HISPC		; so far, is it above legal dispatch?
+	BGT	10$			; yes, this is unacceptable.
+	JMP	@SPCDSP(R2)		; dispatch to handler routines 
+					; (no return)
+
+10$:	MOV	#NOTMTA,R0	; not a magtape function
+	BR	SPCERR		; and issue the error to whoever it is
+
+20$:	MOV	#HNGDEV,R0	; Hung Device
+	.BR	SPCERR
+
+.SBTTL	SPCERR -- handle .SPEC error exit
+
+;+
+; SPCERR --
+;	issue error to user or system job.
+;	SP -> DAPR6 on entrance
+;	      job number * 2 at entry
+;	R0 is error code
+;-
+
+SPCERR:	MAP	POP,APR=6,DATA	; restore mapping on entry
+	ASR	(SP)+	; user or system?
+	BCC	30$	; user
+	RETURN		; go back where we belong
+
+30$:	JMPX	ERROR	; and post error back to user in JDIOST
+
+	.DSABL	LSB
+
+GLOBAL	<XECORE,HNGDEV,NOTMTA>
+
+.SBTTL	Special function dispatch table 
+
+;+
+; SPECIAL FUNCTION DISPATCH TABLE (SPCDSP)
+;-
+
+	; start with dev dependent special functions (negative offsets)
+TOPTBL:			; At the top.  Last valid function
+	.WORD	SETPHY	;-10 -NI$PHY- CHANGE PHYSICAL ADDRESS
+	.WORD	SETEML	;-6  -NI$EML- ENABLE MULTICAST ADDRESSES
+	.WORD	XFRLIN	;-4  -NI$XFL- XFER LINE COUNTERS FROM CDB
+	.WORD	GETLIN	;-2  -NI$LCT- UPDATE CDB LINE COUNTERS
+LOWSPC = <TOPTBL - .>	; set up constant to lowest function
+SPCDSP:	; dev independent special functions
+	.WORD	GETCIR	; 0  -FC$CIR- UPDATE DDB CIRCUIT COUNTERS
+	.WORD	XFRCIR	; 2  -FC$XFR- XFER CIRCUIT COUNTERS TO BUFFER
+	.WORD	BUFQTA	; 4  -FC$RCV- SET RECEIVE BUFFER QUOTA (SHOULDN'THAPPEN)
+HISPC = <. - SPCDSP>	; past the high end of the table
+
+BUFQTA:	CRASH		; nobody sets Receive Buffer Quota.
+
+; SHOULD HAVE A .ASSUME FOR EVERYTHING.  BUT FROM WHERE?
+
+
+.SBTTL	XFRCIR -- Transfer Circuit counters to User Buffer
+
+;+
+; XFRCIR --
+;	User or System.
+;	Called via SPC$XE 
+;	Transfer Circuit (portal) counters into user buffer.
+;
+; On Entry:
+;	R0 -> CDB 
+;	R1 -> PDB 
+;	R2 -- Special Function Code
+;	R3 -> XRB
+;	  XRBC(R3) = length of buffer
+;	  XRLOC(R3) = address of start of buffer
+;	  XRBLK(R3) = 0 to read/<> 0 to ready/clear
+;	R4 -- Calling Job Number * 2
+;	R5 -> (mapped) XRB
+;	(SP) = Job Number times 2
+;-
+
+XFRCIR:	CLR	-(SP)			; save a spot to stick an error indic in
+	TSTB	XRBLK(R3)		; is this a Read and clear?
+	BEQ	10$			; nope, just a read
+	BIT	#BIT0,R4		; is JBNO*2 odd?
+	BNE	10$			; Yeah, it's a SYSJOB, anything goes.
+	MOV	R4,R0			; User, wants to zero, copy JBNO to R0
+	CALLX	CHKPRV,R4		; see if he has the privs, SWCTL
+	  .BPRIV SWCTL
+	BCC	10$			; Carry Clear, he's okay.
+	MOV	#PRVIOL,(SP)		; No privs, error him,
+	BR	40$			; and get out without doing anything
+
+10$:	MOV	#EP.CNT,R0		; get number of counters to xfer
+	CALL	SPCVFY			; verify buffer is legal, map it.
+					; we don't return if it is ugly
+	MOV	R5,R4			; get [mapped] buffer pointer in R4
+	CALLM	UPDZTM,GENAP5		; get current date and time at R5....
+	CMP	(R5)+,(R5)+		; skip over current date/time
+	SUB	#4,R0			; forget about date/time(R0 xfer amount)
+	ASR	R0			; make byte count a word count
+	MOV	R1,R4			; get a copy of the PDB
+	ADD	#EP.BCT,R4		; offset to start of counter region
+20$:	MOV	(R4)+,(R5)+		; transfer a word
+	TSTB	XRBLK(R3)		; zero, or not?
+	BEQ	30$			; don't zero
+	CLR	-2(R4)			; zero counter just copied
+30$:	SOB	R0,20$			; and copy as many as we can (or all)
+	TSTB	XRBLK(R3)		; did we zero?
+	BEQ	40$			; nope
+	MOV	R1,R4			; yes, so update date/time last zeroed
+	ADD	#EP.DTZ,R4		; by mapping it in R4
+	CALLM	UPDZTM,GENAP5		; get current date and time at R4....
+40$:	MOVB	(SP)+,R0		; get any error
+	BEQ	50$			; no error.
+	JMP	SPCERR			; error, go out the best way
+
+50$:	MAP	POP,APR=6,DATA		; restore mapping on entry (clean SP)
+	ASR	(SP)+			; system or user?
+	BCC	60$			; user job
+	CLC				; clear carry, we're okay
+	RETURN				; and exit to system
+
+60$:	BIS	#JFPOST,@JOBF		; make sure we post this
+	JMPX	IOEXIT			; exit with completion to user
+
+GLOBAL	<UPDZTM,NSPAP5>
+
+
+.SBTTL	XFRLIN -- Transfer Line Counters to User Buffer	
+
+;+
+; XFRLIN --
+;	SPC$XE
+;	If we're still getting counters, give DATERR.
+;	Copy as many counters as we can into user buffer.
+;	Since both buffers will be mapped with APR6, use MOVMEM.
+; On Entry:
+;	R0 -> CDB 
+;	R1 -> PDB 
+;	R2 -- Special Function Code
+;	R3 -> XRB
+;	R4 -- Calling Job Number * 2
+;	R5 -> (mapped) XRB (never used)
+;	(SP) = DPAR6 on entry
+;	2(SP) = Job Number times 2
+;-
+
+XFRLIN:	MAP	XEDPR6+XECORE,APR=6,DATA ; map ethernet region.
+	BIT	#C$GCNT,E.STS(R0)	; still getting counters?
+	BEQ	10$			; nope, so give him his counters
+	MOVB	#DATERR,R0		; yes, load an error
+	JMP	SPCERR			; and give it to him
+
+10$:	TSTB	XRBLK(R3)		; is this a Read and clear?
+	BEQ	15$			; nope, just a read
+	BIT	#BIT0,R4		; is JBNO*2 odd?
+	BNE	15$			; Yeah, it's a SYSJOB, anything goes.
+	PUSH	R0			; save the CDB pointer
+	MOV	R4,R0			; User, wants to zero, copy JBNO to R0
+	CALLX	CHKPRV,R4		; see if he has the privs, SWCTL
+	  .BPRIV SWCTL
+	POP	R0			; restore CDB pointer (Carry n/a)
+	BCC	15$			; Carry Clear, he's okay.
+	MOVB	#PRVIOL,R0		; No privs, error him,
+	BR	40$			; and get out without doing anything
+
+15$:	MOV	R0,R1			; get CDB pointer into R1 for MOVMEM
+	CLR	-(SP)			; get error stack position
+	MOV	#E.CNT,R0		; get amount of transfer
+	CALL	SPCVFY			; verify and set up [map user buffer]
+					; don't return if verify fails badly
+	MOV	R5,R4			; get mapped buffer in R4
+	CALLM	UPDZTM,GENAP5		; ..to set up date/time in time at R4..
+	CMP	(R5)+,(R5)+		; skip over current date/time
+	SUB	#4,R0			; forget date/time (R0 xfer amount)
+; set up for MOVMEM
+	MOV	R0,R2			; (R2 for MOVMEM) byte count
+	MOV	XEDPR6+XECORE,R0	; (R0 for MOVMEM) get CDB APR value
+	PUSH	<R1,R3>			; save CDB pointer and XRB pointer
+	BIC	#170000,R1		; going to map CDB through APR5, not 6
+	BIS	#120000,R1		; so make it virtual APR5
+	ADD	#E.CNTS,R1		; (R1 for MOVMEM) from CDB counters
+	MOV	R5,R3			; (R3 for MOVMEM) user buffer in APR6
+;		R0 = 'from' data APR5 mapping
+;		R1 -> 'from' data 
+;		R2 = byte count of transfer
+;		R3 -> 'to' data (mapped in APR6)
+	CALLX	MOVMEM			; copy all the counters we can
+	POP	<R3,R1>			; restore XRB pointer and CDB pointer
+	TST	XRBLK(R3)		; zero?
+	BEQ	30$			; yah, means don't zero counters.
+	; XRBLK <> 0 means clear counters [privs already verified]
+	MAP	XEDPR6+XECORE,APR=6,DATA ; so map enet region,
+	MOV	R1,R5			; set up for top of counters in R5
+	ADD	#E.CNTS,R5		; .. establish start of counters
+	MOV	#<E.CNTE-E.CNTS>,R0	; byte count to clear
+	ASR	R0			; .. /2 for a word count
+20$:	CLR	(R5)+			; clear a word at a time
+	SOB	R0,20$			; 'til we're done
+	SUB	#E.CNTE-E.CNTS,R5	; back to top of counters
+.ASSUME	E.DTZR	EQ E.CNTS		; lined up on date/time last zeroed?	
+	MOV	R5,R4			; get positioned in R4
+ 	CALLM	UPDZTM,GENAP5		; get current date/time at R4....
+30$:	MOVB	(SP)+,R0		; MAGRLE after all?
+	BEQ	40$			; nope, we're clean
+	JMP	SPCERR			; yes, so deliver an error
+
+40$:	MAP	POP,APR=6,DATA		; restore mapping on entry
+	BIT	#1,(SP)+		; system job? [here on entry]
+	BEQ	50$			; no
+	CLC				; yes, system, no error
+	RETURN
+
+50$:	BIS	#JFPOST,@JOBF		; make sure that we post this
+	JMPX	IOEXIT			; exit, no error
+
+GLOBAL	<UPDZTM,NSPAP5,DATERR,XECORE>
+
+
+.SBTTL	SPCVFY -- verify and map .SPEC buffer
+
+;+
+; SPCVFY --
+;	Used for XFRCIR and XFRLIN to verify that the
+;	user supplied buffer is long enough to handle
+;	the counter transfer.
+;
+;	Remember that we are JOB right now.
+;
+; On Entry --
+;	R0 = byte count of counter transfer
+;	R3 -> XRB
+;	  XRBC(R3) = length of buffer
+;	  XRLOC(R3) = address of start of buffer
+;	  XRBLK(R3) = 0 to read/<> 0 to ready/clear
+;	R4 = job number * 2
+;	(SP)  = return address.
+;	2(SP) = slot MAGRLE error if we decide to give it
+;	4(SP) = DPAR6 on entry to SPC$XE
+;	6(SP) = job number times 2
+; On Exit --
+;	If there is a serious problem, we don't even return.
+;	R0 = byte count to do (<= byte count wanted)
+;	XRBLK(R3) may have been modified to prevent zeroing
+;	R5 -> .SPEC buffer through APR6
+;-
+
+SPCVFY:	BIT	#1,XRLOC(R3)	; odd start address?
+	BNE	20$		; Yes, give him a buffer error (BADCNT)
+	CMP	R0,XRBC(R3)	; enough room in user buffer?
+	BLE	10$		; Yes, so don't worry
+	MOV	XRBC(R3),R0	; No, so only transfer that much
+	BIT	#1,R0		; is it odd though?
+	BNE	20$		; yes, forget it, too short and odd is out.
+	CLR	XRBLK(R3)	; not all counters copied, don't zero
+	MOVB	#MAGRLE,2(SP)	; remember MAGRLE for later
+10$:	MOV	XRLOC(R3),R5	; assume system job. set up buffer pointer
+	MAP	4(SP),APR=6,DATA ; and map same as on entry for buffer.
+	BIT	#BIT0,R4	; were we right?
+	BNE	17$		; Yeah, so the mapping is all done.
+	MOV	XRBC(R3),(R3)	; get buffer count into XRLEN
+.ASSUME	XRLEN	EQ	0
+	CLR	XRBC(R3)	; clear return parameter value
+	SEC			; verify rights with CHKXRB
+	CALLX	CHKXRB		; .READ style 'cause we gotta write out there.
+				; don't return if not 'nuf rights
+15$:	MOV	R0,XRBC(R3)	; set up returned byte count
+	CALLX	SCRUMX		; we're gonna go, map the user buffer,
+17$:	RETURN			; and return
+
+20$:	MOV	#BADCNT,R0	; yes, set BADCNT
+	CMP	(SP)+,(SP)+	; toss return address, and error word,
+	JMP	SPCERR		; figure out who to give the error	
+	
+GLOBAL	<MAGRLE,BADCNT>
+
+
+.SBTTL	SETEML -- Handle NI$EML -- Enable Multicast Addresses
+
+;+
+; SETEML --
+;	SPC$XE call
+;	Validate Buffer/request
+;	Acquire and init a CCB
+;	Copy buffer/validate contents
+;	Queue for continuation
+;	DMPJOB
+;	
+;	Validate, copy multicast addresses, set up for CON$ 
+;	processing.
+;
+;	Job is JOB
+;
+; On Entry:
+;	R0 -> CDB 
+;	R1 -> PDB 
+;	R2 -- Special Function Code
+;	R3 -> XRB
+;	R4 -- Calling Job Number * 2
+;	R5 -> (mapped) XRB
+;	(SP) = DPAR6 on entry
+;	2(SP) = job number times 2
+;-
+
+	.ENABL	LSB
+
+SETEML:	PUSH	<R0,R1>		; save CDB,PDB pointers for later
+	MOV	XRBC(R3),R1	; get byte count of transfer into R1
+	MOV	R1,(R3)		; and a copy of it into XRLEN
+.ASSUME	XRLEN	EQ	0	
+	CLR	R0		; and clear the high order word for DIV
+	DIV	#6,R0		; divide for number of multicasts (R0/R1 pair)
+	CMP	R0,#MULMAX	; too many multicasts attempted?
+	BGT	70$		; yeah, BADCNT error (POP R1,R0)
+	TST	R1		; better have a zero remainder
+	BNE	70$		; NOT -- BADCNT for this one too  (POP R1,R0)
+	POP	R1		; Okay, restore PDB pointer
+	MOV	R0,EP.MCT(R1)	; save the count, it is okay
+	BEQ	10$		; if null list, just alloc a CCB and Q CON$
+	BIT	#BIT0,R4	; system job?
+	BNE	10$		; yeah, so no need to do CHKXRB
+	CLC			; We need to look at the buffer. Do CHKXRB
+	CALLX	CHKXRB		; validate our rights
+				; don't return if we got no rights
+10$:	CALL	ALOCCB		; get a CCB in R5
+	BCS	XEREDO		; no CCBs, do a buffer wait (POP R0)
+	TST	EP.MCT(R1)	; is this a null list?
+	BEQ	50$		; yes, so don't copy nothing.  Just go.
+	PUSH	R5		; got a CCB, save it for a sec
+	BIT	#BIT0,R4	; System Job?
+	BEQ	20$		; Nope, gotta get the buffer mapped
+	MOV	XRLOC(R3),R5	; yeah, so segment already UMR/DPAR mapped
+	BR	30$		; and moige in up ahead...
+
+20$:	CALLX	SCRUMX		; map the user's buffer in R5
+	BIT	#1,R5		; better not be odd address
+	BNE	80$		; 'Tis.  Yuck.  BADCNT (POP R5,R0)
+30$:	MOV	R1,R4		; Everything is okay, set up pointer to....
+	ADD	#EP.CST,R4	; ...start of multicast save area (in PDB)
+40$:	MOV	(R5)+,(R4)	; copy first word of address
+	BIT	#1,(R4)+	; if zero, this is physical, and illegal
+	BEQ	100$		; illegal address, BADNAM error (POP R5,R0)
+	MOV	(R5)+,(R4)+	; okay, copy second word
+	MOV	(R5)+,(R4)+	; and copy the third word
+	SOB	R0,40$		; and do this for every address
+	POP	R5		; restore CCB pointer
+50$:	POP	R0		; Restore CDB pointer (from null enable too)
+	MAP	XEDPR6+XECORE,APR=6,DATA ; map the ethernet region
+
+;+
+; QPORT -- not a subroutine.
+; 	Always jumped into.
+;
+;	(SP) = DPAR6 on entry to SPC$XE
+;	2(SP) = job number times two
+;	R0 -> CDB
+;	R5 -> CCB
+;-
+
+QPORT:	MOV	R0,R3		; get CDB pointer where it is everywhere else
+	ADD	#E.CNCQ,R0	; get CCB queue root in R0
+	MOV	R5,R4		; get ready to string the CCB out on there,
+	SPLC	5		;; Boost to PR5 for a jiff
+	CALLX	QUEUE0,R5	;; Queue the CCB to E.CNCQ of the CDB
+	CALL	QCDBCN		;; Queue the CDB for continuation (if required)
+	SPLC	3		; drop back to level three
+	MAP	POP,APR=6,DATA	; restore mapping
+	POP	R4		; get JBNO * 2 back in R4
+	BIT	#BIT0,R4	; user or system job?
+	BEQ	60$		; user [JBNO*2 & 1 = 0]
+	CLC			; system, but no error
+	RETURN			; yes, just return
+
+60$:	BIS	#JFPOST,@JOBF	; make sure we post later
+	CLR	JBSTAT(R4)	; put him into an I/O stall
+	MOV	#JS.SY,JBWAIT(R4) ; for Ethernet completion
+	JMPX	DMPJOB		; and dump the job.
+
+;+
+; common error reporting for SETEML and SETPHY
+;-
+
+70$:	POP	R1		; Restore PDB pointer
+	BR	90$		; skip over the POP R5 
+
+80$:	POP	R5		; Restore CCB pointer
+90$:	POP	R0		; restore CDB pointer
+	MOV	#BADCNT,R0	; setup BADCNT error
+	JMP	SPCERR		; and issue it
+
+100$:	POP	<R5,R0>		; restore CCB,CDB pointers
+	MOV	R5,R4		; return the CCB
+	BUFFER	RETSML		; to the small buffer pool
+	MOV	#BADNAM,R0	; BADNAM is the error
+	JMP	SPCERR		; and issue the error
+
+XEREDO:	ASR	R2		; get function # times 1 back
+	MOV	R2,(R3)		; get it back into the XRB
+.ASSUME	XRLEN	EQ 0
+	POP	R0		; clean CDB pointer off of the stack
+	MAP	POP,APR=6,DATA	; restore mapping.
+	ASR	(SP)+		; clean up the stack, system or user?
+	BCC	120$		; user
+	MOV	#NOBUFS,R0	; system, fail with a NOBUFS
+	RETURN			; and return.
+
+120$:	BIS	#JSBUF,JBWAIT(R4) ; waiting for small availability
+	JMPX	IOREDO		; and leave until there are some
+
+
+.SBTTL	SETPHY -- Handle NI$PHY -- Change physical address
+
+;+
+;  SETPHY --
+;	SPC$XE call
+;	Validate Buffer/request
+;	Acquire and init a CCB
+;	Copy buffer/validate contents
+;	Queue for continuation
+;	DMPJOB
+;	
+;	Validate and queue a set physical address request to
+;	modify the controller's address on the ethernet
+;
+;	Job is JOB
+;
+; On Entry:
+;	R0 -> CDB 
+;	R1 -> PDB 
+;	R2 -- Special Function Code
+;	R3 -> XRB
+;	R4 -- Calling Job Number * 2
+;	R5 -> (mapped) XRB
+;	(SP) = DPAR6 at entry
+;	2(SP) = job number times 2
+;-
+
+
+SETPHY:	PUSH	R0		; push CDB pointer to synch with SETEML
+	BIT	#BIT0,R4		; is JBNO*2 odd?
+	BNE	125$			; Yeah, it's a SYSJOB, anything goes.
+	MOV	R4,R0			; Copy JBNO, user gotta 
+	CALLX	CHKPRV,R4		; ...have privs, SWCTL
+	  .BPRIV SWCTL
+	BCC	125$			; Carry Clear, okay so far
+	MOV	#PRVIOL,R0		; No privs, error the user
+	BR	127$			; with fewer words
+
+;+
+; Now check to see if there is more than one portal open.
+; If so, they can eat my shorts.  Unless they're DECnet, and this is 
+; a restart, so I guess I shouldn't be so adamant about it.
+;-
+
+125$:	MOV	(SP),R0		;get the CDB pointer back for a sec
+	MAP	XEDPR6+XECORE,APR=6,DATA ; map the CDB region
+	MOV	E.PRTL(R0),R0	;get pointer to the first portal
+	TST	(R0)		;better not point anywhere
+	BEQ	128$		;doesn't.  We're gonna do it.
+	CMP	#TRNJOB,R4	;Points off, Is this DECnet?		;013
+	BNE	126$		;No, go return INUSE error		;013
+	MOV	(SP),R0		;DECnet, so we need CDB pointer (again) ;013
+	CMP	E.PHYS(R0),HIORD ;Is the address already DECnet?	;013
+	BNE	126$		;No, skip it				;013
+	CMP	E.PHYS+2(R0),HIORD+2 ;Really DECnet?			;013
+	BNE	126$		;No it isn't				;013
+	CMP	E.PHYS+4(R0),MYADDR ;Set to our DECnet node address? 	;013
+	BEQ	128$		;Yes, it sure is, so we'll do it.	;013
+126$:	MOV	#INUSE,R0	;Can't SETPHY with portals open
+127$:	TST	(SP)+		;clean CDB address off the stack,
+	MAP	(SP),APR=6,DATA	;set-up mapping as expected		;014
+	JMP	SPCERR		; and error out without further ado.
+
+128$:	MAP	2(SP),APR=6,DATA ; get mapping back again (esp. SYSJOB)	;014
+	MOV	(SP),R0		; get the CDB pointer (one more time)
+	MOV	#6,(R3)		; Set XRLEN to be maximum legal length
+.ASSUME	XRLEN	EQ 0		; (CHKXRB will toss long addresses)
+	CMP	#6,XRBC(R3)	; did he give us the right length?
+	BNE	90$		; Nope, not right length.  BADCNT.
+	BIT	#BIT0,R4	; system job?
+	BNE	130$		; yeah, so no need to do CHKXRB
+	CLC			; gotta do it, so do it .WRITE style
+	CALLX	CHKXRB		; validate our rights
+				; don't return if we got no rights
+130$:	CALL	ALOCCB		; get a CCB in R5
+	BCS	XEREDO		; no CCBs, do a buffer wait
+	PUSH	R5		; Push CCB pointer for SETEML compatibility
+	BIT	#1,XRLOC(R3)	; Check physical address for word aligned ;011
+	BNE	80$		; NOT, give BADCNT SETEML style!	  ;011
+	ADD	#E.CDBE,R0	; get pointer [past] physical address storage
+.ASSUME	E.CDBE	EQ <E.PHYS+6>	; ..... ugly ducks.
+	MOV	XRLOC(R3),R5	; assume system job, get pointer to buffer
+	BIT	#BIT0,R4	; was it a system job?
+	BNE	140$		; Yeah, so it is already mapped, no SCRUMX
+	CALLX	SCRUMX		; map the user buffer (through R5)
+140$:	BIT	#BIT0,(R5)	; Physical address.  Better be even.
+	BNE	100$		; no good.  Give a BADNAM error.
+	PUSH	(R5)+		; okay, push LSW
+	PUSH	(R5)+		; .. and second word
+	PUSH	(R5)		; .... and the MSW of the address.
+	MAP	XEDPR6+XECORE,APR=6,DATA ; map the ethernet region
+	POP	-(R0)		; restore the MSW of the address
+	POP	-(R0)		; .. and the second word
+	POP	-(R0)		; .... and the LSW into the CDB.
+	POP	<R5,R0>		; restore CCB and CDB pointers
+	BIS	#C$PHYS,E.STS(R0) ; remark that it isn't the default
+	JMP	QPORT		; and exit queueing CDB for CON$
+				; to perform the actual request.
+	.DSABL	LSB
+
+GLOBAL	<JBSTAT,JBWAIT,BADNAM>
+GLOBAL	<MYADDR>							;013
+
+.SBTTL	GETLIN -- Handle NI$LCT -- Initiate Update Line Counters .SPEC
+
+;+
+; GETLIN --
+;	Set up to Request line counters from the controller.
+;	like the other two, but no  buffer address loading required
+;	Job is JOB
+;
+; On Entry:
+;	R0 -> CDB 
+;	R1 -> PDB 
+;	R2 -- Special Function Code
+;	R3 -> XRB
+;	R4 -- Calling Job Number * 2
+;	R5 -> (mapped) XRB
+;	(SP) = job number times 2
+;-
+
+.ENABL	LSB
+
+GETLIN:	MAP	XEDPR6+XECORE,APR=6,DATA ; map the ethernet region.
+	BIT	#C$GCNT,E.STS(R0) ; Get counters in progress already?
+	BNE	10$		; yes, so we don't have to do anything.
+	CALL	ALOCCB		; no, Get a CCB
+	BCS	20$		; fail or stall according to job on STACK
+	BIS	#C$GCNT,E.STS(R0) ; say, Get Counters in Progress
+	BIT	#BIT0,R4	; is this a system job?
+	BEQ	5$		; no, so it requires posting.
+	CLR	CC.NOB(R5)	; yes, don't post completion.
+5$:	JMP	QPORT		; that was easy, go to Port Command processing
+				; no buffer required.
+
+10$:	MAP	POP,APR=6,DATA	; restore mapping.
+	ASR	(SP)+		; system or user?
+	BCC	15$		; user
+	CLC			; System, but no error
+	RETURN			; and return
+
+15$:	JMPX	IOEXIT		; don't post, nothing doing anyway.
+
+20$:	JMP	XEREDO		; restore XRB/R2, and go into Buf stall (above)
+
+30$:	BIS	#JSBUF,JBWAIT(R4) ; waiting for small availability
+	JMPX	IOREDO		; and leave until there are some
+
+GLOBAL	<NOBUFS,XECORE>
+
+
+.SBTTL	GETCIR -- Get Circuit Counters
+
+;+
+; GETCIR --
+;	SPC$XE call
+;	From system level.  Meaningless since we keep all
+;	Circuit counters in the PDB.  Just return.
+;-
+
+GETCIR:	MAP	POP,APR=6,DATA	; shouldn't have bothered to save it. BFD
+	ASR	(SP)+		; System or User level? (also clean stack)
+	BCC	15$		; user (use GETLIN IOEXIT exit to save room)
+	CLC			; System, with no error
+GOUT:	RETURN			; return
+
+; GOUT is a cheap return from SER$XE if DECnet happens to be stupid
+; enough to issue FC$STA funtions without even opening the device (it is)
+; Since we don't have half enough data structures to handle this disaster,
+; we have to cheat.
+
+.DSABL	LSB
+
+.SBTTL	*************************************************
+
+.SBTTL	SER$XE -- Service Entry point 
+
+;+
+; SER$XE --
+;
+; For System jobs, the registers are as follows:
+;	R0 -  controller number times 2
+;	R1 -> Portal Data Block (PDB)
+;	R2 -  Function code (all set for dispatch)
+;	R3,R4 - unused
+;	R5 -> CCB for the request (unused for FC$STA)
+;
+; User level service for .READ and .WRITE comes in 
+; here as well.  Registers are as follows:
+;	R0 -  Controller number times 2
+;	R1 -> PDB
+;	R2 -> Function code (FC$RD=2, FC$WRT=4)
+;	R3 -  XRB
+;	R4 -  Calling job number times 2
+;	R5 -  User's buffer mapped through APR6
+;
+; If Z=1 or C=0 then this is the first call
+; If Z=0 or C=1 then this is a re-do call
+;-
+
+	TMPORG	SERTBL,10
+
+	.WORD	SER$XE
+
+	UNORG
+
+SER$XE:: CMP	R2,#FC$STA		; is this a status function?
+	BEQ	GOUT			; yes, exit carry clear for DECnet.
+;		(hack hack hack hack hack)
+;		This also implies that FC$STA is a DECnet only function
+	MOV	XECDB+XECORE(R0),R0	; get a pointer to the CDB
+	ADD	#PDBOFF,R1		; offset to link word of PDB
+	TST	R2			; check the incoming function
+	BLE	10$			; Not a legal service function
+	CMP	R2,#ENDSER		; better be a legal service style entry
+	BGE	10$			; No, error exit
+	JMP	@SERDSP(R2)		; well, go cope with it (no return)
+
+10$:	MOV	#NOTMTA,R0		; Not a legal function
+	MOVB	EPJBNO(R1),-(SP)	; push the job number for a sec. ;007
+			; REM: -() on the Stack does a double dec anyway.;007
+	MAP	PUSH,APR=6,DATA		; push APR on top to merge with SPCERR
+	JMP	SPCERR			; and go exit with the right error.
+
+GLOBAL	<XECORE,HNGDEV,NOTMTA>
+
+.SBTTL	Service Entry dispatch table 
+
+;+
+; Service Entry Dispatch Table (SERDSP)
+;-
+
+SERDSP: .WORD	0	; this won't happen.
+	.WORD	XEREAD	; 2 - User .READ function 
+	.WORD	XEWRIT	; 4 - User .WRITE function
+	.WORD	SYWRIT	; 6 - System Job Transmit function
+	.WORD	SUPBUF	; 10 - System Supply Receive Buffer function
+;	.WORD	XESTAT	; 12 - System Get Circuit/Line Status (can't happen)
+ENDSER = <. - SERDSP>	; past the high end of the table
+
+.ASSUME	FC$RD	EQ 2	; make sure that noone confuses the issue
+.ASSUME	FC$WRT	EQ 4
+.ASSUME	FC$XMT	EQ 6
+.ASSUME	FC$BUF	EQ 10
+.ASSUME	FC$STA	EQ 12
+
+
+.SBTTL XEREAD -- See if the user has anything waiting
+
+;+
+; XEREAD --
+;	Always a user request.
+;	Never need a CCB, because we don't track it.
+;	If there are any pending message packets, perform
+;	  the transfer into the user buffer.
+;	If no pending packets, then stall or return NOBUFS
+;	  according to the contents of XRMOD
+;	If the controller is disabled, we allow .READs to succeed
+;	  anyway, but don't do stalls.  Our behavior is:
+;	  -- pending packets are received
+;	  -- Lost packet notification is issued, or
+;	  -- no pending packets, return HNGDEV.
+;	If pending packets exist, but we wish to indicate that other
+;	  packets have been lost due to buffer shortages since our last
+;	  .READ, then we issue a DATERR.  Because traffic might be high,
+;	  after issuing this we clear P$LST, and set P$SND.  P$LST will not
+;	  be set again until the user does at least one read, freeing up 
+;	  bufferspace.  This prevents runaway traffic from giving a user
+;	  data errors and never a chance to do actual receiving.
+;
+; On Entrance --
+;	Mapping is whatever was mapped on entrance to SER$
+;	R0 -> CDB
+;	R1 -> PDB
+;	R3 -> XRB
+;	R4 =  JBNO *2
+;	R5 -> User buffer (virtually mapped through APR6)
+;
+; We Exit through one or another of the posting routines, and don't
+; care what the register contents are at all, so long as we're still
+; mapping correctly, and the Stack is clean.
+;
+;	XRBC = length of data including packet header. With padding
+;	       enabled on the UNA, this is simply the length of the 
+;	       received data....  If XRLEN prevents copying it all,
+;	       then we return MAGRLE and as much data as there is room
+;	       for.
+;-
+
+XEREAD:	REGSCR			; we need a mess of these later.
+	BIT	#P$LST,EP.STS(R1) ; did we drop some packets? (no buffers)
+	BEQ	5$		; nope, so do a receive if appropriate
+; following two instructions must be done in this order or at PR5 ;008
+	BIS	#P$SND,EP.STS(R1) ; and make sure we receive at least one ;008
+	BIC	#P$LST,EP.STS(R1) ; we did, but only return it once	   ;008
+	ERROR	DATERR		; packets lost, return DATERR
+
+5$:	TST	EP.RCV(R1)	; any received packets pending posting?
+	BNE	8$		; YES, go process them
+	CMP	#E$DIS,E.STAT(R0) ; No, Is the controller disabled?
+	BEQ	6$		; Yeah, and nothing pending, give an error
+	BIT	#BIT13,XRMOD(R3) ; Okay, check for the Stall bit
+	BEQ	7$		; not supposed to stall, give an error
+	JMPX	IOREDO		; All set up, just stall.
+
+6$:	ERROR	HNGDEV		; Controller disabled, no packets pending.
+
+7$:	ERROR	NOSUCH		; no stall, no receives there
+
+8$:	BIC	#P$SND,EP.STS(R1) ; this is our guaranteed reception.
+10$:	MOV	EP.RCV(R1),R4	; get a CCB
+	SPLC	5		;; goto 5 in case it is the tail	;015
+	MOV	(R4),EP.RCV(R1)	;; off of the receive queue
+	BNE	13$		;; if not tail, then it is off
+	MOV	R1,EP.RCT(R1)	;; Is the tail, so update..
+	ADD	#EP.RCV,EP.RCT(R1) ;; .. to point to the head
+13$:	SPLC	3		; Back to PR3				;015
+	CLR	(R4)		; take it alone -- don't point to nobody.
+	MAP	PUSH,APR=6,DATA	; temp save of user mapping
+	MAP	BF.MMU+CC.BUF(R4),APR=6,DATA ; map XBUF buffer
+	MOV	BF.VIR+CC.BUF(R4),R1 ; virtual pointer to buffer
+	MOV	BF.CNT(R1),R2 	; get data count of this buffer
+	ADD	BF.OFF(R1),R1	; offset to actual beginning of data for MOVMEM
+	BIC	#170000,R1	; clear old virtual APR value
+	BIS	#120000,R1	; make it virtual APR5 (for MOVMEM)
+	MAP	POP,APR=6,DATA	; restore user buffer APR6 mapping
+	CMP	(R3),R2		; 'nuf room in Receive buffer? (check XRLEN)
+.ASSUME	XRLEN	EQ 0
+	BGE	20$		; yep. so setup and copy. (= is OK, silly) ;006
+	SETERR	MAGRLE,@IOSTS	; NO,return record length error when posting
+	MOV	(R3),R2		; truncate to remaining length
+.ASSUME	XRLEN	EQ 0
+	BEQ	40$		; no length? This is done. Else, xfer remainder
+20$:	SUB	R2,(R3)		; adjust buffer length remaining
+.ASSUME	XRLEN	EQ 0
+	MOV	BF.MMU+CC.BUF(R4),R0 ; get APR address of 'from' data
+	; R1 -> Start of 'from' data from above (APR5 mapping)
+	; R2 =  byte count from above (including header)
+	ADD	R2,XRBC(R3)	; keep accumulating the byte count returned
+	MOVB	CC.DFL(R4),-(SP) ; keep buffer completion flag on the stack
+	MOV	R5,R3		; put 'TO' data in R3 (mapped in APR6)
+	ADD	R2,R5		; offset for next packet segment xfer (if any)
+	CALLX	MOVMEM		; and do the transfer
+		; MOVMEM stomps on just about everything.
+	MOV	TOS.R0+2(SP),R3	; mov CDB pointer into R3
+	MOV	TOS.R1+2(SP),R1	; get the PDB pointer back
+	MOV	R4,R0		; get CCB pointer in R0
+	MOV	#1,R2		; handle one buffer at a time
+	CALL	70$		; dump the buffer back to the RCV free list
+	MOV	TOS.R3+2(SP),R3	; restore XRB to R3 (hidden under CC.DFL)
+	BITB	#DF.CNT,(SP)+	; get buffer continuation information
+	BNE	10$		; if it is continued, back to the top
+30$:	JMPX	IOEXIT		; done, post to JOB.
+ 
+40$:	POP	R1		; we've run out of buffer,
+	PUSH	<R2,R3>		; save a couple registers
+	MOV	R0,R3		; establish CDB pointer
+	MOV	R4,R0		; start return chain
+	MOV	#1,R2		; and note that there is one buffer in it
+50$:	BITB	#DF.CNT,CC.DFL(R4) ; is this a continued buffer?
+	BEQ	60$		; nope, we got 'em all
+	MOV	(R4),R4		; yep, continue the chain
+	INC	R2		; another buffer in the pile
+	TST	R4		; did we get to the end somehow?
+	BEQ	130$		; yes.  This is bad. CRASH
+	BR	50$		; see if it goes on still further
+
+60$:	SPLC	5		;; up priority to 5 for tail update	;015
+	MOV	(R4),EP.RCV(R1)	;; end of packet, update the RCV pointer
+	BNE	65$		;; no need to munge tail
+	MOV	R1,EP.RCT(R1)	;; gotta update the tail
+	ADD	#EP.RCV,EP.RCT(R1) ;; to point to the head
+65$:	SPLC	3		; restore current priority		;015
+	CLR	(R4)		; end the list
+	CALL	70$		; return or discard comm buffers
+	POP	<R3,R2>		; restore XRB and whatever R2 is now
+	PUSH	R1		; re-store PDB pointer,
+	JMPX	IOEXIT		; done, let the user keep running....
+
+;+
+; This section operates as a little subroutine.
+;	R0 -> a chain of CDBs (usually one)
+;	R2 = count of buffers in packet
+;	R3 -> CDB
+; Return COMBUF pairs to pending receive list and LDRCRGs....
+;-
+
+70$:	CALL	MPENET		; save current mapping, map enet region	;014
+	ADD	R2,EP.BUF(R1)	;count it more available for CDB
+	CALL	DSCRCV		; return the buffers in R0 chain to RCV free
+	MAP	POP,APR=6,DATA	;restore mapping
+	RETURN	
+
+130$:	CRASH			; trouble in CCB list.  Incomplete Packet.
+
+
+GLOBAL	<JS.XE,JBWAIT>
+
+.SBTTL XEWRIT -- User Level .Write (transmit) request
+
+;+
+; XEWRIT --
+;	Always a user request.
+;	Allocate and initialize a CCB
+;	Validate User's buffer
+;	  CHKXRB .READ style
+;	  XRLEN > 60.
+;	  if padding,
+;	    then XRBC <= 1514.
+;	    else 60. < XRBC < 1514.
+;	Insert Source Protocol type and length (if required)
+;	Allocate a UMR and initiate the transfer
+;	No UMRs?  CCB to XEDCTL UMR Q.  completed by UMR$Xx.
+;
+;	Length inserted is XRBC - 16 (for header) if padding is enabled
+;
+; On Entrance --
+;	Mapping is whatever was mapped on entrance to SER$
+;	R0 -> CDB
+;	R1 -> PDB
+;	R2 = Function code.  .WRITE
+;	R3 -> XRB
+;	R4 =  JBNO *2
+;	R5 -> User buffer (virtually mapped through APR6)
+;
+; We Exit through one or another of the posting routines, and don't
+; care what the register contents are at all, so long as we're still
+; mapping correctly, and the Stack is clean.
+;-
+
+XEWRIT:	PUSH	<R5,R2>		; save user buffer mapping and function code
+	MOV	XRBC(R3),R2	; get byte count of transfer
+	CLR	XRBC(R3)	; make it a zero for CHKXRB
+	SEC			; want a .READ style check-up (full validate)
+	CALLX	CHKXRB		; and validate most rights
+				; if anything is wrong, we never return
+	CALL	ALOCCB		; get a small buffer
+	BCC	10$		; got one, go on
+	MOV	R2,XRBC(R3)	; restore XRBC to content on entry
+	POP	R2		; get the function code back in again
+	BIS	#JSBUF,JBWAIT(R4) ; none now, do a buffer stall
+	JMPX	IOREDO		; and come see us again, y'hear?	
+
+10$:	MOV	R2,MS.SIZ+CC.BUF(R5) ; Save XRBC as transfer size
+				; in primary buffer descriptor
+	MOVB	(SP)+,CC.FC(R5)	; get the right function code in there
+				; (REM: double increment even on byte POPs)
+	POP	BF.VIR+CC.SEC(R5) ; get buffer address into CCB
+	MOV	@DPAR6,BF.END+CC.SEC(R5) ; save the APR6 mapping in BF.END
+			; because BF.MMU+CC.SEC = CC.DDB
+	PUSH	R5		; save buffer CCB address
+	CMP	R2,#1514. 	; transfer size too big?
+	BGT	40$		; yeah, BADCNT error
+	TSTB	EP.STS(R1) 	; Padding enabled for portal (check open byte)
+.ASSUME	OP$NPD	EQ 200
+	BMI	20$		; no, validate/load params that way
+	; padding special checks
+	CMP	(R3),#60. 	; no minimum transfer, but buffer..
+.ASSUME	XRLEN	EQ 0		; .. must have room for [QNA] padding
+	BLT	40$		; XRLEN invalid, give BADCNT error
+	CMP	R2,#PK.PAD 	; XRBC at least 20(8) for SRC,DST,PROT,LEN ;007
+	BLT	40$		; We allow no data, but BADCNT if no header;007
+	MOV	BF.VIR+CC.SEC(R5),R5 ; get user buffer address back
+	MOV	EP.TYP(R1),PK.PRT(R5) ; load protocol type
+	MOV	R2,PK.LEN(R5)	; load XRBC as the actual length (R2 as above)
+	SUB	#PK.PAD,PK.LEN(R5)  ; ..which is XRBC - length of header
+	BR	30$		; and keep trying to transmit
+
+; no padding special checks
+20$:	CMP	R2,#60.		; XRBC [above] must be > 60.
+	BLT	40$		; yeah, BADCNT error
+	MOV	BF.VIR+CC.SEC(R5),R5 ; get user buffer address back
+	MOV	EP.TYP(R1),PK.PRT(R5) ; load protocol type
+30$:	MOV	#JS.SY,JBWAIT(R4) ; non^C interruptable wait, clear all else
+	POP	R4		; get CCB pointer into R4
+	MOV	@#JOBF,R1	; get JDB @JDFLAG into R1
+	CALLX	SAVJBL,R5	; stop JOB, but leave it locked
+	MOV	R4,R5		; and move CCB pointer back where it belongs
+;+
+; We stop the job BEFORE issuing the transmit because it is not unusual
+; to get the completion interrupt between issuing the request and exitting
+; this routine.  By already having the job stopped, we avoid some nasty
+; timing issues.  R4 is safe from destruction; practically everything else
+; (including the Stack) gets messed up or reset.
+;-
+	MAP	XEDPR6+XECORE,APR=6,DATA ; Map Enet region
+	CALL	USEXMT		; try to perform a user level transmit
+	MAP	BF.END+CC.SEC(R5),APR=6,DATA ; restore mapping to user buffer
+			; from BF.END because BF.MMU+CC.SEC = CC.DDB
+	BCC	35$		; off and running, exit
+;	MOV	R5,R4		; didn't go, we gotta queue it up
+;		R4 set to CCB address before call to SAVJBL.
+	SPLC	5		;; QUEUE0 at level five
+	MOV	#XEUMRQ+XECORE,R0 ;; to the UMR reprocessing queue
+	CALLX	QUEUE0,R5	;; so queue it.  Then exit.
+	SPLC	3		; back to level three.
+35$:	JMPX	RTI3		; and let posting happen from INT$
+
+40$:	POP	R5		; restore CCB pointer (to clean up stack)
+	ERROR	BADCNT		; buffer length error
+
+GLOBAL	<XECORE,BADCNT,JBWAIT>
+
+
+.SBTTL	SYWRIT -- handle system level transmit requests
+
+;+
+; SYWRIT --
+;	DECnet and other system jobs originate their
+;	Transmit (FC$XMT) requests through here.
+;
+; Registers on entrance:
+;	R0 -> CDB
+;	R1 -> Portal Data Block (PDB)
+;	R2 -  Function code (all set for dispatch)
+;	R3,R4 - unused
+;	R5 -> CCB for the request 
+;	   CC.BUF all set up (including BF.VIR)
+;-
+
+SYWRIT:	MOVB	R2,CC.FC(R5)	; load the function code (sort of a poem)
+	MOV	R1,CC.DDB(R5)	; mung up DDB pointer for life of req.
+			; [offset it to normal link]
+	INC	EP.XMO(R1)	; increment outstanding transmit counter.
+	MOV	BF.VIR+CC.BUF(R5),R4 ; get a pointer to the user buffer
+	PUSH	BF.CNT(R4)	; save the length for a second
+	ADD	BF.OFF(R4),R4	; offset to start of Ethernet packet
+	BIC	#P$SND,EP.STS(R1) ; clear User buffer unavailable suppression.
+	TSTB	EP.STS(R1)	; is this a padded protocol?		;008
+.ASSUME	OP$NPD	EQ 200		
+	BMI	10$		; nope.  we're all set.
+	SUB	#PK.PAD,(SP)	; yes, so forget about header length
+	MOV	(SP),PK.LEN(R4)	; MOVE the count into the packet
+10$:	MOV	EP.TYP(R1),PK.PRT(R4) ; load up the protocol type
+	TST	(SP)+		; clear off the stack.
+	.BR	MOPWRT		; and join up with MOPWRT
+;+
+; Entrance for driver originated transmits (some loopback and MOP stuff)
+;-
+
+MOPWRT:	MOV	R0,R3		; get CDB pointer into the usual place
+	SPLC	5		;; Priority 5
+	CALL	MPENET		;; save current mapping, map enet region ;014
+	CMP	#E$DIS,E.STAT(R3) ;; Is this controller disabled?
+	BEQ	40$		;; yes, branch out and cope with it.
+	MOV	R5,@E.XPBT(R3)	;; No, Queue CCB to tail of Xmit Pending Q
+10$:	BITB	#DF.CNT,CC.DFL(R5) ;; continue buffer for multi packet?
+	BEQ	20$		;; no, we're set
+	MOV	(R5),R5		;; yes, so hunt for last buffer in packet
+	BR	10$		;; by checking the next buffer
+
+20$:	CLR	(R5)		;; DECnet isn't very careful of this link word.
+	MOV	R5,E.XPBT(R3)	;; update the tail
+	TST	E.STAT(R3) 	;; Are we running?
+.ASSUME	E$RUN	EQ 0
+	BNE	30$		;; No, XMIT queued, will try after RUNNING.
+	TST	E.XRB(R3)	;; anything out already?		;018
+	BNE	30$		;; Yes, so wait 'til it's done		;018
+	CALL	LDXMRG		;; Otherwise, load the rings
+	BCS	30$		;; not loaded, so no polling demand
+	BIS	#C$PDMD,E.STS(R0) ;; say we want a polling demand
+	CALL	POLL		;; and try to issue it
+30$:	MAP	POP,APR=6,DATA	;; restore current mapping
+	SPLC	3		; dump priority to normal
+	RETURN			; exit back to calling SYStem Process
+				; (or back to REQCNT for that request)
+
+40$:	BITB	#DF.MOP,CC.DFL(R5) ;; is this a MOP buffer?
+	BNE	50$		;; Yeah, it's easy.
+	MOVB	#FC$XER,CC.FC(R5)  ;; no, standard transmit.  failed
+	MOV	#HNGDEV,CC.ERR(R5) ;; .. with a hung device error
+	MOV	R1,CC.DDB(R5)	   ;; set up the PDB pointer for PSTSYS
+	MOVB	EPJBNO(R1),R0	   ;; and the job number
+	CALL	PSTSYS		   ;; post it out.
+	DEC	EP.XMO(R1)	   ;; this one isn't out here any more.
+; we should never run into the situation where a system job attempts
+; a transmit after a close.  So we won't even check for it.
+;	BNE	30$		   ;; others are outstanding.
+;	BIT	#P$CLS,EP.STS(R1)  ;; no others. Are we trying to close?
+;	BEQ	30$		   ;; nope.  Exit.
+;	CALL	DMPPDB		   ;; yes, and now we can.  Dump the PDB.	
+	BR	30$		   ;; restore mapping, priority, and exit.
+
+50$:	MOV	R5,R0		;; it is a MOP request.
+	CALL	DISCRD		;; toss it.
+	BR	30$		;; and exit.
+	
+
+.SBTTL	SUPBUF -- handle system job supply receive buffer
+
+;+
+; SUPBUF --
+;	This is (FC$BUF), a SER$ call.
+;	System jobs get to supply their own receive buffers.
+;	We just got a comm buff pair (CCB/EXTPOL buffer) in R5
+;	Update counts in CDB, string to RCV free list, and exit.
+;
+; Registers on Entrance:
+;	R0 -> CDB pointer
+;	R1 -> Portal Data Block (PDB)
+;	R2 -  Function code 
+;	R3,R4 - unused
+;	R5 -> CCB for the request (unused for FC$STA)
+;
+; Note: This will continue to accept and queue buffers if the device is
+;   disabled and a SYSjob portal is open.  Too bad.  We need to do this
+;   or we are screwed on a reinitialize.
+;-
+
+SUPBUF:	MOV	R0,R3		; get CDB pointer into R3
+	MOV	R5,R0		; get CCB pointer into the usual place
+	CLR	(R0)		; make sure that the CCB points to nowhere
+	CLRB	CC.DFL(R0)	; clear disposition flag		;012
+	CALL	MPENET		; save current mapping, map enet region ;014
+	CALL	DSCRCV		; put new buffer on RCV free list and activate
+	SPLC	5		;; priority up.
+	CALL	LDRCRG		;; call LDRCRG, make use of this buffer
+	SPLC	3		; priority down.
+	INC	EP.BUF(R1)	; add one to the portal's available buffer count
+	BMI	20$		; if more than 32767 allocated, error.
+10$:	MAP	POP,APR=6,DATA	; restore mapping at entry.
+	RETURN			; else(?) just return to System calling.
+
+20$:	CRASH			; error all right.  This would be funny.
+
+
+.SBTTL	XESTAT -- catch any status attempt here, and fail it
+
+;+
+; XESTAT --
+;	FC$STA has no meaning in the Ethernet drivers.
+;	It will fail immediately with a PRVIOL
+;
+;	Due to conditions beyond our control, FC$STA can be issued
+;	Without a portal open on the ethernet.  This wreaks havoc
+;	unless we repell the request immediately on entry.  Which is
+;	what we do.  Hence, this very cute code will/can never be run.
+;-
+
+;XESTAT:	MOV	#PRVIOL,R0	; load R0 with Privilege Violation
+;	SEC			; Set Carry to show error
+;	RETURN			; and tell System job that we're upset.
+
+GLOBAL	<PRVIOL>
+	
+
+.SBTTL	USEXMT -- Process a user transmit request out onto the rings
+
+;+
+; USEXMT --
+;	Called at PR5 and at PR3.
+;	Can be called from UMR$Xx or XEWRIT
+;	USEXMT uses the contents of CC.SEC in the CCB
+;	  to generate a UNIBUS address (with UMRs)
+;	  and queue the request out to the transmit
+;	  descriptor rings.  It will set polling demand,
+;	  and queue Continuation if that is required.
+;
+; On Entrance --
+;	R5 -> CCB
+;	MAPPING in APR6 is to the E-net region
+;	  User buffer address is in CC.SEC
+;	  User PDB is in CC.DDB
+; Exit --
+;	We don't munge any registers
+;     C = 1 No UMRs, caller must queue R5 for clean recovery
+;     C = 0 Request acquired UMRs, queued to transmit pending queue.
+;-
+
+USEXMT:	REGSCR			; save our registers
+	MOV	CC.DDB(R5),R3	; get PDB pointer (for a sec)
+	MOV	EP.CDB(R3),R3	; to get the CDB pointer (for later)
+	CLR	R0		; set up for some calculations
+	MOV	BF.END+CC.SEC(R5),R1 ; get MMU value of buffer
+			; because BF.MMU+CC.SEC = CC.DDB
+	ASHC	#6,R0		; times #100(8) to get physical address
+	MOV	BF.VIR+CC.SEC(R5),R2 ; get virtual APR6 address
+	BIC	#140000,R2	; clear it to an offset, and
+	ADD	R1,R2		; make the LSB of physical address
+	MOV	R0,R1		; get the MSB
+	MOV	MS.SIZ+CC.BUF(R5),R0 ; get the byte count
+	NEG	R0		; and the negative byte count
+	MOV	R5,R4		; use CCB address as unique value in UMR MAP
+	PUSH	@#PS		; save current priority (3 or 5)
+	SPLC	5		;; pop it up to 5
+	CALL	@GETUMR		;; get required UMR
+	BCC	10$		;; we got our UMR
+	POP	@#PS		; little trouble, restore priority
+;	SEC			; Carry Set by GETUMR return
+	RETURN			; Carry set for UMR failure.
+
+10$:	CMP	#E$DIS,E.STAT(R3)	;; Disabled?
+	BNE	20$			;; nope.
+	MOVB	#FC$XER,CC.FC(R5) 	;; Yes, transmit fails
+	MOV	#HNGDEV,CC.ERR(R5)	;; .. with a hung device error
+	MOV	CC.DDB(R5),R1		;; get the DDB pointer
+	MOVB	EPJBNO(R1),R0		;; ...and the job number
+	CALL	XMTUSE			;; post it out.
+	BR	30$			;; clean up and exit.
+
+20$:	MOV	R1,BF.MMU+CC.BUF(R4)	;; save high order UNIBUS address
+	MOV	R2,BF.ADR+CC.BUF(R4)	;; and low order UNIBUS address
+					;; size already saved, R3 -> CDB.
+	CLR	BF.VIR+CC.BUF(R4)	;; and clear the virtual word as a flag
+	MOV	R5,@E.XPBT(R3)		;; load the CCB onto the Pending Xmit Q
+					;; (R5) Q link word already zero.
+	MOV	R5,E.XPBT(R3)		;; and update the tail
+	TST	E.STAT(R3)		;; are we in running state?
+.ASSUME	E$RUN	EQ 0
+	BNE	30$			;; No, try again soon as we're RUNNING.
+	TST	E.XRB(R3)		;; Xmit outstanding already?	;018
+	BNE	30$			;; Yeah, so wait 'til its done	;018
+	CALL	LDXMRG			;; load it onto the rings if we can
+	BCS	30$			;; couldn't load it, let's just leave
+	BIS	#C$PDMD,E.STS(R3) 	;; make sure we perform a polling demand
+	CALL	POLL			;; right now if we can; else ASAP.
+30$:	POP	@#PS			; restore priority
+40$:	CLC				; make sure Carry is clear
+	RETURN
+
+GLOBAL	<XECORE,GETUMR>
+
+
+.SBTTL	.. ALOCCB -- Get a CCB for appropriate user requests
+
+;+
+; ALOCCB --
+;	Allocate a CCB for somebody. We put The PDB pointer in,
+;	and we stick in the function code.  Everything else is zero, 
+;	just like it should be.  Responsibility for the rest is
+;	function dependant.
+;
+; DON'T CALL UNLESS YOU REALLY WANT A CCB
+;
+; On Entrance --
+;	R0 -> CDB
+;	R1 -> PDB
+;	R2 -> Function Code
+; On Exit --
+;	All registers preserved except R5
+;     Carry Clear:
+;	R5 -> CCB, allocated and initialized.
+;     Carry Set:
+;	small buffer not available
+;-
+
+ALOCCB:	PUSH	R4		; Work with this register
+	BUFFER	GETSML,,64.	; get a clean small one, leaving plenty behind
+	BVC	10$		; we're okay.
+	SEC			; not okay, no buffer
+	BR	20$		; so get out.
+
+10$:	MOV	R4,R5		; save it in R5
+	MOVB	R2,CC.FC(R5)	; set in the function code 
+	MOV	R1,CC.NOB(R5)	; Save the PDB pointer where for .SPECS
+	MOV	R1,CC.DDB(R5)	; Save the PDB pointer for transmits.
+	MOV	R3,CC.FQB(R5)	; Save XRB pointer for user jobs....
+	CLC			; Success (everything else = 0 and that is good)
+20$:	POP	R4		; restore the register
+	RETURN			; exit.	
+
+
+
+.SBTTL	.. QCDBCN -- Queue a CDB for CONtinuation service
+
+;+
+; QCDBCN --
+;	Queue a CDB for continuation if it isn't already.
+;	Also set L3Q bit if it isn't already.  If anyone is on the CONQ Q
+;	then the level three bit must be set already.
+;
+; On Entrance --
+;	CALLING PRIORITY IS PR3 OR PR5
+;	R3 -> CDB for queueing
+;	XECONQ in XECORE is the queue root
+; On Exit --
+;	The CDB has been strung on XECONQ, and the L3Q bit set if required
+;-
+
+QCDBCN:	PUSH	R0		; Save a register
+	PUSH	@#PS		; save current priority
+	SPLC	5		;; crank it up.
+	MOV	#XECONQ+XECORE,R0 ;; get the queue root
+	TST	(R0)		;; anything in the queue?
+	BEQ	20$		;; Nope, so queue us and CON$
+10$:	CMP	R3,(R0)		;; is this us?
+	BEQ	40$		;; Yep, so just exit, we'll get ours
+	MOV	(R0),R0		;; Not us, lets find the tail, or ourselves
+	TST	(R0)		;; is this the end?
+	BEQ	30$		;; end of the list, we're not on it....
+	BR	10$		;; not the end, keep looking
+
+20$:	L3QSET	QXECON		;; queue level three processing
+30$:	MOV	R3,(R0)		;; stick ourselves on the queue,
+	CLR	(R3)		;; mark ourselves as the end of the queue,
+40$:	POP	@#PS		; restore entering prio
+	POP	R0		; restore our beaton register
+	RETURN
+
+
+.SBTTL	CLOSE -- Cleanup after a close.
+
+;+
+; CLOSE --
+;	This routine initiates Multicast service for a channel
+;	Every time a portal is closed.  This reconstructs the 
+;	multicast list, dropping out any multicasts that are no
+;	longer needed.
+;
+; On entrance:
+;	R3 -> CDB
+;
+; We allocate a CCB if possible.  If not, we will requeue ourselves
+; in two ticks using RETRY.
+;
+; On Exit:
+;	R3 -> CDB
+;	New CCB queued to E.CONQ 
+;	C$CLS in E.STS reset.
+;	CC.NOB in CCB is zero to know that no posting should be done.
+;-
+
+CLOSE:	MOV	R3,R0		; set up for ALOCCB
+	CLR	R1		; CDB pointer of zero
+	MOV	#NI$EML,R2	; request multicasts when it comes up
+	CALL	ALOCCB		; get a CCB
+	BCS	10$		; failure, retry in two ticks
+	ADD	#E.CNCQ,R0	; get CCB queue root in R0
+	MOV	R5,R4		; get ready to string the CCB out on there,
+	SPLC	5		;; Boost to PR5 for a jiff
+	CALLX	QUEUE0,R5	;; Queue the CCB to E.CNCQ of the CDB
+	SPLC	3		; drop back to level three
+	BIC	#C$CLS,E.STS(R3) ; clear the close action needed flag.
+	RETURN			; back into continuation -- process this
+				; when you get a chance
+
+10$:	CALLR	RETRY		; no change, no buffer, re-queue in 2 ticks
+;	RETURN			; (return from RETRY into CON$XE)	
+
+.SBTTL	*************************************************
+
+.SBTTL	CON$XE -- Port Command Processing 
+
+;+
+; CON$XE --
+;	We use CONTINUATION only for port command handling
+;	especially during controller initialization.
+;	
+;	All port commmands except for Polling Demands Must
+;	come through here to be processed sequentially.
+;
+;	While running, the continuation response is driven off of
+;	the contents of the CCB and E.STS.
+;
+;	In init state, the continuation response is driven off of 
+;	the value of the low byte of E.STS which reflects the initialization
+;	step of the controller.
+;
+;	If we enter here in the Reset state, we just exit.
+;
+;	C$PCIP is set immediately if it was clear.  This is done at PR5
+;	so that INT$ won't work some magic to jerk us around.
+;
+; On Entrance:
+;	Nothing is Free
+; Exit:
+;	Through RTI3, and "it just doesn't matter."
+;-
+
+	L3QENT	QXECON,,XEDAP5
+
+	.ENABL	LSB
+
+CON$XE: PUSH	#RTI3			; Stack a return address
+	MOV	XECONQ+XECORE,R3	;Get a pointer to a CDB (in XECORE)
+	BNE	10$			; if there is one, see what we can do.
+5$:	RETURN				; nothing, just get out of this
+	
+10$:	CALL	MPENET		; save current mapping, map enet region ;014
+	MOV	(R3),XECONQ+XECORE	; pull CDB off of the list
+.ASSUME	E.QLNK	EQ	0		; make sure we're okay.
+	BEQ	11$			; don't come back if no more
+	L3QSET	QXECON			; There is more, y'all come back now
+11$:	BIT	#C$CLS,E.STS(R3) 	; closing a portal on this channel?
+	BEQ	12$			; no, so go on with the usual
+	CALL	CLOSE			; cleanup channel
+12$:	SPLC	5			;; this check at PR5, set immediately
+	TST	E.STS(R3)		;; Port Command in progress?
+	BMI	17$			;; yeah, we'll come back when it is time
+.ASSUME	C$PCIP	EQ 100000
+	BIS	#C$PCIP,E.STS(R3)	;; no, well there will be real soon
+	SPLC	3			; dump the priority and continue
+	MOV	E.STAT(R3),R0		; Get the controller State
+	CMP	R0,#STTBLS		; is it legal?			;004
+	BHIS	20$			; NO! ugh.
+	CLR	(R3)			; Yes, so dequeue it and go
+	JMP	@STEDSP(R0)		; and go to the right dispatch table
+
+17$:	SPLC	3			; busy, dump priority, 
+	MAP	POP,APR=6,DATA		; restore APR6, and get out.
+	RETURN				; and come back when life is simpler
+
+20$:	CRASH				; Death to hippies.
+
+STEDSP:	.WORD	RUNING			; Running, standard dispatch
+	.WORD	20$			; disabled state, shouldn't happen
+	.WORD	20$			; Software one-shot, shouldn't happen
+	.WORD	INICTR			; Initializing Controller, init dispatch
+	.WORD	EXIT			; Reset State, just wait 'til it's done
+STTBLS = <.-STEDSP>			; table size
+
+.ASSUME	E$RUN	EQ	0		;make sure the table is lined up right
+.ASSUME	E$DIS	EQ	2	
+.ASSUME	E$ONE	EQ	4	
+.ASSUME	E$INI	EQ	6
+.ASSUME	E$RST	EQ	10
+
+EXIT:	RETURN				; ignore CON$ requests while in RESET	
+
+	.DSABL	LSB
+
+GLOBAL	<RTI3,XECORE,XEDAP5>
+
+
+.SBTTL	INICTR -- initializing controller dispatch table
+
+;+
+; INICTR --
+;	This is a table driven init routine.
+;	Each time a step is successfully completed, we re-enter this process,
+;	increment the step, and perform the next operation.
+;
+; On Entrance:
+;	R3 -> CDB at link word (0 offset)
+;-
+
+INICTR:	MOV	E.STS(R3),R0		; Get the status word
+	BIC	#^C<C$INST>,R0		; Clear all but the init step bits
+	CMP	R0,#LAST		; last step completing?
+	BLT	10$			; nope, carry on
+	CLR	E.STAT(R3)		; Yes, put controller in running state
+.ASSUME	E$RUN	EQ 0
+	MOV	E.CNCQ(R3),R0		; get the MOP buffer we use as a UDBB
+	MOV	(R0),E.CNCQ(R3)		; (careful CNCQ may be in use on REINIT)
+	BEQ	3$			; if nothing, don't come back in
+	CLR	(R0)			; something, so don't return whole list.
+	CALL	QCDBCN			; Q continuation in case pending reqs
+3$:	CALL	DSCRCV			; back receive Free list (PR5)
+	BIT	#C$QFIP,E.STS(R3)	; is this a user attempt?
+	BNE	5$			; yes, so (CFG) QFIP to complete him.
+	TST	XECNTL+XECORE		; Check control word for first pass
+	BMI	7$			; not first time, just exit
+	DEC	XECNTL+XECORE		; count another controller completion
+	BNE	7$			; not all done yet
+	COM	XECNTL+XECORE		; set sign bit in XECNTL for completion
+5$:	L3QSET	QFIP			; Queue FIP to get us out
+7$:	BIC	#^C<C$PHYS!C$DCNT>,E.STS(R3) ; Clear Status
+					; remember DECnet and physical address.
+			; following section activates frozen transmits if 
+			; required.  PR3 in running state may have seen
+			; Receives, which would have transmits going already.
+	SPLC	5			;; got to get transmits reactivated
+	TST	E.XRB(R3)		;; any xmit out already?	;018
+	BNE	9$			;; Yes, so just LDRCRG and out	;018
+	CALL	LDXMRG			;; load a transmit (get things started)
+	BCS	9$			;; nothing to load I guess
+	BIS	#C$PDMD,E.STS(R3)	;; loaded, so set polling demand
+9$:	CALL	POLL			;; issue a polling demand and LDRCRG
+	SPLC	3			; back to PR3
+	BR	30$			; restore mapping and get out.  DONE.
+
+10$:	TSTB	E.STS(R3)		; middle of a multi-step command?
+	BMI	20$			; Yes, so finish it before we continue
+.ASSUME	C$STEP EQ 200
+	INC	R0			; No, so set R0 to next step indicated,
+	BIC	#C$INST,E.STS(R3)	; clear out current step bits
+	BIS	R0,E.STS(R3)		; move in this step for next time thru.
+20$:	ASL	R0			; (times 2) get a word to dispatch to
+	MOV	E.CNCQ(R3),R5		; get CCB pointer for some stages.
+	CALL	@INIDSP(R0)		; dispatch to init function
+30$:	MAP	POP,APR=6,DATA		; restore mapping on entrance
+	RETURN				; and return through RTI3.
+
+INIDSP:	.WORD	0		; never use offset zero in this scheme.
+;	.WORD	SLFTST		; After RESET, SELFTEST makes it READY
+;	   Skip the self test.  It takes too long
+	.WORD	GETPCB		; Give PCBB address to controller
+;	.WORD	SYSID		; set up SYS ID PARAMS			;011
+;		Use default SYSID parameters				;011
+	.WORD	DOMODE		; set up controller MODE
+	.WORD	CHGPHY		; CHANGE PHYSICAL address	
+	.WORD	ENBINI		; do MULTICAST set-up for controller
+	.WORD	WRTRNG		; WRITE RING information to the controller
+LAST = <<. - INIDSP>/2>		; START is the LAST command
+	.WORD	START		; START the controller (READY to RUNNING state)
+
+
+.SBTTL	RUNING -- Running State Dispatch handling
+
+;+
+; RUNING --
+;	This is the normal handler for the port commands that
+;	we expect to see in a normal, healthy running system.
+;
+;	It is driven off of the function code in the first CCB
+;	linked into E.CNCB -- the Continuation CCB Q for Port 
+;	commands. 
+;
+;	It also considers the condition of E.STS, specifically
+;	C$PCIP,C$PCDN, and C$STEP.
+;
+;	For a CLOSE cleanup of multicasts, in the event of a buffer
+;	stall, it is possible to enter this routine with NO CCBs
+;	on E.CNCQ.  If it happens, we just exit to RTI3 and assume
+;	the CLOSE will try to acquire a CCB again in a little while.
+;
+; On Entrance --
+;	R3 -> CDB at link word
+;-
+
+	.ENABL	LSB
+
+RUNING:	MOV	E.CNCQ(R3),R5		; get the first Port Command CCB
+	BEQ	20$			; none.  probably a close [stalled]
+	MOVB	CC.FC(R5),R0		; get the function code
+	CMP	R0,#DEPTBL		; lower than lowest (negative offsets)?
+	BLT	30$			; yeah. UGH. CRASH!
+	CMP	R0,#INDTBL		; past the end of the table?
+	BGT	30$			; yeah. UGH. CRASH!
+	CALL	@CONTBL(R0)		; It fits, dispatch into the handler.
+10$:	MAP	POP,APR=6,DATA		; restore mapping on entry, and
+	RETURN				; exit through RTI3.
+
+20$:	BIC	#C$PCIP,E.STS(R3)	; no command.
+	BR	10$			; so exit.
+
+30$:	CRASH				; Bad, bad Function. Down System. BAD!
+
+;+
+; We got us some conventions at this point:
+;	R0 = controller number * 2
+;	R1 available
+;	R2 -> CSR
+;	R3 -> CDB
+;	R4 -> PDB
+;	R5 -> CCB
+;
+; We don't always follow these, but we try to, both initializing,
+; and during normal command processing.
+;-
+	
+; start with dev dependent special functions (negative offsets)
+NEGTBL:			; Above the top.  Invalid function
+	.WORD	SETMOD	;-14 -NI$WMD- write the mode in the controller
+	.WORD	LINCTR	;-12 -NI$RCT- Request Counters
+	.WORD	CHGPHY	;-10 -NI$PHY- change physical address
+	.WORD	ENBMUL	;-6  -NI$EML- enable multicast addresses
+	.WORD	30$	;-4  -NI$XFL- xfer line counters -- not CON$ action
+	.WORD	LINCTR	;-2  -NI$LCT- update cdb line counters
+DEPTBL = <NEGTBL - .>	; offset to end of dev dependant functions
+CONTBL:	.WORD	30$	; 0  -------- reserved, shouldn't happen.  crash
+; service style functions -- both decnet and user level
+	; If any of these get in here, we CRASH!
+	; 2  -FC$RD - READ request. NEVER at CON$
+	; 4  -FC$WRT- WRITE request. NEVER at CON$
+	; 6  -FC$XMT- TRANSMIT request. NEVER at CON$
+	; 10 -FC$BUF- SUPPLY RECEIVE BUFFER (SHOULDN'T HAPPEN)
+	; 12 -FC$STA- GET LINE/CIRC status. NEVER at CON$
+; dev independent special functions
+	; 14 -FC$CNT- update ddb circuit counters. NEVER at CON$
+	; 16 -FC$XFR- xfer cir counters to buffer NEVER at CON$
+	; 20 -FC$RCV- set receive buffer quota (shouldn'thappen)
+INDTBL = <. - CONTBL>	; Offset to end of Dev independant functions
+
+	.DSABL	LSB
+
+
+.SBTTL	.. POLL   -- Issue a Polling Demand to the controller
+
+;+
+; POLL --
+;     This routine can be called at PR5 or PR3.
+;     Polling Demands can be issued from SER$, UMR$, CON$, or INT$,
+;     according to the state of C$PCIP -- the Port Command In Progress
+;     bit in the E.STS word of the CDB.
+;
+; It is called whenever it may be required, but may not be legal when called.
+;
+; We Load Receive Rings (LDRCRG) at the end of this routine because it is
+; convenient.  Already at PR5, and called in all of the places mentioned
+; above.  Should keep the receive rings pretty well stocked.
+;
+; On Entrance --
+;     R3 -> CDB
+;     E.STS(R3) has C$PDMD set.  We clear it immediately.  INT$ discards
+;	this on completion and everybody is happy as lice.
+;
+; On Exit --
+;     R3 -> CDB
+;     R0,R2,R3 are stomped.
+;     Request may or may not have been issued.
+;-
+
+POLL:	PUSH	@#PS			; save current priority
+	SPLC	5			;; pump it up, this is complicated
+	ADD	#E.STS,R3		;; offset to E.STS in CDB
+	TST	E.STAT-E.STS(R3)	;; are we in RUNNING state?
+	BNE	10$			;; no, don't do PDMD 'til we're running
+.ASSUME E$RUN	EQ 0			;;   This is why we can do this.
+	TST	(R3)			;; is PCIP set? Something out already?
+.ASSUME	C$PCIP  EQ 100000
+	BMI	10$			;; yeah, come back later.
+	BIT	#C$PDMD,(R3) 		;; do we need to do a Polling Demand?
+	BEQ	10$			;; no, so go away.
+	BIC	#C$PDMD,(R3)		;; yes, so do it, rem it is starting
+	BIS	#C$PCIP!C$DMO,(R3)	;; Polling Demand/command outstanding 
+	MOVB	E.UNT-E.STS(R3),R0	;; get controller number * 2
+	MOV	CSR.XE(R0),R2		;; and offset to PCSR0
+	MOV	#C0$IE!POL.XE,(R2)	;; write in Polling Demand (IE remains)
+	MOV	#5.,E.PTMO-E.STS(R3)	;; give it a while.		;003
+;	MOV	#8.,E.XTMO-E.STS(R3)	;; xmit timeout set by LDXMRG	;003
+	MOV	#-1,TIM.XE(R0)		;; make sure we're once a seconding.
+10$:	SUB	#E.STS,R3		;; correct CDB pointer
+	CALL	LDRCRG			;; load Receive rings.
+	POP	@#PS			; restore today's priority.
+	RETURN				; RTI3, INTSAV, UMR$, whereever....
+
+GLOBAL	<CSR.XE,TIM.XE>
+
+
+.SBTTL	.. SLFTST -- Initiate controller Self-test
+
+;+
+; Self test
+;	Only done during INIT state (E$INI)
+;	It is always done immediately after a RESET, so I must set IE.
+;
+; On entrance, 
+;   R3 -> CDB
+;-
+
+SLFTST:	MOVB	E.UNT(R3),R0		; get the controller number times 2
+	MOV	CSR.XE(R0),R2		; get the CSR
+	SPLC	5			;; bop to 5 -- Two CSR accesses.
+	MOV	#C0$IE,(R2)		;; set the interrupt enable
+	PUSH	R2			;; save R2 to flap.
+	MOV	#12.,R2			;; set up to flap
+10$:	SOB	R2,10$			;; flap for 125 micros or so
+	POP	R2			;; restore R2
+	BIT	#C0$IE,(R2)		;; is interrupt enable set?
+	BEQ	20$			;; NO, WTFO?
+	TST	R0			;; Are we dealing with unit zero?
+	BNE	20$			;; no.  Time to crash.
+	MOV	#C0$IE!SLF.XE,(R2)	;; start the self test
+	SPLC	3			; happy now jes' loafin' along.
+	MOV	#15.,E.PTMO(R3)		; give Self test 10 full seconds
+	MOV	#-1,TIM.XE(R0)		; make sure we're once a seconding.
+	RETURN
+
+20$:	CRASH	; looks like we just found our initialization bug.
+
+GLOBAL	<CSR.XE,TIM.XE>
+
+
+.SBTTL	.. START -- Issue Start command.
+
+;+
+; START --
+;	Only done during INIT state (E$INI)
+;	Transition from READY to RUNNING.  We Are In Business.
+;
+; On entrance, 
+;   R3 -> CDB
+;-
+
+START:	MOVB	E.UNT(R3),R0		; get the controller number times 2
+	MOV	CSR.XE(R0),R2		; get the CSR
+	MOV	#C0$IE!STR.XE,(R2)	; start controller (and away we go)
+	MOV	#7.,E.PTMO(R3)		; timeout port command in five seconds
+	MOV	#-1,TIM.XE(R0)		; make sure we're once a seconding.
+	RETURN
+
+
+.SBTTL	.. GETPCB	-- Get PCBB address to the controller
+
+;+
+; GETPCB
+;   Done only during INIT or RE-INIT of a controller.
+;
+;   R3 -> CDB
+;-
+
+GETPCB:	MOVB	E.UNT(R3),R0		; get the controller number times 2
+	MOV	CSR.XE(R0),R2		; get the CSR
+	MOV	E.PCBB(R3),PCSR2(R2)	; load the low order PCBB address
+	CLR	PCSR3(R2)		; and there isn't any high order
+	MOV	#C0$IE!GPC.XE,(R2)	; load Get PCBB command
+	MOV	#7.,E.PTMO(R3)		; timeout port command in two seconds
+	MOV	#-1,TIM.XE(R0)		; make sure we're once a seconding.
+	RETURN
+
+GLOBAL	<CSR.XE,TIM.XE>
+
+
+.SBTTL	.. SYSID  -- Set up for Controller Sys ID message
+
+;+
+; SYSID --
+;	Called during Controller initialization only.
+;
+;	Uses MOP buffer (in CC.SEC) to set up SYSID parameters
+;	and issue them to the controller
+;
+; On Entrance --
+;	R3 -> CDB pointer
+;	R5 -> CCB/Buffer pair
+;-
+
+SYSID:	MOV	#WPR$XE,BF.END+CC.SEC(R5) ; set up Write parameters command
+	CALL	UDBMAP			; by calling UDBMAP
+			; R5 -> CCB
+			; R3 -> CDB
+			; R2 -> PCBB+6
+			; R1 -> UDBB (mapped)
+	MOVB	#BIT0!BIT6,ID.FV1(R1)	; set Function value 1 to reflect
+					; LOOP handling, and Counter handling
+; I should definitely fill in software ID
+	MOV	#100.,(R2) 		; work on a full SYSID field   (PCBB+6)
+	MAP	XEDPR6+XECORE,APR=6,DATA ; restore mapping of Enet region
+	MOV	#7.,R2			; say five second timeout on this
+	CALLR	PCBCMD			; issue a Get PCBB Command
+;	RETURN				; PCBCMD does the return.
+
+
+.SBTTL	.. CHGPHY -- Set new Physical address
+
+;+
+; CHGPHY --
+;	Set a new physical address if there is one in the CDB.
+;	Otherwise, just exit, we are running at the Default Hardware
+;	address.
+;
+; 	R3 -> CDB
+;-
+
+CHGPHY:	BIT	#C$PHYS,E.STS(R3)	; do we have a new physical address?
+	BEQ	20$			; nope.
+	MOV	E.PCBB(R3),R2		; load up the PCBB
+	MOV	#WPA$XE,(R2)+		; load command (Write Physical address)
+	MOV	R3,R0			; setup R0 to point to...
+	ADD	#E.PHYS,R0		; ... the physical address
+	MOV	(R0)+,(R2)+		; copy low order word		(PCBB+2)
+	MOV	(R0)+,(R2)+		; ...and next word		(PCBB+4)
+	MOV	(R0)+,(R2)+		; ...and last word		(PCBB+6)
+	MOV	#7.,R2			; set a timeout value of five seconds
+	CALLR	PCBCMD			; and go issue get command
+;	RETURN
+
+20$:	BIC	#C$PCIP,E.STS(R3)	; no new physical address, forget it
+	CMP	#E$INI,E.STAT(R3)	; are we initializing?
+	BNE	30$			; no, never mind.
+	CALL	QCDBCN			; yes, so keep process going with a reQ
+30$:	RETURN				; go away.
+
+GLOBAL	<CSR.XE,TIM.XE>
+
+
+.SBTTL	.. DOMODE -- write Mode information to the controller
+
+;+
+; DOMODE -- this is for init only.  Sets to clean state.
+;
+;  R3 -> CDB
+; 
+;-
+
+DOMODE:	PUSH	R1			; save R1
+	CLR	R1			; initially no multi/no prom
+	CALL	SETMOD			; set the mode
+	POP	R1			; restore R1
+	RETURN
+
+.SBTTL	.. SETMOD - set the mode.
+
+;+
+; SETMOD -- 
+;  R3 -> CDB
+;  R1 =  Mode bits wanted.
+;	 Within reason.
+;	 We always zero reserved fields and DRDC!DMNT
+;	 We always set TPAD, ECT, and HDPX
+;
+;  This can be used to set and clear Promiscuous Receive
+;    and Multicast Filtering.  Currently no way to set Promiscuous 
+;    Receive in controller, but it is pretty easy.
+;
+;  This is called during Enable Multicast Sequence, and during 
+;    Controller INIT.  May be used for LOOP if implemented, or
+;    called from OPEN if we implement a Promiscuous Portal.
+;
+;  We may need to allow more flexibility here.  Particulairly:
+;    Some forms of loop testing may require full duplex xmits.
+;-
+
+SETMOD: MOV	E.PCBB(R3),R2	; get PCBB pointer
+	MOV	#WMD$XE,(R2)+	; set Write Mode	 (PCBB+0)
+	CLR	(R2)		; clear all mode bits	 (PCBB+2)
+	MOV	#TPAD!HDPX,(R2)	; always want: Padding, Halfduplex op	;011
+				; ... Don't check heartbeat [DELUA]	;011
+	BIC	#^C<PROM!ENAL>,R1 ; Promiscuous and multicast bits only
+	BIS	R1,(R2)		; set any wanted.
+	MOV	#7.,R2		; timeout port command in five seconds
+	CALLR	PCBCMD		; tell controller to pick up command
+;	RETURN
+
+GLOBAL	<CSR.XE,TIM.XE>
+
+
+.SBTTL	.. LINCTR-- Read and Clear controller Line Counters
+
+;+
+; LINCTR--
+;	Done in response to a user Get Line Counters .SPEC
+;	  or in response to a REQUEST COUNTERS MOP function
+;	  coming in over the wire.
+;	This is a multi-step operation, requiring counter acquisition,
+;	  and then counter manipulation; in the case of REQUEST COUNTERS,
+;	  it also builds and queues the COUNTERS packet and puts it back
+;	  out on the wire in response to the request.
+;
+; On Entrance --
+;	R3 -> CDB
+;	R5 -> CCB
+;-
+
+LINCTR:	TSTB	E.STS(R3)		; is this a return performance?
+	BPL	10$			; no.
+.ASSUME	C$STEP  EQ 200
+	BIC	#C$PCIP!C$GCNT!C$STEP,E.STS(R3) 
+			; REM: C$PCIP is lock on PCBB.  Don't need PCBB anymore.
+			; C$GCNT  -- counter collection done
+			; C$STEP  -- all steps completed
+	CMPB	#NI$LCT,CC.FC(R5)	; yes, Node Request?
+	BEQ	30$			; yes, so we're about done
+	JMP	REQCNT			; no, ethernet request, complete it
+
+10$:	BUFFER	GETLRG,<32.*2+BUFHDR>,64.,MONPOL ; get buffer for counters
+					; (32. words of counters)
+					; MUST alloc from MONPOL to defray
+					; incredible mapping overhead
+	BCC	20$			; got one
+	JMP	RETRY			; none available, try again in a bit
+
+20$:	CALL	BUFINT			; initialize CCB/buffer
+	BIS	#C$STEP,E.STS(R3)	; remember that this is first step
+	MOV	#RCT$XE,BF.END+CC.SEC(R5) ; set up Write parameters command
+	CALL	UDBMAP			; by calling UDBMAP
+			; R5 -> CCB
+			; R3 -> CDB
+			; R2 -> PCBB+6
+			; R1 -> UDBB (mapped)
+	MOV	#<32.*2>,(R2)		; we want all the counters     (PCBB+6)
+			; 32. decimal words, shifted left one place
+			; making it an EVEN byte count.  You read the stupid
+			; manual.
+	MOV	#7.,R2			; timeout in five seconds
+	MAP	XEDPR6+XECORE,APR=6,DATA ; remap Enet region
+	CALLR	PCBCMD			; issue the command
+;	RETURN				; return from PCBCMD
+	
+30$:	CALL	HNDCNT			; update the counters
+	CALL	PSTSPC			; Post Completion, & Cleanup
+	CALLR	POLL			; issue polling request if one..
+;	RETURN				; ..is pending. (return from POLL)
+
+;+
+; REQCNT -- 
+;	This little section of code handles setting up and issuing
+;	the response to an Ethernet Request Counters request coming
+;	in off of the net.
+;
+;	We always use the MOP RCV buffer CCB to queue the steps required to
+;	get ready for this.  The CCB is special:
+;		- CC.SEC block describes UDBB acquired from MONPOL to get
+;		  the UNA/LUA counters
+;		- CC.BUF block describes the EXTPOL COMM buffer which we
+;		  will received the REQ Counters request, and which we will
+;		  be using to transmit the response to this request.
+;
+;	Since the CDB and the Comm buffer which will be used to transmit our
+;	response are both mapped through APR6, we have to do some finagling.
+;	On top of that, we've got so many counters, that trying to stack and
+;	unstack the whole mess leads easily to stack underflows.  So, here's
+;	how we handle it:
+;
+;	1) call HNDCNT -- this uses the MONPOL UDBB containing controller
+;	   counters to update the CDB (mapped through Enet region APR6).
+;	2) We reuse the MONPOL UDBB to set up our counters in the REQ counters
+;	   order.
+;	3) We map the Comm buff that the response is going out in (same one
+;	   as it was received in), set up the header, and copy the MONPOL
+;	   UDBB [containing properly formatted counters] into place.
+;	4) Then we queue the Buffer for transmit, and return the MONPOL
+;	   buffer to the buffer pool.
+;
+;	Remember: There is only one Comm buffer associated with a REQCNT
+;	   by the time it clears interrupt processing, so this whole mess
+;	   works very simply.  If the buffersize is ever made less than
+;	   120 bytes or so, we will be in SERIOUS trouble with this.  I
+;	   don't see RSTS doing this.					;004
+;
+; Mapping on entry and exit is the Ethernet region.
+;-
+
+REQCNT:	PUSH	E.DTZR+2(R3)		; save RSTS time last zeroed
+	PUSH	E.DTZR(R3)		; .. and the RSTS date last zeroed
+	CALL	HNDCNT			; update the counters in the CDB
+	BIC	#C$STEP!C$GCNT,E.STS(R3) ; counters gotten, no more steps
+	MOV	BF.VIR+CC.SEC(R5),R1	; make R1 -> UDBB used to Get Counters 
+	ADD	BF.OFF(R1),R1		; .. offset into start of UDBB
+	MOV	R1,R4			; get a copy for CVTTIM		;016
+				; Set up the Counter Block in PMM
+				; ..because we need Enet region mapped now
+	POP	(R1)+			; get date last zeroed,		;016
+	POP	(R1)			; and time (no increment R1)	;016
+	CALLM	CVTTIM,GENAP5		; convert to seconds since last zeroed.
+				; convert it all, but overwrite 2nd word ;016
+	CALL	20$,R5,E.BYTR		; copy 4 words. from E.BYTR into (R1)+
+.ASSUME	E.BYTS	EQ <E.BYTR+4>		; .. which includes E.BYTS
+	CALL	20$,R5,E.BLKR		; four words from E.BLKR and E.BLKS
+.ASSUME	E.BLKS	EQ <E.BLKR+4>		; .. which includes E.BLKR
+	MOV	E.MBYR(R3),(R1)+	; first word of multi bytes Rcvd
+	MOV	E.MBYR+2(R3),(R1)+	; .. second word.
+	MOV	E.MBLR(R3),(R1)+	; first word of multi packets Rcvd
+	MOV	E.MBLR+2(R3),(R1)+	; .. second word
+	CALL	20$,R5,E.DEF		; four words E.DEF, E.1COL into (R1)+
+.ASSUME	E.1COL	EQ <E.DEF+4>
+	MOV	E.MCOL(R3),(R1)+	; first word of Multicollisions counter
+	MOV	E.MCOL+2(R3),(R1)+	; .. second word
+	MOV	E.RCVF(R3),(R1)+	; Receive Failure Counter
+	MOV	E.RFLG(R3),(R1)+	; Receive Failure Flag
+	CALL	20$,R5,E.UDST	; four words E.UDST to E.USAV into (R1)+
+.ASSUME	E.DTOV	EQ <E.UDST+2>		; Quack.
+.ASSUME	E.SYAV	EQ <E.DTOV+2>		;       Quack, Quack.
+.ASSUME	E.USAV	EQ <E.SYAV+2>		; 				Quack.
+	MAP	BF.MMU+CC.BUF(R5),APR=6,DATA ; Map the MOP COM buffer
+	MOV	BF.VIR+CC.BUF(R5),R4	; .. with R4 -> received packet (REQCNT)
+	MOV	#RC.RCP+2+66,BF.CNT(R4)	; tell LDXMRG how big the xmit is  ;004
+				; MOP header up to RC.RCP		   ;004
+				; 2 Bytes of Receipt # to counter start    ;004
+				; 66 bytes of Counters			   ;004
+	ADD	BF.OFF(R4),R4		; then offset past buffer header
+				; next, move source to dest (return to sender)
+	PUSH	R4			; save pointer to top
+	MOV	PK.SRC(R4),(R4)+	; but offset by two each word
+.ASSUME	PK.DST	EQ 0
+	MOV	PK.SRC(R4),(R4)+	; mov SRC+2 to DST+2
+	MOV	PK.SRC(R4),(R4)		; mov SRC+4 to DST+4
+	POP	R4			; restore pointer to top of buffer
+					; set up REQ COUNTERS answer
+	MOVB	#RQRSP,RC.FUN(R4)	; load it with a R C response (11.);016
+	MOV	#66+<RC.RCP-PK.LEN>,PK.LEN(R4)	; set up padded length	;004
+				; .. including Func/resrvd/receipt word	;004
+				; .. for valid length of 71(8)		;016
+	; Protocol Type,  PK.PRT is same on exit as on entry.  Don't change it.
+	; Receipt number, RC.RCP also stays the same.
+	ADD	#<RC.RCP+2>,R4		; R4 -> where to put counters
+	MOV	BF.VIR+CC.SEC(R5),R1	; set up R1 to be...
+	ADD	BF.OFF(R1),R1		; .. R1 -> where to get counters	
+	MOV	#<66>,R0		; number of bytes to copy from UDBB;016
+10$:	MOVB	(R1)+,(R4)+		; Now, move the counters into EXTPOL;016
+	SOB	R0,10$			; Keep going 'til we get better
+	MOV	BF.ADR+CC.SEC(R5),R4	; get pointer to MONPOL UDBB
+	BUFFER	RETURN			; .. and return it to the pool
+	MAP	XEDPR6+XECORE,APR=6,DATA ; Now, map the E-net region
+	MOV	(R5),E.CNCQ(R3)		; pull CCB off of CNCQ
+	CLR	(R5)			; all the way off.
+	BISB	#DF.MOP,CC.DFL(R5)	; and remark that it is a MOP buffer
+	MOV	R3,R0			; SYWRIT expects: R0 -> CDB, R5 -> CCB
+	CALLR	MOPWRT			; call it to send out the request
+;	RETURN				; .. just like we send out SYSJOB XMITs
+					; .. and return from there.
+;+
+; Bogus little four word move routine because it is useful in getting
+; the counters into the MONPOL buffer.  We move them back in more of a slug.
+;
+;	CALL	CNTMOV,R5,<offset>
+;		<offset>(R3) is where the first of four words to move is.
+;		R1 is where they are moved  to, and R1 is punched up past
+;		  the last word moved so the buffer is okay.
+;	R0 is munged.
+;-
+
+20$:	MOV	#4,R0		; set up four word counter
+	PUSH	R3
+	ADD	(R5)+,R3	; set up startiing pointer
+30$:	MOV	(R3)+,(R1)+	; move
+	SOB	R0,30$		; 'til four words gone
+	POP	R3		; restore original R3
+	RETURN	R5		; return through R5
+
+GLOBAL	<XECORE>
+	
+.SBTTL	.. HNDCNT -- update CDB with line counters 
+
+;+
+; HNDCNT --
+;	Update CDB line counters with info passed in UDBB from
+;	'READ AND CLEAR' counters request.
+;
+;	Works with UDBB allocated from MONPOL
+;
+; On Entrance --
+;	Mapping to Ethernet Region
+;	R3 -> CDB
+;	R5 -> CCB
+; On Exit --
+;	R3 -> CDB
+;	R5 -> CCB
+;	R1 is modified.
+;	Mapping is not changed
+;-
+
+HNDCNT:	MOV	BF.VIR+CC.SEC(R5),R1	; map MONPOL UDBB buffer with R1
+	ADD	BF.OFF(R1),R1		; and offset to UDBB proper
+	CMP	(R1)+,(R1)+		; Skip past: 
+					; .. 0(UDBB) (length) 
+					; .. 2(UDBB) (seconds since zeroed)
+	CALL	ADD2W,R5,E.BLKR		; 4(UDBB) 2 word Packets Rcvd
+					; R1 -> new packets rcvd
+					; return with (R1)+,(R1)+
+	CALL	ADD2W,R5,E.MBLR		; 10(UDBB) Multicast Packets Received
+	BIS	(R1)+,E.RFLG(R3)	; 14(UDBB) Receive Error Flag
+	ADD	(R1)+,E.RCVF(R3)	; 16(UDBB) Receive Error Count
+	BCC	10$			; Carry clear, all is okay.
+	MOV	#-1,E.RCVF(R3)		; overflow, set to highest [unsigned]
+10$:	CALL	ADD2W,R5,E.BYTR		; 20(UDBB) Bytes Received
+	CALL	ADD2W,R5,E.MBYR		; 24(UDBB) Multicast Bytes Received
+	TST	(R1)+			; 30(UDBB) UDBB internal buff error
+	ADD	(R1)+,E.SYAV(R3)	; 32(UDBB) System buffers unavailable
+	BCC	20$			; all is well
+	MOV	#-1,E.SYAV(R3)		; overflow, set to highest [unsigned]
+20$:	CALL	ADD2W,R5,E.BLKS		; 34(UDBB) Packets Sent
+	CMP	(R1)+,(R1)+		; 40(UDBB) Multicasts Sent [who cares?]
+	CALL	ADD2W,R5,E.MCOL		; 44(UDBB) Multicollision Transmits
+	CALL	ADD2W,R5,E.1COL		; 50(UDBB) 2 attempt Transmits
+	CALL	ADD2W,R5,E.DEF		; 54(UDBB) Deferred Transmits
+	CALL	ADD2W,R5,E.BYTS		; 60(UDBB) Bytes Transmitted
+	CMP	(R1)+,(R1)+		; 64(UDBB) Multi bytes xmit [who cares?]
+	BIS	(R1)+,E.XFLG(R3)	; 70(UDBB) Xmit failure reasons
+	ADD	(R1)+,E.XMTF(R3)	; 72(UDBB) Xmit Failures
+	BCC	30$			; count okay
+	MOV	#-1,E.XMTF(R3)		; overflow, set to highest [unsigned]
+30$:	ADD	(R1)+,E.CDCF(R3)	; 74(UDBB) Collision Detect Failure
+	BCC	40$			; count okay
+	MOV	#-1,E.CDCF(R3)		; overflow, set to highest [unsigned]
+40$:	RETURN				; done.  We is rockin'.
+
+.SBTTL	.. ADD2W -- Add long word and long word
+
+;+
+; ADD2W --
+;	
+;	R3 -> CDB (mapped)
+;	R1 -> long word to add
+;
+;	CALL	ADD2W,R5,<offset>
+;
+;	R3 -> CDB
+;	R1 =  R1 + 4
+;	<offset>(R3) = <offset>(R3) + (R1) [longwords both]
+;-
+
+ADD2W:	PUSH	R3		; save CDB counter
+	ADD	(R5)+,R3	; point at LSW of longword
+	ADD	(R1)+,(R3)+	; add LSWs together
+	ADC	(R3)		; Carry into MSW
+	ADD	(R1)+,(R3)	; add MSWs together
+	BCC	10$		; sum okay
+	MOV	#-1,(R3)	; overflow get highest [unsigned] number
+	MOV	#-1,-(R3)	; into the whole longword
+10$:	POP	R3		; restore CDB
+	RETURN	R5		; return through R5
+
+
+.SBTTL	.. ENBMUL -- Set up controller's Multicast addresses
+
+;+
+; ENBMUL --
+;   On entrance, we expect to be mapping the Enet Region.
+;   Enabling Multicasts proceeds in this order:
+;	1) Allocate Maximum Sized UDBB from EXTPOL
+;	   (if I can't do it, just WAIT2T and come back)
+;	2) Call MULCST to set up the multicast UDBB
+;	3) SETMOD -- 
+;	     Carry Set means ENABLE ALL MULTICASTS
+;	     Carry Clear means Filter MULTICASTS at controller
+;	4) If doing Multicasts filtering, then
+;	   issue the Enable Multicasts call.
+;	5) Return the UDBB on completion.
+;-
+
+	.ENABL	LSB
+
+ENBMUL:	TSTB	E.STS(R3)		; time for second step?
+	BMI	40$			; Yeah, so issue the real McCoy
+.ASSUME	C$STEP	EQ 200
+	BUFFER	GETLRG,<10*6+BUFHDR>,64.,EXTPOL ; first time, user, get a buffer
+					; up to 10 multicasts, 6 bytes each
+	BCC	20$			; got one, go ahead
+	JMP	RETRY			; nothing.  Try again in a minute
+
+20$:	CALL	BUFINT			; set-up CCB in R5/buffer header
+	.BR	ENBINI			; fall into Enable init multicasts
+
+;+
+; INIT enters here --
+;	R5 -> CCB with UDBB in CC.BUF block
+;	   CC.NOB is clear indicating no PDB available
+;	R3 -> CDB
+;-
+
+ENBINI:	TSTB	E.STS(R3)		; second stage of setup?
+	BMI	40$			; yeah, so go to it.
+.ASSUME	C$STEP	EQ 200
+	CALL	MULCST			; go set up the buffer.	
+	BCC	30$			; go set mode, then set multis
+	MOV	#ENAL,R1		; enable all multicast reception
+	CALL	SETMOD			; issue Write Mode command soonest
+	RETURN				; exit through RTI3, no second step
+
+	
+30$:	BIS	#C$STEP,E.STS(R3)	; remember that we're multistepping
+	CLR	R1			; and doing multicast filtering
+	CALL	SETMOD			; go do Write Mode
+	RETURN				; exit through RTI3
+
+40$:	BIC	#C$PCDN!C$STEP,E.STS(R3) ; clear done bit, clear step bit
+	MOV	#WML$XE,BF.END+CC.SEC(R5) ; set up Write parameters command
+	CALL	UDBMAP			; by calling UDBMAP
+			; R5 -> CCB
+			; R3 -> CDB
+			; R2 -> PCBB+6
+			; R1 -> UDBB (mapped)
+	MOVB	CC.WAK(R5),-(R2) 	; load number of addresses in PCBB+5
+	MOV	#7.,R2			; timeout in five seconds
+	MAP	XEDPR6+XECORE,APR=6,DATA ; remap Enet region
+	CALLR	PCBCMD			; issue the command
+;	RETURN				; return from PCBCMD
+
+	.DSABL	LSB	
+
+GLOBAL	<CSR.XE,TIM.XE>
+
+
+.SBTTL	.. WRTRNG -- Write Ring Parameters to controller
+
+;+
+; WRTRNG --
+;	Called only during controller initialization.
+;
+; R3 -> CDB
+; R5 -> CCB
+;	UDBB all set and waiting on CC.SEC
+;-
+
+WRTRNG:	PUSH	E.TOPR(R3)		; Save RCV ring base for remapping
+	PUSH	E.TOPX(R3)		; Save XMIT ring base for remapping
+	MOVB	E.UNT(R3),R0		; get controller number in R0
+	MOV	#WRF$XE,BF.END+CC.SEC(R5) ; set up Write ring parameters
+	CALL	UDBMAP			; by calling UDBMAP
+			; R5 -> CCB
+			; R3 -> CDB
+			; R2 -> PCBB+6
+			; R1 -> UDBB (mapped)
+; set up UDBB
+	POP	(R1)		; pop virtual XMIT ring base into UDBB
+	CALL	10$			; get it converted to UNIBUS TDRB
+					; [in two words]
+	MOVB	#<UN$SIZ/2>,(R1)+	; word length of Xmit Desc entry
+	CLR	(R1)			; clear next word for a byte move
+	MOVB	XERCXM+1+XECORE(R0),(R1) ; and move in number of rings
+					; (XMIT is the high byte)
+	TST	(R1)+			; advance into next word of UDBB
+	POP	(R1)		; now pop virtual RCV ring base
+	CALL	10$			; conver to LSB/MSB UNIBUS RDRB
+	MOVB	#<UN$SIZ/2>,(R1)+	; word length of RCV Desc entry
+	CLR	(R1)			; clear next word for a byte move
+	MOVB	XERCXM+XECORE(R0),(R1)	; move in number of RCV ring entries
+	MAP	XEDPR6+XECORE,APR=6,DATA ; remap Enet region
+	MOV	#7.,R2			; timeout in five seconds
+	CALLR	PCBCMD			; issue the command
+;	RETURN				; return from PCBCMD
+
+;+
+; 10$ is a conversion routine to change the virtual address of the 
+; descriptor rings into a UNIBUS address using the jammed UNIBUS mapping
+; register in XECORE.  It takes the results and locates LSB (R1) where
+; the virtual address was, and MSB in low order bits of 3(R1) while updating
+; R5 to point past the three bytes in use.
+;-
+
+10$:	PUSH	R3			; gotta preserve CDB pointer
+	BIC	#140000,(R1)		; make it offset into MMU
+	MOV	XEUBUS+XECORE,R3	; get Enet UNIBUS mapping....
+	CLR	R2			; get ready to expand
+	ASHC	#6,R2			; * 100(8) for physical start of region
+	ADD	R3,(R1)+		; make (UDBB) LSB of XMIT address
+	MOVB	R2,(R1)+		; ...fill in MSBits next byte
+	POP	R3			; and restore CDB pointer
+	RETURN
+
+GLOBAL	<XECORE>
+
+
+.SBTTL	.. PCBCMD -- Issue Get Command from PCBB to controller
+
+;+
+; PCBCMD --
+;
+;	R3 -> CDB
+;	R2 =  timeout value for command
+;
+;	CALL	PCBCMD
+;
+;	nothing is changed, 'cept that a GET CMD command is issued
+;	for the command pending in the PCBB.
+;-
+
+PCBCMD:	MOVB	E.UNT(R3),R0	; get controller number * 2
+	MOV	R2,E.PTMO(R3)	; save the timeout value
+	MOV	CSR.XE(R0),R2	; get the CSR address
+	MOV	#-1,TIM.XE(R0)	; make sure we're thinking about timing out
+	MOV	#C0$IE!CMD.XE,(R2) ; kick the controller into looking, and
+	RETURN			; go away (usually RTI3)
+
+
+.SBTTL	.. RETRY -- requeue large buffer failed request.
+
+;+
+; RETRY --
+;   CDB unchanged
+;   Request CCB unchanged
+;
+;   R3 pointer to CDB which has been pulled from queue
+;
+;   Queue for continuation with a WAIT2T
+;   Must verify that CDB is not on CONQ now.
+;-
+
+RETRY:	CALL	QCDBCN			;; get the CDB on the CON$ Q for retry
+	BIC	#C$PCIP,E.STS(R3)	;; couldn't issue the request
+	CALL	POLL			; do polling demand if required
+	RETURN				; and exit to RTI3 (or back to CON$)
+
+GLOBAL	<XECORE>
+
+.SBTTL	.. BUFINT -- setup large buffer from EXTPOL/MONPOL
+
+;+
+; BUFINT --
+;	Just got a buffer, let's set up 
+;	some junk in the CCB.
+;
+;	We use CC.SEC to point to the UDBB in a CCB as 
+;	CC.BUF may be in use in some situations (internal MOP).
+;
+;	The buffer may be from MONPOL or EXTPOL, but is always a large
+;	style buffer (complete with null buffer header)
+;
+; R1 = size of buffer
+; R3 -> CDB
+; R4 = contorted buffer address (EXTPOL only)
+;  or R4 = straight buffer address (MONPOL)
+; R5 -> CCB
+;
+; R1,R3,R5 preserved
+; CC.SEC block in CCB set up to point at UDBB
+; Enet region mapped through DPAR6
+;-
+
+BUFINT:	MOV	R1,MS.SIZ+CC.SEC(R5)	; save the actual buffer size
+	MOV	R4,BF.ADR+CC.SEC(R5)	; and the [possibly] contorted address 
+	PUSH	R3			; save the CDB address for a second
+	CALLX	MAPBUF			; with R4 = 'contorted' or monpol addr.
+	MOV	R3,BF.VIR+CC.SEC(R5)	; R3 is virtual address of buffer
+	MOV	@DPAR6,BF.MMU+CC.SEC(R5) ; returns mapping the data buffer
+	MAP	XEDPR6+XECORE,APR=6,DATA ; reset Enet mapping.
+	POP	R3			; restore CDB pointer
+	RETURN				; exit
+
+GLOBAL	<XECORE>
+
+
+.SBTTL	.. PRTCMP -- Port Command Completion Routine
+
+;+
+; PRTCMP --
+;	This can be called from PR5 or PR3.
+;
+;	This routine is called at the completion of every port
+;	command.  It deallocates all resources which were required
+;	for the command execution.
+;
+;	This includes,
+;	  A UDBB buffer area (either EXTPOL or MONPOL)
+;	  A Small buffer which was a CCB
+;
+; On Entrance --
+;	R3 -> CDB
+;	R5 -> CCB
+;	CC.SEC(R5) -- descriptor information to any CCB that may
+;	  exist.
+;-
+
+PRTCMP:	MOV	BF.ADR+CC.SEC(R5),R4	; get any buffer that may be allocated
+	BEQ	10$			; none for this request.
+	BUFFER	RETURN			; is one, return it.  BF.SIZ not changed
+10$:	MOV	R5,R4			; set it up for return
+	BUFFER	RETSML			; return CCB to small buffer pool
+	RETURN				; to wherever it was called from.
+
+
+.SBTTL	.. MULCST -- Assemble the Multicast list
+
+;+
+; MULCST --
+;	Assembles the multicast list using:
+;	 1) required multicasts
+;	 2) Multicasts from each portal on Channel
+;
+;	As we build the list, we don't want to repeat multicasts
+;	which may be enabled already for other portals, so we have
+;	to compare the whole smear.
+;
+;  On Entrance --
+;	R3 -> CDB
+;	R5 -> CCB
+;	      CC.BUF is descriptor info for UDBB (from EXTPOL)
+;  On Exit --
+;	C = 1
+;	      UDBB modified, but too many multicasts. Disable Filtering
+;	C = 0 
+;	      UDBB contains all current multicasts
+;	      CC.WAK in CCB contains number of multicasts to set
+;-
+
+MULCST:	MOV	E.PRTL(R3),R4		; get first Portal pointer
+	CLR	CC.WAK(R5)		; clear the multicast count
+	PUSH	R3			; save CDB pointer
+	MAP	PUSH,APR=6,DATA		; save Enet mapping
+	MAP	BF.MMU+CC.SEC(R5),APR=6,DATA ;but map EXTPOL buffer
+	MOV	BF.VIR+CC.SEC(R5),R1	; point at UDBB with R1
+	ADD	BF.OFF(R1),R1		; past the buffer header spot
+; first, clear the whole UDBB
+	PUSH	R1			; save start of R1 for a second
+	MOV	#<10*6/2>,R0		; get number of words to zero
+					; (10 multis, 6 bytes/2 bytes/word)
+5$:	CLR	(R1)+			; and clear
+	SOB	R0,5$			; .. one word at a time
+	POP	R1			; restore start of UDBB.
+; now, get required multicasts from list below
+	MOV	#BRDCST,R0		; get pointer to count of requireds
+	MOV	(R0)+,R2		; set up the count
+	CALL	INSERT			; put this list in.
+	BCS	40$			; too many, we can stop now
+; get Mulcsts from each PDB
+10$:	MOV	R4,R0			; get pointer to portal
+	BEQ	30$			; no more portals, exit
+	ADD	#EP.CST,R0		; offset to multicast region
+	MOVB	EP.MCT(R4),R2		; and count of buffers 
+	BEQ	20$			; no buffers, go to next
+	CALL	INSERT			; put them in the buffer
+	BCS	40$			; too many, exit right now
+20$:	MOV	(R4),R4			; else, get the next portal,
+	BR	10$			; and carry on
+
+30$:	TST	(PC)+			; success exit
+40$:	SEC				; failure exit
+	MAP	POP,APR=6,DATA		; restore mapping at entry
+	POP	R3			; restore CDB pointer
+	RETURN
+
+
+BRDCST:	.WORD	2			; count of required multicasts
+	HEX	<CF-00-00-00-00-00>	; Loopback Assistant Multicast
+	HEX	<FF-FF-FF-FF-FF-FF>	; Broadcast Multicast address
+
+;+
+; INSERT --
+;	Insert a multicast address into the UDBB is it
+;	isn't there already.
+;
+;	R5 -> CCB
+;	      CC.WAK(R5) = number of multicasts in list
+;	R0 -> Multicasts to insert
+;	R1 -> UDBB pointer
+;	R2 = number of addresses to insert
+;
+;	R0,R2,R3 get trashed.
+;	R1,R4,R5 are preserved.
+;
+;	C = 1 if total multicast list would become > 10
+;-
+
+INSERT: PUSH	R1		; keep UDBB pointer pristine for exit
+10$:	MOV	CC.WAK(R5),R3	; current count of multicast addresses in UDBB
+	BEQ	40$		; the first one goes in without a fight
+15$:	CMP	(R0),(R1)+ 	; LSB match up?
+	BNE	20$		; no, next address or add it in
+	CMP	2(R0),(R1)+	; first okay, second?
+	BNE	30$		; no, next address or add it in
+	CMP	4(R0),(R1)	; so far, all okay?
+	BEQ	60$		; Yeah, so this multicast is already in
+	BR	30$		; remember where address pointer is
+
+20$:	TST	(R1)+		; skip toward next multicast
+30$:	DEC	R3		; is there a next one?
+	BEQ	50$		; no, so this one goes on the end of the list
+	TST	(R1)+		; line up on next multicast in UDBB and
+	BR	15$		; go play little multicast games
+
+40$:	TST	-(R1)		; first one, offset a little confused
+50$:	INC	CC.WAK(R5)	; increase multicast count
+	CMP	CC.WAK(R5),#10.	; are we past the limit?
+	BGT	80$		; yes, exit status bad
+	TST	(R1)+		; no, so there is room, point multicast slot
+	MOV	(R0)+,(R1)+	; LSB
+	MOV	(R0)+,(R1)+	; second word
+	MOV	(R0),(R1)	; third word
+	DEC	R2		; one less to set for this guy
+	BEQ	70$		; Done.  Exit clean
+	TST	(R0)+		; more, point to next one
+	MOV	(SP),R1		; get UDBB pointer back
+	BR	10$		; and see if the next one fits in.
+
+60$:	DEC	R2		; Multicast already set, less to check
+	BEQ	70$		; Done.  Exit clean
+	ADD	#6,R0		; more, point to next one
+	MOV	(SP),R1		; get UDBB pointer back
+	BR	10$		; and see if the next one fits in.
+
+70$:	TST	(PC)+		; exit with clean status
+80$:	SEC			; set carry, we've got too much
+	POP	R1		; restore UDBB pointer
+	RETURN
+
+.SBTTL	*************************************************
+
+.SBTTL	UMR$XE -- UMR freed up entry point 
+
+;+
+; UMR$XE --
+;	called at PR5.
+;	Only possible pending work is User Level Transmit
+;	  Processing.
+;	If any user transmits are UMR stalled, their CCBs have
+;	  been queued (singly linked list) to XEUMRQ in XEDCTL.
+;	We attempt to process them out using USEXMT, the procedure for
+;	  setting up user level write requests.  If we fail to acquire
+;	  UMRs, we requeue the request to the HEAD of the UMRQ in XEDCTL
+;	  to protect our guarantee of sequential transmission.
+;-
+
+	TMPORG	XEDINT,16
+
+	.WORD	UMR$XE
+
+	UNORG
+
+UMR$XE:	MOV	XEUMRQ+XECORE,R5	;; Get a CCB off of the Q (if any)
+	BEQ	30$			;; nothing, exit
+	MOV	(R5),XEUMRQ+XECORE	;; Was one, remove it from the Q.
+	MOV	CC.DDB(R5),R4		;; get a PDB pointer
+	MOV	EP.CDB(R4),R3		;; and a CDB pointer (for later)
+	CALL	MPENET			;; save current mapping, map enet region;014
+	CALL	USEXMT			;; attempt the transmit
+	MAP	POP,APR=6,DATA		;; restore mapping on entry.
+	BCS	20$			;; UMRs already gone, queue to head
+	BR	UMR$XE			;; Gone, try for another.
+
+20$:	MOV	XEUMRQ+XECORE,(R5)	;; put CCB back on front of queue
+	MOV	R5,XEUMRQ+XECORE	;; to try again ASAP.
+30$:	RETURN				;; and exit
+
+GLOBAL	<XECORE>
+
+.SBTTL	*************************************************
+
+.SBTTL	INT$XE -- Interrupt processing for UNA/LUA 
+
+;+
+;
+; Interrupt Processing --
+;
+;	Each time that we enter interrupt processing, we continue
+;	Processing on the interrupting controller until all possible
+;	interrupts have been dealt with.
+;
+;	We do this by testing interrupts in this order:
+;
+;	1) C0$SEI!C0$USI (Error Status interrupt and Unsolicted State Change)
+;	2) C0$NRI!C0$RCI (Receive complete, or no buffers available)
+;	3) C0$XMI	 (Transmit Complete Interrupts)
+;	4) C0$DNI!C0$CEI (Port Command completion, done, or in error)
+;
+;	When we complete processing any interrupt received, we clear
+;	the interrupt bits involved, and continue.
+;
+;	After checking them all, we make another pass to make sure that
+;	no new events have occured that would interrupt, then we leave.
+;
+;	The philosophy of operating this way is that it is senseless
+;	to stop servicing interrupts if it is just going to happen again.
+;
+;	Remember that all UNA/LUA interrupt bits are write 1 to clear
+;
+;  On Entrance:
+;
+;	R0 - Unit Number times two
+;	We will immediately load:
+;	  R3 -> CDB
+;	  R2 -> CSR set, and R0 won't last for long.
+;
+;  Exit using a return (back to INTSAV)
+;
+;-
+
+	TMPORG	XEDINT,6
+	 .WORD	INT$XE
+	UNORG
+
+INT$XE:: ;NOP				;;Debugging Aid (make space)	;019
+	CLR	TIM.XE(R0)		;;Prevent a timeout, we interrupted
+	MOV	XECDB+XECORE(R0),R3	;;Get a pointer to the CDB (in XECORE)
+	MOV	CSR.XE(R0),R2		;;Get a pointer to the CSR set
+	MOV	(R2),XECSR0+XECORE	;;save contents for PRTINT processing
+	CALL	MPENET		;; save current mapping, map enet region ;014
+	PUSH	R0			;; save controller number times two
+
+;+
+; Start Checking interrupt bits with catastrophic error indicators.
+; Bad news results in a controller init and errors being logged.  if 
+; the controller can't be reinitialized, then we disable it and issue
+; FC$ERR to the DECnet portal (if it is open).  Any pending Port Commands
+; or Xmit requests are dumped out with HNGDEV.  E$DIS state keeps all
+; requests from getting in through SER$ or SPC$
+;-
+
+	BIT	#ALLINT,(R2)		;; any interupts at all?
+	BEQ	70$			;; none, lets keep overhead down.
+			;; (sometimes we come in here even though we serviced)
+			;; (the interrupt in the course of servicing some    )
+			;; (previous interrupt				     )
+10$:	BIT	#C0$CEI!C0$SEI!C0$USI,(R2) ;; Some bad nasty error?
+	BEQ	20$			;; No, good. Let's go.
+					;; Yes, awful.
+					;; R2 -> CSR 
+					;; R3 -> CDB
+	CLR	R4			;; R4 -> PDB (not avail)
+	CLR	R5			;; R5 -> CCB (not avail)
+			;; aren't inited, don't bother saving 'em.
+	LOG$XE				;; Log the error
+	TST	E.STAT(R3)		;; are we running?
+	BEQ	16$			;; yes.  do more checking
+.ASSUME	E$RUN	EQ 0
+		;; other states all part of normal controller [re]initializing
+		;; failure during init means bye-bye (wave wave)
+	CALL	@EVTSAV			;; set up for PR5 event logging
+	BCC	15$			;; No DECnet, no event.
+	CALLM	NIEINI,EVLAP5		;; log init failed Line event.
+	CALL	@(SP)+			;; clean up from event.
+15$:	CALL	DISABL			;; Toast the controller.
+	BR	70$			;; And get out.
+					;; (The controller is dead or dying)
+16$:	BIT	#C0$SEI,(R2)		;; was it Status Error Interrupt?
+	BEQ	18$			;; Nope. don't bother With Port Status
+; Status Interrupt means check port status. The only thing of interest out 
+; there is an indication of CDCF failure for us to log an event on.  
+; We will check for it if we can, but if there is a Port Command in progress,
+; we just drop the whole idea. We'll catch it sooner or later anyway
+	TST	E.STS(R3)		;; Port command in progress?
+	BMI	18$			;; yep. so we can't do port status.
+.ASSUME	C$PCIP	EQ 100000
+	BIS	#C$PCIP,E.STS(R3)	;; no, but there will be!
+; We can do this here because CON$XE always tests and sets C$PCIP as a PR5
+; operation if it is going to, so we aren't undermining the lockup.
+	MOVB	#<ALLINT/400>,1(R2)	;; Clear all Interrupt bits, and 
+	MOV	E.PCBB(R3),R2		;; get PCBB pointer
+	MOV	#RCS$XE,(R2)		;; set Read and Clear Port Status
+	MOV	#7.,R2			;; set up the timeout value
+	CALL	PCBCMD			;; issue the request
+	BR	70$			;; we REINIT after this is done.
+
+18$:	CALL	REINIT			;; whatever it was, can we recover?
+	BR	70$			;; let's wait and see.
+;+
+; Start checking normal interrupts:
+;-
+
+20$:	BIT	#C0$NRI!C0$RCI,(R2)	;; Something with the Receive Rings?
+	BEQ	30$			;; No, look for something else
+	CALL	RECINT			;; Yes, go clean out the rings
+30$:	BIT	#C0$XMI,(R2)		;; Any transmit completions?
+	BEQ	40$			;; No, so check up on Port Commands
+	CALL	XMTINT			;; Yes, so clean out the rings
+40$:	BIT	#C0$DNI,(R2)		;;Port Command Completion?
+	BEQ	50$			;; No, see if we're done
+	CALL	PRTINT			;; Yes, so process it off
+50$:	TST	E.STAT(R3)		;; running state?
+.ASSUME	E$RUN	EQ 0
+	BNE	60$			;; no, let running start things up.
+	TST	E.XRB(R3)		;; Xmit outstanding currently?	;018
+	BNE	60$			;; Yeah, so don't do anything	;018
+	TST	E.XPB(R3)		;; Any Pending Transmit packets?
+	BEQ	60$			;; No, check for new interrupt reports
+55$:	CALL	LDXMRG			;; Load a packet on the transmit buffer
+	BCS	60$			;; Couldn't do it, too bad.	  ;017
+	BIS	#C$PDMD,E.STS(R3) 	;; Done, remember to do a polling demand
+;	BR	55$			;; successful, so try for another ;017
+
+60$:	BIT	#ALLINT,(R2)		;; Is there ANYTHING new?(interruptwise)
+	BNE	10$			;; Yes, find it and fix it.
+70$:	POP	R0			;; restore controller number times two
+	TST	E.STAT(R3)		;; are we running?
+	BNE	80$			;; nope, initializing, don't transmit
+.ASSUME	E$RUN	EQ 0
+	TST	E.XRB(R3)		;; any transmits outstanding?
+		; E.XTMO is already set up by LDXMRG or XMTINT		;003
+	BNE	85$			;; Yeah, start up timeouts	;003
+80$:	TST	E.PTMO(R3)		;; any port timeouts wanted?
+	BEQ	90$			;; no, so exit.
+85$:	MOV	#-1,TIM.XE(R0)		;; start up once a second again.
+90$:	CALL	POLL			;; initiate polling demand if needed
+	MAP	POP,APR=6,DATA		;; restore mapping.
+	RETURN				;; And leave (finally), whew!
+
+GLOBAL	<LOG$XE,XECORE,TIM.XE,CSR.XE,EVTSAV>
+
+.SBTTL RECINT -- Process received packets off of the rings
+
+;+
+; On Entrance:
+;	R2 -> CSRs
+;	R3 -> CDB
+;       E.EMPR(R3) -> to the first ring previously owned by the controller
+;
+; The Ethernet Region is mapped, and we know that a receive interrupt
+; occurred.  It may be a Receive Buffer Unavailable, but our action 
+; is the same.  Clear the rings, and get some buffers out there.
+;
+; At Exit:
+;	C0$RCI and C0$RNI bits are cleared
+;	R0,R1, and R4 are modified
+;	All Completely Received Packets are off of the rings
+;	E.EMPR(R3) is the next buffer owned by the controller
+;	As many Free Receive buffers as possible have been placed
+;	  on the rings
+;
+; The algorithm:
+;    1) Get a complete (multi-buffer) packet
+;       If we fail to get a packet, do step seven, and exit
+;       If the rings are confused, re-init the controller
+;    2) Check the packet for errors.  If in error, log
+;       the error and try for another packet
+;    3) Packet is valid.  Is it a MOP packet?
+;       Yes, handle it right here, and get another packet
+;       No, continue
+;    4) Check Portals, is it a valid protocol-type?
+;       No, discard it, log error and event
+;       Yes, continue
+;    5) Is it received on a multicast address?
+;       No, just continue
+;       Yes, check against portals multicasts,
+;       If valid, continue
+;    6) Message okay, post it:
+;       For system job, queue CCB to queue
+;       For user, queue req to portal, call IOFINI
+;    7) Put any available packets on the Receive Rings
+;    8) Try to get another packet.
+;
+;-
+
+	.ENABL	LSB
+
+RECINT:	CLC				;; tell GETPKT we want RCV packets
+	CALL	GETPKT			;; Get a packet.
+	BCC	5$			;; We got a packet, check it out
+			;; no more packets out there.  Check to see if we..
+			;; .. should log Sys Bufs unavailable for posterity..
+			;; .. and get out.
+	BIT	#C0$NRI,(R2)		;; Was this a No RCV Buffers Interrupt?
+	BEQ	2$			;; No.
+;log Event 5.15 Receive Failed, line, Sys Buffs unavailable
+	MOV	#EDF$SB,R4		;; Failed 'cuz System Buffer Unavailable
+	CALL	RCVLIN			;; Log RCV failed/Line Entity Event.
+	BIS	#C$DEF,E.STS(R3)	;; remember we need polling demand
+					;; to show RCV ring trans to non-empty
+2$:	MOVB	#<<C0$RCI!C0$NRI>/400>,1(R2) ;; clear interrupts in high byte
+					;; .. and retain IE bit
+	RETURN				;; Go back for more interrupt processing
+
+		; Packet received.  What kind of shape was it received in?
+5$:	BITB	#S1$ERS!R1$FRM!R1$OFL!R1$CRC,E.STR1(R3)	;; Reception Error?
+	BEQ	80$			;; good shape, go ahead
+; Yes, we log an event 5.15 (Receive Failed), once we figure out the reason
+	BIT	#S2$BFL,E.STR2(R3)	;; not enough buffers for chain? ;007
+	BEQ	6$			;; Not that, something else then ;007
+	MOV	#EDF$SB,R4		;; yes, so SYS BUFF UNAVAILABLE	 ;007
+	BR	30$			;; and log the event		 ;007
+
+6$:	BITB	#R1$FRM,E.STR1(R3)	;; framing error?
+	BEQ	10$			;; no.
+7$:	MOV	#EDF$FE,R4		;; yes, stash the failure reason
+	BR	30$			;; and log the event
+
+10$:	BITB	#R1$CRC,E.STR1(R3)	;; Block Check error? (CRC)
+	BEQ	20$			;; uh-uh.  So it's a data overrun
+	MOV	#EDF$BD,R4		;; yeah, so stash failure reason
+	BR	30$			;; and log the event
+
+20$:	MOV	#EDF$DO,R4		;; DATA OVERRUN then (from OFL or STR2)
+30$:	CALL	RCVLIN			;; Line Event.  RCV failed.
+	MOV	R0,R5			;; get CCB pointer in R5 (from RCVLIN)
+; We don't post this anywhere.  So why bother?
+;	MOVB	#FC$RER,CC.FC(R5)	;; Assume System receive in error
+;	MOV	#DATERR,CC.SEC(R5)	;; and tell him Data Error
+	BIT	#R2$NCH,E.STR2(R3)	;; No chain set?
+	BEQ	50$			;; No,
+	CALL	REINIT			;; yes, this shouldn't happen,
+					;; reinitialize the controller.
+50$:	BIT	#S2$NXM,E.STR2(R3)	;; NXM?
+	BEQ	57$			;; no, then just a normal error, handle
+	CRASH				;; yes, blech.  Crash.  JMP a mile.;007
+					;; [NXM means controller is nuts]
+
+;+
+; Discarding the packet way down here is okay so long as we don't run at
+; PR3 at any time between the call to REINIT and here.  That is currently
+; the case.  If it changes, we will have to change packet dumping a tad.
+;-
+
+57$:	MOV	XEPKT+XECORE,R0		;; error, get first CCB into R0
+	CALL	DSCRCV			;; toss errored packet into Free list
+	JMP	RECINT			;; try for another RCV packet
+
+
+;+
+; Our packet was received okay.  See if we can locate the owner and
+;   do the right thing with it.
+; First, Is it a legal MOP packet?
+;-
+
+80$:	MOV	XEPKT+XECORE,R5		;; Get the first CCB in the packet
+	MAP	PUSH,APR=6,DATA		;; Save E-net Region APRs
+	MAP	BF.MMU+CC.BUF(R5),APR=6,DATA ;; Map the EXTPOL data buffer
+	MOV	BF.VIR+CC.BUF(R5),R5 	;; and get virtual buffer mapping set up
+	ADD	BF.OFF(R5),R5		;; Offset to start of PDU
+	MOV	(R5),R1			;; save first word of DEST address ;005
+		;; makes multicast check later a cinch			   ;005
+.ASSUME	PK.DST	EQ 0			;; 	(save a word)		   ;005
+	ADD	#PK.PRT,R5		;; and further offset to Protocol Type
+	CLR	R0			;; Set up for MOP type checks
+90$:	CMP	(R5),MOPLST(R0)		;; Is this it?
+	BEQ	100$			;; Yeah, so we get to do MOP processing
+	TST	(R0)+			;; No, line up on the next one
+	TST	MOPLST(R0)		;; are there more?
+	BEQ	110$			;; Nope, so do normal processing
+	BR	90$			;; There are more, so check 'em
+
+100$:	CALL	@MOPDSP(R0)		;; Go do MOP processing
+	BCS	110$			;; If MOP can't handle it, try regulars
+	MAP	POP,APR=6,DATA		;; was MOP, restore Enet region mapping
+	CALL	LDRCRG			;; Load RCV rings, and
+	JMP	RECINT			;; try to receive another packet
+	
+MOPLST:	HEX	<60-02>		;; (0260) DNA Remote Console Protocol Type
+	HEX	<90-00>		;; (0090) Loopback Message Protocol Type
+	.WORD	0		;; End of list 
+
+MOPDSP:	.WORD	CONSOL		 ;; - Service Remote Console Message
+	.WORD	LOOPBK		 ;; - Service Loopback Request
+
+;+
+; Not MOP, check open portal, see if someone is trying to receive this
+; protocol type.
+;-
+
+110$:	MOV	(R5),R5			;; Get the protocol type from buffer
+	MAP	POP,APR=6,DATA		;; Map back into E-net region
+	MOV	E.PRTL(R3),R4		;; get the head of the portal list
+	BEQ	130$			;; No open portals.  No match.
+120$:	CMP	R5,EP.TYP(R4)		;; is this a match?
+	BEQ	150$			;; Yes, go to it
+	BLT	130$			;; no, and no chance (ascending list)
+	MOV	(R4),R4			;; no, try next
+	BNE	120$			;; still more, keep trying 
+; isn't for anybody we know.  Log an event if that is sensible,
+; and try for more packets.  We saved first word of multicast in R1 at around
+; 80$.  Miraculously, it is still there at this point, even if we've done
+; MOP processing.
+130$:	BIT	#1,R1			;; Was destination a multicast addr?;005
+	BNE	140$			;; Yes.  Don't log event.	    ;005
+	MOV	#EDF$UF,R4		;; Not for anybody we know
+	CALL	RCVLIN			;; Event: Line, Unknown Frame Dest.
+140$:	MOV	XEPKT+XECORE,R0 	;; No match (ascending list), get head
+	CALL	DSCRCV			;; No more, no match, ret RCV buffers.
+	CALL	LDRCRG			;; and get them back to rings....
+	JMP	RECINT			;; and try for another packet
+
+; it is for us.  We get to find out if it was received to an address
+; valid for this portal or not.
+150$:					;; Must Check for Multicasts....
+					;; and straighten out padding issues
+	MOV	XEPKT+XECORE,R5		;; get first buffer CCB back
+	MOV	R4,CC.DDB(R5)		;; save the PDB for SYSjob
+	MOVB	#FC$RCP,CC.FC(R5)	;; and put in RCV complete for SYSJOB
+	MAP	PUSH,APR=6,DATA		;; Save E-net Region APRs
+	MAP	BF.MMU+CC.BUF(R5),APR=6,DATA ;; Map the EXTPOL data buffer
+	MOV	BF.VIR+CC.BUF(R5),R5 	;; and get virtual buffer mapping set up
+	PUSH	R4			;; Push the PDB value
+	TSTB	EP.STS(R4)		;; okay, padded protocol?	;008
+.ASSUME	OP$NPD	EQ 200
+	BMI	155$			;; no, so GETPKT loaded BF.CNT okay.
+	CMP	XECNT+XECORE,#1		;; padded protocol. need multiple Bufs?
+	BNE	155$			;; yeah, let's bet that noone adds 
+					;; padding to anything bigger than 512.
+	PUSH	BF.CNT(R5)		;; save GETPKT received length
+	MOV	R5,R4			;; get [another] pointer to buffer
+	ADD	BF.OFF(R5),R4		;; offset to start of PDU	;007
+	MOV	PK.LEN(R4),BF.CNT(R5)	;; get actual data length into BF.CNT;007
+	ADD	#PK.PAD,BF.CNT(R5)	;; and add header length.	;007
+	CMP	BF.CNT(R5),(SP)+	;; compare padded length w/ rcvd len;007
+;	BLOS	155$			;; padded < or = so its okay
+;	POP	R4			;; restore portal pointer, and continue
+;	MAP	POP,APR=6,DATA		;; restore Enet region mapping
+;	JMP	7$			;; padded > rcvd so we got trouble.
+					;; (call it a framing error)
+			;; the above code works on the assumption that noone
+			;; is silly enough to send more than 512. bytes of data
+			;; with extra padding on the end.  We only pad to 64.
+			;; bytes, and so does most hardware, so I don't expect
+			;; trouble.
+155$:	POP	R4			;; restore portal pointer, and continue
+	ADD	BF.OFF(R5),R5		;; Offset to first word of address ;007
+	BIT	#1,(R5)			;; Multicast Address? (LSBit = 1?)
+	BEQ	160$			;; No, its physical, message okay
+	CALL	CHKMUL			;; Is a multicast, verify reception ok
+160$:	MAP	POP,APR=6,DATA		;; Restore E-net Region APRs (carry ok)
+	BCS	140$			;; not valid for this portal, dump it
+	SUB	XECNT+XECORE,EP.BUF(R4) ;; count against available packets
+	BGE	170$			;; we've got enough for reception
+	ADD	XECNT+XECORE,EP.BUF(R4) ;; not enough, restore available count
+	INC	EP.UNA(R4)		;; USER BUFFER UNAVAILABLE (circ cntr)
+	BNE	161$			;; not overflowed
+	COM	EP.UNA(R4)		;; overflowed, set to highest unsigned.
+161$:	INC	E.USAV(R3)		;; USER BUFFER UNAVAILABLE (line cntr)
+	BNE	162$			;; not overflowed
+	COM	E.USAV(R3)		;; overflowed, highest unsigned.
+162$:	BIT	#P$SND,EP.STS(R4)	;; have we just given a DATERR?
+	BNE	140$			;; yeah, don't reset this bit so soon.
+	BIS	#P$LST,EP.STS(R4) 	;; no, so remember we dropped something
+;	log event 5.15 Receive Failed, User buffers unavailable, Circuit
+	MOV	XEPKT+XECORE,R0		;; get CCB of head of packet
+	MOV	#EDF$UB,R4		;; User Buffer Unavailable Event
+	CALL	@EVTSAV			;; get going.
+	BCC	140$			;; no event logging on this system
+	CALLM	NIERCF,EVLAP5		;; log Circuit RCV failure event.
+	CALL	@(SP)+			;; clean up from event
+	JMP	140$			;; discard packet, and exit
+
+170$:	CALL	LDRCRG			;; Load up RCV rings
+	CALL	USR2WI,R5,EP.BLR	;; increment packets received (2 words)
+	MOV	E.STR2(R3),R0		;; Get [padded] length of buffer in R0
+	BIC	#<S2$BFL!S2$NXM!R2$NCH>,R0 ;; clear status bits (NOT ON!)
+	SUB	#<PK.NPD+4>,R0		;; subtract NI overhead (Header+CRC);011
+	CALL	USR2W,R5,EP.BYR		;; add into bytes received (2 words)
+	MOV	XEPKT+XECORE,R5		;; get HEAD of packet
+	MOVB	EPJBNO(R4),R0		;; get jobnumber in R0
+	BIT	#1,R0			;; SYSJOB, or user?
+	BEQ	175$			;; User, so hook up his receive buffers
+	CALL	PSTSYS			;; System, post the packet out to sysjob
+	JMP	RECINT			;; And try for another RCV packet
+
+175$:	MOV	R5,@EP.RCT(R4)		;; stick buffer(s) on RCVd packet tail
+	MOV	XEPKTT+XECORE,EP.RCT(R4) ;; update the tail.
+	MOVB	EPJBNO(R4),R4		;; get JBNO * 2 into R4 and
+	CALLX	IOFIN4,R5,JS.XE!JSTIM	;; ..clear the stall [if there is one]
+	JMP	RECINT			;; more fun and profit if applicable
+
+GLOBAL	<LOG$XE,XECORE,EVTSAV>
+
+	.DSABL	LSB
+
+
+.SBTTL	.. RCVLIN -- Receive Failed, Line Entity Event logger
+
+;+
+;
+; On Entrance:
+;	R4 = Failure reason.
+;	XEPKT+XECORE -> first CCB in recvd packet
+; On Exit:
+;	Event logged if possible.
+;	R0 -> first CCB in list.
+;	Mapping maintained
+;-
+
+RCVLIN:	MOV	XEPKT+XECORE,R0		;; get first CCB in R0
+	CALL	@EVTSAV			;; set up for PR5 event logging
+	BCC	10$			;; no way, just leave
+	CALLM	NIERLF,EVLAP5		;; log event.
+	CALL	@(SP)+			;; clean up from event.
+10$:	RETURN				;; exit
+
+GLOBAL	<EVTSAV>
+
+.SBTTL	XMTINT -- Process Transmit interrupts
+
+;+
+; XMTINT --
+;	Transmit interrupt has happened.  Our job, to pull all
+;	processed transmit packets off of the rings and get them
+;	on their way home.
+;
+; On Entrance:
+;	R2 -> CSRs
+;	R3 -> CDB
+;	E.EMPX -> oldest outstanding transmit request desc ring
+;
+; On Exit:
+;	C0$XMI interrupt bit clear
+;	All completed transmit requests are off of the rings.
+;-
+
+	.ENABL	LSB
+
+XMTINT:	SEC				;; tell GETPKT we want XMIT packets
+	CALL	GETPKT			;; pull a packet off the rings
+	BCS	70$			;; no more packets, get out clean
+	MOV	#5,E.XTMO(R3)		;; assume more transmits out there ;003
+		; each transmit deserves full timeout treatment.  If we
+		; get here, we know that at least one transmit completed
+		; one way or the other.					;003
+	MOV	XEPKT+XECORE,R5		;; get first CCB of packet
+	MOVB	#FC$XCP,CC.FC(R5)  	;; assume SYSJOB, and success
+	BITB	#S1$ERS,E.STR1(R3) 	;; transmit failed, or suspect?
+	BEQ	40$			;; Nope, nothing wrong
+	MOVB	#FC$XER,CC.FC(R5) 	;; assume system job with error
+	MOV	#DATERR,CC.ERR(R5)	;; and call it a DATERR on device
+	PUSH	R4			;; save error logging regs
+					;; R2 -> CSR 
+					;; R3 -> CDB
+	CLR	R4			;; R4 -> PDB (not avail)
+					;; R5 -> CCB 
+	LOG$XE				;; Log the error
+	POP	R4			;; restore the registers
+	BIT	#C$DCNT,E.STS(R3) 	;; DECnet out there?
+	BEQ	40$			;; nope, try for another request
+;	yeah, log a SEND FAILED event, work out the reasons
+	BIT	#T2$RTY,E.STR2(R3)	;; Excessive collisions?
+	BEQ	10$			;; no.
+;	MOV	#EDF$EC,R4		;; move Xcess coll into reason
+	CLR	R4			;; Xcess coll value is a zero	;003
+.ASSUME	EDF$EC	EQ 0			;; 	(save a word)		;003
+	BR	30$	
+
+10$:	BITB	#T2$LCR,E.STR2(R3)	;;Carrier check failed?
+	BEQ	20$			;; nope, check for frame length error
+	MOV	#EDF$CC,R4		;; yes, move that into the failure 
+	BR	30$			;; log the error
+
+20$:	MOV	#EDF$FL,R4		;; Must be Frame too long.
+30$:	MOV	E.STR2(R3),R5		;; log event by getting TDR
+	BIC	#^C<T2$TDR>,R5		;; and clearing all but TDR value bits
+	CALL	@EVTSAV			;; set up for high priority event 
+	BCC	40$			;; noone out there listening.
+	CALLM	NIESNF,EVLAP5		;; Send Failure, Line.
+	CALL	@(SP)+			;; clean up.	
+;+
+; Current implementation will never get a Short Circuit or an Open
+; Circuit.  We depend on observation to show that failures have similiar
+; TDR values.
+;	Short Circuit
+;	Open Circuit
+; Remote Failure to Defer?
+;	Remote failure to defer 
+;  where does a late collision come in here?
+
+40$:	MOV	XEPKT+XECORE,R5		;; get head of XMIT buffer
+	BITB	#DF.MOP,CC.DFL(R5) 	;; one of our MOP functions?
+	BEQ	50$			;; nope
+	BICB	#DF.MOP,CC.DFL(R5) 	;; Yes, clear the bit,
+	PUSH	R0			;; save R0
+	MOV	R5,R0			;; point to beginning of packet
+	CALL	DSCRCV			;; return to receive rings
+	ADD	XECNT+XECORE,E.MOPB(R3) ;; count them as MOP packets
+	POP	R0			;; restore
+	BR	XMTINT			;; try for another
+
+50$:	MOV	CC.DDB(R5),R4		;; get PDB pointer
+	CALL	USR2WI,R5,EP.BLS	;; increment packets sent (2 words)
+	MOV	E.MSGL(R3),R0		;; get [padded] count of packet sent
+	SUB	#PK.NPD,R0		;; subtract out header(DST,SRC,prot);011
+	CALL	USR2W,R5,EP.BYS		;; add into bytes sent (2 words)
+	CALL	XMTPST			;; post back a transmit
+70$:	MOVB	#<C0$XMI/400>,1(R2) ;; clear interrupts in high byte
+	TST	E.XRB(R3)		;; any transmits still out there? ;003
+	BNE	75$			;; Yes, so E.XTMO is correct	;003
+	CLR	E.XTMO(R3)		;; no, so don't timeout xmit	;003
+75$:	RETURN				;; and continue processing
+
+GLOBAL	<LOG$XE,RELUMR,XECORE,EVTSAV>
+
+	.DSABL	LSB
+
+
+.SBTTL .. USR2WI/USR2W -- circuit counter control
+
+;+
+; USR2WI/USR2W --
+;	Add a value into offset from R4 as a long word.
+;	Watch for overflow of high word.
+;
+; 	R4 -> PDB
+;
+;	CALL	USR2WI,R5,<offset>
+;		Increments long word counter at <offset>(R4)
+;  or, 
+;	R4 -> PDB
+;	R0 = number to add in
+;
+;	CALL	USR2W,R5,<offset>
+;		Add R0 to long word counter at <offset>(R4)
+;
+;	R0 destroyed in USR2WI.
+;-
+
+
+USR2WI:	MOV	#1,R0		; just want to increment
+USR2W:	PUSH	R4		; save CDB pointer
+	ADD	(R5)+,R4	; set up offset
+	ADD	R0,(R4)+	; add to LSW
+	ADC	(R4)		; add carry to high order
+	BCC	10$		; no overflow
+	MOV	#-1,-2(R4)	; set low order. [overflow value]
+	MOV	#-1,(R4)	; set high order [overflow value]
+10$:	POP	R4		; restore R4 on entry
+	RETURN	R5		; return through R5, like we came in.
+
+
+.SBTTL	PRTINT -- Handle Port Command interrupts
+
+;+
+;  PRTINT  --
+;	Port interrupt handling.  There are two kinds of
+;	Port handling that need to be handled in the driver.
+;
+;	POLLING DEMANDS -- These will occur frequently, have
+;	  no CCB related to them, and are simply dropped here.
+;	  If other Port Commands are awaiting processing (E.CNCQ),
+;	  then we will queue CON$.
+;
+;	GET COMMAND -- This is the command which causes the controller
+;	  to interrogate the PCBB for an ancillary instruction.  We will
+;	  mark the request as done (clear C$PCIP and set C$PCDN) and
+;	  queue continuation to continue handling if C$STEP is set, or the
+;	  controller is in E$INIT (software init state)
+;	  Otherwise the CCB is removed from E.CNCQ and the request
+;	  is processed to completion.
+;
+;
+;  On Entrance --
+;	R3 -> CDB at queue link
+;	R2 -> CSR set.  C0$DNI is set
+;
+;  On Exit --
+;	Registers preserved, except for R0
+;	C0$DNI is cleared.
+;	CON$ may be queued to complete handling
+;-
+
+.ENABL	LSB
+
+PRTINT:	PUSH	R4			;; save us a work register
+	CLR	E.PTMO(R3)		;; stop timing out Port commands
+	CMP	#E$DIS,E.STAT(R3)	;; is the controller disabled now?
+	BEQ	40$			;; Yes, so clear DNI, and ignore it.
+	BIC	#C$PCIP,E.STS(R3)	;; no more command in progress
+	BIS	#C$PCDN,E.STS(R3)	;; at least this step is done
+	CMP	#RCS$XE,@E.PCBB(R3)	;; Read and Clear Port Status?
+	BNE	20$			;; no.
+	MOV	E.PCBB(R3),R4		;; Yes, so get PCBB pointer
+	MOV	2(R4),E.PSTS(R3) 	;; and the port status
+	BIT	#PS$CER,E.PSTS(R3)	;; CDCF failure?
+	BEQ	10$			;; no, nothing else is an event.
+	CALL	@EVTSAV			;; high priority event.
+	BCC	10$			;; noone is listening.
+	CALLM	NIECCF,EVLAP5		;; CDCF failure (no params)
+	CALL	@(SP)+			;; clean up.
+10$:	PUSH	R5			;; save error logging regs
+	; no need to save R4 through this one.
+					;; R2 -> CSR 
+					;; R3 -> CDB
+	CLR	R4			;; R4 -> PDB (not avail)
+	CLR	R5			;; R5 -> CCB (not avail)
+	LOG$XE				;; Log the error
+	POP	R5			;; restore the registers
+	CLR	@E.PCBB(R3)		;; Clear out command field
+		;; RCS still in PCBB through pending RESET command otherwise.
+	CALL	REINIT			;; initiate controller reinitialization.
+; Reset is extra.  We can sneak through by calling it initialization.
+; Saves six words.  Delightful.
+;20$:	CMP	#E$RST,E.STAT(R3)	;; reset state?
+;	BNE	25$			;; nope.
+;	MOV	#E$INI,E.STAT(R3)	;; yes, and successful, setup for init.
+20$:	CMP	#E$INI,E.STAT(R3)	;; initializing?
+	BEQ	30$			;; Yeah, just queue CON$ and carry on
+	TSTB	E.STS(R3)		;; multi-step command in progress?
+	BMI	30$			;; Yeah, queue CON$ for handling
+.ASSUME	C$STEP	EQ 200
+;	MOV	XECSR0+XECORE,R4	;; get CSR0 value at entry.
+;	BIC	#^C<C0$CMD>,R4		;; ..clean out all but command field
+;	CMP	#POL.XE,R4		;; Polling Demand completing?
+;	BEQ	28$			;; Yes, so it never gets posted
+	BIT	#C$DMO,E.STS(R3)	;; Did we have a polling demand out?
+	BNE	28$			;; yes, complete, just drop it.	
+	TST	E.CNCQ(R3)		;; do we have a REAL request?
+	BEQ	28$			;; no, so don't mess up the queues.
+	CALL	PSTSPC			;; post result back to whoever gets it.
+	BR	40$			;; and clear out of here
+
+28$:	BIC	#C$PCDN!C$DMO,E.STS(R3) ;; Polling demand is done. Cleanup.
+			;; Polling Demand never user originated.
+	TST	E.CNCQ(R3)		;; Any Port Commands waiting a chance?
+	BNE	30$			;; yep, so queue continuation
+	BIT	#C$RCS,E.STS(R3)	;; no, but how 'bout Read/Clear Status?
+	BEQ	40$			;; nope, so no need for CON$
+30$:	CALL	QCDBCN			;; queue up CON$ processing for CDB
+40$:	POP	R4			;; Restore R4, and
+	MOVB	#<C0$DNI/400>,1(R2)	;; clear the done interrupt.  No NOP
+	RETURN				;; RETURN.
+
+
+
+.SBTTL	.. DSCRCV/DSCXMT/DSCALL -- discard Buffer chain to Free List
+
+;+
+; DSCRVC -- discard buffer chain back to Receive Free List
+; DSCXMT -- discard buffer chain back to Transmit Pending List
+;
+; DSCALL -- common buffer chain dumper.  Called with R3 ALREADY OFFSET
+;	    to buffer subblock -- called by DRAIN during a Disable.
+;
+; Return buffer chain
+; Called with 
+;	R0 -> Head of buffer chain to return to available queue (not null)
+;	  Note: (R0) + 2 must be the tail pointer
+;	R3 -> CDB
+; These routines are used to put a chain of buffers back on the front of 
+; the 'Pending' list for transmit or receive.  We only need to update the
+; tail pointer if the head pointer was previously zero.  We don't care about
+; the tail pointer for the Receive Free list (buffer order is unimportant),
+; but we use this to move transmit buffers off of the rings back onto the
+; pending queue in the event of a controller Re-init, so we gotta keep track
+; of the tail.  The different entry points get us into the right buffer 
+; subblock.
+;
+; On Exit --
+; 	R0 is trashed
+;	Buffer chain is back on the E.PND list of the subblock used.
+;	R3 -> CDB ('ts okay)
+;-
+
+	.ENABL	LSB
+
+DSCALL:	PUSH	R3			; save R3 (just to POP)
+	BR	10$			; and merge with common code
+
+DSCXMT:	PUSH	R3			; save CDB pointer
+	ADD	#E.XRB,R3		; offset to XMIT buffer subblock
+	BR	10$			; and merge with common code
+
+DSCRCV:	PUSH	R3			; save CDB pointer
+	ADD	#E.RRB,R3		; offset to RCV buffer subblock
+10$:	PUSH	@#PS			; save entering PR (3 or 5)
+	PUSH	R0			; save head of list (if there is one)
+	BNE	20$			; we have something, process it.
+	POP	R0			; nothing, clean up the stack,
+	BR	50$			; and get out.
+
+20$:	TST	(R0)			; end of the return chain?
+	BEQ	30$			; Yes, link to free list
+	MOV	(R0),R0			; No, keep traversing
+	BR	20$			; til we find the end
+
+30$:	SPLC	5			;; make sure that we're at PR5
+	MOV	E.PND(R3),(R0)		;; Stuff free list on tail of packet
+	BNE	40$			;; no need to update the tail
+	MOV	R0,E.PNDT(R3)		;; Was empty, update the tail	;007
+40$:	POP	E.PND(R3)		;; Pop in new head of list
+50$:	POP	@#PS			;  restore Priority of entrance
+	POP	R3			; restore the CDB pointer
+	RETURN				; and return.
+
+	.DSABL	LSB
+
+
+.SBTTL	.. GETPKT -- Get (string of) buffers from rings
+
+;+
+; GETPKT:
+;
+; On Entrance:
+;	R3 -> CDB to get packet from.
+;	  C = 0 means Get Receive Packet if available
+;	  C = 1 means get Xmit Packet if xmit complete
+;
+; GETPKT is responsible to pull a completed packet off of the UNA
+;        rings for the controller. If there are no complete packets
+;	 remaining, or the rings are empty, it will exit without
+;	 modifying the rings.
+;
+;	This routine preserves BF.CNT for transmit posting, but only
+;	for single buffer transmit packets.  This is for DECnet, and
+;	if DECnet starts doing chained transmissions, we will need to
+;	squeeze out more words (two or three) to protect buffers 
+;	besides the last one.  This is required to facilitate DECnet
+;	retransmission attempts.
+;
+; On Exit:
+;	No registers are modified.
+;  C=0	E.EMP(R3) updated to next desc to pull packet off of
+;	XEPKT/XEPKTT in XECORE contains a buffer (chain)
+;	  which forms up a complete packet
+;	XECNT contains number of buffers involved in packet
+;	CDB updated with status of last ring involved in reception
+;  C=1  No complete packets were available on the rings
+;	XEPKT/XEPKTT are in an undetermined state
+;	Buffer Control Sub-block not modified in any way
+;
+;  NOTE:  This routine gets used rather a lot, and during important
+;	times.  It is NOT optimized.  Probably should be.
+;-
+
+GETPKT:	REGSCR			;; save our registers
+	ROR	R4		;; save sense of carry bit at sign of R4
+	BMI	2$		;; Carry set means Xmit buff request
+	ADD	#E.RRB,R3	;; Carry Clear, so offset into RCV subblock
+	BR	3$		;; join common code
+
+2$:	ADD	#E.XRB,R3	;; Xmit request, offset to that subblock
+3$:	TST	(R3)		;; anything on the rings anyway?	;003
+.ASSUME	E.RNG	EQ 0		;;   (save a word)
+	BEQ	70$		;; No, quit, we are not amused
+	MOV	E.EMP(R3),R1	;; Get the first ring pointer
+5$:	BITB	#S1$OWN!S1$STP,UN$ST1(R1) ;;Ours, and Start of packet?
+	BMI	70$		;; Not ours, so nothing to pick up
+.ASSUME	S1$OWN	EQ	200	;; (set means his, clear means ours)
+	BEQ	80$		;; Ours, but not start of packet.  Bad.
+	MOV	#XECNT+XECORE,R0 ;; Get a pointer to the temp buffer count
+	CLR	(R0)+		;; Clear buffer count, point to packet head
+.ASSUME	<XECNT+2> EQ XEPKT	;; 	(save word, if XECORE is okay)
+	MOV	R0,2(R0)	;; Set up the TAIL pointer (TAIL->HEAD)
+	CLR	(R0)+		;; clear the Head, and point at the tail
+.ASSUME	<XEPKT+2> EQ XEPKTT	;; 	(verify XECORE okay)
+10$:	INC	XECNT+XECORE	;; increment count of buffers in packet
+	MOV	(R3),R5		;; Pull buffer CCB off of Active RCV buff list
+	MOV	(R5),(R3)	;; 	All the way off
+.ASSUME	E.RNG	EQ 0		;;   (save a word)
+	BNE	20$		;; 	Updating the TAIL pointer if req'd
+	MOV	R3,E.RNGT(R3)	;;	To point at the HEAD of the list 
+;	ADD	#E.RNG,E.RNGT(R3) ;; we can add zero, or forget it.
+.ASSUME	E.RNG	EQ 0		;;   (save a word)
+20$:	CLR	(R5)		;; make sure the CCB is linked to nothing
+	MOV	R5,@(R0)	;; drop it on the packet queue thru the tail
+	MOV	R5,(R0)		;; and update the Tail Pointer
+	BITB	#S1$ENP,UN$ST1(R1) ;; does this desc mark the end of a packet?
+	BNE	100$		;; YES, so we have the whole packet
+	BISB	#DF.CNT,CC.DFL(R5) ;; No, tag CCB as part of a CoNTinued packet
+	MAP	PUSH,APR=6,DATA	;; save current mapping
+	MAP	BF.MMU+CC.BUF(R5),APR=6,DATA ;; map the buffer
+	MOV	BF.VIR+CC.BUF(R5),R5 ;; and look at it
+	MOV	(R5),BF.CNT(R5)	;; and get the total size
+.ASSUME	BF.SIZ	EQ 0
+	SUB	BF.OFF(R5),BF.CNT(R5) ;; minus the offset to PDU
+		;; and save that for future reference at BF.CNT in the buffer
+	MAP	POP,APR=6,DATA	;; restore Enet region mapping
+	ADD	#UN$SIZ,R1 	;; offset to start of next ring entry
+	CMP	E.BOT(R3),R1	;; 	Checking for bottom.
+	BNE	40$		;;	Not bottom, no big
+	MOV	E.TOP(R3),R1	;;	Bottom, so wraparound
+40$:	CMP	E.FIL(R3),R1	;; Are the rings empty?
+	BEQ	50$		;; Yes, return packets so far, and quit
+	TSTB	UN$ST1(R1)	;; Do we own this packet?
+	BPL	10$		;; Yes, go get next packet
+.ASSUME	S1$OWN 	EQ 200
+				;; No, buffers go back to Outstanding Q to wait
+50$:	MOV	(R3),@(R0)	;; Place active RCV bufs behind Packet bufs
+.ASSUME E.RNG	EQ 0		;; 	(save word, offset zero)
+	BNE	60$		;; There were some?
+	MOV	(R0),E.RNGT(R3)	;; No, so update the tail
+60$:	MOV	XEPKT+XECORE,(R3) ;; And update the head
+.ASSUME E.RNG	EQ 0		;; 	(save a word)
+	.BR	70$		;; and make sure that we exit (without a packet)
+
+70$:	CLR	XEPKT+XECORE	;; forget the past
+	MOV	#XEPKT+XECORE,XEPKTT+XECORE ;; completely
+	SEC			;; Set Carry, failed to get a packet
+	RETURN			;; Really (without a valid packet
+
+
+80$:	CRASH			;; shouldn't hit this during testing.
+	; this is to make sure that we don't.
+	;This is where we should sort of consider the sanity
+	; of the controller under these conditions.
+	
+100$:	BICB	#DF.CNT,CC.DFL(R5) 	;; make sure the CoNTinue flag is clear
+	TST	R4			;; is this a transmit call?
+	BMI	107$			;; yes, don't change the buffer header.
+	MAP	PUSH,APR=6,DATA		;; save current mapping
+	PUSH	UN$ST2(R1)		;; save part of descriptor for remap
+	MAP	BF.MMU+CC.BUF(R5),APR=6,DATA ;; map the buffer
+	MOV	BF.VIR+CC.BUF(R5),R5	;; and point at it
+	POP	BF.CNT(R5)		;; get length of message in BF.CNT
+	BIC	#<S2$BFL!S2$NXM!R2$NCH>,BF.CNT(R5) ;; clear any status bits 
+				;; ST2 contains other junk 'sides just length
+	SUB	#4,BF.CNT(R5)		;; .. then drop 4 bytes of CRC	  ;006
+	MOV	XECNT+XECORE,R2		;; now get number of buffers involved
+	DEC	R2			;; minus one for current buffer
+	BEQ	105$			;; only one, so BF.CNT is this buffer
+	PUSH	BF.OFF(R5)		;; save offset to PDU for a sec
+	MOV	R5,R4			;; get R5 for a multiply
+	MOV	(R5),R5			;; get buffer size into R5
+.ASSUME BF.SIZ	EQ 0
+	SUB	(SP)+,R5		;; ...minus the offset of generic RCVBUF
+	MUL	R2,R5			;; get (PDUsize * # buffers involved)
+					;; [besides the last one]
+	SUB	R5,BF.CNT(R4)		;; make length of this packet:
+					;;  TOTAL LEN - PREVIOUS BUFFER LEN
+					;; [which is data length of last buffer]
+105$:	MAP	POP,APR=6,DATA		;; restore E net mapping
+107$:	MOV	R1,R2			;; we need CURRENT and NEXT
+	ADD	#UN$SIZ,R1 		;; offset to start of NEXT ring entry
+	CMP	E.BOT(R3),R1		;; 	Checking for bottom.
+	BNE	110$			;;	Not bottom, no big
+	MOV	E.TOP(R3),R1		;;	Bottom, so wraparound
+110$:	MOV	R1,E.EMP(R3)		;; Update the NEXT Empty pointer
+	MOV	TOS.R3(SP),R3		;; restore CDB pointer on entry
+			;; this stuff is saved mostly to facilite error logging.
+	MOV	(R2),E.MSGL(R3) 	;; Now, save some junk (the length) ;003
+.ASSUME	UN$LEN	EQ 0							    ;003
+	MOVB	UN$ST1(R2),E.STR1(R3) 	;;  .the first status byte
+	MOV	UN$ST2(R2),E.STR2(R3) 	;;  .and the second status word
+	CLC				;; Clear Carry
+	RETURN				;; We got a packet
+
+
+.SBTTL	LDRCRG - Load Receive Descriptor rings
+
+;+
+; LDRCRG --
+;
+; On entrance:
+;	R3 -> CDB
+;	CALL AT PR5 ONLY
+;
+; LDRCRG loads as many buffers as possible onto the Receive Descriptor
+;	rings.  It stops when there is no more room on the rings, or when
+;	there are no more buffers in the Buffer Free List to move onto
+;	the rings.
+;
+;	If we have more buffers than we need to run, LDRCRG returns them
+;	via COMRET to the COMMBUFF pool to free up memory.
+;
+;	If the controller is disabled, LDRCRG will still be called to 
+;	[possibly] release extra buffers from a closing portal.  We
+;	toss E.XTRA buffers but do not reload the rings in that case.
+;
+;-
+
+LDRCRG:	REGSCR
+	ADD	#E.RRB,R3		;; offset CDB to RCV subblock
+10$:	MOV	E.PND(R3),R5		;; Get next free RCV buffer
+	BEQ	50$			;; no more, so we're done
+	TST	E.XTRA-E.RRB(R3)	;; got extra buffers out here?
+	BEQ	20$			;; nope, try to load the rings
+	MOV	(R5),E.PND(R3)		;; Okay, remove it from pending list
+;	CLR	(R5)			;; COMRET doesn't care about links
+	CALLX	COMRET			;; return this one, and ...
+	DEC	E.XTRA-E.RRB(R3)	;; ... count one less extra
+	BR	10$			;; fire away agin.
+
+20$:	CMP	#E$DIS,E.STAT-E.RRB(R3)	;; controller disabled?
+	BEQ	50$			;; yeah, so don't load the rings.
+	MOV	E.FIL(R3),R2		;; Get first available descriptor ring
+	CMP	R2,E.EMP(R3)		;; fill pointer = empty pointer?
+	BNE	30$			;; nope, so rings aren't full
+	TST	(R3)		;; yeah, so full or empty, which?
+.ASSUME	E.RNG	EQ 0		;;   (save a word)
+	BEQ	30$			;; empty, so load 'em up
+	RETURN				;; full, so we're done
+
+30$:	MOV	(R5),E.PND(R3)		;; Okay, remove it from pending list
+	BNE	40$			;; still more to come
+	MOV	R3,E.PNDT(R3)		;; end, update the tail.
+	ADD	#E.PND,E.PNDT(R3)	;; to point to the head
+40$:	CLR	(R5)			;; and forget that it points anywhere
+	MOV	R5,@E.RNGT(R3)		;; move CCB to outstanding queue 
+	MOV	R5,E.RNGT(R3)		;; ..and update the tail
+	MAP 	PUSH,APR=6,DATA		;; save current mapping
+	MAP	BF.MMU+CC.BUF(R5),APR=6,DATA ;; map the EXTPOL region
+	MOV	BF.VIR+CC.BUF(R5),R1	;; and get a pointer to the header
+	MOV	(R1),R4			;; get length of buffer loaded
+.ASSUME	BF.SIZ	EQ	0
+	PUSH	BF.OFF(R1)		;; store away offset of PDU
+	SUB	(SP),R4			;; PDU size = buffersize - offset
+	MOV	BF.ADR+CC.BUF(R5),R1	;; now get contorted address and
+	CALL	UNIMAP			;; convert R1/R0 into UNIBUS address
+	ADD	(SP)+,R1		;; add virt offset into LSB of address
+	ADC	R0			;; update MSBits if required
+	MAP	POP,APR=6,DATA		;; restore mapping to enet region.
+	MOVB	R0,UN$MSB(R2)		;; Load the high order BUS address,
+	MOV	R1,UN$ADD(R2)		;; and the low order BUS address
+	MOV	R4,(R2)			;; load the length field	;003
+.ASSUME	UN$LEN	EQ 0			;; save us a word		;003
+	MOV	R5,UN$CCB(R2)		;; save CCB address to help debug
+	MOVB	#S1$OWN,UN$ST1(R2)	;; give buffer to controller
+			;; if we had a no RCV buffs interrupt, then C$DEF
+			;; is set.  We must issue polling demand to indicate
+			;; rings have made transition to not empty from empty.
+	BIT	#C$DEF,E.STS-E.RRB(R3)	;; check for Deferred polling demand
+	BEQ	45$			;; nope.
+	BIC	#C$DEF,E.STS-E.RRB(R3)	;; was, clear it,
+	BIS	#C$PDMD,E.STS-E.RRB(R3)	;; and ask for polling demand ASAP
+45$:	ADD	#UN$SIZ,E.FIL(R3)	;; update the fill pointer, 
+	CMP	E.BOT(R3),E.FIL(R3)	;;	checking for bottom
+	BNE	10$			;;	not bottom, go ahead
+	MOV	E.TOP(R3),E.FIL(R3)	;;	Bottom, get to top
+	BR	10$			;; Room for another? Let's try
+
+50$:	RETURN				;; And exit
+
+
+.SBTTL	LDXMRG - Load a pending packet onto the transmit Descriptor Rings
+
+;+
+; LDXMRG --
+;
+; On Entrance --
+;	Mapping to Enet region in DPAR6
+;	R3 -> CDB
+;
+; LDXMRG attempts to load one packet onto the transmit descriptor
+;	rings.
+;
+; 	One packet is defined like this:
+;	Starting with first CCB on E.FIL, load buffers onto the 
+;	descriptor rings until one is encountered which doesn't
+;	have DF.CNT set in CC.DFL in the CCB.
+;
+; On Exit:
+;	C = 0
+;	  Packet loaded on rings, Buffer Subblock updated
+;	C = 1
+;	  No Packet loaded on rings, no change to buffer subblock.
+;	  Failure could be: no buffers on Pending list, or not enough
+;	  room for packet on rings.
+;	Registers are preserved.
+;-
+
+LDXMRG:	REGSCR				;; Save registers
+	ADD	#E.XRB,R3		;; point at buffer subblock
+		; we can get away with this with impunity as we just	;003
+		; restore R3 on exit anyway.  				;003
+	MOV	E.PND(R3),R5		;; Get first pending CCB
+	BEQ	50$			;; None, exit carry set
+	MOV	E.FIL(R3),R2		;; Get First available ring slot
+10$:	CMP	R2,E.EMP(R3)		;; is there room?
+	BNE	15$			;; yep, so far
+	TST	(R3)			;; maybe, rings full, or empty?
+.ASSUME	E.RNG	EQ 0			;;   (save a word)
+	BNE	50$			;; must be full, so stop loading.
+					;; FIL = EMP at both empty and full
+15$:	BITB	#DF.CNT,CC.DFL(R5)	;; Is this the whole packet?
+	BEQ	20$			;; Yes, this packet will fit, 
+	ADD	#UN$SIZ,R2		;; No, still not sure, traverse rings,
+	CMP	R2,E.BOT(R3)		;; at bottom?
+	BNE	17$			;; nope
+	MOV	E.TOP(R3),R2		;; yeah, so do the wrap
+17$:	MOV	(R5),R5			;; and traverse Pending list
+; following line comes out after testing
+	BEQ	60$			;; shouldn't happen, we got a chain!
+	BR	10$			;; check out next in line
+
+20$:	PUSH	#S1$OWN!S1$STP		;; Push Start and Own onto stack
+30$:	MOV	E.PND(R3),R5		;; Get next xmit buffer (again maybe)
+; remove following line after testing
+	BEQ	60$			;; No more?  We shouldn't be here!
+	MOV	(R5),E.PND(R3)		;; Pull it off of the head of the list
+	BNE	35$			;; don't need to update tail
+	MOV	R3,E.PNDT(R3)		;; must update tail
+	ADD	#E.PND,E.PNDT(R3) 	;; to point to head of list
+35$:	CLR	(R5)			;; clear link word (tail now)
+	MOV	R5,@E.RNGT(R3)		;; put buffer on end of ring loaded list
+	MOV	R5,E.RNGT(R3)		;; ..and update the tail pointer
+	MOV	E.FIL(R3),R2		;; Get next available descriptor ring
+	TST	BF.VIR+CC.BUF(R5)	;; system or user?
+	BEQ	70$			;; User, load is a little different
+	PUSH	R3			;; save descriptor ring pointer
+	MAP 	PUSH,APR=6,DATA		;; save current mapping
+	MAP	BF.MMU+CC.BUF(R5),APR=6,DATA ;; map the EXTPOL region
+	MOV	BF.VIR+CC.BUF(R5),R1	;; get the virtual address in R1
+	MOV	BF.CNT(R1),R3		;; get byte count of buffer
+	PUSH	BF.OFF(R1)		;; save offset to PDU for a second
+	MOV	BF.ADR+CC.BUF(R5),R1	;; get contorted address and
+	CALL	UNIMAP			;; ..convert R1 into UNIBUS address
+	ADD	(SP)+,R1		;; add offset into the LSW of address
+	ADC	R0			;; update MSBits if required
+	MAP	POP,APR=6,DATA		;; restore mapping to enet region.
+	MOVB	R0,UN$MSB(R2)		;; Load the high order BUS address,
+	MOV	R1,UN$ADD(R2)		;; and the low order BUS address
+	MOV	R3,(R2)			;; load the length field	;003
+.ASSUME	UN$LEN	EQ 0			;; save us a word.		;003
+	MOV	R5,UN$CCB(R2)		;; save CCB address for debugging
+	POP	R3			;; restore CDB pointer
+	ADD	#UN$SIZ,E.FIL(R3) 	;; update the Fill pointer to next entry
+	CMP	E.FIL(R3),E.BOT(R3)	;; bottom of rings?
+	BNE	37$			;; nope.
+	MOV	E.TOP(R3),E.FIL(R3)	;; yep, set it to top (R2 still current)
+37$:	BITB	#DF.CNT,CC.DFL(R5)	;; is this the end of the packet?
+	BEQ	40$			;; Yes, so get out of this stupid loop!
+	POP	R0			;; NO, get status byte off of the stack
+	MOVB	R0,UN$ST1(R2)		;; set status, give buffer to controller
+	MOV	E.FIL(R3),R2		;; Get next available descriptor ring
+	CMP	R2,E.EMP(R3)		;; rings full now?
+	BEQ	60$			;; YES, CRASH!
+	PUSH	#S1$OWN			;; Stack status byte
+	BR	30$			;; and check out next buffer in chain
+
+40$:					;; We're done, tag, update, quit
+	POP	R0			;; get the current status tags
+	BISB	#S1$ENP,R0		;; Set End-Of-Packet as well
+	MOVB	R0,UN$ST1(R2)		;; give status to the controller (+end)
+	BR	80$			;; and quiterino, everything A-Otay.	
+
+50$:	SEC				;; Set Carry, no packet loaded, 
+		; don't modify E.XTMO(R3) 				;003
+	RETURN				;; And return	
+
+60$:	CRASH				;; Mess. 1/2 of a packet, 
+					;;   or no ring space
+					;;   or bad Verify traversal
+
+;+
+;	for user buffers, we already got the physical address and a UMR,
+;	plus it is never chained, plus we ain't got no buffer header on
+;	his buffer....
+;-
+
+70$:	MOV	BF.ADR+CC.BUF(R5),UN$ADD(R2) ;; load the low order address
+	MOVB	BF.MMU+CC.BUF(R5),UN$MSB(R2) ;; and the high order stuff
+	MOV	MS.SIZ+CC.BUF(R5),(R2)	;; load up the buffer length
+.ASSUME	UN$LEN	EQ	0		;; 	(save a word)		;003
+	MOV	R5,UN$CCB(R2)		;; save CCB address for debugging aid
+	POP	R0			;; pop the start of packet and own bits
+	BISB	#S1$ENP,R0		;; Set End-Of-Packet as well
+	MOVB	R0,UN$ST1(R2)		;; give packet to controller (+end)
+	ADD	#UN$SIZ,E.FIL(R3) 	;; update the Fill pointer to next entry
+	CMP	E.FIL(R3),E.BOT(R3)	;; bottom of rings?
+	BNE	80$			;; nope.
+	MOV	E.TOP(R3),E.FIL(R3)	;; yep, set it to top (R2 still current)
+80$:	TST	E.XTMO-E.XRB(R3)	;; working from a zero timeout?	;003
+	BNE	85$			;; no, something else is going on ;003
+	MOV	#5,E.XTMO-E.XRB(R3)	;; yes, but something now, so...  ;003
+					;; set up a timeout value.	  ;003
+85$:	CLC				;; Clear Carry
+	RETURN				;; and quiterino, everything A-Otay.
+
+
+.SBTTL	.. CHKMUL -- Verify that Multicast address is legal for portal
+
+;+
+; CHKMUL --
+;	Scans multicast enabled list for match against destination
+;	address of received packet.  We do not come in here if the
+;	address received on is a physical address.
+;
+; On entrance:
+;	R5 -> pointer to PK.DST in received packet
+;	R4 -> PDB at link word
+; On Exit:
+;	registers preserved
+;	Carry Set if no Multicast Match
+;	Carry Clear if Multicast Match is successful
+;-
+
+CHKMUL:	PUSH	<R2,R3,R4>	; Save some Registers
+	MOV	EP.MCT(R4),R2	;; Get count of multicasts for this portal
+	BEQ	50$		;; None, this was easy
+	MOV	R4,R3		;; lookit portal,
+	ADD	#EP.CST,R3	;; and get start of multicast list
+10$:	PUSH	R5		;; save beginning of destination address
+	CMP	(R5)+,(R3)+	;; LSB match?
+	BNE	20$		;; No, get next address (if any)
+	CMP	(R5)+,(R3)+	;; So far, does the second word match?
+	BNE	30$		;; No, get next address (if any)
+	CMP	(R5)+,(R3)+	;; The Whole thing Match?
+	BEQ	60$		;; Yeah, We're Done, and successful!
+	BR	40$		;; No, but close, try again.
+
+20$:	TST	(R3)+		;; Increment Twice to next address (first word)
+30$:	TST	(R3)+		;; Increment Once to next address  (second word)
+40$:	POP	R5		;; Get Start of Destination back,
+	SOB	R2,10$		;; Try for another match (if addresses left)
+50$:	POP	<R4,R3,R2>	;; We've failed, restore some registers
+	SEC			;; Set the Carry Bit
+	RETURN			;; and go back sad
+
+60$:	POP	<R5,R4,R3,R2>	;; Restore registers (including Dest. pointer)
+	CLC			;; Clear the carry bit,
+	RETURN			;; and return
+
+.SBTTL	****************************************************
+
+.SBTTL  MOP -- Remote Console Type Handler -- CONSOL 
+
+;+
+; CONSOL:
+;	For the DEUNA driver, this routine will only handle
+;	REQUEST COUNTERS requests.  All appropriate SYSID
+;	Messages have already been handled by the controller
+;
+; On Entrance:
+;	Received Packet is mapped (DPAR6, and R5)
+;	R5 (offset to protocol type PK.TYP)
+;	R3 -> CDB
+;	R2 -> CSRs
+;
+;	A REQUEST counters packet is about 16 bytes long.  We expect
+;	it to be padded to 64 bytes, but must ensure that we don't
+;	crash if some Nimnull sends us a LARGE Request Counters (requiring
+;	more than one buffer).						;004
+;
+; On Exit:
+;	C = 0
+;	  Good things going on
+;	C = 1
+;	  Not valid MOP for any number of reasons.
+;	  Nothing new
+;-
+
+CONSOL:	CMPB	RC.FUN-PK.PRT(R5),#RQCNTR ; Request Counters packet?	;016
+	BNE	20$		;; No, forget it.
+	BIT	#1,PK.SRC-PK.PRT(R5) ;; It is, Source better be physical address
+	BNE	20$		;; Not physical, pretend it ain't MOP
+	CALL	MPENT2		;; save current mapping, map enet region ;019
+	DEC	E.MOPB(R3) 	;;Account for MOP buffers in use	;004
+;		Only one in use.  Short packet.  Short response.	;004
+;		ignore incredible padding.  Only One will be tied up.	;004
+	BLT	30$		;; Bad news, no buffers available
+	PUSH	<R0,R4>		;; save queueing registers for our use
+	MOV	XEPKT+XECORE,R4	;; Get [first] CCB address into R4
+	MOV	(R4),R0		;; get [next] CCB in chain in R0	;004
+	CALL	DSCRCV		;; toss the rest of the chain (if any)	;004
+;		Remember, DSCRCV can handle zero length lists		;004
+;	CLR	(R4)		;; forget the list			;004
+;		No need to do this.  QUEUE0 (below) will clear it regardless
+	BICB	#DF.CNT,CC.DFL(R4) ;; and make sure we don't look continued ;004
+	MOVB	#NI$RCT,CC.FC(R4) ;; load ReQuest counTers function code
+	MOV	R3,R0		;; get CDB addresss into R0
+	ADD	#E.CNCQ,R0	;; make it the CCB continuation queue root
+	CALLX	QUEUE0,R5	;; And queue up the Req Counters for service.
+	BCC	10$		;; Controller already active, don't L3Q Con$
+	CALL	QCDBCN		;; queue the controller CDB for CON$ service
+10$:	POP	<R4,R0>		;; restore our amazing registers
+;	MAP	POP,APR=6,DATA	;; get the buffer mapping back (removed);019
+	CLC			;; MOP function successful
+	RETURN
+
+20$:	SEC			;; Unhappy.  Not valid MOP
+	RETURN			;; Return
+
+30$:	PUSH	<R2,R4,R5>		;; save error logging regs
+	CLR	R2			;; R2 -> CSR (not avail)
+					;; R3 -> CDB
+	CLR	R4			;; R4 -> PDB (not avail)
+	MOV	XEPKT+XECORE,R5		;; R5 -> CCB 
+	LOG$XE				;; Log the error (out of MOP buffers)
+	POP	<R5,R4,R2>		;; restore the registers
+	ADD	XECNT+XECORE,E.MOPB(R3) ;; correct the buffer count
+	PUSH	R0		;; save R0 so we can use it
+	MOV	XEPKT+XECORE,R0	;; get pointer to first buffer
+	CALL	DSCRCV		;; discard the buffers back to RCV free list
+	POP	R0		;; restore working reg
+	BR	10$		;; restore mapping, leave CARRY CLEAR
+				;; (was legal MOP, we just couldn't do it)
+
+GLOBAL	<LOG$XE>
+
+
+.SBTTL	MOP function - Loopback Special Handling - LOOPBK
+
+;+
+; LOOPBK --
+;	The UNA handles Loopback requests to the physical and to 
+;	the broadcast addresses.  This routine need only watch for
+;	Loopback requests issued to the LOOP ASSISTANT MULTICAST.
+;	Again, we will only respond if the request is to be forwarded
+;	to a physical address.
+;
+; On Entrance --
+;	First Receive packet buffer mapped in R5
+;	  (R5 offset to PK.PRT (type))
+;	R3 -> CDB at link word
+;
+; On Exit --
+;	C = 0
+;	  Loopback function valid, Queued for forwarding to next address
+;	C = 1
+;	  Loopback function invalid.  No change
+;-
+
+LOPAST:	HEX	<CF-00-00-00-00-00>	;; Loop Assistant Multicast Address
+
+LOOPBK:	REGSCR				;; save our registers
+	SUB	#PK.PRT,R5		;; get back to top of PDU
+	BIT	#BIT0,(R5)		;;VALIDATE OUR RECEPTION (physical?)
+.ASSUME	PK.DST	EQ 0			;; destination address first in PDU
+	BEQ	10$			;; is physical, so next check
+	MOV	#LOPAST,R1		;; is it LOOP ASSIST MULTICAST?
+	CMP	(R5),(R1)+		;; match in first  word? (00CF)
+	BNE	50$			;; No.  not for us.
+	CMP	2(R5),(R1)+		;; So far, next word match? (0000)
+	BNE	50$			;; no, not MOP that we do
+	CMP	4(R5),(R1)		;; Okay, last word? (0000)
+	BNE	50$			;; no, close, but not enough
+10$:	MOV	LP.SKP(R5),R1		;;VALIDATE THE SKIP COUNT (pick it up)
+	BIT	#BIT0,R1		;; skip count valid?
+	BNE	50$			;; odd skip is certainly weird
+; should it be BIT  #7,R1 to make sure that we get a multiple of 8?
+	ADD	#<PK.PAD+8.>,R1		;; account for header and entire..
+.ASSUME	LP.SKP	EQ PK.LEN		;; .. next skip command block
+	CALL	MPENET		;; save current mapping, map enet region ;014
+	SUB	XECNT+XECORE,E.MOPB(R3) ;;VALIDATE: buffers available?
+	BPL	30$			;; we got the buffers, go for it.
+		;; no receive buffers,log an error, return buffers, and get out
+					;; R2 -> CSR
+					;; R3 -> CDB
+	CLR	R4			;; R4 -> PDB (not avail)
+	MOV	XEPKT+XECORE,R5		;; R5 -> CCB 
+	LOG$XE				;; Log as an error
+	ADD	XECNT+XECORE,E.MOPB(R3) ;; Adjust the count back
+	MOV	R5,R0			;; get packet head in R0
+	CALL	DSCRCV			;; return buffs to receive free list
+	MAP	POP,APR=6,DATA		;; remap whatever we came in with
+	CLC				;; remember that it was MOP
+	RETURN				;; and exit (REGSCR completes)
+
+30$:	MOV	E.STR2(R3),R0		;; get length of rcvd packet (plus)
+	MAP	(SP),APR=6,DATA		;; restore mapping
+					;; (leave it on the stack)
+	BIC	#<S2$BFL!S2$NXM!R2$NCH>,R0 ;; clear error bits (none set)
+	CMP	R1,R0			;; New Skip count < total Rcvd packet?
+	BGE	40$			;; No. BCS exit (restore mapping)
+	SUB	#8.,R1			;; yes, so reset command block pointer
+	MOV	XEPKT+XECORE,R0		;; get pointer to first CCB [of chain?]
+	CALL	CVTLOP			;; and update the block for xmit
+	BCS	40$			;; wasn't for us after all
+		;; we have verified.  CVTLOP will not fail for any other reason
+	BISB	#DF.MOP,CC.DFL(R0)	;; mark it as a MOP buffer
+	MAP	XEDPR6+XECORE,APR=6,DATA ;; map enet region (again)
+	CALL	DSCXMT			;; load on FRONT of pending XMIT list
+					;; [will load and poll later in INT$]
+	CLC				;; clear carry, we have success.
+	MAP	POP,APR=6,DATA		;; restore mapping (pushed at start)
+	RETURN				;; remap, restore registers and exit
+
+	; two kinds of non MOP exit.  Before modifying count, and after
+40$:	MAP	XEDPR6+XECORE,APR=6,DATA ;; map enet region yet again
+	ADD	XECNT+XECORE,E.MOPB(R3) ;; those MOP buffers still available
+	MAP	POP,APR=6,DATA		;; restore mapping on entry
+50$:	SEC				;; not MOP.
+	RETURN				;; go back, try to use as normal rcv
+
+GLOBAL	<LOG$XE,XECORE>
+
+
+.SBTTL	CVTLOP - convert loop message for xmit.
+
+;+
+;
+; CVTLOP:
+;
+;	Update the loop back message into forwarding form.  This is a little
+;	tricky since the command area may span buffer boundaries.  This is
+;	bound to be ugly.
+;
+;	If we get into this routine, we know that there is enough information
+;	in the message to complete the function.  We don't know, however, if
+;	the information is valid.
+;
+;	You can only forward to a physical address.
+;
+; INPUT:
+;
+;	R0 -> message (chain).
+;	R1 =  offset in message where function block lives.
+;	R3 -> CDB [not mapped]
+;	R5 -> message buffer (of first buffer).
+;		*First message mapped*
+;
+; CALL:
+;
+;	JSR	PC,CVTLOP
+;
+; BACK:
+;
+;	C = 0 If message modified.
+;	C = 1 If wasn't loop forward command (normally it's a reply)
+;	      or other error.
+;	R4, R1 trashed
+;	mapping unchanged.
+;-
+
+
+CVTLOP:	PUSH	<R2,R0>			;;save first buffer CCB
+	CALL	GETWD$			;;get first word of function block
+	CMP	#LPFRWD,R2		;;loop forward request?
+	BNE	20$			;;no, exit
+10$:	CALL	GETWD$			;;get the word
+	BIT	#BIT0,R2		;;Is it a physical address
+	BEQ	30$			;;yes, it is legal
+20$:	POP	R0			;;restore the chain pointer
+	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA ;;re-map the original buffer
+	BR	50$			;;and fail
+
+30$:	PUSH	R2			;;yes, store first word
+	MOV	#2,R5			;;get remaining number of words in addr
+40$:	CALL	GETWD$			;;get the word from the message
+	PUSH	R2			;;save it
+	SOB	R5,40$			;;for all the words
+			;
+			; This is a bad practice, but little elegant 
+			; alternatives are not available.
+			;
+	MOV	6(SP),R0		;;restore original pointer
+	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA ;;re-map the original buffer
+	MOV	CC.BUF+BF.VIR(R0),R4	;;make pointer to buffer header
+	ADD	BF.OFF(R4),R4		;;make pointer to start of message
+	POP	PK.DST+4(R4)		;;restore word 3
+	POP	PK.DST+2(R4)		;;  restore word 2
+	POP	(R4)			;;    restore word 1
+.ASSUME	PK.DST EQ 0
+	TST	(SP)+			;;clean up the stack
+	ADD	#8.,LP.SKP(R4)		;;update skip count
+	TST	(PC)+			;;success
+50$:	SEC				;;failure
+	POP	R2
+	RETURN
+
+GETWD$:
+;
+; GETWD$: - get a word from a message that may span several buffers.
+;			basic effect =  MOV  MESSAGE_BUFF(R1)+,R2
+;
+; Inputs:
+;	R0 -> current CCB.
+;	R1 =  current offset (may never get smaller).
+; Output:
+;	R0 updated.
+;	R1 = previous R1 + 2
+;	R2 = word at offset in R1
+;	R4 is trashed
+;
+10$:	MOV	CC.BUF+BF.VIR(R0),R4	;;get virtual address of buffer
+	CMP	R1,BF.CNT(R4)		;;will skip count span buffer
+	BLOS	30$			;;no, look it up
+	MOV	(R0),R0			;;yes, get next CCB
+.ASSUME	CC.LNK EQ 0
+	BEQ	20$			;;crash if not there
+	SUB	BF.CNT(R4),R1		;;subtract previous's data cnt from skip
+	MAP	CC.BUF+BF.MMU(R0),APR=6,DATA ;;map the next message buffer
+	BR	10$			;;and try this buffer
+
+20$:	CRASH				;;illegal buffer chain
+
+30$:	ADD	BF.OFF(R4),R4		;;make pointer to data portion of buff
+	ADD	R1,R4			;;add in (modified) skip count
+	TST	(R1)+			;;make new offset
+	MOV	(R4),R2			;;return the word
+	RETURN
+
+	GLOBAL	<XECORE>
+
+.SBTTL	*************************************************
+
+.SBTTL  Transmit Posting Routines 
+.SBTTL	XMTPST -- post an [unkown] transmit completion
+
+;+
+; XMTPST -- 
+;	Post out a transmit completion.
+;
+; mapping in DAPR6 is Enet region
+; R3 -> CDB @CDBOFF
+; R4 -> PDB @PDBOFF
+; R5 -> first [possibly] chained CCB
+;-
+
+XMTPST:	MOVB	EPJBNO(R4),R0	; get the job number in R0
+	BIT	#1,R0		; System job or user?
+	BEQ	XMTUSE		; User.
+	.BR	XMTSYS		; system.
+
+.SBTTL	XMTSYS -- post a SYSJOB transmit completion
+
+;+
+;XMTSYS --
+;	Post a [possibly errored] system transmit
+;	back to the system job that issued it.
+;
+; Mapping in APR6 is Enet region
+; R0 = Job number times 2
+; R3 -> CDB @CDBOFF
+; R4 -> PDB @PDBOFF
+; R5 -> first [possibly] chained CCB
+;-
+
+XMTSYS:	CALL	PSTSYS			; Beauty, so get it to the right queue.
+	DEC	EP.XMO(R4)		; another system transmit completes
+	BNE	10$			; and we're done
+	BIT	#P$CLS,EP.STS(R4)	; none left, are we closing?
+	BEQ	10$			; not closing.
+	MOV	R4,R1			; R1 -> PDB
+	CALL	DMPPDB			; dump the PDB [close complete].
+10$:	RETURN				; and go back where you came from.
+
+.SBTTL	XMTUSE -- Post a user transmit completion
+
+;+
+;XMTUSE --
+; 	Post a [possibly errored] request back 
+;	to the user level job that called it.
+;
+;On Entrance:
+;	R0 = Job number times 2
+;	R5 -> CCB (only one)
+;		If CC.FC = FC$ERR
+;		  Then CC.ERR = Error Code to post.
+;		  Else Success.
+;On Exit:
+;	UMRs released.
+;	Error Posted.
+;	CCB returned.
+;-
+
+XMTUSE:	MOV	R0,R4			;; job number: R0 for UNLOCK,
+	PUSH	R2			;; -- R4 for IOFIN4 (SAVE R2)
+	CMPB	CC.FC(R5),#FC$XER	;; did we see a problem?
+	BNE	65$			;; Nope.
+	MOV	JOBTBL(R0),R2		;; yeah, so get JDB pointer,
+	MOV	CC.ERR(R5),JDIOST(R2)	;; and post a Data error when possible.
+65$:	CALLX	UNLOCK			;; unlock the job.
+	CALLX	IOFIN4,R5,JS.SY!JSTIM	;; get him going again
+	POP	R2			;; Restore R2 (munged by UNLOCK)
+	MOV	R5,R4			;; get the CCB into R4 to ...
+	CALL	@RELUMR			;; ... release reserved UMRs, and ...
+	BUFFER	RETSML			;; ... to drop it back to MONPOL
+
+	RETURN
+
+
+.SBTTL	PSTSPC -- post .SPEC request to SYSJOB or USER
+
+;+
+; PSTSPC -- called at PR3 or PR5. (yucko)
+;
+;	R3 -> CDB
+;	CCB of .SPEC to post in E.CNCQ
+;
+; Three results:
+;	1 - Post to User job and cleanup
+;	2 - Post to system job and cleanup
+;	3 - Driver originated, just cleanup.
+;
+; R0,R4,R5 may be modified
+;-
+
+PSTSPC:	MOV	E.CNCQ(R3),R5		; get a pointer into the CCB
+	MOV	(R5),E.CNCQ(R3)		; pull off of the CON$ list
+	BEQ	60$			; no more to come.
+	CALL	QCDBCN			; and make sure we do more CON$
+60$:	CLR	(R5)			; forget anything following for now.
+	MOV	CC.NOB(R5),R0		; get a PDB pointer,
+	BEQ	110$			; no PDB, internal; no response...
+			; or it has already been posted (Get Line Counters)
+	MOV	R0,CC.DDB(R5)		; replace PDB pointer for DECnet to see
+	MOVB	EPJBNO(R0),R0		; get the Job number
+	BIT	#1,R0			; SYSJOB or user?
+	BEQ	100$			; User Job, use IOFIN4
+	MOV	BF.ADR+CC.SEC(R5),R4	; get the UDBB (if any)
+	BEQ	70$			; none, so don't return it
+	BUFFER	RETURN			; return it to the right place
+	CLR	BF.ADR+CC.SEC(R5)	; make sure we don't return it twice
+.ASSUME	BF.ADR	EQ 0
+70$:	CLR	CC.ERR(R5)		; and indicate no error.
+	CMPB	#NI$EML,CC.FC(R5)	; Enable Multicasts?
+	BNE	80$			; Nope
+	MOVB	#FC$MUL,CC.FC(R5)	; yeah, so load end notification
+	BR	90$			; post it.
+
+80$:	MOVB	#FC$PHY,CC.FC(R5)	; else, notify of Physical Address set
+90$:	MOV	R0,R4			; get PDB into correct register
+	CALL	PSTSYS			; SYSJOB - success CC.FC okay
+	BR	130$			; so queue it out, and exit.
+
+100$:	MOV	R0,R4			; get JBNO in R4 for posting.
+	CALLX	IOFIN4,R5,JS.SY!JSTIM	; Post it, and make him runnable.
+110$:	CALL	PRTCMP			; return CCB/UDBB pair
+130$:	RETURN				; and exit.
+
+.DSABL	LSB
+
+GLOBAL	<LOG$XE,QUEL3Q,EVTSAV>
+
+
+.SBTTL	PSTSYS -- Post [generic] result to System Job
+
+;+
+; PSTSYS --
+;	Called at PR5 or PR3.  Mostly called at PR5 to
+;	handle receive and transmit completions.
+;
+;	Use Lowcore SJBQUE table to post an error CCB,
+;	a transmit completion, or a Received packet to
+;	a system job.
+;
+;	On entrance to this routine, the CCB is expected to be 
+;	ready for posting: FC$XCP will be in CC.FC for successful 
+;	transmits, etc..    
+;
+;
+; On Entrance --
+;	R0 = Job number times 2
+;	R5 -> first CCB to handle, maybe a list
+;		CC.DDB -> PDB @PDBOFF (always)
+;
+; Both Registers destroyed on exit, no other registers are used.
+;
+; The SJBQUE table operates like this:
+;
+;	SJBQUE::.WORD	0		; No Sysjob 1
+;		.WORD	NSPBLK		; Sysjob 3
+;		.WORD	TRNBLK		; Sysjob 5
+;	SJBEND == <. - SJBQUE>		; end of table
+;
+;	TRNBLK::.WORD	0		; HEAD of TRNQUE
+;		.WORD	TRNBLK		; TAIL of TRNQUE
+;		.L3Q	QTRN		; L3Q bits to get TRN service
+;
+;	The SJBQUE table is accessed by SYSJOB number - 1.
+;	In TBL, SJBQUE is a static table consisting of one word
+;	for each SYSJOB.  Each SYSJOB is responsible for merging
+;	it's xxxBLK into the table at offset SYSJOB-1.  If the entry
+;	is zero, anyone that happens to access this should crash.
+;-
+
+PSTSYS:	DEC	R0		; make it even.
+	CMP	R0,#SJBEND	; off the end of the table? (either direction)
+	BHI	20$		; yes, just crash. we're real messed up
+	MOV	SJBQUE(R0),R0	; get pointer to SYSJOB subblock
+;	BEQ	20$		; Crash if it wasn't merged.
+;	  we'll crash on the call if it wasn't merged.
+	PUSH	<R2,R3>		; save some registers for fun with L3Q
+	PUSH	@#PS		; save current status
+	SPLC	5		;; five for sure now.
+	MOVB	4(R0),R2	;; get L3 bit information		;007
+	MOVB	5(R0),R3	;; and byte offset from L3QUE		;007
+	ADD	#L3QUE,R3	;; address the right byte through R3	
+	BISB	R2,(R3)		;; set the L3Q bit requested
+				;; Just did L3QSET, the long way.
+	MOV	R5,@2(R0)	;; Thread the first CCB to the tail
+	MOV	CC.DDB(R5),R3	;; get the PDB @PDBOFF
+	MOVB	EPUNT(R3),R3	;; get the unit number times one
+	ASL	R3		;; times two
+10$:	MOV	DEV.XE(R3),CC.DDB(R5) ;; and give SYSJOB its 'real' DDB
+	TST	(R5)		;; end?
+	BEQ	15$		;; yeah, stick it on the tail
+	MOV	(R5),R5		;; no, so get the {next} CCB in the list
+	BR	10$		;; ... and set it up
+15$:	MOV	R5,2(R0)	;; load last packet into TAIL pointer
+	POP	@#PS		; restore running priority
+	POP	<R3,R2>		; restore our registers
+	RETURN			; and return
+
+20$:	CRASH			;; illegal system job number
+
+GLOBAL	<SJBQUE,SJBEND>
+
+.SBTTL	*************************************************
+
+.SBTTL  General Mapping Routines 
+.SBTTL	UDBMAP -- map UDBB, set up PCBB for a request
+
+;+
+; UDBMAP --
+;
+;	Mapping to Ethernet region
+;	R3 -> CDB
+;	R5 -> CCB
+;		CC.SEC maps UDBB to map
+;		BF.END+CC.SEC is command to execute
+;
+;	CALL UDBMAP
+;
+;	R5 -> CCB
+;	R3 -> CDB
+;	R2 -> PCBB + 6
+;	R1 -> start of UDBB proper in XBUF region (mapped)
+;		UDBB mapped into PCBB and command ready to go
+;	Mapping UDBB through APR6
+;
+;	R0 preserved over call
+;-
+
+UDBMAP:	PUSH	R0			; save this [usually cntrlr #]
+	MOV	E.PCBB(R3),R2		; get the PCBB address [enet mapped]
+	MAP	BF.MMU+CC.SEC(R5),APR=6,DATA ; map UDBB [forget enet region]
+	MOV	BF.ADR+CC.SEC(R5),R1	; get contorted address
+	CALL	UNIMAP			; make R1/R0 LSB/MSB of address
+	PUSH	R1			; save LSB for a sec
+	MOV	BF.END+CC.SEC(R5),(R2)+	; load command into PCBB+0
+	MOV	BF.VIR+CC.SEC(R5),R1	; map to the UDBB
+	MOV	BF.OFF(R1),(R2)		; get offset to UDBB into PCBB+2
+	ADD	(SP)+,(R2)+		; and add in UNIBUS addressing (PCBB+2)
+	ADC	R0			; update high order addressing
+	MOV	R0,(R2)+		; and set up the MSB in PCBB+4
+	ADD	BF.OFF(R1),R1		; offset into actual Data of UDBB
+	POP	R0			; restore whatever it is.
+	RETURN				; return
+
+.SBTTL	UNIMAP -- convert address into 18 bit UNIBUS address
+
+;+
+; UNIMAP --
+;	Convert 'contorted' or MONPOL address into UNIBUS
+;	address.  'Contorted' addresses are always in EXTPOL.
+;
+; On Entrance:
+;	R1 = 'contorted' address for EXTPOL
+;	R1 = UNIBUS address for MONPOL (R1 & 37 = 0)
+;
+; On Exit:
+;	R0 = MSB (in bits zero and one)
+;	R1 = LSB (word value)
+;-
+
+UNIMAP:	CLR	R0		; make room for MSBits
+	BIT	R1,#37		; pulled from MONPOL?
+	BEQ	10$		; yep, all set
+	ASHC	#-7,R1		; uncontort to physical address/100
+	ADD	EXTPOF,R1	; add in extended pool offset
+	ASHC	#6,R0		; multiply R0/R1 pair by 100 for UNIBUS address
+10$:	RETURN			; everything is as it should be
+
+
+;+
+; MPENET -- Map Ethernet Region.
+; MPENT2 -- Map Enet region without saving current mapping
+;
+; Stupid routine.
+; Called a million times.
+; maps the The ethernet APR
+;
+;	CALL	MPENET
+;	CALL	MPENT2
+;
+; On entrance:
+;	no registers required
+; On Exit:
+;	all registers preserved
+;	(SP) = pushed DPAR6 except on MPENT2
+;-
+
+MPENET:	MOV	(SP),-(SP)	; get an extra copy of return address	;014
+	MOV	@DPAR6,2(SP)	; stick current DPAR6 under return address
+MPENT2:	MAP	XEDPR6+XECORE,APR=6,DATA ; map ethernet region		;019
+	RETURN			; normal return.  R5 okay, and leaves
+				; DPAR6 on top of stack to be restored
+GLOBAL	<EXTPOF>
+
+.END
+

@@ -1,0 +1,1008 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /INIT:INIPFX/
+	.INCLUDE /CMN:RTCOM/
+TITLE	HOOK,<HOOK A FILE TO A BOOTSTRAP RECORD>,0A,10-MAY-91,ABC/SJK/AWR/TG/GPK/SDL/WJS/KMF/VAM
+
+;
+;		COPYRIGHT (c) 1974, 1985 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR HOOK
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-08
+;  001	TG   30-Dec-80	Took date out of header
+;  002	GPK  11-Apr-82	Bugfix in RDB (error if outside 1st cluster)
+;			Removed DECtape hooking
+;  003  SDL  13-Apr-82  "HOOK - version #" is automatically updated
+;  004	GPK  07-Jun-82	Bugfix in dealing with alternate INIT.SYS files
+;
+;			[RSTS V8.0]
+;  000	GPK  08-Jun-82	New boot block layout
+;  001	GPK  09-Jul-82	Use common "BLDBOT" module
+;  002	GPK  04-Aug-82	Removed date saving for magtape boots
+;  003	GPK  05-Aug-82	/O (ODT or Offset) switch
+;  004	GPK  26-Sep-82	Fix handling of high address from SAV file
+;  005  JHC  03-Mar-83  Bug fix cluster map builder (DCN to blocks)
+;
+;			[RSTS V9.0]
+;  006	WJS  12-Sep-83	LIMITS check;  fix handling of names o/t INIT.SYS
+;  007	KMF  02-Feb-84	No longer have to dismount and remount to write
+;			to disk.
+;
+;			[RSTS V9.1]
+;  008  VAM  19-May-85	Add support for 6250 BPI tapes using new .SPEC call
+;  009  VAM  02-Jun-85	Change boot block to new universal format.
+;  010  VAM  12-Jun-85	Add privilege check.
+;  011  VAM  27-Jul-85	Restore original file open/close for tapes.
+;  012	FEK  22-Sep-86	Add mode 16384 for NFS write
+;
+;			[RSTS V9.5]
+;  013	PJH  31-Jul-87	Add large disk support (Small buffer read/write)
+;-
+
+.SBTTL	DEFINITIONS
+
+.ENABL	LC
+
+.MCALL	..V1..,	.READW,	.LOOKUP,.TTYIN,	.TTYOUT,.PRINT,	.ENTER
+.MCALL	.WRITW,	.CSISPC,.EXIT,	.CLOSE,	.SRESET,.RCTRLO
+
+..V1..
+
+.MACRO	ERROR	TEXT
+.DSABL	CRF
+	TMPORG	HOOTXT
+$$$$$$	= .
+.NLIST	BEX
+	 .ASCII	TEXT<200>
+	UNORG
+.ENABL	CRF
+	 JSR	R0,ERRORP
+.DSABL	CRF
+	 .WORD	$$$$$$
+.ENABL	CRF
+.ENDM	ERROR
+
+.MACRO	MAGTAPE	CHAN,TYPE,ARG
+.IF B	ARG
+	CALL	MAGTXX,R5
+	  .WORD	TYPE'.MT*400+377
+	  .WORD	CHAN+<26.*400>
+.IFF
+.IF IDN	<ARG>,<0>
+	CALL	MAGTX0,R5
+	  .WORD	TYPE'.MT*400+377
+	  .WORD	CHAN+<26.*400>
+.IFF
+	CALL	MAGTAP,R5
+	  .WORD	ARG
+	  .WORD	TYPE'.MT*400+377
+	  .WORD	CHAN+<26.*400>
+.ENDC	;IDN <ARG>,<0>
+.ENDC	;B <ARG>
+.ENDM	MAGTAPE
+
+BDNERR	=	64		;Define a 'Bad Number' error		;008
+
+; ORDER THE CSECTS
+
+	DEFORG	HOOK
+	.CSECT	BLDBOT		;Stupid TMPORG defines symbol
+	TMPORG	HOOCTL
+	TMPORG	HOOTXT
+
+BNFMSG:	.ASCII	"%No bootstrap found for "				;009
+BNFDEV:	.ASCIZ	"??"							;009
+
+TOOBIG:	.ASCII	"?Bootstrap for device "				;009
+TOBDEV:	.ASCII	"??"							;009
+	.ASCII	" is too big"<200>					;009
+
+	TMPORG	HOOCTL
+
+MSBSID::.BLKW0	1		;MASS BUSS ID OF DB OR DR
+DSKFLG:	.BLKW0	1		;FLAG DB OR DR DISKS (-1 MEANS MODIFY BOOT)
+CSIBLK:	.BLKW0	3*5		;UNUSED PART OF CSI WORK AREA
+DEVNM1:	.BLKW0	4		;FIRST CSI INPUT FILE
+DEVNM2:	.BLKW0	4		;SECOND CSI INPUT FILE
+DEVNM3:	.BLKW0	4*4		;THIRD - SIXTH CSI INPUT FILES
+DSKNAM:	.BLKW0	4		;DEVICE BLOCK FOR OPENING THE DEVICE NFS
+DFEXTS:	.BLKW0	4		;NO DEFAULT EXTENSION
+MT4NFS:	.BLKW0	4		;DEVICE FOR NFS MAGTAPE
+
+DEVASC:	.WORD	0		;DEVICE NAME IN ASCII
+DEVNUM:	.WORD	0		;UNIT NUMBER (& UNIT FLAG)
+
+BUFLEN:	.WORD	0		;BUFFER LENGTH FOR NFS DISK
+CLURAT:	.WORD	0		;FILE CLUSTER RATIO (FCS/DCS)
+DCS::	.WORD	0		;DEVICE CLUSTER SIZE
+FCS:	.WORD	0		;File cluster size
+BTSIZE:	.WORD	0		;Size of bootstrap code
+XFERAD::.WORD	0		;TRANSFER ADDRESS
+BOOTWC::.WORD	0		;WORD COUNT FOR BOOT
+FIBLK:	.WORD	-1		;BLOCK NUMBER IN FIBUF (NOTHING THERE YET)
+FIBUF:	.BLKW0	256.		;BUFFER FOR DIRECTORY
+
+BUFF:	.BLKW	16.*256.	;Here's our multi-purpose buffer.	;009
+
+SY0:	.RAD50	"SY0INIT  SYS"	;NAME FOR OPENING [0,1]INIT.SYS TO GET BOOTS
+INIBLK:	.WORD	-1		;BLOCK OF INIT.SYS IN INIBUF
+INIBUF:	.BLKW	256.		;BUFFER FOR READING INIT.SYS
+
+MLABEL:	.RAD50	"MGBOOTSYS"	;Our pre-built extended DOS label.	;009
+	.BYTE	1,0		;PPN of [0,1].				;009
+	.BYTE	155.		;Protection code of <155>.		;009
+	.BYTE	0		;This byte must be zero.		;009
+	.WORD	0		;This is filled in with internal date.	;009
+	.WORD	0		;We write this word as zero.		;009
+MLBEND:				;This word marks the end.		;009
+
+XXBPTR::.BLKW0	2		;Pointer to boot pointer table in INIT
+STBLOC:	.BLKW0	1		;BLOCK OFFSET OF STB IN INIT
+STBNUM:	.BLKW0	1		;NUMBER OF SYMBOLS IN STB
+OVBLOC:	.BLKW0	1		;BLOCK OFFSET OF OVERLAY DESCRIPTOR BLOCK
+OVBNUM:	.BLKW0	1		;NUMBER OF OVERLAYS
+UNITFL:	.BLKW0	1		;UNIT NUMBER AND FLAG OF DEVICE TO HOOK
+BTPTR:	.BLKW0	2		;2-WORD BYTE ADDRESS OF BOOTS IN INIT
+MTDENS:	.BLKW0	1		;DENSITY FOR (OUTPUT) MAGTAPE
+SFUNBK:	.BLKB	12.		;MT SPECIAL FUNCTION BLOCK
+FTLGET:	.BLKW0	1		;0 IF SYMBOL LOOKUPS ARE FATAL, ELSE NON-ZERO
+STRTED:	.BLKW0	1		;NON-ZERO IF HOOK'S BANNER HAS BEEN PRINTED
+OFFSET:	.BLKW0	1		;Start address offset (from /O)
+NONSTD:	.BLKW0	1		; Name of file being hooked is not "INIT.SYS"	;006
+
+.DSECT				;DEFINE FUNCTION CODES FOR MT SPECIALS
+
+RWO.MT:	.BLKB			;REWIND AND OFFLINE
+EOF.MT:	.BLKB			;WRITE EOF
+REW.MT:	.BLKB			;REWIND
+SKP.MT:	.BLKB			;SKIP FORWARD
+BSP.MT:	.BLKB			;SKIP BACKWARD
+DEN.MT:	.BLKB			;SET DENSITY/PARITY
+UNT.MT:	.BLKB			;GET MAGTAPE UNIT STATUS
+FIL.MT:	.BLKB			;GET MAGTAPE FILE CHARACTERISTICS
+RWC.MT:	.BLKB			;REWIND MAGTAPE ON CLOSE
+EOV.MT:	.BLKB			;Write EOV label (not used in HOOK)	;008
+ECA.MT:	.BLKB			;Error Condition Ack (not used in HOOK)	;008
+XDN.MT:	.BLKB			;Extended Set Density			;008
+
+	UNORG
+
+	.SBTTL	MAIN CODE
+
+.ENABL	LSB
+
+	BR	START		;ALLOW START AT BEGINNING
+
+ERRIOS:	MOVB	FIRQB,R0	;GET THE REAL ERROR
+	.ERRPRT			;PRINT IT
+	BR	CRLF
+
+ERRORP:	MOV	(R0)+,R0	;GET TEXT POINTER
+ERRPRT:	.PRINT
+CRLF:	CLR	-(SP)		;AND RESTORE THE CARRIAGE
+	MOV	SP,R0
+	.PRINT
+	NOP			;FOR REENTER
+START::	MOV	@#USERSP,SP	;RESET THE STACK
+	CLR	MTDENS		;CLEAR THE DENSITY FLAG
+	CLR	CSIBLK		;DON'T CONFUSE ME
+	CLR	OFFSET		;Assume no offset
+	CLR	NONSTD		; Assume std name, "INIT.SYS"		;006
+	BIS	#RSTRT$,JSW	;WE ARE REENTERABLE
+	.SRESET			;RESET THE WORLD
+	.RCTRLO			;SPEAK
+	TST	STRTED		;PRINTED OUR NAME AND VERSION YET?
+	BNE	10$		;YES, AND ONCE IS ENOUGH.
+	COM	STRTED		;MAKE SURE WE DON'T TRY ANYTHING STUPID...
+	ERROR	<"HOOK V"<SYSVEL&377><SYSVEL/400><SYSVEE&377><SYSVEE/400><'-><$$$VER&377><$$$VER/400>>
+
+10$:	.CSISPC	#CSIBLK,#DFEXTS	; Get a spec from the TTY
+	TST	DEVNM1+2	; Filename specified?
+	BEQ	30$		; No => go supply the standard name	;006
+	CMP	DEVNM1+2,#^RINI	; Yes:  check to see if			;006
+	BNE	20$		;    the name supplied is		;006
+	CMP	DEVNM1+4,#^RT  	;    other than "INIT.SYS"		;006
+	BNE	20$		; It's non-standard => go set the flag	;006
+	CMP	DEVNM1+6,#^RSYS	; Last part of the check...		;006
+	BEQ	40$		; It passes !   Name is standard	;006
+20$:	COM	NONSTD		; Non-standard name:  remember that	;006
+	BR	40$							;006
+
+30$:	MOV	#^RINI,DEVNM1+2	; Supply the standard file		;006
+	MOV	#^RT  ,DEVNM1+4	;  name of INIT.SYS
+	MOV	#^RSYS,DEVNM1+6
+	.BR	40$							;006
+
+40$:	MOV	#DEVNM1,R1	;POINT TO THE FILE NAME
+	MOV	R1,R0		;COPY POINTER TO
+	.SETFQB			; SET UP THE FIRQB
+	BCS	ERRIOS		;OOPS
+	CLR	XRB		;NO LOGICAL NAME MAPPING
+	.PRIV,	.LOGS		;GET DEVICE TYPE
+	TSTB	FIRQB		;ERROR ?
+	BNE	ERRIOS		;YUP
+	MOV	#BOOTYP,R3	;R3 -> VALID TYPES OF DEVICES
+	MOVB	XRB+6,R0	;R0 = DEVICE INDEX
+50$:	MOV	(R3)+,R4	;R4 = ADDRESS OF HOOKER FOR DEVICE
+	BEQ	140$		;END OF TABLE, CAN'T HOOK THIS ONE
+	CMP	R0,(R3)+	;IS THIS THE DEVICE?
+	BNE	50$		;NO
+	MOV	FIRQB+FQDEVN,UNITFL ;GET THE UNIT NUMBER AND FLAG
+	CLR	R2		;Default to no density specified
+	MOV	(SP)+,R1	;Get switch count
+	BEQ	180$		;None, fine
+	CMP	R1,#2		;Too many?
+	BHI	150$		;Yes
+60$:	MOV	(SP)+,R2	;GET OPTION NAME AND FILE NUMBER
+	CMPB	R2,#'O		;/O (Offset or ODT)?
+	BNE	90$		;No, try for /D
+	TST	R2		;Have argument?
+	BMI	70$		;Yes
+	MOV	#2,-(SP)	;Otherwise supply arg of 2 (ODT offset)
+70$:	CLRB	R2		;Now look at the high byte
+	SWAB	R2		;Make it low
+	BIC	#200,R2		;Clear the argument flag
+	BEQ	80$		;File 0 is ok
+	CMP	R2,#3		;So is file 3
+	BNE	150$		;Others are bad
+80$:	MOV	(SP)+,OFFSET	;Set the offset
+	BR	120$		;See if we have more switches
+
+90$:	CMPB	R2,#'D		;WAS IT "/D"?
+	BNE	150$		;SORRY
+	TST	R2		;SIGN BIT SET?
+	BPL	NODENS		;If not, no density was supplied.	;008
+100$:	CLRB	R2		;NOW LOOK AT THE HIGH BYTE
+	SWAB	R2		;MAKE IT THE LOW BYTE
+	BIC	#200,R2		;CLEAR THE SIGN BIT
+	BEQ	110$		;FILE 0 IS A LEGAL ONE
+	CMP	R2,#3		;SO IS FILE 3
+	BNE	150$		;BUT NOTHING ELSE IS LEGAL
+110$:	MOV	(SP)+,R2	;Get the actual argument.		;008
+	CMP	R2,#2.		;It must be greater than 2.		;008
+	BLT	NODENS		;Sorry, no can do.			;008
+	CMP	R2,#32766.	;Also, less than or equal to 32766.	;008
+	BGT	NODENS		;Sorry, same thing.			;008
+	MOV	R2,MTDENS	;If it's OK, stick it away.		;008
+120$:	SOB	R1,60$		;Loop through the switches
+	BR	180$		; and continue
+
+130$:	ERROR	<"?Can't open [0,1]SY0:INIT.SYS">
+
+140$:	ERROR	<"?Not a bootable device">
+
+150$:	ERROR	<"?Illegal command?">	;I hate cryptic err msgs.	;008
+
+NODENS:	ERROR	<"?Illegal density">
+
+160$:	ERROR	<"?INIT.SYS is not a SAV format SIL">
+
+170$:	ERROR	<"?INIT.SYS overlays the bootstrap">
+
+
+180$:	MOV	FIRQB+FQDEV,R5	;Get the disk name.			;010
+	CMP	R0,#MTAHND	;Is it a tape?				;010
+	BEQ	200$		;Yup, so skip the privilege check.	;010
+	CMP	R0,#DSKHND	;If it's not a tape, it must be disk.	;010
+	BEQ	190$		;Looks OK...go on about your business.	;010
+	JMP	NOBOOT		;Oops!!  Boot is not in INIT.		;010
+190$:	.CLRFQB			;Start out with a clean FIRQB		;010
+	MOVB	#UU.CHK,FQFUN+FIRQB	;Say we want to check privs.	;010
+	INCB	FIRQB+FQFIL		;Give the check subfunction.	;010
+	MOV	#"SY,FIRQB+FQNAM1	;Put the privilege name "SYSMOD";010
+	MOV	#"SM,FIRQB+FQNAM1+2	; into the correct place	;010
+	MOV	#"OD,FIRQB+FQNAM1+4	; in the FIRQB.			;010
+	EMT	377		;Say it's a RSTS call...		;010
+	.UUO			; ...and do it!				;010
+	TSTB	FIRQB+FQERNO	;Do we have SYSMOD?			;010
+	BEQ	200$		;Yup, so carry on.			;010
+	ERROR	<"?Need SYSMOD privilege to HOOK a disk"> ;So there.	;010
+
+200$:	MOV	R0,-(SP)	;Save the handler index for later...	;009
+	TST	DEVNM3+2	;ALTERNATE INIT.SYS SUPPLIED?
+	BEQ	220$		;NO; THAT'S JUST AS WELL
+	.LOOKUP	16,#DEVNM3	;HAVE IT YOUR WAY
+	BCS	130$		;YOU DESERVE A BREAK TODAY
+	BR	230$		;SKIP THE STANDARD OPEN
+220$:	MOV	#0*400+1,@SYSPTR ;USE [0,1]
+	.LOOKUP	16,#SY0		; TO OPEN INIT.SYS ON THE SYSTEM DISK
+	BCS	130$		;OOPS, ERROR
+230$:	MOV	#-1,INIBLK	;NOTHING IN BUFFER YET
+	CLR	DSKFLG		;AND WE DON'T KNOW WHAT TYPE OF DISK YET
+	CLR	R2		;HIGH WORD OF BLOCK 0 BYTE ADDRESS IS 0
+	CLR	R3		;BYTE ADDRESS OF BYTE 0 IS 0
+	CALL	INIWRD		;SO GET THE FIRST WORD OF INIT.SYS
+	CMP	(SP)+,#1	;THE SIL MUST HAVE EXACTLY 1 MODULE
+	BNE	160$		;COMPLAIN IF IT AIN'T SO
+	MOV	#2+SE.STB,R3	;FIND THE BLOCK OFFSET OF THE STB
+	CALL	INIWRD		;GET IT
+	MOV	(SP)+,STBLOC	;SAVE IT
+	BEQ	160$		;THERE MUST BE AN STB
+	TST	(R3)+		;FIND THE NUMBER OF SYMBOLS
+.ASSUME	SE.STB+2 EQ SE.STN
+	CALL	INIWRD		;GET IT
+	MOV	(SP)+,STBNUM	;SAVE IT
+	BEQ	160$		;MORE SIL SANITY-CHECKING
+	MOV	#2+SE.OVB,R3	;FIND BLOCK OFFSET OF OVERLAY DESCRIPTOR BLOCK
+	CALL	INIWRD		;NOTE: R2 IS STILL 0 BECAUSE WE ARE IN BLOCK 0
+	MOV	(SP)+,OVBLOC	;SAVE IT
+	BEQ	160$		;NO OVERLAYS IN INIT???
+	TST	(R3)+		;FIND THE NUMBER OF OVERLAY DESCRIPTORS
+.ASSUME	SE.OVB+2 EQ SE.OVN
+	CALL	INIWRD		;GET IT
+	MOV	(SP)+,OVBNUM	;SAVE IT
+	BEQ	160$		;THERE MUST BE SOME OVERLAYS IN INIT
+	CMP	(SP)+,#MTAHND	;Hooking a magtape?			;009
+				; (Use saved handler index).		;009
+	BEQ	250$		;YES, SO NO MASSBUS HASSLES
+	MOV	#102,R3		;AT 102 WE FIND A POINTER TO THE MASSBUS IDS
+	CALL	INIWRD		;GET IT
+	MOV	(SP)+,R3	;POINT TO MASSBUS IDS
+	ADD	#IDX$DB,R3	;ASSUME THE CONTROLLER WITH NAME 'DB'
+	ADC	R2		;IT'S 2-WORD ARITHMETIC!!
+	CMP	R5,#"DB		;RP04/05/06/07/RM02/03/05/80?
+	BEQ	240$		;ONE OF THE ABOVE
+	CMP	R5,#"DR		;SAME THING, OTHER CONTROLLER?
+	BNE	250$		;NOPE, JUST AN ORDINARY DISK
+	ADD	#IDX$DR-IDX$DB,R3 ;YES, USE CONTROLLER 'DR'
+	ADC	R2		;GRAB ANY SPARE BITS
+240$:	CALL	INIWRD		;GET POINTER TO MASSBUS ID TABLE FOR DEVICE
+	MOVB	UNITFL,R3	;GET UNIT NUMBER
+	ASL	R3		; * 2
+	ADD	(SP)+,R3	;COMPUTE ADDRESS OF MASSBUS ID FOR THIS UNIT
+	ADC	R2		;2-WORD, AGAIN
+	CALL	INIWRD		;GET THE ID
+	MOV	#"DB,R5		;WE WANT THE DB BOOT
+	MOVB	(SP)+,MSBSID	;SAVE THE MASSBUSS ID FOR THIS DISK
+	COM	DSKFLG		;AND FLAG FOR LATER MODIFICATIONS TO THE BOOT
+250$:	CALL	GETSYM,R5	;Back with R2,R3 => bootstrap table
+	 .RAD50	"XXBOOT"
+	MOV	R3,XXBPTR	;Store the address
+	MOV	R2,XXBPTR+2
+	MOV	#IDXTBL,R0	;Point to table of devices
+260$:	TST	(R0)		;End?
+	BEQ	NOBOOT		;Yes, bad name
+	CMP	(R0)+,R5	;Name match?
+	BNE	260$		;No, look some more
+	SUB	#DSKIDX+2,R0	;Convert to device index
+	MOV	UNITFL,R3	;GET UNIT NUMBER AND FLAG
+	SWAB	R3		;CHECK FLAG FOR EXPLICIT UNIT
+	BEQ	270$		;NO EXPLICIT UNIT, ERROR
+	CALL	(R4)		;GO DO THE HOOK
+	ERROR	<"Hook complete">
+
+270$:	ERROR	<"?Explicit unit number required">
+
+NOBOOT:	ERROR	<"?Not a bootable device">
+
+BOOTYP:	.WORD	DKHOOK,DSKHND
+	.WORD	MTHOOK,MTAHND
+	.WORD	0
+
+.DSABL	LSB
+
+
+IDXTBL:	$TAPES
+	.WORD	"NAME
+.ENDR
+DSKIDX:	$DISKS
+	.WORD	"NAME
+.ENDR
+	0			;End of list
+
+.SBTTL	HOOK A DISK FILE
+
+.ENABL	LSB
+
+DKHOOK:	MOV	R0,-(SP)	;Save disk index
+	MOV	#DEVNM1,R1	;Point to the name block for the output file
+	CALL	LKRB0		;OPEN THE FILE, READ BLK 0
+	.CLOSE	1		;CLOSE THE FILE
+	MOV	R5,@SYSPTR	;SET UP EXPLICIT PPN TO OPEN THE UFD
+	.LOOKUP	1,#DSKNAM	;OPEN THE UFD
+	BCC	10$		;OK
+	ERROR	<"?UFD open failure">
+
+10$:	CLR	R3		;AND READ IN THE FIRST BLOCK OF IT
+	CALL	RDB1		;READ IN FIRST BLOCK OF UFD
+	CALL	SDU		;NOW SEARCH THE UFD FOR THE FILE NAME
+	BCC	30$		;GOOD
+20$:	ERROR	<"?Directory error">
+
+30$:	MOV	16(R5),-(SP)	;REMEMBER LINK TO RETRIEVAL INFO
+	MOV	14(R5),R3	;GET LINK TO ACCOUNTING ENTRY
+	CALL	RDB		;AND GET THE A.E.
+	BCS	20$		;???
+	MOV	16(R5),R1	;R1 = FILE CLUSTER SIZE
+	MOV	R1,FCS		;Save it
+	.LOOKUP	2,#DSKNAM	;OK, THIS TIME OPEN THE DISK NFS
+	CLR	R0		;CLEAR FOR DIVIDE
+	MOV	FIRQB+FQBUFL,R3	;GET DEFAULT BUFFER LENGTH
+	ROR	R3		;IN WORDS
+	MOV	R3,BUFLEN	;SAVE IT				;013
+	CMP	BUFLEN,#16.*256.;Is Device Too big for buffer?		;013
+	BLOS	35$		;No, so do standard way			;013
+	MOV	#16.*256.,BUFLEN;Yes, so set as 16 block read/write	;013
+35$:	MOV	R3,-(SP)	;COPY IT TO WORK WITH
+	SWAB	(SP)		;IN WORDS
+	MOV	(SP),DCS	;SAVE THE DEVICE CLUSTER SIZE
+	DIV	(SP)+,R0	;GET CLURAT IN R0
+	MOV	R0,CLURAT	;SAVE THE CLUSTER RATIO
+	CLR	R0		;BLOCK NUMBER IS O
+	.READW	2,#BUFF,BUFLEN	;READ IN THE FIRST DISK DEVICE CLUSTER	;013
+	BCC	40$		;OK
+	ERROR	<"?Error reading boot block">
+
+40$:	.CLOSE	2		;CLOSE THE NFS DISK
+	MOV	#BUFF+<B.DATE-B.BOOT>,R2 ;Point to the cluster map area
+	MOV	(SP)+,R3	;GET LINK TO FIRST R.E.
+	MOV	(SP)+,R0	;Restore disk index
+	CALLX	BLDBOT,R5,<BUFF> ;Build the bootstrap
+	MOV	R0,-(SP)	;Save top of bootstrap
+	BEQ	NOBOOT		;Error if there was none
+	ADD	OFFSET,BUFF+<B.XFER-B.BOOT> ;Bias the start address
+	CLR	R1		;Initialize # device clusters in segment
+	CLR	-(SP)		; and starting DCN
+60$:	CALL	RDB		;GET R.E. INTO MEMORY
+	BCS	20$		;DIRECTORY ERROR
+	MOV	#7,R3		;7 FILE CLUSTER POINTERS IN THIS R.E.
+	TST	(R5)+		;SKIP THE LINK
+70$:	MOV	(R5)+,R0	;GET A FILE CLUSTER POINTER
+	BEQ	100$		;WE SHOULD HAVE STOPPED IN THE LOOP!
+	SUB	R1,R0		;See if this one is adjacent
+	CMP	R0,(SP)		;Well?
+	BEQ	90$		;Yes, add it to current chunk
+	MUL	DCS,R1		;convert DCNs to blocks			;005
+	CALL	EXPAND		;Expand this chunk out into the block map
+	MOV	-2(R5),-(SP)	;Set starting DCN of next chunk
+	CLR	R1		; and initialize size
+90$:	ADD	CLURAT,R1	;Increase the size of this chunk
+	SUB	FCS,R4		;And another file cluster bites the dust
+	BLOS	110$		;Branch if we're done
+	SOB	R3,70$		;MORE FILE CLUS IN THIS WINDOW?
+	MOV	-20(R5),R3	;GET LINK TO NEXT R.E.
+	BNE	60$		;AND READ IT (IF ANY)
+100$:	ERROR	<"?File high limit too large">
+
+110$:	MUL	DCS,R1		;convert DCNs to blocks			;005
+	ADD	R4,R1		;Cut last chunk to only as much as needed
+	BEQ	120$		;Nothing needed, skip ahead
+	CALL	EXPAND		;Expand the last chunk
+	MOV	BOOTWC,R0	;Get actual word count to use
+	BIC	#^C<377>,R0	;Isolate last partial block's count
+	BEQ	120$		;Was a full block, skip
+	MOVB	R0,4(R2)	;Update last word count
+	DECB	5(R2)		; one less block
+120$:	CLR	-(R2)		;Store the end marker
+	CMP	R2,(SP)+	;Does the boot fit?
+	BLO	150$		;No, error
+	.SRESET			;CLOSE ALL FILES
+	MOV	SYSPTR,R0	;Get pointer to scratch area		;012
+	MOV	#140000,MODE(R0) ;Set R/W mode for all disks		;012
+	.LOOKUP	1,#DSKNAM	;OPEN THE DISK NFS
+	BCS	160$		;HUH?
+	CLR	R0		;BLOCK NUMBER 0
+	.WRITW	1,#BUFF,BUFLEN	;WRITE OUT THE BOOT BLOCK
+	BCS	170$		;OUCH
+	.CLOSE	1
+	CALLR	NAMCHK		;DO CHECK FOR NON-STANDARD NAME		;006
+
+150$:	ERROR	<"?INIT.SYS is too fragmented">
+
+160$:	ERROR	<"?Can't open disk NFS">
+
+170$:	ERROR	<"?Error writing boot block">
+
+.DSABL	LSB
+
+.SBTTL	Enter data for a contiguous chunk into the block map
+
+EXPAND:	TST	R1		;check for previous chunk		;005
+	BEQ	30$		;Skip if there was no previous chunk
+	MOV	R4,-(SP)	;Save some registers
+	MOV	R5,-(SP)	; another one
+	MOV	2+4(SP),R4	;Get starting DCN
+	MUL	DCS,R4		;Multiply by DCS to get block number
+	BPL	10$		;Branch if no overflow
+	ADD	DCS,R4		;Correct for signed multiply
+10$:	MOV	#77400/400,R0	;Get max block count
+	CMP	R0,R1		;Do we even have that many blocks?
+	BLOS	20$		;Yes
+	MOV	R1,R0		;No, so do only as many as exist in this chunk
+20$:	MOV	R0,-(R2)	;Set block count
+	SWAB	(R2)		; now word count
+	MOV	R4,-(R2)	;Set high order block number
+	MOV	R5,-(R2)	; and low order
+	ADD	R0,R5		;Advance block number
+	ADC	R4		; in double precision
+	SUB	R0,R1		;Compute how many blocks are left
+	BNE	10$		;Some, stash another chunk
+	MOV	(SP)+,R5	;Restore registers
+	MOV	(SP)+,R4	; and another
+30$:	MOV	(SP)+,(SP)	;Remove the word passed on the stack
+	RETURN			;Done...
+
+.SBTTL	Do check and fix-up for non-standard name
+
+NAMCHK:	TST	NONSTD		; Were we given a non-standard name ?	;006+
+	BEQ	90$		; No => nothing to fix up, then
+	.LOOKUP	16,#DEVNM1	; Yes:  open the target INIT.SYS
+	BCS	110$		; Ouch - error
+	MOV	#-1,INIBLK	; Nothing in buffer yet
+	CALL	GETSYM,R5	; Find INIT's filespec for itself
+	 .RAD50	"FQINIT"
+	ADD	#FQNAM1,R3	; Point to filename
+	ADC	R2		;   in the "FIRQB"
+	MOV	#3,R4		; Set count of words to update
+	MOV	#DEVNM1+2,R1	;  and the place to get them from
+10$:	MOV	R2,-(SP)	; Save word-in-INIT
+	MOV	R3,-(SP)	;  pointers
+	DIV	#512.,R2	; Divide by 512. to get the block number
+	MOV	R2,R0		; Set R0 = block number for RT11
+	MOV	(SP)+,R3	; Restore word-in-INIT
+	MOV	(SP)+,R2	;  pointers
+	CMP	R0,INIBLK	; Is this block in the buffer ?
+	BEQ	20$		; Yes => continue
+	MOV	R0,INIBLK	; No:  but it will be
+	.READW	16,#INIBUF,#256.  ; Read the necessary block
+	BCS	110$		; Ouch
+20$:	MOV	R3,R5		; Copy LSB of the address
+	BIC	#^C<777>,R5	; Isolate offset within the block
+	MOV	(R1)+,INIBUF(R5)  ; Update one word of the filespec
+	.WRITW	16,#INIBUF,#256.  ; Put the revised block back
+	BCS	110$		; Ouch
+	ADD	#2,R3		; Increment the
+	ADC	R2		;  word-in-INIT pointers
+	SOB	R4,10$		; Go for another word to update
+	.CLOSE	16		; Close the updated target file
+90$:	RETURN								;006-
+
+110$:	ERROR	<"Error on target file during name update">		;006
+
+.SBTTL	HOOK A MAGTAPE FILE
+
+.ENABL	LSB
+
+MTHOOK:	MOV	#DEVNM2+2,R1	;R1 -> NAME OF 2ND INPUT FILE
+	TST	(R1)		;ANY FILE NAME?
+	BEQ	10$		;NO
+	TST	-(R1)		;YES, ANY DEVICE NAME?
+	BNE	20$		;YUP, THAT'S OK
+10$:	ERROR	<"?Second input file required for magtape hook">
+
+20$:	MOV	#DEVNM1,R0	;SET UP THE FIRQB
+	.SETFQB			;TO GET THE DEVICE AND UNIT NUMBER
+	MOV	#FIRQB+FQFUN,R0	;POINT TO THE FUNCTION BYTE
+	MOVB	#UU.ASS,(R0)+	;LOAD THE 'ASSIGN' FUNCTION
+	.REPT	4		;CLOBBER UNUSED PARTS
+	   CLR	(R0)+		; OF THE FIRQB
+	.ENDR
+	MOV	#^RDOS,(R0)+	;SET THE MT TO DOS FORMAT
+	.REPT	5		;CLOBBER SOME MORE FIRQB
+	   CLR	(R0)+		; MUST BE ZERO
+	.ENDR
+	.PRIV,	.UUO		;DO THE RSTS UUO
+	BCS	30$		;ABORT ON ERROR
+	MOV	DEVNM1,MT4NFS	;GET MT NAME FOR A NFS'ED OPEN
+	CLR	DCS		;DCS = 0
+	CALL	LKRB0		;OPEN THE FILE ON CHANNEL 1, READ BLK 0
+	.ENTER	2,#MT4NFS	;TRY TO DO IT
+	BCS	30$		;I DON'T KNOW WHAT CAUSED IT
+	MAGTAPE	2,REW		;REWIND THE MAGTAPE
+	BCS	30$		;SOMETHING'S WRONG
+	MOV	MTDENS,R0	;Get the user-supplied density.		;008
+	BEQ	40$		;If none supplied, don't change it.	;008
+	BIS	#100000,R0	;Say we're gonna set it.		;008
+	MAGTAPE	2,XDN		;And, go do it.				;008
+	BCC	40$		;Something went wrong.			;008
+30$:	BR	80$		;Handle an out-of-range branch.		;009
+
+40$:	MOV	#BUFF,R0	;R0 -> our general-purpose I/O buffer.	;009
+	MOV	#MLABEL,R1	;R1 -> our pre-built extended DOS label	;009
+50$:	MOV	(R1)+,(R0)+	;Move stuff into the buffer.		;009
+	CMP	R1,#MLBEND	;Are we done yet?			;009
+	BNE	50$		;No, so keep going.			;009
+	EMT	377		;Set up for a RSTS EMT.			;009
+	.DATE			;Get today's date.			;009
+	MOV	XRB,BUFF+12	;Put it into the extended DOS label.	;009
+	MOV	#IDX$MU,R0	;The MU boot goes first.		;009
+	MOV	R0,R2		;A copy of the index in R2 also.	;009
+	CALLX	BLDBOT,R5,<BUFF+14.>	;Put it into the first slot.	;009
+	CALL	CHKBOO,R5	;And check it.				;009
+	MOV	#IDX$MS,R0	;Next, the TS11 boot.			;009
+	MOV	R0,R2		;A copy of the index in R2 also.	;009
+	CALLX	BLDBOT,R5,<BUFF+14.+1000> ;It goes in the second slot.	;009
+	CALL	CHKBOO,R5	;And check it.				;009
+	MOV	#IDX$MM,R0	;And the TE16/TU45/TU77 boot.		;009
+	MOV	R0,R2		;A copy of the index in R2 also.	;009
+	CALLX	BLDBOT,R5,<BUFF+14.+2000> ;It goes in the third slot.	;009
+	CALL	CHKBOO,R5	;And check it.				;009
+	MOV	#IDX$MT,R0	;Finally, the TU10/TE10 boot.		;009
+	MOV	R0,R2		;A copy of the index in R2 also.	;009
+	CALLX	BLDBOT,R5,<BUFF+14.+3000> ;It goes in the fourth slot.	;009
+	CALL	CHKBOO,R5	;And check it.				;009
+	.WRITW	2,#BUFF,#<256.*4.+7.>	;Now, write it out!!		;009
+	CALL	GETSYM,R5	;Look up the address of "MGBOOT"	;009
+	 .RAD50	"MGBOOT"	;This sets up R2 and R3.		;009
+	CALLX	BLDMGB,R5,<BUFF>;Get the secondary boot!		;009
+	.WRITW	2,#BUFF,#256.	;Then, write it out.			;009
+	.CLOSE	2		;Thus endeth Part I.			;011
+	BR	100$
+
+80$:	CMPB	FIRQB,#BDNERR	;Did they give an invalid density	;008
+	BEQ	90$		;Yup, so go off to the jump.		;008
+	JMP	ERRIOS		;Otherwise, go say the error.		;008
+90$:	JMP	NODENS		;Say invalid density if needed...	;008
+
+100$:	.ENTER	2,#DEVNM1	;ENTER THE FILE BEING HOOKED
+	BCS	80$		;NO GOOD
+	CLR	R3		;START COPYING AT BLOCK 0
+	CLR	R2		;ALSO START WRITING AT BLOCK 0
+110$:	.READW	1,#BUFF,#16.*256.,R3 ;READ FROM THE FILE
+	BCS	130$		;ERROR, MAY BE EOF
+	MOV	R0,R1		;SAVE # OF WORDS ACTUALLY GOTTEN
+	CLRB	R1		;CALCULATE NUMBER OF 256. WORD
+	SWAB	R1		; RECORDS TO WRITE
+	ADD	R1,R3		;UPDATE NEXT BLOCK TO READ
+	MOV	#BUFF,R4
+120$:	.WRITW	2,R4,#256.,R2	;WRITE TO MAGTAPE
+	ADD	#512.,R4	;INCREMENT THE BYTE COUNT
+	INC	R2		;UPDATE OUTPUT BLOCK COUNT
+	SOB	R1,120$		;AND AGAIN
+	BR	110$		;COPY MORE
+
+130$:	TSTB	@#52		;EOF ERROR?
+	BNE	80$		;NO, REALLY BAD
+	.CLOSE	2		;CLOSE OUT THE WORLD
+	.CLOSE	1
+	RETURN			;BACK TO MAIN LOOP
+
+.DSABL	LSB
+
+
+.ENABL	LSB								;009+
+
+.SBTTL	Check a Bootstrap and Fix Transfer Address and Offset
+
+;+
+;	This routine is called immediately after a call to BLDBOT.  It first
+;	checks R0 (returned by BLDBOT) to make sure that a bootstrap was
+;	found for the specified device and, if so, that it's not too big.
+;	It then uses the buffer address argument passed to BLDBOT and fixes
+;	the transfer address and word count in the boot.
+;
+;	Call:
+;		R0 = Address of next buffer location, or 0 if no boot
+;			(that's the way BLDBOT returns it).
+;		R2 = Device index (only used if an error occurs)
+;
+;	CALL	CHKBOO,R5
+;
+;	Return:
+;		R0,R2 are unchanged.
+;		R1 is random.
+;-
+
+CHKBOO:	TST	R0			;Was there a boot at all?
+	BEQ	10$			;Nope, so go give error.
+	MOV	-6(R5),R1		;Get the buffer address.
+	ADD	#1000,R1		;This is the biggest it can be.
+	CMP	R0,R1			;Have we gone too far?
+	BHI	20$			;Yup, so tell 'em.
+	MOV	-6(R5),R1		;Get the buffer address again.
+	MOV	BOOTWC,B.TWC-B.BOOT(R1)	;Put the word count in.
+	ADD	OFFSET,B.XFER-B.BOOT(R1);Fudge the start addr if needed
+	RETURN	R5			;Go back to the mainstream.
+
+10$:	MOV	DSKIDX(R2),BNFDEV	;Put the device name in place.
+	MOV	#BNFMSG,R0		;Point to the text.
+	BR	30$			;Go handle as an error.
+
+20$:	MOV	DSKIDX(R2),TOBDEV	;Put the device name in place.
+	MOV	#TOOBIG,R0		;Point to the text.
+30$:	.CLOSE	1			;Close up the INIT file...
+	.CLOSE	2			; ...and the output tape.
+	JMP	ERRPRT			;Call it an error!
+
+.DSABL	LSB								;009-
+
+.SBTTL	THE MAGTAPE FUNCTION
+
+MAGTX0:	CLR	R0		;CLEAR THE ARGUMENT
+	BR	MAGTXX		; AND DO THE PROPER THING
+
+MAGTAP:	MOV	(R5)+,R0	;GET THE ARG
+MAGTXX:	MOV	R3,-(SP)	;SAVE R3
+	MOV	#SFUNBK+12.,R3	;GET A POINTER TO THE PARAMETER AREA
+	CLR	-(R3)		;CLEAR A WORD
+	MOV	(R5)+,-(R3)	;SET IN THE SPECIAL FUNCTION CODE
+	MOV	R0,-(R3)	;  AND ITS ARGUMENT
+	CLR	-(R3)		;CLEAR A WORD
+	CLR	-(R3)		;  AND ANOTHER
+	MOV	(R5)+,-(R3)	;SET THE CHANNEL/RTFUN SPECIFICATION
+	MOV	R3,R0		;RT11 WANTS R0 TO POINT TO SFUNBK
+	EMT	375		;TRAP TO RT11
+	MOV	(SP)+,R3	;RESTORE R3
+	MOV	XRB+2,R0	;  AND PARAMETER
+	RETURN	R5		;   AND RETURN EXECUTION
+
+
+.SBTTL	LOOK UP THE FILE, GET INFO FROM BLOCK 0
+
+;+
+; LKRB0 - LOOKUP THE FILE TO HOOK, READ BLOCK 0 & EXTRACT INFORMATION
+;
+;	R1 -> RT-11 SPEC FOR OPENING THE FILE
+;
+;	CALL	LKRB0
+;
+;	R0 =  RANDOM
+;	R1 -> NAME IN PASSED SPEC
+;	R4 =  NUMBER OF BLOCKS TO LOAD (LINK HIGH LIMIT ROUNDED UP)
+;	R5 =  PPN OF FILE
+;-
+
+.ENABL	LSB
+
+LKRB0:	.LOOKUP	1,R1		;OPEN THE FILE ON CHANNEL 1
+	BCS	20$		;NO SUCH FILE
+	MOV	FIRQB+FQDEV,DEVASC ;RETAIN DEVICE NAME
+	MOV	FIRQB+FQDEVN,DEVNUM
+	MOV	FIRQB+FQPPN,R5	;R5 = PPN OF FILE
+	CLR	R0		;BLOCK ZERO
+	.READW	1,#BUFF,#256.	;READ IN THE FIRST BLOCK OF THE FILE
+	BCC	10$		;NO ERROR
+	TSTB	@#ERRBYT	;EOF?
+	BNE	20$		;NO, A REAL BADDIE
+	ERROR	<"?Null file can't be hooked">
+
+10$:	MOV	BUFF+USERPC,XFERAD ;REMEMBER THE TRANSFER ADDRESS
+	MOV	BUFF+USERTOP,R4 ;R4 = HIGHEST ADDRESS TO LOAD
+	ADD	#2,R4		;Adjust because of weird RT11 conventions ;004
+	CMP	R4,#157000	; Check to insure INIT doesn't		;006
+	BLOS	15$		;  overlay the bootstrap		;006
+	ERROR	<"?Target INIT overlays bootstrap">			;006
+
+15$:	MOV	R4,BOOTWC	;REMEMBER THE WORD COUNT
+	CLC			;(THAT'S WORDS)
+	ROR	BOOTWC
+	ADD	#777,R4		;ROUND UP TO NUMBER OF BLOCKS TO LOAD
+	CLRB	R4
+	SWAB	R4
+	ROR	R4
+	MOV	(R1)+,DSKNAM	;COPY NAME OF DISK
+	RETURN
+
+20$:	JMP	ERRIOS
+
+.DSABL	LSB
+
+.SBTTL	UTILITIES
+
+;+
+; SETFQB - SET UP THE FIRQB FOR A UUO
+;
+;	CALL	SETFQB,R5
+;	 .BYTE	FUNCTION CODE, SUBCODE
+;
+;	FIRQB CLEARED, THEN FUNCTION CODE -> FQFUN, SUBCODE -> FQFIL
+;		DEVASC -> FQDEV, DEVNUM -> FQDEVN-1
+;	R0 CLOBBERED
+;-
+
+SETFQB:	MOV	#FIRQB+FQBSIZ,R0
+10$:	CLRB	-(R0)		;CLEAR OUT THE FIRQB
+	CMP	R0,#FIRQB+FQFUN
+	BHI	10$
+	MOVB	(R5)+,(R0)+	;SET THE DISK FUNCTION
+	MOVB	(R5)+,(R0)	;AND THE SUBCODE
+	MOV	#FIRQB+FQDEV,R0	;POINT TO DEVICE
+	MOV	DEVASC,(R0)+
+	MOV	DEVNUM,(R0)+
+	RETURN	R5
+
+;+
+; DOUUO - DO A UUO, RETURN OR REPORT ERROR
+;
+;	FIRQB ALREADY SET UP
+;
+;	CALL	DOUUO
+;
+;	NORMAL RETURN IF NO ERROR, ELSE PRINT ERROR & QUIT
+;-
+
+DOUUO:	.PRIV,	.UUO
+	TSTB	FIRQB		;ERROR?
+	BNE	10$		;YUP
+	RETURN
+
+10$:	JMP	ERRIOS
+
+;+
+; INIWRD - FETCH A WORD FROM INIT.SYS
+;
+;	R2 =  MSB OF BYTE ADDRESS WITHIN INIT
+;	R3 =  LSB OF BYTE ADDRESS WITHIN INIT
+;
+;	CALL	INIWRD
+;
+;	(SP) = THE WORD
+;-
+
+INIWRD::MOV	(SP),-(SP)	;MAKE ROOM FOR RETURNED VALUE
+	MOV	R0,-(SP)	;GET A WORKING REGISTER
+	MOV	R2,-(SP)	;DON'T LOSE R2
+	MOV	R3,-(SP)	; OR R3, EITHER
+	DIV	#512.,R2	;DIVIDE BY 512 TO GET THE BLOCK NUMBER
+	MOV	R2,R0		;R0=BLOCK TO GET
+	MOV	(SP)+,R3	;RESTORE R3
+	MOV	(SP)+,R2	;LIKEWISE R2
+	CMP	R0,INIBLK	;IS THIS BLOCK IN THE BUFFER?
+	BEQ	10$		;YES
+	MOV	R0,INIBLK	;NO, BUT IT WILL BE
+	.READW	16,#INIBUF,#256. ;READ THE REQUESTED BLOCK
+	BCS	20$		;OOPS
+10$:	MOV	R3,R0		;COPY THE LSB OF THE ADDRESS
+	BIC	#^C<777>,R0	;ISOLATE OFFSET IN BLOCK
+	MOV	INIBUF(R0),4(SP) ;RETURN VALUE ON THE STACK
+	MOV	(SP)+,R0	;RESTORE REGISTER
+	RETURN
+
+20$:	ERROR	<"?Error reading INIT.SYS">
+
+.SBTTL	GETSYM - DECODE A GLOBAL SYMBOL ADDRESS
+
+;+
+; GETSYM - DECODE A GLOBAL SYMBOL ADDRESS
+;
+;	CALL	GETSYM,R5
+;	 .RAD50	"SYMBOL"
+;
+; RETURNS
+;	R2 = MSB OF DISK BYTE ADDRESS
+;	R3 = LSB OF DISK BYTE ADDRESS
+;	C = 0 IF SYMBOL FOUND
+;	C = 1 IF SYMBOL NOT FOUND
+;-
+
+.ENABL	LSB
+
+GTSYM1:	CLR	FTLGET		;MAKE SURE WE SET
+	COM	FTLGET		; THE FATAL ERROR FLAG TO NON-FATAL
+	BR	10$		;  BECAUSE WE MIGHT NOT FIND A SYMBOL
+GETSYM:	CLR	FTLGET		;LOOKUP FAILURES ARE NOW FATAL
+10$:	MOV	R0,-(SP)	;GET A WORKING REGISTER
+	CLR	R2		;GET THE BLOCK OFFSET
+	MOV	STBLOC,R2	; OF THE STB
+	MUL	#512.,R2	;MAKE IT A BYTE ADDRESS
+	MOV	STBNUM,R0	;GET NUMBER OF SYMBOLS
+	DEC	R0		;BIAS IT, SLIGHTLY
+20$:	CALL	INIWRD		;GET THE FIRST WORD
+	ADD	#2,R3		;POINT TO THE NEXT WORD
+	ADC	R2		;ADJUST MSB OF POINTER
+	CMP	(SP)+,(R5)	;DO THEY MATCH?
+	BNE	30$		;NO
+	CALL	INIWRD		;GET THE SECOND WORD
+	CMP	(SP)+,2(R5)	;IS IT A MATCH?
+	BEQ	50$		;YES
+30$:	ADD	#6,R3		;ELSE POINT TO THE NEXT SYMBOL
+	ADC	R2		;FIX THE MSB
+	SOB	R0,20$		;TRY TO MATCH THE NEXT SYMBOL
+	TST	FTLGET		;DIDN'T FIND IT. ARE LOOKUP FAILURES FATAL?
+	BEQ	40$		;YES, SO TOO BAD
+	MOV	(SP)+,R0	;NO, SO RESTORE OLD R0
+	CMP	(R5)+,(R5)+	;FIX UP R5 FOR THE RETURN TRIP
+	SEC			;AND INDICATE NO COOKIES FOR YOU
+	RETURN	R5		;NOW LET CALLER WORRY ABOUT IT
+
+40$:	ERROR	<"?No BOOT in STB">
+
+50$:	ADD	#2,R3		;GET SYMBOL'S OVLY DESCRIPTOR NUMBER
+	ADC	R2		;FIX MSB
+	CALL	INIWRD		;GET IT
+	MOV	(SP)+,R0	;R0 = OVERLAY DESCRIPTOR NUMBER
+	CMP	R0,OVBNUM	;IS IT <= NUMBER OF OVERLAYS?
+	BHI	60$		;NOPE
+	ADD	#2,R3		;GET THE SYMBOL'S VALUE
+	ADC	R2		;FIX MSB
+	CALL	INIWRD		;LEAVE THAT ON THE STACK, TOO
+	TST	R0		; Is symbol in overlay 0 (the root) ?	;006
+	BNE	55$		; Nope => go look up overlay data	;006
+	MOV	(SP)+,R3	; Yes: the value is absolute already	;006
+	CLR	R2		;  ..and MSB is 0			;006
+	BR	57$		; Go return the symbol's absolute value	;006
+
+55$:	CLR	R2		;GET BLOCK OFFSET			;006
+	MOV	OVBLOC,R2	; OF OVERLAY BLOCK DESCRIPTORS
+	MUL	#512.,R2	;MAKE IT A BYTE ADDRESS
+	ASH	#3.,R0		;OVLY NUM * 8 TO INDEX INTO OVLY BLOCK
+	ADD	R0,R3		;MAKE AN ABSOLUTE ADDRESS
+	ADC	R2		;FIX MSB
+	CALL	INIWRD		;GET THE OVERLAY'S BASE ADDRESS
+	MOV	2(SP),R0	;GET SYMBOL'S RELATIVE VALUE
+	SUB	(SP)+,R0	;SUBTRACT THE BASE VIRTUAL ADDRESS
+	TST	(SP)+		;TOSS SYMBOL'S RELATIVE VALUE
+	ADD	#4,R3		;GET BYTE OFFSET TO THE OVERLAY
+	ADC	R2		;FIX MSB
+	CALL	INIWRD		;GET IT
+	ADD	#2,R3		;GET LSB OF BYTE OFFSET
+	ADC	R2		;FIX MSB
+	CALL	INIWRD		;GET IT
+	MOV	(SP)+,R3	;R3 = LSB OF BYTE OFFSET OF THE OVERLAY
+	MOV	(SP)+,R2	;R2 = MSB OF BYTE OFFSET OF THE OVERLAY
+	ADD	R0,R3		;ABSOLUTELY POINT TO THE DATA
+	ADC	R2		;FIX MSB
+57$:	MOV	(SP)+,R0	;RESTORE R0				;006
+	CMP	(R5)+,(R5)+	;HOP PAST 2 RAD50 WORDS
+	CLC			;INDICATE MUCH SUCCESS
+	RETURN	R5		;AND RETURN
+
+60$:	ERROR	<"?Illegal overlay number in INIT">
+.DSABL	LSB
+
+.SBTTL	SDU - SEARCH UFD FOR FILE NAME
+
+SDU:	CLR	R3		;GET FIRST BLOCK OF UFD
+10$:	CALL	RDB		;GET UFD
+	BCS	30$		;ERROR (OR EOF)
+	CMP	(R1),2(R5)	;CHECK FILE NAME
+	BNE	20$		;NOT HERE
+	CMP	2(R1),4(R5)
+	BNE	20$
+	CMP	4(R1),6(R5)
+	BNE	20$		;NOT HERE
+	BITB	#300,10(R5)	;MARKED FOR DELETE?
+	BEQ	30$		;NO, WE GOT IT
+20$:	MOV	(R5),R3		;LINK TO NEXT NAME ENTRY
+	BNE	10$		;TRY THAT
+	SEC
+30$:	RETURN
+
+.SBTTL	RDB - READ A UFD BLOCK GIVEN A LINK
+
+.ENABL	LSB
+
+RDB:	MOV	R3,R5		;COPY LINK
+	BIC	#^C<760>,R5	;Get rid of block offset, cluster, and flags
+	BIC	R5,R3		;REMOVE BLOCK OFFSET FROM R3
+	ADD	#FIBUF,R5	;R5 -> ABSOLUTE LOCATION
+	SWAB	R3		;GET GOOD STUFF
+	MOV	R2,-(SP)	;SAVE R2
+	MOV	R3,R2		;COPY R3
+	BIC	#^C<16>,R3	;ISOLATE CLUSTER NUMBER * 2 IN R3
+	ASR	R3		;R3 = DIRECTORY CLUSTER NUMBER
+	MUL	FIBUF+760,R3	;TIMES DIRECTORY CLUSTER SIZE
+	ASH	#-4,R2		;SHIFT R2 FOR BLOCK WITHIN CLUSTER
+	BIC	#^C<17>,R2	;Make sure all junk is eliminated
+	ADD	R2,R3		;R3 = RELATIVE BLOCK IN UFD
+	MOV	(SP)+,R2	;RESTORE R2
+	CMP	R3,FIBLK	;IS THIS BLOCK IN ALREADY?
+	BEQ	20$		;YUP
+RDB1:	.READW	1,#FIBUF,#256.,R3 ;READ IN A BLOCK FROM THE UFD
+	BCC	10$		;GOT IT
+	MOV	#-1,R3		;OOPS, NOTHING IN THE BUFFER
+10$:	MOV	R3,FIBLK	;REMEMBER THE BLOCK NUMBER
+20$:	RETURN
+
+.DSABL	LSB
+
+
+.END	START

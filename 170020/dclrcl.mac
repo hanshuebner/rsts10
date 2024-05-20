@@ -1,0 +1,243 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.LIBRARY	/DCL:DCLMAC.MLB/
+.NLIST
+.INCLUDE	/DCL:DCLPFX.MAC/
+.LIST
+TITLE	DCLRCL,<DCL Recall Command>,0C,19-JUL-91,JFM/BTB
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DCLRCL
+;+
+;			[RSTS/E V10.0]
+;  000	JFM  20-Oct-89	Creation
+;  001  BTB  13-Nov-89	Add setting of one-shot noprompt flag before
+;			returning to DCL command interpreter
+;  002  BTB  13-Nov-89	Add support for RECALL <string>
+;  003  BTB  03-Jan-90	Made UPCASE global
+;  004  BTB  08-Feb-90	Made "RECALL -1" an error; check for Ctrl-C in search 
+;			for string; don't allow RECALL from .COM files;
+;  005  BTB  24-May-90	Trap error for RECALL from non-DCL RTS
+;
+;			[RSTS/E V10.1]
+;  006	JFM  12-Jul-91	Changed name of variable
+;-
+
+	.PSECT	DCLRCL,RO,REL,CON
+	DEFORG	DCLRCL
+
+	$CUI	TABLE			;Include macros for CUI tables
+
+.MCALL	$FETCQ,$FETP
+
+.SBTTL	RECALL Command
+
+; Qualifier list
+
+REC.QL:	DEFQUAL	ALL.Q,CLASS=QUL.TG	;/ALL
+	DEFQUAL	ERA.Q,CLASS=QUL.TG	;/ERASE
+END.QL:	ENDQUAL
+
+REC.CMD::$THR
+	$DO				;Drop into MACRO
+	BIT	#ICFACT,ICFFLG		;Are we in a command procedure?
+	BEQ	5$			;No
+	MOV	#U.QUIT,R0		;Yes - Get out (RECALL is meaningless)
+5$:	$ENDDO				;
+	$DEFCMD	QUAL=REC.QL		;RECALL
+	$FETCQ	QUL.TG			;Any qualifiers specified so far?
+	$IF	ABSENT			;If not then
+	$PARM	PARM1,U$REST,FLAGS=PF.OPT				;002
+					; Get optional rest of command
+	$ENDIF				;Endif
+	$ENDCMD
+
+	$FETCQ	ALL.Q			;Did he specify /ALL?
+	$IF	PRESENT			;If so then
+	$DO				;  Go into MACRO for this
+	MOV	#<200*400>+0,R1		;  Delete recall command, 0=read oper
+10$:	INC	R0			;  R0 starts at 1 (was 0 from $DO)
+	CALL	GETCMD			;  Get the command	
+	BCC	15$			;  No error - keep going	;005
+	CMPB	#PRVIOL,FIRQB+0		;  Was it a Priv viol error?	;005
+	BNE	20$			;  No - we must be done		;005
+	MOV	#DCLC.E,R0		;  "?Command valid only at DCL level" ;005
+	MOV	CMDPOS,LX.ERP		;  Point to beginning of command ;005
+	BR	25$			;  And quit			;005
+
+15$:	MOV	R0,-(SP)		;  Save index			;005
+	CMESSAG	#RECA.M <R0,XRB+XRBC,#TRNBUF> ;  Print the command
+	MOV	(SP)+,R0		;  Restore index
+	CLR	R1			;  Don't delete anymore (R1=0 for read)
+	BITB	#CCHIT,DCLFLG		;  CTRL/C hit?			;006
+	BNE	30$			;  Yes, quit
+	BR	10$			;  Loop until no more
+20$:	DEC	R0			;  Were any command in buffer?
+	BNE	30$			;  Yes, so just quit now
+	MOV     U.CMN+U.POS,LX.ERP      ;  No, point to "ALL"
+	MOV	#NCOM.E,R0		;   and return "%No commands to recall"
+25$:	$ENDDO				;  Done with macro		;005
+	$ENDIF				;Endif
+
+	$FETCQ	ERA.Q			;Did he specify /ERASE?
+	$IF	PRESENT			;If so then
+	$DO				;  Go into MACRO for this
+	CALLX	CLRFQX			;  Clear the FIRQB and XRB
+	MOV	#FIRQB+FQFIL,R4		;  R4 -> FIRQB+FQFIL
+	MOV	#15,(R4)+		;  Function is 15, recall
+	MOV	#2,(R4)			;  Erase operation
+	.MESAG				;  Initialize everything
+30$:	MOV	#U.QUIT,R0		;  Get out fast
+	$ENDDO				;  Done with macro
+	$ENDIF				;Endif
+
+	$FETP	PARM1			;Did he specify a parameter?
+	$IF	ABSENT			; If not then
+	$DO				;  Go into MACRO
+	INC	R0			;  R0 = 1 (was 0 from U$DO)
+	BR	80$			;  Join common code 
+	$ENDDO				;  Get out of MACRO
+	$ELSE				;Else one was specified
+	$DO				;  Go into MACRO
+
+	MOV	#U.CMN+U.STR,R0		;  Point to the string		;002
+	MOV	#U.CMN+U.LOW,R1		;  Point to value return cell	;002
+	CLR	R2			;  No maximum field width	;002
+	CALLX	$XDTB			;  Try to convert number	;002
+	BCS	40$			;  Failed, forget it		;002
+	TSTB	R2			;  Did entire string get used?	;002
+	BNE	40$			;  No, not a number		;002
+	MOV	U.CMN+U.LOW,R0		;  Fetch the index		;002
+	BLT	35$			;  Negative value is invalid	;004
+	CMP	#9999.,R0		;  Is index more than 4 digits?	;004
+	BGT	80$			;  No, go ahead and use it	;004
+35$:	MOV	#PMOR.E,R0		;  "?Parameter out of range"	;004
+	BR	110$			;  Quit				;004
+
+40$:	CLR	R0			;  Preset index value 		;002
+	MOV	#<200*400>+0,R1		;  Delete command, 0=read oper	;006
+50$:	BITB	#CCHIT,DCLFLG		;  CTRL/C hit?			;006
+	BNE	30$			;  Yes - quit now		;004
+	INC	R0			;  Update index			;002
+	CALL	GETCMD			;  Get the command		;002
+	BCC	55$			;  No error - keep going	;005
+	CMPB	#PRVIOL,FIRQB+0		;  Was it a Priv viol error?	;005
+	BNE	100$			;  Report no match		;005
+	MOV	#DCLC.E,R0		;  "?Command valid only at DCL level" ;005
+	MOV	CMDPOS,LX.ERP		;  Point to beginning of command ;005
+	BR	110$			;  And quit			;005
+
+55$:	MOV	#TRNBUF,R1		;  Point to returned string	;002
+	MOV	U.CMN+U.LEN,R2		;  Get length of match string	;002
+	CMP	R2,XRB+XRBC		;  Is returned string too short? ;002
+	BHI	70$			;  Yes, skip it			;002
+	MOV	#U.CMN+U.STR,R3		;  Point to match string	;002
+60$:	MOVB	(R1)+,R5		;  Get a character to check	;002
+	CALL	UPCASE			;  Convert it to upper case	;002
+	MOVB	R5,-(SP)		;  Save converted character	;002
+	MOVB	(R3)+,R5		;  Get match character		;002
+	CALL	UPCASE			;  Convert it to upper case	;002
+	CMPB	R5,(SP)+		;  Is this a match?		;002
+	BNE	70$			;  No, stop looking		;002
+	SOB	R2,60$			;  Yes, loop for the whole string ;002
+	MOV	#1,R1			;  Don't set delete flag, 1=write oper ;002
+	BR	90$			;  And recall the command	;002
+
+70$:	CLR	R1			;  Indicate read operation	;002
+	BR	50$			;  And loop			;002
+
+80$:	MOV	#<200*400>+1,R1		;  Delete recall command, 1=write oper ;002
+90$:	MOV	R0,-(SP)		;  Save the index
+	MOV	R1,-(SP)		;  And the delete flag/operation ;002
+	CALLX	GETPMT			;  Get the right prompt string
+	CALBX	U$PMT <R3>		;  Print the current prompt now
+	MOV	(SP)+,R1		;  Restore delete flag / operation ;002
+	MOV	(SP)+,R0		;  Restore the index
+	CALL	GETCMD			;  Do the output
+	BCC	95$			;  No error - keep going	;005
+	;CMPB	#PRVIOL,FIRQB+0		;  ;Must be a Priv viol error	;005
+	;BNE	100$			;  ;Report no match		;005
+	MOV	#DCLC.E,R0		;  "?Command valid only at DCL level" ;005
+	MOV	CMDPOS,LX.ERP		;  Point to beginning of command ;005
+	BR	110$			;  And quit			;005
+
+95$:	BIS	#NOPROM,ICFFLG		;  Supress the prompt		;001
+	CLR	R0			;  Clear index (so we don't post error)
+	BR	110$			;  Now exit			;002
+
+100$:	MOV	U.CMN+U.POS,LX.ERP	;  Point to command		;002
+	MOV	#NMAT.E,R0		;  "?Command not found"		;002
+110$:	$ENDDO				;  Get out of MACRO
+	$ENDIF				;End if
+
+	$ENDTHR			
+
+GLOBAL	<U.POS,LX.ERP,U.CMN,U.QUIT,NCOM.E,RECA.M,CCHIT,DCLFLG,ICFFLG>
+GLOBAL	<NMAT.E,PMOR.E,DCLC.E,PRVIOL,CMDPOS>				;005
+
+.SBTTL	GETCMD	Get a command from recall buffer
+;+
+; Inputs:
+;	R0 = Index
+;	R1 = operation (0=read, 1=write) in low byte,
+;	     delete flag  (200 to delete command) in high byte
+;
+; Outputs:
+;
+;-
+.ENABL	LSB
+
+GETCMD:	CALLX	CLRFQX			;Clear the FIRQB and XRB
+	MOV	#FIRQB+FQFIL,R4		;R4 -> FIRQB+FQFIL
+	MOV	#15,(R4)+		;Function is 15, recall
+	MOV	R1,(R4)+		;Set operation (low byte) and 
+					; delete flag (high byte)
+	MOV	R0,(R4)+		;Set index
+	MOV	#TRNBUF,XRB+XRLOC	;Set return buffer address 
+	MOV	#TRN.BSIZ,XRB+XRLEN	;Set buffer length (255)
+	.MESAG				;Get previous command
+	CMPB	#0,FIRQB+0		;Error? (C=0 if so)
+	RETURN				;Return
+
+.DSABL	LSB
+
+GLOBAL	<TRNBUF,TRN.BSIZ>
+
+;+
+; UPCASE - Convert a character to upper case
+;
+;	R5 = Character
+;
+;	CALL	UPCASE
+;
+;	R5 = Converted character
+;-
+
+UPCASE::CMPB	R5,#141			;Might we need to upcase it?	;003
+	BLO	20$			;No, not this time		;002
+	CMPB	R5,#172			;Do we have to?			;002
+	BLOS	10$			;Yes, go do it			;002
+	CMPB	R5,#340			;Do we need to upcase it?	;002
+	BLO	20$			;No, not this time		;002
+10$:	SUB	#40,R5			;Upcase the character		;002
+20$:	RETURN				;All done
+
+	.END

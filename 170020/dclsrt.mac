@@ -1,0 +1,252 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.INCLUDE	/CMN:KERNEL.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.LIBRARY	/DCL:DCLMAC.MLB/
+.NLIST
+.INCLUDE	/CMN:PFBDEF.MAC/
+.INCLUDE	/DCL:DCLPFX.MAC/
+.LIST
+
+	DEFORG	DCLSRT
+
+	TMPORG	IMPURE
+SLIST::	.BLKW			;Pointer to first entry on sort list
+CMPFUN::.BLKW			;Pointer to entry comparison function
+	UNORG
+
+; Some possible improvements:
+;	put CMPFUN into R5
+;	put SLIST into R3
+;		rearrange SMPSRT to use R3 instead of R0
+
+.SBTTL	SORT	- Sort an arbitrary list
+
+; Inputs:
+;	SLIST	-> List to be sorted
+;	R2	=  Number of items in list
+;	CMPFUN	-> Entry comparison function
+;
+; Call:
+;	CALL	SORT
+;
+; Outputs:
+;	R0	-> Sorted list
+;	R1	-- Destroyed
+;	R2	-- Destroyed
+;	R4	-- Destroyed
+;	SLIST	-> The current remaining unsorted list
+;
+; Note:
+;	When this routine finally stops recursing, SLIST will be zero (the
+;	null list).
+
+.ENABL	LSB
+
+SORT::	CLR	R0
+	TST	SLIST		;Is the list empty?
+	IFNE			;If not then
+	CMP	R2,#3		;  Do we have a long list to sort?
+	IFGT			;  If so then do SORT/MERGE
+	ASR	R2		;    Divide length by two
+	PUSH	R2		;    Save result for second sort
+	ADC	R2		;    Add carry if length was odd to preserve
+				;    ... the relation R2+(SP) = length
+	CALL	SORT		;    Sort the first half
+	MOV	(SP),R2		;    Get list length of second half
+	MOV	R0,(SP)		;    Save pointer to first half for merge
+	CALL	SORT		;    Sort the second half
+	POP	R1		;    Restore pointer to first half
+	CALL	MERGE		;    Merge the first half with the second half
+	ELSE			;  Else list is short
+	CALL	SMPSRT		;    Do a quicker simpler sort
+	ENDIF			;  Endif
+	ENDIF			;Endif
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	MERGE	- Merge two arbitrary sorted lists
+
+; Inputs:
+;	R0	-> The first list
+;	R1	-> The second list
+;	CMPFUN	-> The entry comparison function
+;
+; Call:
+;	CALL	MERGE
+;
+; Outputs:
+;	R0	-> The merged list
+;	R1	-- Destroyed
+;	R2	-- Destroyed
+;	R4	-- Destroyed
+;
+
+.ENABL	LSB
+
+MERGE::	TST	-(SP)		;Carve out space to hold pointer to result list
+	MOV	SP,R2		;R2 is pointer to end of result list
+	BR	20$		;Go see if were done before we start
+
+10$:	MOV	R1,R4		;Set up ptr to entry on 2nd list for CMPFUN
+	CALL	@CMPFUN		;Compare entry on first list to entry on
+				;... second list
+	IFHI			;If 1st entry > 2nd entry then
+	MOV	R1,(R2)		;  Link entry on second list to
+	MOV	R1,R2		;  ... end of result list
+	MOV	(R1),R1		;  Unlink entry from second list
+	ELSE			;Else 1st entry <= 2nd entry
+	MOV	R0,(R2)		;  Link entry on first list to
+	MOV	R0,R2		;  ... end of result list
+	MOV	(R0),R0		;  Unlink entry from first list
+	ENDIF			;Endif
+20$:	TST	R0		;Anything left on first list?
+	BEQ	30$		;No, Finish up
+	TST	R1		;Anything left on second list?
+	BNE	10$		;Yes, do another entry
+	MOV	R0,R1		;No, make first list the second list
+
+30$:	MOV	R1,(R2)		;Link remainder of unmerged list to end
+				;... of result list
+	MOV	(SP)+,R0	;Return with pointer to first entry on result
+				;... list in R0
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	SMPSRT	- Simple sort for lists of three entries or less
+
+; Simple sort.  We must guarantee to return a sorted list of at least the
+; first 3 entries or the rest of the list (which ever is smaller).
+;
+; Inputs:
+;	SLIST	-> List to be sorted
+;	CMPFUN	-> Function to do entry comparisons
+;
+; Calls:
+;	CALL	SMPSRT
+;
+; Outputs:
+;	R0	-> Sorted sublist of SLIST
+;	R1	-- Destroyed
+;	R2	-- Destroyed
+;	R4	-- Destroyed
+;	SLIST	-> Remainder of unsorted list
+
+.ENABL	LSB
+
+SMPSRT:	MOV	SLIST,R0	;Copy pointer of list to sort
+	MOV	R0,R1		;Set up pointer to start of list
+	MOV	R0,R2		;Set up pointer to end of list
+	BNE	20$		;If we have a list to sort go see if we're
+				;... already done
+	BR	30$		;Otherwise we had nothing to sort so quit
+;
+; Check if entry belongs after last entry on result list
+;
+10$:	MOV	R2,R4		;Set up ptr to entry on end of result list
+				;... for CMPFUN
+				;R0 -> entry on list to sort
+	CALL	@CMPFUN		;Compare entry to result list
+	IFHIS			;If GE then
+	MOV	R0,(R2)		;  Link entry to end of result list
+	MOV	R0,R2		;  Make this entry the end of result list 
+	ELSE			;Else
+;
+; Check if entry belongs before first entry on result list
+;
+	MOV	R1,R4		;  Set up ptr to entry on beginning of result
+				;  ... list for CMPFUN
+				;  R0 -> entry on list to sort
+	CALL	@CMPFUN		;  Compare entry to result list
+	IFLOS			;  If LE then
+	MOV	(R0),(R2)	;    Unlink this entry from the sort list
+	MOV	R1,(R0)		;    Link entry to beginning of result list
+	MOV	R0,R1		;    Make this entry beginning of result list
+	ELSE			;  Else
+;
+; Check if entry belongs before second entry on result list
+;
+	MOV	(R1),R4		;    Set up ptr to entry after beginning of
+				;    ... result list
+	BEQ	25$		;    Oops! There's nothing there so finish up
+				;    R0 -> entry on list to sort
+	CALL	@CMPFUN		;    Compare entry to result list
+	IFLOS			;    If LE then
+	MOV	(R0),(R2)	;      Unlink this entry from the sort list
+	MOV	(R1),(R0)	;      Link entry to just after beginning of
+				;      ... result list
+	MOV	R0,(R1)		;      Make this entry the entry after the
+				;      ... beginning of result list
+	ELSE			;    Else
+;
+; We can't find a place for the entry so stop trying
+;
+	BR	25$		;      Go finish up
+	ENDIF			;    Endif
+	ENDIF			;  Endif
+	ENDIF			;Endif
+20$:	MOV	(R2),R0		;Point to next entry on list to sort
+	BNE	10$		;Go do next entry if we've got one
+;
+; Finish up
+;
+25$:	CLR	(R2)		;Terminate the result list
+	MOV	R0,SLIST	;Update pointer to remaining entries in the
+				;... list to be sorted
+	MOV	R1,R0		;Return with pointer to start of result list
+				;... in R0
+
+30$:	RETURN			;Return
+
+.DSABL	LSB
+
+;
+; Comparison function for garbage collector
+;
+
+.ENABL	LSB
+
+GBGCMP::
+	CMP	R0,R4		;Set up condition codes based on entry
+				;... addresses
+	RETURN
+
+.DSABL	LSB
+
+;
+; Comparison function for SHOW SYMBOLS
+;
+
+.ENABL	LSB
+
+SYMCMP::
+	CALLX	SAVRGS,R5
+
+	MOV	R4,R1
+	TST	-(R1)
+	MOVB	E.TYPE(R1),R2
+	ADD	ENAMES(R2),R1
+	CLR	R2
+	BISB	(R1)+,R2
+
+	MOV	R0,R3
+	TST	-(R3)
+	MOVB	E.TYPE(R3),R4
+	ADD	ENAMES(R4),R3
+	CLR	R4
+	BISB	(R3)+,R4
+
+	CLR	<5*2>(SP)
+	CALLX	CMPSTR
+	IFNE
+	INC	<5*2>(SP)
+	ENDIF
+
+	RETURN
+
+GLOBAL	<ENAMES>
+
+.DSABL	LSB
+
+	.END

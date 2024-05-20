@@ -1,0 +1,149 @@
+1	SUB BRDCST
+	!		PROGRAM		: OMS.TSK
+	!		PACKAGE		: OMS
+	!		MODULE		: BRDCST.B2S
+	!		VERSION		: V10.1
+	!		EDIT		: A
+	!		EDIT DATE	: 10-MAY-91
+	!		START DATE	: 06-JUL-1989
+	!****************************************************************&
+	!								 &
+	!		  C O P Y R I G H T				 &
+	!								 &
+	!								 &
+	!		      Copyright (C) 1983, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.		 &
+	!								 &
+	!								 &
+	! This software is furnished under a license and may be used and &
+	! copied  only  in accordance with the terms of such license and &
+	! with the  inclusion  of  the  above  copyright  notice.   This &
+	! software  or  any  other copies thereof may not be provided or &
+	! otherwise made available to any other person.  No title to and &
+	! ownership of the software is hereby transferred.		 &
+	!								 &
+	! The information in this software is subject to change  without &
+	! notice  and should not be construed as a commitment by Digital &
+	! Equipment Corporation.					 &
+	!								 &
+	! DIGITAL assumes no responsibility for the use  or  reliability &
+	! of its software on equipment that is not supplied by DIGITAL.	 &
+	!								 &
+	!****************************************************************&
+
+	! ++								 &
+	! This module is called display a message or request on all 	 &
+	! operstor service consoles.  The text along with some		 &
+	! formated header information is broadcast to all Operator	 &
+	! Service Consoles which have the appropriate characteristic.	 &
+	! --								 &
+
+
+	OPTION TYPE = EXPLICIT
+
+ %INCLUDE "SYSTEM:CMNDEF.B2S"
+
+ %INCLUDE "SYSTEM:OMSCMN.B2S"
+
+
+        EXTERNAL WORD FUNCTION FORMAT		! Header + Text + CRLF
+	MAP (FMTBUF) BYTE REQ.DATA(661%)	!   160  + 500  +  2 = 662
+	MAP DYNAMIC (FMTBUF) STRING	TEMP,	&
+					TMP1
+
+	DECLARE	BYTE	RETRY,			&
+		BYTE	KB,			&
+		WORD	SENT,			&
+		WORD	LENGTH,			&
+		WORD	UNSENT,			&
+		WORD	HDR.LEN,		&
+		WORD	KB.TYPE,		&
+		STRING	FRQB
+
+	DECLARE STRING CONSTANT			&
+		UU.BROAD = "6"C + "251"C,	&
+		UU.TRM1 = "6"C + "16"C + "0"C,	&
+		UU.TRM2 = "6"C + "16"C + "1"C
+
+
+ BRDCST:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("BRDCST Entered", 1%)	!  Tell'em they're here
+    %END %IF
+
+	HDR.LEN = FORMAT			! Format header for display
+        REMAP (FMTBUF)	STRING	FILL = HDR.LEN,	! Skip formatted header and &
+				TMP1 = REQ.LEN,	!  map text for broadcast   &
+				TEMP = 2%	!  plus possible <CR><LF>
+
+	TMP1 = REQ.TXT				! Create string for broadcast
+	LENGTH = HDR.LEN + REQ.LEN		! Save broadcast string length
+
+	JUNK = REQ.DATA(LENGTH - 1%)		! Fetch the last character
+	IF (JUNK <> 10%) AND (JUNK <> 12%)	! IF text doesn't end with line
+	THEN					! feed or form feed Then
+	  TEMP = CR.LF				!   Add a <CR><LF>
+	  LENGTH = LENGTH + 2%			!   All of it is unsent at start
+	END IF					!
+	REP.KB = 0%				! Init the confirmation KB count
+	KB = 0%
+	ON ERROR GOTO BRDCST_ERR
+
+
+ BROADCAST:
+
+	KB.TYPE = ASCII(RIGHT(SYS(UU.TRM2 +	! Get OSC type flags &
+		 CHR$(KB)),19%)) AND 3%		!   1 = MESSAGE/2 = REQUEST
+	IF (REQ.TYP AND KB.TYPE)		! If KB is correct OSC type
+	THEN					! Then
+	  RETRY = 50%				!  50 tries to broadcast it all
+	  UNSENT = LENGTH			!  Header + text is unsent
+	  SENT = 0%				!  Nothing sent for starters
+	  WHILE (RETRY > 0%) AND (UNSENT > 0%)	!  Initialize loop conditions
+	    REMAP (FMTBUF) STRING FILL = SENT,	!   Skip past everything but &
+				  TEMP = UNSENT	!	the text
+	    FRQB = SYS(UU.BROAD+CHR$(KB)+TEMP)	!   Try to broadcast the text
+	    UNSENT = RECOUNT			!   Get new unsent byte count
+	    IF UNSENT = LENGTH - SENT		!   If nothing was broadcast
+	    THEN				!   Then
+	      IF ASCII(RIGHT$(SYS(UU.TRM1 +	!    Is the terminal gagged &
+			CHR$(KB)),28%)) = 255%	!
+	      THEN				!    Yes
+		RETRY = 0%			!     So don't try any more
+	      ELSE				!    No, terminal is not gagged
+		RETRY = RETRY-1%		!     decrement counter
+	      END IF				!
+	    ELSE				!   Something WAS broadcast
+	      SENT = LENGTH - UNSENT		!    Adjust sent byte count
+	      RETRY = 50% IF UNSENT		!    Reset rebroadcast counter
+	    END IF				!
+	    SLEEP 0% IF UNSENT			!   Wait around for some buffers
+	  NEXT					!  Loop if there's more to send
+	  REP.KB = REP.KB + 1% UNLESS UNSENT 	!  Inc count if all was sent
+	END IF					!
+
+
+ NEXT_KB:
+	IF KB < OSCMAX
+	THEN
+	  KB = KB + 1%				! Check out the next keyboard
+	  GOTO BROADCAST
+	ELSE
+	  GOTO BRDCST_END
+	END IF
+
+
+ BRDCST_ERR:
+
+	RESUME NEXT_KB IF ERR = 8%		! Device(KB) not available
+	ON ERROR GO BACK
+
+
+ BRDCST_END:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("BRDCST Exit", -1%)		!  Tell'em they're leaving
+    %END %IF
+
+	SUBEND

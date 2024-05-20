@@ -1,0 +1,785 @@
+1	SUB DELENT							      &
+\	MODULE$ = "DELENT"						      &
+\	ON ERROR GOTO 19000						      &
+\	SUBEXIT IF CC.FLG%						      &
+	!								      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   t i t l e				      &
+	!								      &
+	!	  subprogram : DELENT					      &
+	!	     version : V10.1					      &
+	!	        edit : J					      &
+	!	   edit date : 27-MAR-92				      &
+	!	   author(s) : PRL/DRP/ACT				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!		  C O P Y R I G H T				      &
+	!								      &
+	!								      &
+	!		      Copyright (C) 1982, 1992 by		      &
+	!	Digital Equipment Corporation, Maynard, Mass.		      &
+	!								      &
+	!								      &
+	! This software is furnished under a license and may be used and      &
+	! copied  only  in accordance with the terms of such license and      &
+	! with the  inclusion  of  the  above  copyright  notice.   This      &
+	! software  or  any  other copies thereof may not be provided or      &
+	! otherwise made available to any other person.  No title to and      &
+	! ownership of the software is hereby transferred.		      &
+	!								      &
+	! The information in this software is subject to change  without      &
+	! notice  and should not be construed as a commitment by Digital      &
+	! Equipment Corporation.					      &
+	!								      &
+	! DIGITAL assumes no responsibility for the use  or  reliability      &
+	! of its software on equipment that is not supplied by DIGITAL.	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   c a l l   f o r m a t		      &
+	!								      &
+	!	CALL DELETE						      &
+	!								      &
+	!	Argument	I/O	Usage				      &
+	!	========	===	=====				      &
+	!	ERRSTS%		O	error status			      &
+	!				   0 = success			      &
+	!				   n = ERR value		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m o d i f i c a t i o n   h i s t o r y   l o g		      &
+	!								      &
+	!								      &
+	! VER/ED	EDIT DATE	REASON				      &
+	!								      &
+	! V9.0-10	22-Jan-85	(PRL) Change rules for entry owner    &
+	! V9.0-12	25-Jan-85	(PRL) Don't allow null entry name     &
+	! =================================================================== &
+	! V10.1-J	19-Mar-92	(PRL) Support 'xxx*' wildcards	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   d e s c r i p t i o n		      &
+	!								      &
+	!	This subprogram is called to delete entries in a queue.  The  &
+	!	format of the DELETE/ENTRY command is:			      &
+	!								      &
+	!		DELETE/ENTRY entry				      &
+	!								      &
+	!	where entry is either an entry number or entry-spec.	      &
+	!								      &
+	!	Qualifiers:						      &
+	!								      &
+	!			/ALL					      &
+	!			/BATCH					      &
+	!			/PRINT					      &
+	!								      &
+	!	You can only delete entries that you own (same PPN), or	      &
+	!	that you have accounting access (GACNT or WACNT) to.	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	v a r i a b l e s  /  a r r a y s   u s e d		      &
+	!								      &
+	!	name		description				      &
+	!	====		===========				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b r o u t i n e s   u s e d				      &
+	!								      &
+	!	line #/name		description			      &
+	!	===========		===========			      &
+	!	DISPLY			print error text at user's KB	      &
+	!	INIPKT			initialize send packet		      &
+	!	ENTSPC			parse entry-spec		      &
+	!	CHKQUE			validate queue-name		      &
+	!	GETREC			read queue file record		      &
+	!	RECV			receive ACK/NACK packet		      &
+	!	SEND			send packet to queue manager	      &
+	!								      &
+	!	FET$A BY REF		fetch (CUI) argument		      &
+	!	FET$CQ BY REF		fetch (CUI) command qualifier	      &
+	!	FET$P BY REF		fetch (CUI) parameter		      &
+	!	FET$NP BY REF		fetch next (CUI) parameter	      &
+	!								      &
+	!	10000			delete entry by entry-number	      &
+	!	10100			delete current entry record	      &
+	!	11000			delete entry by entry-spec	      &
+	!	11100			delete current entry record	      &
+	!	12000			common delete routine		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	f u n c t i o n s   u s e d				      &
+	!								      &
+	!	line #	name		description			      &
+	!	======	====		===========			      &
+	!	15000	FN.UNSIGNED%	convert fl-pt to unsigned int	      &
+	!	15100	FN.UNSIGNED	convert unsigned integer to fl-pt     &
+	!	15200	FN.PPN$		return [proj,prog] string	      &
+	!	15300	FN.ENTRY.ID$	return entry ID of current entry rec  &
+	!	15400	FN.OWN.ENTRY%	return user's own-entry status	      &
+	!	15600	FN.GET.ENTRY%	return next selected entry record     &
+	!	15700	FN.MATCH.PPN%	return 'PPNs match' status	      &
+	!	15800	FN.MATCH.NAME%	return names-match status	      &
+	!	15900	FN.PRIV%	return user's privilege status	      &
+	!	16000	FN.NUMERIC%	return numeric-entry flag	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m a p   d e c l a r a t i o n s				      &
+	!								      &
+	!	line #	name	description				      &
+	!	======	====	===========				      &
+	!	   700	PBSCMN	QUEUE common data (%INCLUDE PBSCMN.B2S)	      &
+	!	   	PBSMAP	Send/Recv/Record fields (%INCLUDE PBSMAP.B2S) &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	c o m m o n   d e c l a r a t i o n s			      &
+	!								      &
+	!	line #	name	description				      &
+	!	======	====	===========				      &
+	!	   700	PBSKEY	CUI constants (%INCLUDE PBSKEY.B2S)	      &
+	!	   	CUICMN	CUI common data (%INCLUDE CUICMN.B2S)	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	d i m e n s i o n   d e c l a r a t i o n s		      &
+	!								      &
+	!	line #	variable		description		      &
+	!	======	========		===========		      &
+	!	   900	NAM.1%(30)		work table for FN.MATCH.NAME% &
+	!		NAM.2%(30)		work table for FN.MATCH.NAME% &
+	!								      &
+	!******************************************************************** &
+
+700	!	i n c l u d e   r e q u i r e d   M A P s , C O M M O N s     &
+	!								      &
+	!								      &
+	%INCLUDE "SYSTEM:PBSCMN.B2S"		!include QUEUE data section   &
+	%INCLUDE "SYSTEM:PBSMAP.B2S"		!include QUEUE map sections   &
+	%INCLUDE "SYSTEM:PBSKEY.B2S"		!include CUI keywords	      &
+	%INCLUDE "CUI:CUICMN.B2S"		!include CUI data section     &
+
+900	!	D I M E N S I O N   d e c l a r a t i o n s		      &
+	!								      &
+	!								      &
+	DIM	NAM.1%(10),			!table for FN.MATCH.NAME%     &
+		NAM.2%(10)			!table for FN.MATCH.NAME%     &
+
+1000	!	m a i n   s u b p r o g r a m   l o g i c		      &
+	!								      &
+	!								      &
+	QTYP% = 0%				!select any queue type	      &
+						!			      &
+\	CALL FET$CQ BY REF (PRT.Q%)		!fetch /PRINT qualifier	      &
+\	IF U.PRES% THEN				!if present,		      &
+		QTYP% = PRT.TYP%		!  select print queues only   &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$CQ BY REF (BAT.Q%)		!fetch /BATCH qualifier	      &
+\	IF U.PRES% THEN				!if present,		      &
+		QTYP% = BAT.TYP%		!  select batch queues only   &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$P BY REF (ENT.T%)		!fetch entry parameter	      &
+\	ENT.POS% = U.POS%			!save position in cmd line    &
+\	ENTRY$ = SEG$(U.STR$,1%,U.LEN%)		!save entry string	      &
+\	ENT.NO% = FN.ENTRY% (ENTRY$)		!return entry no. or 0	      &
+\	SUBEXIT IF ERRSTS%			!exit if invalid entry no.    &
+\	IF ENT.NO% THEN				!if entry-number,	      &
+		GOSUB 10000			!  go delete by number	      &
+	ELSE	GOSUB 11000			!  go delete by spec	      &
+\	END IF					!end if			      &
+						!			      &
+\	SUBEXIT					!exit			      &
+
+10000	!	d e l e t e   b y   e n t r y   n u m b e r		      &
+	!								      &
+	!								      &
+	CALL FET$P BY REF (QUE.T)		!fetch queue name	      &
+\	QUE.FLG% = U.PRES%			!set flag if present	      &
+\	IF QUE.FLG% THEN			!if present,		      &
+		QNAM$ = SEG$(U.STR$,1%,U.LEN%)	!  save queue name	      &
+\		CALL CHKQUE (QNAM$,FALSE%)	!  check if valid queue	      &
+\		RETURN IF ERRSTS% OR CC.FLG%	!  exit if errors or CTRL/C   &
+\	END IF					!end if			      &
+						!			      &
+\	MSG.TXT$ = ""				!show no message text	      &
+\	GOSUB 10100				!go delete this entry no.     &
+\	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	IF LEN(MSG.TXT$) THEN			!if any msg text,	      &
+		U.POS% = 0%			!  disable repainting cmd     &
+\		CALL DISPLY (MSG.TXT$)		!  display message text	      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+10100	!	d e l e t e   c u r r e n t   e n t r y   n o .		      &
+	!								      &
+	!								      &
+	CALL INIPKT				!go set up for send	      &
+\	SUBEXIT IF ERRSTS% OR CC.FLG%		!abort if error or CTRL/C     &
+						!			      &
+\	KY$ = CVT%$(SWAP%(FN.UNSIGNED%(ENT.NO%)))			      &
+						!build seq no. key string     &
+\	CALL GETREC (1%,0%,KY$)			!find entry rec by seq no.    &
+\	SUBEXIT IF FATAL% OR CC.FLG%		!exit if fatal err or CTRL/C  &
+						!			      &
+\	SELECT QTYP%				!select via queue type:	      &
+\	CASE = PRT.TYP%				!case = print entries,	      &
+\		Z$ = "print "			!  build print text	      &
+\	CASE = BAT.TYP%				!case = batch entries,	      &
+\		Z$ = "batch "			!  build print text	      &
+\	CASE ELSE				!case else,		      &
+\		Z$ = ""				!  build null text	      &
+\	END SELECT				!end select		      &
+\	ENTRY$ = Z$ + "entry " + ENTRY$		!build full entry name	      &
+						!			      &
+\	Z% = ASCII(PKT.QUE$)			!get entry's type	      &
+\	ERRSTS% = ERR.NOTFND%			!return NOTFND error	      &
+		IF ((Z% AND NOT 15%) <> 0%)	!  if not an entry record     &
+		OR ((Z% AND 15%) = 0%)		!  or no entry type defined   &
+		OR (PKT.SEQ% <= 0%)		!  or queue header rec (0)    &
+		OR ((QTYP% <> 0%) AND (Z% <> QTYP%))			      &
+						!  or wrong type of entry     &
+			UNLESS ERRSTS%		!    unless pending error     &
+						!			      &
+\	MSG.TXT$ = "%No " + ENTRY$ +" found"	!build error message text     &
+		IF ERRSTS% = ERR.NOTFND%	!  if record not found	      &
+						!			      &
+\	RETURN IF ERRSTS%			!exit if any errors	      &
+						!			      &
+\	IF QUE.FLG% THEN			!if queue name specified,     &
+		Z$ = SEG$(PKT.QNM$,1%,ASCII(PKT.QNL$))			      &
+						!  get entry's queue name     &
+\		IF NOT FN.MATCH.NAME%(Z$,QNAM$) THEN			      &
+						!  if not in right queue,     &
+			MSG.TXT$ = MSG.TXT$ + " in queue " + QNAM$	      &
+						!    return err msg text      &
+\			ERRSTS% = ERR.NOTFND%	!    return NOTFND error      &
+\			RETURN			!    and exit		      &
+\		END IF				!  end if		      &
+\	END IF					!end if			      &
+						!			      &
+\	QUE.TYP% = ASCII(PKT.QUE$) AND 15%	!get entry type		      &
+\	GOSUB 12000				!go delete the entry	      &
+\	RETURN					!and exit		      &
+
+11000	!	d e l e t e   b y   e n t r y - s p e c			      &
+	!								      &
+	!								      &
+	ES.SPEC$ = ""				!init null entry-spec	      &
+\	ES.QUE$ = "*"				!select all queues	      &
+\	ES.NAM$ = ""				!require entry name	      &
+\	ES.PPN% = PPN%				!select own entries	      &
+						!			      &
+\	ES.SPEC$ = ENTRY$			!save entry-spec string	      &
+						!			      &
+\	ES.FLG%% = 1%+2%+4%+8%+32%+64%		!set options for entry-spec:  &
+						!  1  = allow null queuename  &
+						!  2  = allow wild queuename  &
+						!  4  = allow null PPN	      &
+						!  8  = allow wild PPN	      &
+						! ~16 = disallow null entname &
+						!  32 = allow wild entname    &
+						!  64 = allow not own PPN     &
+						!			      &
+\	QUE.POS%, OWN.POS%, NAM.POS% = 0%	!init entry-spec pointers     &
+\	CALL ENTSPC (ES.SPEC$,ES.FLG%,ES.QUE$,ES.PPN%,ES.NAM$)		      &
+						!parse entry-spec	      &
+\	SUBEXIT IF ERRSTS% OR CC.FLG%		!exit if error or CTRL/C      &
+						!			      &
+\	QNAM$ = ES.QUE$				!set queue name for get-queue &
+						!			      &
+\	ENT.FLG% = FALSE%			!clear entry-selected flag    &
+\	CALL INIPKT				!go set up for send	      &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+\	Z% = FN.GET.ENTRY%(3%)			!get 1st entry rec	      &
+\	UNTIL ERRSTS% OR CC.FLG%		!until no entries or CTRL/C:  &
+\		GOSUB 11100			!  go delete this entry	      &
+\		RETURN IF CC.FLG%		!  exit if CTRL/C	      &
+\		ENT.FLG% = TRUE%		!  set entry-selected flag    &
+			UNLESS ERRSTS%		!    unless error	      &
+\		CALL INIPKT			!  go set up for next send    &
+\		RETURN IF ERRSTS% OR CC.FLG%	!  abort if errors or CTRL/C  &
+\		Z% = FN.GET.ENTRY%(0%)		!  get next entry record      &
+\	NEXT					!next (entry record)	      &
+\	SUBEXIT IF CC.FLG%			!exit if CTRL/C		      &
+						!			      &
+\	IF NOT ENT.FLG% THEN			!if no entries selected,      &
+		ERRSTS% = ERR.NOTFND%		!  return not found status    &
+\		Z$ = ""				!  init entry type text	      &
+\		Z$ = "print "			!  change to 'print'	      &
+			IF QTYP% = PRT.TYP%	!    if print entries	      &
+\		Z$ = "batch "			!  change to 'batch'	      &
+			IF QTYP% = BAT.TYP%	!    if batch entries	      &
+\		U.POS% = 0%			!  disable repainting of cmd  &
+\		CALL DISPLY ("%No "+Z$+"entries "+ES.SPEC$+" found")	      &
+						!  display error msg	      &
+\		RETURN				!  and exit		      &
+\	END IF					!end if			      &
+						!			      &
+\	ERRSTS% = 0%				!return success status	      &
+\	RETURN					!and exit		      &
+
+11100	!	d e l e t e   c u r r e n t   e n t r y - s p e c	      &
+	!								      &
+	!								      &
+	MSG.TXT$ = ""				!clear message text	      &
+\	ENT.NO$ = NUM1$(FN.UNSIGNED(PKT.SEQ%))	!build current entry-no.      &
+						!			      &
+\	GOSUB 12000				!go delete the entry	      &
+\	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	IF LEN(MSG.TXT$) THEN			!if any message text,	      &
+		U.POS% = 0%			!  disable repainting cmd     &
+\		CALL DISPLY (MSG.TXT$)		!  display message	      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!and exit		      &
+
+12000	!	c o m m o n   d e l e t e   r o u t i n e		      &
+	!								      &
+	!								      &
+	ERRSTS% = 0%				!init error status	      &
+\	ENTRY$ = FN.ENTRY.ID$			!build entry ID string	      &
+\	IF NOT FN.OWN.ENTRY% (PKT.JB.PPN%) THEN	!if not owner of entry,	      &
+		MSG.TXT$ = "%No owner rights to entry " + ENTRY$	      &
+						!  build error message	      &
+\		RETURN				!  and exit		      &
+\	END IF					!end if			      &
+						!			      &
+\	PKT.CMD$ = CHR$(KL.CMD%)		!load DELETE command code     &
+\	PKT.RTQ$ = CHR$(AK.FLG%)		!load return-ack flag	      &
+\	CALL SEND (KL.LEN%,SEND.RETRY%)		!send DELETE packet	      &
+\	SUBEXIT IF ERRSTS%			!abort if errors	      &
+		   OR CC.FLG%			!  or CTRL/C		      &
+			OR NOSEND%		!    or NOSEND flag set	      &
+						!			      &
+\	Z% = RECV.WAIT%				!use work copy of wait secs   &
+\	CALL RECV (Z%)				!wait for ACK packet	      &
+\	SUBEXIT IF ERRSTS% OR CC.FLG%		!abort if errors or CTRL/C    &
+						!			      &
+\	SELECT QUE.TYP%				!select via queue type:	      &
+\	CASE = PRT.TYP%				!  case = print queue,	      &
+\		Z$ = "Print e"			!    build 'print' prefix     &
+\	CASE = BAT.TYP%				!  case = batch queue,	      &
+\		Z$ = "Batch e"			!    build 'batch' prefix     &
+\	CASE ELSE				!  case else,		      &
+\		Z$ = "E"			!    build null prefix	      &
+\	END SELECT				!end select		      &
+\	Z$ = Z$ + "ntry "			!message text almost built    &
+									      &
+\	IF ASCII(PKT.CMD$) = AK.CMD% THEN	!if ACK received,	      &
+		ERRSTS% = 0%			!  clear error status	      &
+\		MSG.TXT$ = Z$ + ENTRY$ + " deleted"			      &
+						!  build deleted msg text     &
+\		RETURN				!  and exit		      &
+\	END IF					!end if			      &
+									      &
+\	IF PKT.STS% = RMS.LBY% THEN		!If entry is already deleted  &
+		ERRSTS% = 0%			!  its no big deal	      &
+\		MSG.TXT$ = "%" + Z$ + ENTRY$ + " already deleted"	      &
+						!  build warning message      &
+\		RETURN				!  and exit		      &
+\	END IF					!End If			      &
+									      &
+\	ERRSTS% = PKT.STS%			!save error status code	      &
+\	IF ERRSTS% = RMS.RNF% THEN		!if no entry found,	      &
+		ERRSTS% = ERR.NOTFND%		!  return not-found error     &
+\		RETURN				!  and exit		      &
+\	END IF					!end if			      &
+						!			      &
+\	FATAL% = TRUE%				!set fatal error flag	      &
+\	ERRNAM$ = MODULE$			!return bad module name	      &
+\	SUBEXIT					!abort			      &
+
+15000	!	f n . u n s i g n e d % ( FL.PT )			      &
+	!								      &
+	!								      &
+	!inputs:	VALUE		-	floating-pt value 0 to 65535  &
+	!								      &
+	!outputs:	FN.UNSIGNED%	-	unsigned 16-bit integer	      &
+	!								      &
+	!uses:		None.						      &
+	!								      &
+	!								      &
+	DEF FN.UNSIGNED% (FL.PT)					      &
+\	FL.PT = 0.				!force to 0		      &
+		IF FL.PT < 0. OR FL.PT > 65535.	!  if not in range 0-65535    &
+\	FL.PT = FL.PT - 65536.			!normalize (-32768,+32767)    &
+		IF FL.PT > 32767.		!  if over max pos integer    &
+\	FN.UNSIGNED% = FL.PT			!return unsigned integer      &
+\	FNEND					!end FN.UNSIGNED% function    &
+
+15100	!	f n . u n s i g n e d ( VALUE% )			      &
+	!								      &
+	!inputs:	VALUE%		-	16-bit unsigned integer	      &
+	!								      &
+	!outputs:	FN.UNSIGNED	-	corresponding FL-PT value     &
+	!								      &
+	!uses:		Z		-	work FL-PT		      &
+	!								      &
+	!								      &
+	DEF FN.UNSIGNED (VALUE%)					      &
+\	Z = VALUE%				!move to fl-pt variable	      &
+\	Z = Z + 65536.				!normalize to 0		      &
+		IF Z < 0.			!  if negative		      &
+\	FN.UNSIGNED = Z				!  return fl-pt value	      &
+\	FNEND					!end FN.UNSIGNED function     &
+
+15200	!	f n . p p n $ ( PPN% )					      &
+	!								      &
+	!inputs:	PPN%		-	PPN word		      &
+	!								      &
+	!outputs:	FN.PPN$		-	PPN string "[proj,prog]"      &
+	!								      &
+	!uses:		Z%		-	work integer		      &
+	!		Z1$, Z2$	-	work strings		      &
+	!								      &
+	!								      &
+	DEF FN.PPN$ (PPN%)						      &
+\	Z1$, Z2$ = "*"				!init proj,prog strings	      &
+\	Z% = SWAP%(PPN%) AND 255%		!get project no.	      &
+\	Z1$ = NUM1$(Z%)				!build project string	      &
+		UNLESS Z% = 255%		!  unless wild		      &
+\	Z% = PPN% AND 255%			!get programmer no.	      &
+\	Z2$ = NUM1$(Z%)				!build programmer string      &
+		UNLESS Z% = 255%		!  unless wild		      &
+\	FN.PPN$ = "[" + Z1$ + "," + Z2$ + "]"	!return PPN string	      &
+\	FNEND					!end FN.PPN$ function	      &
+
+15300	!	f n . e n t r y . i d $					      &
+	!								      &
+	!								      &
+	!inputs:	PKT.SEQ%	-	entry's sequence no.	      &
+	!		PKT.QNM$	-	entry's queue name	      &
+	!		PKT.QNL$	-	entry's queue name length     &
+	!		PKT.JB.PPN%	-	entry's PPN		      &
+	!		PKT.JB.NAM$	-	entry's name		      &
+	!		PKT.JB.NML$	-	entry's name length	      &
+	!								      &
+	!outputs:	FN.ENTRY.ID$	-	entry ID string in the form   &
+	!					  "n queue:[ppn]name"	      &
+	!								      &
+	DEF FN.ENTRY.ID$ = NUM1$(FN.UNSIGNED(PKT.SEQ%)) + " "		      &
+						!entry no.		      &
+		+ SEG$(PKT.QNM$,1%,ASCII(PKT.QNL$)) + ":"		      &
+						!append queue name	      &
+		+ FN.PPN$(PKT.JB.PPN%)		!append PPN		      &
+		+ SEG$(PKT.JB.NAM$,1%,ASCII(PKT.JB.NML$))		      &
+						!append entry name	      &
+
+15400	!	f n . o w n . e n t r y % ( ACC.PPN% )			      &
+	!								      &
+	!inputs:	ACC.PPN%	-	entry's PPN to check	      &
+	!		PPN%		-	user's PPN		      &
+	!								      &
+	!outputs:	FN.OWN.ENTRY%	-	ownership flag:		      &
+	!					  TRUE  -> owner access	      &
+	!					  FALSE -> no owner access    &
+	!								      &
+	!notes:	This function determines if the user has owner access to the  &
+	!	current entry, based on the user's PPN and the entry's PPN.   &
+	!								      &
+	!	A user has ownership of an entry if:			      &
+	!								      &
+	!		1) The user has WACNT privilege			      &
+	!	or	2) The user has GACNT privilege and the PPN's	      &
+	!		   project number matches the user's		      &
+	!		3) The entry's PPN matches the user's		      &
+	!								      &
+	!								      &
+	DEF FN.OWN.ENTRY% (ACC.PPN%)					      &
+\	IF ACC.PPN% = PPN% THEN			!if same ppn,		      &
+		FN.OWN.ENTRY% = TRUE%		!  return TRUE		      &
+	ELSE	CHANGE SYS (			!else do UU.CHK SYS call:     &
+			CHR.6$ +		!    FIP call		      &
+			CHR$(32%) +		!    check access function    &
+			CHR.00$ +		!    reserved		      &
+			CHR$(ACC.PPN%) +	!    prog no. to check	      &
+			CHR$(SWAP%(ACC.PPN%))	!    proj no. to check	      &
+			   ) TO FIRQB%		!  end of sys call	      &
+						!			      &
+\		FN.OWN.ENTRY% = ((FIRQB%(3%) AND 128%) <> 0%)		      &
+						!  return ownership flag      &
+\	END IF					!end if			      &
+						!			      &
+\	FNEND					!end FN.OWN.ENTRY% function   &
+
+15600	!	f n . g e t . e n t r y % ( GET.MODE% )			      &
+	!								      &
+	!								      &
+	!inputs:	GET.MODE%	-	initial GET mode to use	      &
+	!		QTYP%		-	entry's queue type to select  &
+	!		ES.QUE$		-	entry's queue to select	      &
+	!		ES.NAM$		-	entry's name to select	      &
+	!		ES.PPN%		-	entry's PPN to select	      &
+	!								      &
+	!outputs:	FN.GET.ENTRY%	-	select-entry status:	      &
+	!					   TRUE% - entry selected     &
+	!					  FALSE% - no entry selected  &
+	!		ERRSTS%		-	error status:		      &
+	!					  0 = no error (rec found)    &
+	!					  n = error (rec not found)   &
+	!		QUE.TYP%	-	entry rec's queue type	      &
+	!		ENT.QUE$	-	entry rec's queue name	      &
+	!		ENT.NAM$	-	entry rec's name	      &
+	!								      &
+	!uses:		Z$		-	local work string	      &
+	!								      &
+	!notes:								      &
+	!								      &
+	! This function is called to return the next entry definition  record &
+	! (EDR),  based  on  the selection values specified above.  The value &
+	! GET.MODE% (0-3) is used by this function in  its  initial  call  to &
+	! GETREC, to allow  the caller to decide how to get the initial entry &
+	! record.  Mode 0 (GET NEXT) should be specified if at least one  EDR &
+	! has  been  read and no other non-EDRs have been read since the last &
+	! call; otherwise, mode 1 (GET EQ) should be specified, with QUE.TYP% &
+	! set accordingly.  Once the  initial GET is performed, the record is &
+	! tested  to ensure that it is actually a EDR;  if  not  the function &
+	! exits with status ERR.NOTFND%. Otherwise, a check is made to see if &
+	! the EDR should  be selected, based on the selection values.  If the &
+	! EDR  is  selected,  the  function  exits  with  success status (0); &
+	! otherwise, a GET NEXT is performed and the process repeats.	      &
+	!								      &
+	!								      &
+	DEF FN.GET.ENTRY% (GET.MODE%)					      &
+\	FNEXIT IF CC.FLG%			!exit if CTRL/C		      &
+\	Z$ = CHR$(QTYP%) + STRING$(5%,0%)	!build search key	      &
+		IF GET.MODE%			!  unless get-next mode	      &
+\	FN.GET.ENTRY% = FALSE%			!set fn val = rec not found   &
+
+15610	CALL GETREC (GET.MODE%,1%,Z$)		!get initial entry record     &
+\	FNEXIT IF CC.FLG%			!exit if CTRL/C		      &
+\	QUE.TYP% = ASCII(PKT.QUE$)		!save entry's queue type      &
+\	ERRSTS% = ERR.NOTFND%			!return not-found error	      &
+		IF QUE.TYP% AND (NOT 15%)	!  if not a entry record      &
+			UNLESS ERRSTS%		!    unless pending error     &
+\	FNEXIT IF ERRSTS%			!exit if any error	      &
+\	GET.MODE% = 0%				!use GET NEXT mode now	      &
+						!			      &
+\	GOTO 15610				!skip this entry	      &
+		IF QTYP% <> QUE.TYP%		!  if different types	      &
+			IF QTYP%		!    if single queue type     &
+						!			      &
+\	GOTO 15610				!skip this entry	      &
+		UNLESS FN.MATCH.PPN%(PKT.JB.PPN%,ES.PPN%)		      &
+						!  unless PPN's match	      &
+\	ENT.QUE$ = SEG$(PKT.QNM$,1%,ASCII(PKT.QNL$))			      &
+						!extract queue name	      &
+\	GOTO 15610				!skip this entry	      &
+		UNLESS FN.MATCH.NAME%(ENT.QUE$,ES.QUE$)			      &
+						!  unless queue-names match   &
+			IF LEN(ES.QUE$)		!    if select by queue-name  &
+						!			      &
+\	ENT.NAM$ = SEG$(PKT.JB.NAM$,1%,ASCII(PKT.JB.NML$))		      &
+						!extract entry name	      &
+\	GOTO 15610				!skip this entry	      &
+		UNLESS FN.MATCH.NAME%(ENT.NAM$,ES.NAM$)			      &
+						!  unless entry-names match   &
+			IF LEN(ES.NAM$)		!    if select by entry-name  &
+						!			      &
+\	FN.GET.ENTRY% = TRUE%			!set fn val = rec found	      &
+\	FNEND					!end FN.GET.ENTRY% function   &
+
+15700	!	f n . m a t c h . p p n % ( PPN.1% , PPN.2% )		      &
+	!								      &
+	!								      &
+	!inputs:	PPN.1%		-	queue rec PPN		      &
+	!		PPN.2%		-	PPN word to match	      &
+	!					  (255 = wildcard)	      &
+	!								      &
+	!outputs:	FN.MATCH.PPN%	-	returned match status:	      &
+	!					  TRUE% = PPN's match	      &
+	!					 FALSE% = PPN's don't match   &
+	!								      &
+	!uses:		Z0%		-	loop index		      &
+	!		Z1%		-	1st PPN's byte value	      &
+	!		Z2%		-	2nd PPN's byte value	      &
+	!								      &
+	!								      &
+	DEF FN.MATCH.PPN% (PPN.1%,PPN.2%)				      &
+\	FN.MATCH.PPN% = FALSE%			!init fn value as no match    &
+\	FOR Z0%= 1% TO 2%			!do for each PPN byte:	      &
+\		Z1% = PPN.1% AND 255%		!  get lo byte of 1st ppn     &
+\		Z2% = PPN.2% AND 255%		!  get lo byte of 2nd ppn     &
+\		FNEXIT				!  exit (no match)	      &
+			IF Z1% <> Z2% 		!    if bytes don't match,    &
+				IF Z2% <> 255%	!      if byte not wild	      &
+\		PPN.1% = SWAP%(PPN.1%)		!  swap 1st ppn bytes	      &
+\		PPN.2% = SWAP%(PPN.2%)		!  swap 2nd ppn bytes	      &
+\	NEXT Z0%				!continue for hi bytes	      &
+\	FN.MATCH.PPN% = TRUE%			!match if loop completes      &
+\	FNEND					!end FN.MATCH.PPN% function   &
+
+15800	!	f n . m a t c h . n a m e $ ( NAM.1$ , NAM.2$ )		      &
+	!								      &
+	!								      &
+	!inputs:	NAM.1$		-	entry name string	      &
+	!		NAM.2$		-	name string to match	      &
+	!								      &
+	!outputs:	FN.MATCH.NAME%	-	returned match status:	      &
+	!					   TRUE% = names match	      &
+	!					  FALSE% = names don't match  &
+	!								      &
+	!uses:		Z0%		-	loop index		      &
+	!		NAM.1%()	-	work table for entry name     &
+	!		NAM.2%()	-	work table for match name     &
+	!								      &
+	!notes:		This function compares a entry name string (NAM.1$)   &
+	!		against a match name string (NAM.2$). The match name  &
+	!		string may contain a '*' or multiple '?' wildcard     &
+	!		characters (always match).			      &
+	!								      &
+	!		If the match name string is null or *, then the	      &
+	!		function returns TRUE% (match), regardless of the     &
+	!		entry name string.				      &
+	!								      &
+	!		If the match string contains a trailing *, then	      &
+	!		the * is replaced with enough ?'s to fill the string  &
+	!		to a length of nine characters.			      &
+	!								      &
+	!								      &
+	DEF FN.MATCH.NAME% (NAM.1$,NAM.2$)				      &
+\	IF LEN(NAM.2$) = 0%			!if null match name	      &
+	   OR NAM.2$ = "*" THEN			! or wildcard match name,     &
+		FN.MATCH.NAME% = TRUE%		!  return match		      &
+\		FNEXIT				!  and exit		      &
+\	END IF					!end if			      &
+						!			      &
+\	Z0% = POS(NAM.2$,"*",LEN(NAM.2$))	!look for trailing * char     &
+\	IF Z0% > 0% THEN			!if any found,		      &
+		NAM.2$ = SEG$(NAM.2$,1%,Z0%-1%) +			      &
+			 STRING$(9%-Z0%+1%,ASCII("?"))			      &
+						!  replace * with ?'s	      &
+
+15810	CHANGE EDIT$(NAM.1$,2%+4%) TO NAM.1%	!move entry name into array   &
+\	CHANGE EDIT$(NAM.2$,2%+4%) TO NAM.2%	!move match name into array   &
+\	FN.MATCH.NAME% = FALSE%			!init fn value as no match    &
+						!			      &
+\	FNEXIT					!exit with no match	      &
+		IF NAM.1%(0%) > NAM.2%(0%)	!  if entry name is longer    &
+						!			      &
+\	FNEXIT					!exit with no match	      &
+		IF NAM.1%(Z0%) <> NAM.2%(Z0%)	!  if chars don't match	      &
+			IF NAM.2%(Z0%) <> ASCII("?")			      &
+						!    if not wildcard char     &
+				FOR Z0% = 1% TO NAM.1%(0%)		      &
+						!      for each char	      &
+						!			      &
+\	FNEXIT					!exit with no match	      &
+		IF NAM.2%(Z0%) <> ASCII("?")	!  if next char not wild      &
+			FOR Z0% = NAM.1%(0%)+1% TO NAM.2%(0%)		      &
+						!    for remaining chars      &
+						!			      &
+\	FN.MATCH.NAME% = TRUE%			!match if loops complete      &
+\	FNEND					!end FN.MATCH.NAME% function  &
+
+15900	!	f n . p r i v % ( P R I V $ )				      &
+	!								      &
+	!								      &
+	!inputs:	PRIV$		-	priv name to check	      &
+	!								      &
+	!outputs:	FN.PRIV%	-	privilege status:	      &
+	!					  TRUE  -> priv on	      &
+	!					  FALSE -> priv off	      &
+	!								      &
+	!		ERRSTS%		-	0 if priv on		      &
+	!					ERR.PRVIOL if priv off	      &
+	!					ERR.BADNAM if invalid priv    &
+	!								      &
+	DEF FN.PRIV%(PRIV$)			!start definition	      &
+\	ON ERROR GOTO 15910			!local error routine	      &
+\	ERRSTS% = 0%				!clear ERRSTS		      &
+\	PRIV$ = EDIT$(PRIV$,-1%)		!trim the priv name string    &
+\	Z$ = SYS (				!do check priv SYS call:      &
+		CHR.6$ +			!  FIP call		      &
+		CHR$(32%) +			!  check access function      &
+		CHR$(1%) +			!  check priv name subfun     &
+		CHR.0$ +			!  reserved		      &
+		CHR.00$ +			!  reserved		      &
+		PRIV$				!  priv name to check	      &
+		 )				!end of sys call	      &
+\	Z%,FN.PRIV% = (ASCII(SEG$(Z$,3%,3%)) = 0%)			      &
+						!return priv status	      &
+\	IF NOT Z% THEN				!if priv not enabled,	      &
+		CALL DISPLY ("?"+PRIV$+" privilege required")		      &
+						!  display error message      &
+\		ERRSTS% = ERR.PRVIOL%		!  and return PRVIOL error    &
+\	END IF					!end if			      &
+\	GOTO 15920				!skip to function exit	      &
+
+15910	ERRSTS% = ERR.BADNAM%			!set bad priv name	      &
+\	CALL DISPLY ("?Invalid privilege name")	!display error message	      &
+\	FN.PRIV% = FALSE%			!return priv disabled	      &
+\	RESUME 15920				!resume to function end	      &
+
+15920	FNEND					!end FN.PRIV% function	      &
+
+16000	!	f n . e n t r y % ( ENTRY$ )				      &
+	!								      &
+	!								      &
+	!inputs:	ENTRY$		-	entry string		      &
+	!								      &
+	!outputs:	FN.ENTRY%	-	entry number in range 1-9999  &
+	!					0 if not an entry number      &
+	!		ERRSTS%		-	error status:		      &
+	!					     0 = valid entry no. or 0 &
+	!					   <>0 = invalid entry no.    &
+	!								      &
+	!uses:		Z		-	work fl-pt		      &
+	!								      &
+	!notes:	This function determines whether an entry string is numeric   &
+	!	(indicating an entry number), or non-numeric (indicating an   &
+	!	entry-spec).  If non-numeric, then 0 is returned.  If entry   &
+	!	number, then ensures in range 1-9999.  If in range, then the  &
+	!	entry number is returned with ERRSTS%=0.  If out of range,    &
+	!	then entry number 0 is returned with ERRSTS% = ERR.BADNAM%.   &
+	!								      &
+	!								      &
+	DEF FN.ENTRY% (ENTRY$)						      &
+\	ON ERROR GOTO 16010			!trap own errors	      &
+\	ERRSTS% = 0%				!init success		      &
+\	Z = VAL(ENTRY$)				!try to convert to number     &
+\	IF POS(ENTRY$,"+",1%) OR		!if includes + sign,	      &
+	   POS(ENTRY$,"-",1%) OR		!or includes - sign,	      &
+	   POS(ENTRY$,".",1%) THEN		!or includes decimal point,   &
+		FN.ENTRY% = 0%			!  return entry no. = 0	      &
+\		GOTO 16020			!  and skip to exit	      &
+\	END IF					!end if			      &
+						!			      &
+\	IF (Z >= 1.) AND (Z <= 9999.) THEN	!if entry no. in range,	      &
+		FN.ENTRY% = Z			!  return entry no.	      &
+	ELSE	ERRSTS% = ERR.BADNAM%		!else return BADNAM error     &
+\		FN.ENTRY% = 0%			!  return entry no. = 0	      &
+\		CALL DISPLY ("?Number not in range 1 to 9999")		      &
+						!  display error message      &
+\	END IF					!end if			      &
+\	GOTO 16020				!skip to exit		      &
+
+16010	FN.ENTRY% = 0%				!return entry no. 0	      &
+\	RESUME 16020				!resume to exit fn	      &
+
+16020	FNEND					!end FN.NUMERIC% function     &
+
+19000	!	s t a n d a r d   e r r o r   h a n d l i n g		      &
+	!								      &
+	!								      &
+	FATAL% = TRUE%				!set fatal error flag	      &
+\	ERRSTS% = ERR				!save error no.		      &
+\	ERRLIN% = ERL				!save error line no.	      &
+\	ERRNAM$ = ERN$				!save module name	      &
+\	RESUME 32767				!resume to exit		      &
+
+32767	!	e n d   o f   s u b p r o g r a m			      &
+	!								      &
+	!								      &
+	SUBEND

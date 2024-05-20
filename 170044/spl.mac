@@ -1,0 +1,449 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+	.LIBRARY /CMN:NETDEF.SML/
+TITLE	SPL,<ONE-SHOT SPOOLING PACKET>,0A,10-MAY-91,SJK/MHB/JTC/WJS/PRL/GPK/KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR SPL
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	JTC  09-Jul-80	UU.SPL crashes system bug fix
+;  002	WJS  29-Oct-82	New UUOENT for EMT Logger
+;  003	PRL  16-Dec-82	Add support for PBS
+;
+;				[RSTS V9.0]
+;  004	GPK  25-Mar-83	Multiple privileges
+;  005	GPK  20-Sep-83	Add SYSMGR privilege
+;  006	GPK  17-Nov-83	Bugfix in CHKACC call
+;  007	GPK  17-Apr-84	Privilege name changes
+;  008	GPK  25-Apr-84	Do send right here since SNDFQ is gone,
+;			Add hooks for PBS user request packets
+;  009	PRL  10-May-84	Send to PBS via URP
+;  010	PRL  30-Jul-84	Correct offsets bug creating OPSER packet
+;			Correct bytes remaining bug in URP message
+;			Don't set NOFLAG_PAGES field in batch URP
+;  011	PRL  02-Aug-84	Always route BA requests to OPSER
+;  012	PRL  28-Nov-84	Support new "force routing" bits in FQMODE
+;  013	PRL  20-Jan-85	Route .COM batch requests to PBS
+;  014	PRL  28-Jan-85	Support PBS network queues
+;  015	KPH  05-Mar-85	Finish 014
+;
+;-
+
+FQFSRT	SPL
+
+.SBTTL	ONE-SHOT SPOOLING PACKET REQUEST
+
+.MCALL	$MSGFUN								;008
+	$MSGFUN			;Define send/receive function codes	;008
+
+; LAYOUT FOR SPOOLING REQUEST PACKET
+
+.DSECT	P$PARM								;008
+
+SP.LEN:	.BLKB		;+14, 19. FOR MESSAGE LENGTH
+SP.TOK:	.BLKB		;+15, 14. FOR ONE-SHOT PACKET TOKEN
+SP.SDV:	.BLKB	2	;+16, SPOOLED DEVICE NAME
+SP.SDU:	.BLKB		;+20, SPOOLED DEVICE UNIT (0 TO 7, OR 255.)
+SP.SWT:	.BLKB		;+21, SWITCHES
+SP.DEV:	.BLKW	2	;+22, SPOOLED FILE DEVICE NAME/UNIT
+SP.NAM:	.BLKW	2	;+26, SPOOLED FILE NAME
+SP.EXT:	.BLKW		;+32, SPOOLED FILE EXTENSION
+SP.PPN:	.BLKB	2	;+34, SPOOLED FILE PPN
+SP.MOD:	.BLKW		;+36, SPOOLED FILE MODE (**RESERVED**)
+FQBSIZ:			; IT'S EXACTLY A FIRQB SIZE
+
+; Layout of User Request Packet (URP)					;008
+
+.DSECT									;008
+UR.BFC:	.BLKB			;Binary File-spec field code		;009
+	.BLKB			;(reserved)				;009
+UR.PPN:	.BLKW			;PPN of file				;009
+UR.NAM:	.BLKW	2		;RAD50 filename of file			;009
+UR.TYP:	.BLKW			;RAD50 filetype of file			;009
+UR.DEV:	.BLKW			;ASCII device name of file		;009
+UR.UNT:	.BLKW			;Device unit no./unit real flag		;009
+	.EVEN
+UR.BFZ:				;Size of Binary File-spec field		;009
+
+.DSECT									;008
+UR.QNC:	.BLKB			;Queue Name field code			;009
+UR.QNL:	.BLKB			;Queue name length			;009
+UR.QNM:	.BLKB	11		;Max queue name string			;009
+	.EVEN
+UR.QNZ:				;Max size of Queue Name field		;009
+
+.DSECT									;009
+UR.DLC:	.BLKB			;DELETE Flag field code			;009
+UR.DLF:	.BLKB			;DELETE flag				;009
+	.EVEN
+UR.DLZ:				;Size of DELETE Flag field		;009
+
+.DSECT									;009
+UR.FPC:	.BLKB			;FLAG_PAGES Flag field code		;009
+UR.FPF:	.BLKB			;FLAG_PAGES flag			;009
+	.EVEN
+UR.FPZ:				;Size of FLAG_PAGES Flag field		;009
+
+URPSIZ = <UR.BFZ+UR.QNZ+UR.DLZ+UR.FPZ> ;Max length of URP		;009
+
+; Define request type codes for URP					;009
+
+UT.PRT	= 1			;Print request				;009
+UT.BAT	= 2			;Batch request				;009
+
+; Define field codes for URP						;009
+
+UF.QNM	= 2.			;Queue Name field			;009
+UF.BFS	= 129.			;Binary File-spec field			;009
+UF.DEL	= 132.			;DELETE Flag field			;009
+UF.FPG	= 134.			;FLAG_PAGES Flag field			;009
+
+	UNORG
+
+;+
+; UU.SPL - ONE-SHOT SPOOLING PACKET REQUEST.
+;
+;	R4 -> FIRQB
+;		FQPPN  = PPN OF FILE TO SPOOL [DEFAULT IS CALLER'S]
+;		FQNAM1 = FILE NAME OF FILE TO SPOOL
+;		FQEXT  = EXTENSION OF FILE TO SPOOL
+;		+16    = DEVICE NAME TO SPOOL TO [DEFAULT IS "LP0:"]
+;		+20    = UNIT NUMBER AND FLAG OF DEVICE TO SPOOL TO
+;		FQMODE = MODE TO SPOOL FILE IN (**RESERVED**)
+;		FQFLAG = QMAN SWITCHES/FORCED ROUTING SWITCHES:		;012
+;			      1 = FORTRAN carriage control (OPSER)	;012
+;			      2 = Restart (OPSER)			;012
+;			      4 = Delete after spooling (OPSER/PBS)	;012
+;			     10 = Binary file (OPSER)			;012
+;			     20 = End (OPSER)				;012
+;			     40 = No header(OPSER/PBS)			;012
+;			  10000 = Network print/batch request		;014
+;			  20000 = Route request to OPSER		;012
+;			  40000 = Route request to PBS			;012
+;		FQDEV  = DEVICE NAME OF FILE TO SPOOL [DEFAULT IS "SY:"]
+;		FQDEVN = UNIT NUMBER AND FLAG OF FILE TO SPOOL
+;-
+
+.ENABL	LSB
+
+SPL.DF:	.ASCII	"LP"		;Define default device (LP)
+	.BYTE	0,-1		;Define default unit (0, -1 = unit real flag)
+
+	UUOENT	SPL,,,LOGABL,DOLOG	; ONE-SHOT SPOOLING PACKET REQUEST
+
+	MOV	R4,R0		;Get pointer to FIRQB			;009
+	ADD	#16,R0		;R0 -> spooler device name		;009
+	TST	(R0)		;Null spooler device?			;009
+	BNE	10$		;No, so continue			;009
+	MOV	SPL.DF,(R0)	;Yes, copy default device		;009
+	MOV	SPL.DF+2,2(R0)	;  And default unit/unit real		;009
+10$:	MOV	#SO.URP,-(SP)	;Init PBS queue mgr's local obj type	;009
+	BIT	#20000,6(R0)	;Force request to OPSER?		;012
+	BNE	20$		;Yes, so route to OPSER			;012
+	BIT	#40000,6(R0)	;No, force request to PBS?		;012
+	BNE	30$		;Yes, so route to PBS			;012
+	CMP	#"BA,(R0)	;No, is this a batch request?		;013
+	BNE	17$		;No, so skip to print request check	;013
+	CMP	#^RCOM,-2(R0)	;Yes, is filetype .COM?			;013
+	BEQ	30$		;Yes, so route to PBS			;013
+	BR	20$		;No, so route to OPSER			;013
+
+17$:	CMP	#"LP,(R0)	;Is this a print request?		;009
+	BNE	20$		;No, so route to OPSER			;013
+	TST	@#LOTTBL-2+<SO.URP*2> ;Yes, is PBS running?		;011
+	BNE	30$		;Yes, so route to PBS			;013
+20$:	MOV	#SO.OQM,(SP)	;Use OPSER's local obj type		;009
+	BIC	#10000!20000!40000,6(R0) ;Clear PBS and "forced routing" bits ;012
+30$:	TSTB	3(R0)		;Is the spooler device unit real?	;012
+	BEQ	50$		;No, so skip check			;009
+	CMPB	2(R0),#7	;Yes, is it in range 0-7?		;009
+	BLOS	50$		;Yes, continue				;009
+40$:	ERROR	NODEVC		;No, so bad device			;009
+
+50$:	CALLX	CHKWLD		; IS IT A GOOD NAME? IF SO WE WILL RETURN
+	ROL	-(SP)		; SAVE THE CARRY ON THE STACK
+	CALLX	GUN,R5		; GET THE UNIT
+	 BR	70$		; THIS IS A MOUNTED DISK, SO LET IT PASS
+60$:	ERROR	PRVIOL		; OTHERWISE A PROTECTION VIOLATION
+
+70$:	MOV	R4,R0		; COPY THE FIRQB POINTER
+	ADD	#FQPPN,R0	; OFFSET TO THE PPN
+	TST	(R0)		; IS THERE A PPN SUPPLIED?
+	BNE	80$		; YES, USE IT
+	MOV	@#FIUSER,(R0)	; ELSE USE THE CALLER'S PPN		;004
+80$:	CMPB	#255.,(R0)	; CHECK FOR A WILD PROGRAMMER NUMBER
+	BEQ	100$		; Wild, see if that's allowed		;008
+	CMPB	#255.,1(R0)	; CHECK FOR A WILD PROJECT NUMBER
+	BEQ	100$		; Wild, see if that's allowed		;008
+	ROR	(SP)+		; POP THE STACK AND GET THE CARRY
+	BCS	120$		; IF THE CARRY IS SET, FILE HAS A WILD CARD
+	CALLX	SMU		; SEARCH FOR THE FILE			;004
+	BCC	110$		; FOUND IT
+90$:	ERROR	NOSUCH		; DIDN'T FIND IT, GIVE AN ERROR		;008
+
+100$:	TST	(SP)+		;Trash the wildcard file flag		;009
+	CMP	#SO.URP,(SP)	;Are we sending to PBS?			;009
+	BEQ	120$		;Yes, it knows how to do wild PPN	;009
+	ERROR	BADNAM		; GIVE AN ILLEGAL FILE NAME ERROR
+
+110$:	MOVB	UPROT(R5),R1	;Get the file's protection code		;004
+	MOV	FQPPN(R4),R0	;Get the PPN				;004
+	CALLX	CHKACC		;Check access rights			;004
+	BIT	#DDRLO,R0	;Read access denied?			;004
+	BNE	60$		;Yes, quit				;004
+120$:	MOV	R4,R0		;Copy FIRQB pointer			;004
+	MOV	(SP),R1		;Get local object type for spooler	;009
+	ASL	R1		;Make it a word index			;009
+	ADD	#LOTTBL-2,R1	;Point to entry in table		;009
+	MOV	(R1),R1		;Get RIB pointer			;009
+	BEQ	90$		;Not there, so quit			;009
+	CALL	170$		;Check for room on RIB, get PMB		;008
+	CMP	#SO.OQM,(SP)+	;Are we routing request to OPSER?	;009
+	BEQ	130$		;Yes, so skip to OPSER packet handler	;009
+	MOV	R1,-(SP)	;No, save RIB pointer			;009
+	MOV	R2,-(SP)	;  And PMB pointer			;009
+	BUFFER	GETLRG,URPSIZ+BUFHDR,-1,LRGPOL ;Get a data buffer	;009
+	MOV	(SP)+,R2	;Restore PMB pointer			;009
+	MOV	(SP)+,R1	;  And RIB pointer			;009
+	BCS	190$		;Can't get a buffer, error		;008
+	CLR	(R2)+		;Clear out link				;008
+.ASSUME	P$LINK EQ 0							;008
+	MOV	R4,(R2)+	;Set data buffer pointer		;008
+.ASSUME	P$BUFA EQ P$LINK+2						;008
+	MOVB	#SR$SLM,(R2)+	;Set type = send with mask		;008
+.ASSUME	P$TYPE EQ P$BUFA+2						;008
+	CALL	230$		;Fill in some common stuff		;008
+	MOV	#URPSIZ,(R2)+	;Set size of message			;008
+	MOV	#FIPRVM,R3	;Point to caller's effective mask	;008
+.ASSUME	P$PARM EQ P$BREM+2						;008
+.REPT	PRIVSZ/2							;008
+	MOV	(R3)+,(R2)+	;Copy next word of mask			;008
+.ENDR									;008
+.REPT	4-<PRIVSZ/2>							;009
+	CLR	(R2)+		;Clear next word of mask		;009
+.ENDR									;009
+	FJMP	BLDURP		;Now go fill up the data buffer		;008
+
+130$:	CMP	(R2)+,(R2)+	;Skip to type				;008
+	MOVB	#SR$SLD,(R2)+	;Set type = local data			;008
+.ASSUME	P$TYPE EQ 4							;008
+	CALL	230$		;Set up sender info			;008
+	CLR	(R2)+		;No data buffer so no remaining count	;008
+	MOV	(PC)+,(R2)+	;LOAD LENGTH & TOKEN
+	 .BYTE	19.,14.
+.ASSUME	SP.LEN EQ P$PARM						;008
+.ASSUME	SP.TOK EQ SP.LEN+1						;008
+	ADD	#16,R0		;Point to spooled device name in FIRQB	;008
+	MOV	(R0)+,(R2)+	;Set spooled device name		;008
+.ASSUME	SP.SDV EQ SP.TOK+1						;008
+	MOVB	(R0),(R2)+	;Set real unit number			;009
+.ASSUME	SP.SDU EQ SP.SDV+2						;008
+	TSTB	1(R0)		;Is spooler device unit real?		;009
+	BNE	150$		;Yes, so use unit number supplied	;009
+	MOVB	#-1,-1(R2)	;No, set unit number to -1 (any unit)	;009
+150$:	MOVB	24-20(R0),(R2)+	;Load the switch bits			;010
+.ASSUME	SP.SWT EQ SP.SDU+1						;008
+	MOV	#^RSY,(R2)	;Default device name is "SY"		;008
+.ASSUME	SP.DEV EQ SP.SWT+1						;008
+	MOVB	FQDEV-20(R0),R3	;Now really get file's device name	;010
+	BEQ	160$		;NOTHING THERE, USE THE DEFAULT
+	SUB	#'A-1,R3	;Convert to RAD50 range			;008
+	MUL	#50*50,R3	; and multiply for first position	;008
+	MOV	R3,(R2)		;Save that				;008
+	MOVB	FQDEV+1-20(R0),R3 ;Get second byte			;010
+	SUB	#'A-1,R3	;Convert to RAD50 range			;010
+	MUL	#50,R3		; and multiply for second position	;008
+	ADD	R3,(R2)		;Add it in				;008
+	MOV	FQDEVN-20(R0),R3 ;Get unit number and "real" flag	;010
+	BEQ	160$		;Not real, skip				;008
+	MOVB	R3,R3		;Get just unit				;008
+	CMP	R3,#7		;IS UNIT WITHIN RANGE?
+	BHI	40$		;NOPE, DIE WITH NODEVC
+	ADD	#^R  0,R3	;ADD IN THE BASE FOR RAD50 CODE
+	ADD	R3,(R2)		; and add into PMB
+160$:	CMP	(R2)+,(R2)+	;Now advance over device name		;008
+	ADD	#FQNAM1-20,R0	;Point to name in FIRQB			;010
+	MOV	(R0)+,(R2)+	;Move name				;008
+.ASSUME	SP.NAM EQ SP.DEV+4						;008
+	MOV	(R0)+,(R2)+						;008
+	MOV	(R0)+,(R2)+	; and extension				;008
+.ASSUME	FQEXT EQ FQNAM1+4						;008
+.ASSUME	SP.EXT EQ SP.NAM+4						;008
+	MOV	FQPPN-<FQEXT+2>(R0),(R2)+ ;Set PPN			;008
+.ASSUME	SP.PPN EQ SP.EXT+2						;008
+	MOV	FQMODE-<FQEXT+2>(R0),(R2) ;Set mode			;008
+	FJMP	SNDMSG		; and send the message out the door	;008
+
+170$:	BITB	#SA.LCL,S.ACCS(R1) ;Allowing local messages?		;008
+	BEQ	220$		;No, error				;008
+	BITB	#SA.PRV,S.ACCS(R1) ;Yes, but priv'd only?		;008
+	BEQ	180$		;No, skip check				;008
+	TSTPRV	SEND,@#FIPRVM	;Must have send privs			;008
+	BEQ	220$		;Error if not				;008
+180$:	CMPB	S.MCNT(R1),S.MMAX(R1) ;Full of messages?		;008
+	BHIS	210$		;Yes, error				;008
+	BUFFER	GETSML,,40.	;Try to get a PMB			;008
+	BVS	200$		;None available				;008
+	MOV	R4,R2		;Copy PMB pointer			;008
+	RETURN			;Done					;008
+
+190$:	MOV	R2,R4		;Copy PMB pointer			;008
+	BUFFER	RETSML		;Release it				;008
+200$:	ERROR	NOBUFS		;No buffer available			;008
+210$:	ERROR	NOROOM		;Receiver is all full of messages	;008
+220$:	ERROR	PRVIOL		;No local messages, or no privs		;008
+
+230$:	MOVB	@#FIJOB,(R2)+	;Job number				;008
+.ASSUME	P$SNDR EQ P$TYPE+1						;008
+	MOV	@#FIUSER,(R2)+	; and PPN				;008
+.ASSUME	P$SPPN EQ P$SNDR+1						;008
+	MOV	R0,-(SP)	;Save a register			;008
+	MOV	@#FIJBDA,R0	;Get JDB address of caller		;008
+	MOV	@(R0)+,R0	;Get console DDB pointer		;008
+	MOV	#377,(R2)	;Assume detached, clear reserved byte	;008
+.ASSUME	P$SKBN EQ P$SPPN+2						;008
+	BIT	#DDCONS,DDCNT(R0) ;Detached indeed?			;008
+	BEQ	240$		;Yes					;008
+	CMPB	DDJBNO(R0),@#FIJOB ;Maybe not; owner match?		;008
+	BNE	240$		;No, so detached			;008
+	MOVB	DDUNT(R0),(R2)	;Set KB number				;008
+240$:	TST	(R2)+		;Skip to bytes remaining		;008
+.ASSUME	P$BREM EQ P$SKBN+2						;008
+	MOV	(SP)+,R0	;Restore R0				;008
+	RETURN			;Done					;008
+
+.DSABL	LSB
+
+GLOBAL	<LOTTBL,FIUSER,FIPRVM,FIJOB,FIJBDA>				;008
+
+FQFEND
+
+FQFSRT									;008
+
+;+									;008
+;	R0 ->	Caller's work block (FIRQB)				;008
+;	R1 ->	RIB of receiver						;008
+;	R2 ->	PMB (just past privilege mask)				;008
+;	R4 =	Contorted address of data buffer			;008
+;-									;008
+
+NET.PQ:	.ASCII	"NET$PRINT"	;PBS network print queue name		;015
+.ASSUME <.-NET.PQ> EQ 9.	;Must be 9. chars - pad with nulls	;015
+
+NET.BQ:	.ASCII	"NET$BATCH"	;PBS network batch queue		;015
+.ASSUME <.-NET.BQ> EQ 9.	;Must be 9. chars - pad with nulls	;015
+
+BLDURP:	CALLX	MAPBUF		;Now map the data buffer		;008
+	MOV	R0,-(SP)	;Save start of FIRQB			;009
+	MOV	R3,R4		;Save start of data buffer		;009
+	ADD	#BUFHDR,R3	;Now point to data			;008
+	MOV	#UT.PRT,(R2)	;Init request as a print type		;010
+	CMP	#"LP,16(R0)	;Is this a print request?		;010
+	BEQ	10$		;Yes, so we guessed right		;010
+	INC	(R2)		;No, so change type to batch request	;010
+.ASSUME	UT.BAT	EQ UT.PRT+1
+10$:	CLRB	2(R2)		;Show no confirmation rcvr name		;009
+	MOV	#UF.BFS,(R3)+	;Load Binary file-spec field code	;009
+.ASSUME	UR.BFC	EQ 0
+	ADD	#FQPPN,R0	;Offset to the PPN			;009
+	MOV	(R0)+,(R3)+	;Copy PPN into URP			;009
+.ASSUME	UR.PPN	EQ UR.BFC+2
+	MOV	(R0)+,(R3)+	;Copy 1st half of filename into URP	;009
+.ASSUME	UR.NAM	EQ UR.PPN+2
+.ASSUME	FQNAM1	EQ FQPPN+2
+	MOV	(R0)+,(R3)+	;Copy 2nd half of filename into URP	;009
+	MOV	(R0),(R3)+	;Copy filetype into URP			;009
+.ASSUME	UR.TYP	EQ UR.NAM+4
+.ASSUME	FQEXT	EQ FQNAM1+4
+	ADD	#FQDEV-FQEXT,R0	;Offset to DEV				;009
+	MOV	(R0)+,(R3)+	;Copy device name into URP		;009
+.ASSUME	UR.DEV	EQ UR.TYP+2
+	MOV	(R0),(R3)+	;Copy unit no./unit flag into URP	;009
+.ASSUME	UR.UNT	EQ UR.DEV+2
+.ASSUME	FQDEVN	EQ FQDEV+2
+
+	BIT	#10000,-6(R0)	;Is this a network request?		;014
+.ASSUME	FQFLAG	EQ FQDEVN-6						;014
+	BEQ	30$		;No, so use standard queue names	;014
+	MOVPIC	#NET.PQ,R0	;Yes, get addr of netwrk print queue	;015
+	CMP	#UT.PRT,(R2)	;Is this a print request?		;014
+	BEQ	20$		;Yes, continue				;014
+	ADD	#NET.BQ-NET.PQ,R0 ;No, use addr of netwrk batch queue	;015
+20$:	MOV	#9.*400+UF.QNM,(R3)+ ;Load queue code/len (9.) into URP	;009
+.ASSUME	UR.QNL	EQ UR.QNC+1						;014
+.ASSUME	UR.QNM	EQ UR.QNL+1						;014
+	MOV	R2,-(SP)	;Save R2 on stack			;014
+	MOVB	#9.,R2		;R2 = no. chars in queue name		;015
+25$:	MOVB	(R0)+,(R3)+	;Copy next byte of queue name into URP	;014
+	SOB	R2,25$		;  Until done				;014
+	CLRB	(R3)+		;Add null to word align next field	;014
+	MOV	(SP)+,R2	;Restore R2 reg				;014
+	BR	40$		;Skip spooler device name checks	;014
+
+30$:	ADD	#16-FQDEVN,R0	;Offset to spooler device name		;009
+	TSTB	FQDEVN+1-FQDEV(R0) ;Is the device unit number real?	;009
+.ASSUME	FQDEVN	EQ FQDEV+2
+	BEQ	40$		;No, so use default queue		;009
+	MOV	#4*400+UF.QNM,(R3)+ ;Yes, load queue code/len into URP	;009
+.ASSUME	UR.QNL	EQ UR.QNC+1
+.ASSUME	UR.QNM	EQ UR.QNL+1
+	MOV	(R0)+,(R3)+	;Copy device name into URP		;009
+	MOVB	(R0)+,(R3)	;Copy unit number into URP		;009
+	BISB	#60,(R3)+	;Convert unit to ASCII digit		;009
+	CLRB	(R3)+		;Pad with null				;009
+40$:	MOV	(SP),R0		;Get base of FIRQB			;009
+	BIT	#4,24(R0)	;is DELETE bit set?			;009
+	BEQ	50$		;No, so skip DELETE field in URP	;009
+	MOV	#377*400+UF.DEL,(R3)+ ;Yes, load DELETE (=on) field	;009
+50$:	CMP	#UT.PRT,(R2)	;Is this a print request?		;010
+	BNE	60$		;No, so skip FLAG_PAGES bit check	;010
+	BIT	#40,24(R0)	;Yes, is NOFLAG_PAGES bit set?		;009
+	BEQ	60$		;No, so skip FLAG_PAGES field in URP	;009
+	MOV	#0*400+UF.FPG,(R3)+ ;Yes, load FLAG_PAGES (=off) field	;009
+60$:	SUB	R4,R3		;Compute length of data			;009
+	SUB	#BUFHDR,R3	;Don't include header length		;009
+	MOV	R3,BF.CNT(R4)	;Set data size in buffer header		;009
+	MOV	R3,-12(R2)	;  And bytes remaining field (P$BREM)	;010
+.ASSUME	P$PARM EQ P$BREM+2
+	MOV	(SP)+,R0	;Restore base of FIRQB			;009
+	.BR	SNDMSG		;All set, go send the message		;008
+
+;+									;008
+;	R1 ->	RIB of receiver						;008
+; 	R2 ->	PMB (any offset)					;008
+;-									;008
+
+SNDMSG:	BIC	#40-1,R2	;Make sure we're at the top of the PMB	;008
+	MOV	R2,@S.MLST+2(R1) ;Link this message to tail of list	;008
+	MOV	R2,S.MLST+2(R1)	; and make it the new tail		;008
+	INCB	S.MCNT(R1)	;Count one more message			;008
+	MOVB	S.JBNO(R1),R4	;Get job number * 2 of receiver		;008
+	CALLX	IOFIN4,R5,JSTIM	;Wake him up				;008
+	MAP	FIP,DATA,PIC	;Restore FIP mapping			;008
+	RETURN			;Done!					;008
+
+FQFEND									;008
+
+.END

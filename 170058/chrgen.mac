@@ -1,0 +1,212 @@
+.INCLUDE	%CMN:COMMON%
+TITLE	CHRGEN,<BLOCK CHARACTER GENERATOR>,0A,10-MAY-91,SJM/JTC/PRL/KCG
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR CHRGEN
+;+
+;
+; Edit	By   Date	Reason
+;  001  SJM  23-Sep-82	CREATION - And it was a good thing
+;  002	PRL  26-May-84	Use .INCLUDEs and .LIBRARYs
+;  003	KCG  13-Feb-85	Include support for Multi-national char set
+;
+;-
+
+.SBTTL	INCLUDE MACRO LIBRARIES
+
+.LIBRARY	%SYSTEM:PBSMAC%
+
+.SBTTL	MACROS	- SUCK IN NEEDED MACROS
+
+	.MCALL	PSECTS,BITDEF,SAVREG
+	.MCALL	FQBERR,CR$LF,MOVBYT
+
+	PSECTS
+	BITDEF
+	CR$LF
+
+
+
+.SBTTL	CHRLIN	- GENERATE 1 LINE OF A BLOCK CHARACTER
+
+;
+; CHRLIN - Get a line of block characters.
+;
+;	R0  = 0 for first call, unchanged for subsequent calls
+;		(contains line pointer context for this routine)
+;	R1  = Length of source string
+;	R2 -> Source string
+;	R3 -> Output buffer area
+;		(assumed big enough for a line)
+;	R4  = 0 -> Convert string to upper case (no decenders)
+;	    = 1 -> Mixed case (with decenders)
+;	R5  = Rows/Columns multiplier
+;
+;	CALL	CHRLIN
+;
+;	R0    = Updated internal line counter (0 if all done)
+;	R1-R3 = Same as passed
+;	R4    = Length of output string (0 if all done)
+;	R5    = Same as passed
+;
+
+SPACE	=	40	;ASCII for Space
+CR	=	15	;ASCII for Carriage return
+LF	=	12	;ASCII for Line feed
+
+	.DSECT		;Locations at start of character table.
+COL:	.BLKW		;Number of columns in each character.
+ROW:	.BLKW		;Number of rows in each character.
+ROWUC:	.BLKW		;Number of rows if upper-case only
+			; (no decenders, if lower-case has them).
+TBL:			;Actual character bits start here.
+
+.PSECT	CHRGEN
+
+CHRLIN::NOP			;For debuging
+	SAVREG			;Save caller's registers.
+	MOV	CHARS+ROW,-(SP)	;Guess at mixed case characters.
+	TST	R4		;Are we doing lower case?
+	BNE	10$		;Yes, so allow possible decenders.
+	MOV	CHARS+ROWUC,(SP) ;No, get upper-case-only row count.
+10$:	MOV	R0,R5		;Copy our output line counter,
+	CLR	R4		;Clear out for divide,
+	DIV	TOS.R5+2(SP),R4	; and get the current font row.
+	CMP	R4,(SP)+	;Are we past the last row in the font?
+	BLO	20$		;Not yet, do another line.
+	CLR	TOS.R0(SP)	;All done, so say no characters returned,
+	CLR	TOS.R4(SP)	; and zero out our line counter,
+	RETURN			;  and return all done.
+
+20$:	INC	R0		;Count one more line processed,
+	MOV	R0,TOS.R0(SP)	; and return new counter to our caller.
+	MOV	TOS.R5(SP),R5	;Restore our rows/columns multiplier,
+	MOV	R1,-(SP)	;Put source length on stack.
+	BEQ	LINEND		;No length!  Just to a blank line.
+	.BR	DOCHAR		;Now loop for each character in input string.
+
+;
+; DOCHAR - Loop for each character in the input string.
+;
+;	R2 -> Next byte to process in source string.
+;	R3 -> Next free byte in output buffer.
+;	R4  = Line number in font to produce.
+;	R5  = Rows/columns multiplier value.
+;	(SP)= Length of source string remaining to process.
+;
+
+DOCHAR:	MOVBYT	(R2)+,R0	;Get the next character.
+	PUSH	R2		;Save the input buffer pointer.
+	CMP	R0,#SPACE	;Is character too low?
+	BLO	10$		;Yes, use a space.
+	CMP	R0,#200		;Eight-bit character?
+	BHIS	5$		;Yes, go process eight bit character
+	TST	TOS.R4+2+2(SP)	;Converting to upper case?
+	BNE	20$		;No, character is fine as is.
+	CMP	R0,#'A+40	;Is character below lower case A?
+	BLO	20$		;Yes, no conversion needed.
+	CMP	R0,#'Z+40	;Is character above lower case Z?
+	BHI	20$		;Yes, no conversion needed.
+	BIC	#40,R0		;Lower case alphabetic, upcase it,
+	BR	20$		; and proceed.
+
+5$:	CMP	R0,#240		;Printable Eight bit code?
+	BLO	10$		;no, treat as space
+	SUB	#40,R0		;adjust character value over to our code
+	TST	TOS.R4+2+2(SP)	;Converting to upper case?
+	BNE	20$		;no, character is set
+	CMP	R0,#300		;Is this a character that can be converted?
+	BLO	20$		;no, character is already in upper case
+	SUB	#40,R0		;convert to new character code
+	BR	20$		;and find it
+
+10$:	MOV	#SPACE,R0	;Character is invalid, so use a space.
+20$:	MOV	R0,R2		;Remember character to print.
+	SUB	#SPACE,R0	;Remove the table bias.
+	MUL	CHARS+ROW,R0	;Find the character base (in R1).
+	ADD	R4,R1		;Add in the row index.
+	PUSH	R4		;Get another working register.
+	MOV	CHARS+COL,R4	;Get number of columns in each row.
+	MOV	R1,R0		;Set up to multiply.
+	MUL	R4,R0		;Find where this row starts in table.
+	ASHC	#16.-3,R0	;Get lowest three bits into top of R1,
+				; higher bits into bottom of R0.
+	CMPB	#200,R2		;Was this an eight bit char?
+	BHI	DOCOL		;no, process normally
+	ADD	#40,R2		;yes, restore orignal character value
+	.BR	DOCOL
+
+;
+; DOCOL - Loop for each column within the character.
+;
+;	R0  = Byte offset into table for current column within character.
+;	R1  = High 3 bits of R1 contain number of the bit within the byte
+;		pointed to by R0 that corresponds to the current column.
+;	R2  = Character we are working on.
+;	R3 -> Next free byte in output buffer.
+;	R4  = Number of columns we have left to do.
+;	R5  = Multiplier count.
+;
+DOCOL:	ASHC	#3-16.,R1	;Get lowest three bits into bottom of R1.
+	PUSH	<R2,R5>		;Save character and multiplier count.
+	BITB	BITBYT(R1),CHARS+TBL(R0) ;Does this bit say print a character?
+	BNE	10$		;Yes, output the character.
+	MOVB	#SPACE,R2	;No, output a space instead.
+10$:	MOVB	R2,(R3)+	;Put the character or space in the buffer,
+	SOB	R5,10$		; multiplier number of times.
+	POP	<R5,R2>		;Restore multiplier count and character.
+	ASHC	#16.-3,R1	;Get lowest three bits into top of R1 again,
+	ADD	#BIT13,R1	; so we can point at the bit representing
+	ADC	R0		;  the next column in this row.
+	SOB	R4,DOCOL	;And do it for all the columns in this
+				; row for this character.
+	POP	R4		;Restore the font row number.
+	POP	R2		;Restore the input buffer pointer.
+	DEC	(SP)		;Done all the characters yet?
+	BEQ	LINEND		;Yes, finish off this line and exit.
+	MOV	R5,R0		;No, copy the multiplier count
+20$:	MOVB	#SPACE,(R3)+	; so we can put spaces after this
+	SOB	R0,20$		;  character and before the next one.
+	BR	DOCHAR		;Now go do this row for the next character.
+
+;
+; LINEND - Finish off a line of characters.
+;
+; R0-R2 = Irrelevant.
+; R3   -> Next free byte in output buffer.
+; R4-R5 = Irrelevant.
+;
+LINEND:	TST	(SP)+		;All through with the character count now.
+	MOVB	#CR,(R3)+	;At end of the line put a carriage return
+	MOVB	#LF,(R3)+	; and a line feed.
+	SUB	TOS.R3(SP),R3	;Get count of characters in output buffer,
+	MOV	R3,TOS.R4(SP)	;And return this count in caller's R4.
+	RETURN			;Line of characters buffered and ready to go.
+
+BITBYT:	.BYTE	  1,  2,  4	;The bits in a byte,
+	.BYTE	 10, 20, 40	; all
+	.BYTE	100,200		;  8 of
+	.EVEN			;   them.
+
+	.GLOBL	CHARS
+
+	.END
+

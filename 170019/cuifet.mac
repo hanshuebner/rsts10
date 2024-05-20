@@ -1,0 +1,606 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.INCLUDE	/CUI:CUIPFX.MAC/
+TITLE	CUIFET,<CUI Information Fetcher>,0A,10-MAY-91,CEK/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR CUIFET
+;+
+;
+;  001	CEK  25-MAY-82	Created from CUITHR.MAC
+;  002	CEK  07-Jul-82	Added FET.PL and FET.PV
+;  003	CEK  28-Sep-82	Eliminated FET.PV and FET.PL.
+;  004	CEK  28-Sep-82	Made FET.NP and FET.A use new FET.NEXT.
+;  005	CEK  14-Oct-82	Added FET.CS, changed global symbol names.
+;  006	JFM  03-Feb-83	Made FET.CS return status in U.STAT
+;  007	JFM  26-Apr-83	Removed CRE.NODE from MCALL
+;  008	JFM  29-Apr-83	Changed FET.A and FET.KA so that when they are used
+;			recursively, with no specified level, they will work.
+;  009	JFM  10-May-83	Added $FETNQ routine.  FETch Next Qualifier.
+;  010	JFM  10-May-83	Changed comments.
+;  011	JFM  17-Jul-84	Preclear U.STR so basic will not re-use trailing chars
+;
+;			[RSTS/E V9.7]
+;  012	JFM  16-Sep-88	Added $FETK routine.  FETch subsequent Keyword
+;-
+
+;+
+;
+; MODULE DESCRIPTION:
+;
+; This module contains the routines that let the CUSP query CUI about
+; the command that the user typed.
+;-
+
+	.MCALL	FET.NODE,FET.NEXT
+	.PSECT	CUIFET,RO,REL,LCL,CON
+	DEFORG	CUIFET
+
+.SBTTL	$FETP -- Fetch a parameter 
+;+
+; $FETP--Fetch a parameter, or the first element in a parameter list.
+;
+; USAGE:
+;	$FETP	parmtag
+;
+; OUTPUTS:
+; R0=U.CMN+U.STAT=0 if success.
+;	A node at P.LVL (parameter level) in PARMTRE becomes
+;		the current node of PARMTRE.  The node is the leftmost
+;		child of the node at PL.LVL (parameter list level)
+;		whose tag equals the inline argument of $FETP.
+;	PARMTRE becomes the current tree.
+;	R3	->	next instruction
+; R0=U.CMN+U.STAT=-1 if failure.
+;-
+; The binary expansion of $FETP parmtag is
+;	.WORD	U$FTP,parmtag
+
+.MACRO	$FETP	PARMTAG
+	 .WORD	U$FTP,PARMTAG
+	.GLOBL	U$FTP
+	.ENDM	$FETP
+
+.ENABL	LSB
+
+$FETP::
+U$FTP::	CALB	FET.P <(R3)+>
+	RETURN
+
+FET$P::	SUBR	<TAG>
+	CALB	FET.P <@TAG(R5)>
+	RETURN
+
+FET.P::	SUBR	<TAG>		;Select branch for parameter list.
+	MOV	CMNADR,R4	;Point at CUI common.
+	FET.NODE TREE=PARMTREE,LEVEL=PL.LVL,TAG=TAG(R5)
+	IFCC			;If we found it then
+				;  Fetch first parameter.
+	FET.NODE TREE=PARMTREE,LEVEL=P.LVL,TAG=<>
+				;  Now R1 -> parameter node
+	ENDIF
+	CALLR	PUTCMN		;Put the results in CUI common.
+
+.DSABL	LSB
+GLOBAL	<CMNADR>
+
+.SBTTL	$FETNP -- Fetch next parameter 
+;+
+; $FETNP--Fetch next element in a parameter list.
+; 
+; INPUTS:
+; 	The current node of PARMTREE is a parameter node (at P.LVL),
+; 	or a descendant of such a node.
+;
+; USAGE:
+;	$FETNP
+;
+;	This is used repeatedly after a 
+;
+;	$FETP	parmtag
+;
+;	to fetch the second and subsequent elements in a parameter list.
+;
+; BINARY:
+;	.WORD	U$FTNP
+;
+; OUTPUTS:
+; R0=U.CMN+U.STAT=0 if success.
+; 	The next right brother of the node at P.LVL becomes the current
+; 	node.  
+;	PARMTRE becomes the current tree.
+;	R3	->	next instruction
+; R0=U.CMN+U.STAT=-1 if failure.
+;-
+
+.MACRO	$FETNP
+	 .WORD	U$FTNP
+	.GLOBL	U$FTNP
+	.ENDM	$FETNP
+
+.ENABL	LSB
+
+$FETNP::
+U$FTNP::CALB	FET.NP
+	RETURN
+
+FET$NP::
+FET.NP::SUBR
+	MOV	CMNADR,R4	;Point R4 at CUI common.
+	FET.NEXT TREE=PARMTREE,LEVEL=P.LVL
+				;Fetch the next parameter node.
+				;Now R1 -> parameter node
+	CALLR	PUTCMN		;Put the results in CUI common.
+
+.DSABL	LSB
+GLOBAL	<CMNADR>
+
+.SBTTL	$FETNQ -- Fetch next qualifier
+;+
+; $FETNQ--Fetch next qualifier.
+; 
+; INPUTS:
+; 	The current node of QUALITREE is a qualifier (at CQ.LVL)
+;
+; USAGE:
+;	$FETNQ	tag
+;
+;	This is used repeatedly after a 
+;
+;	$FETCQ	tag
+;
+;	to fetch the second and subsequent qualifiers in a list.
+;
+; BINARY:
+;	.WORD	U$FTNQ
+;
+; OUTPUTS:
+; 	R0=U.CMN+U.STAT=0 if success.
+; 		The next right brother of the node at P.LVL becomes the current
+; 		node.  
+;	PARMTRE becomes the current tree.
+;	R3	->	next instruction
+; R0=U.CMN+U.STAT=-1 if failure.
+;-
+
+.MACRO	$FETNQ	TAG
+	.IIF	B	TAG	.ERROR	;Qualifier tag required
+	 .WORD	U$FTNQ,TAG
+	.GLOBL	U$FTNQ
+	.ENDM	$FETNQ
+
+.ENABL	LSB
+
+$FETNQ::
+U$FTNQ::CALB	FET.NQ	<(R3)+>
+	RETURN
+
+FET$NQ::
+FET.NQ::SUBR	<TAG>
+	MOV	CMNADR,R4	;Point R4 at CUI common.
+	FET.NEXT TREE=QUALTREE,LEVEL=CQ.LVL,TAG=TAG(R5)
+				;Fetch the next qualifier node.
+				;Now R1 -> qualifier node
+	CALLR	PUTCMN		;Put the results in CUI common.
+
+.DSABL	LSB
+GLOBAL	<CMNADR>
+
+.SBTTL	FET.CQ -- Fetch a command qualifier
+;+
+; FET.CQ -- Fetch a command qualifier.
+;
+; THREADED USAGE:
+;	$FETCQ	qualtag
+;
+; MACRO USAGE:
+;	CALBX	FET.CQ <#qualtag>
+;
+; BP2 USAGE:
+;	CALL FET$CQ BY REF (qualtag%)
+;
+; DESCRIPTION:
+;	This routine fetches a command qualifier from the tree representation.
+;	"qualtag" is the tag of the node to fetch.
+;
+; OUTPUTS:
+;	R0=U.CMN+U.STAT=0 if success.
+;	R0=U.CMN+U.STAT=-1 if failure.
+;-
+
+; THREADED BINARY:
+;	.WORD	U$FTCQ
+;	.WORD	qualtag
+;
+
+.MACRO	$FETCQ	QCLASS
+	 .WORD	U$FTCQ,QCLASS
+	.GLOBL	U$FTCQ
+	.ENDM	$FETCQ
+
+.ENABL	LSB
+
+$FETCQ::
+U$FTCQ::CALB	FET.CQ <(R3)+>
+	RETURN
+
+FET$CQ::SUBR	<TAG>
+	CALB	FET.CQ <@TAG(R5)>
+	RETURN
+
+FET.CQ::SUBR	<TAG>
+	MOV	CMNADR,R4	;Point R4 at CUI common.
+	FET.NODE TREE=QUALTREE,LEVEL=CQ.LVL,TAG=TAG(R5)
+				;Look for a global qualifier.
+	CALLR	PUTCMN		;Put the results in CUI common.
+
+.DSABL	LSB
+GLOBAL	<CMNADR>
+
+.SBTTL	FET.PQ -- Fetch a parameter qualifier
+;+
+; $FETPQ--Fetch a command qualifier.
+;
+; THREADED USAGE:
+;	$FETPQ	qualtag
+;
+; MACRO USAGE:
+;	CALBX	FET.PQ <#qualtag>
+;
+; BP2 USAGE:
+;	CALL FET$PQ BY REF (qualtag%)
+;
+; DESCRIPTION:
+;	This routine fetches a parameter qualifier from the tree 
+;	representation.  Use it after a successful FET.P or FET.NP.
+;	"qualtag" is the tag of the node to fetch.
+;
+; OUTPUTS:
+;	R0=U.CMN+U.STAT=0 if success.
+;	R0=U.CMN+U.STAT=-1 if failure.
+;-
+
+; THREADED BINARY:
+;	.WORD	U$FTPQ
+;	.WORD	qualtag
+
+.MACRO	$FETPQ	QCLASS
+	 .WORD	U$FTPQ,QCLASS
+	.GLOBL	U$FTPQ
+	.ENDM	$FETPQ
+
+.ENABL	LSB
+
+$FETPQ::
+U$FTPQ::CALB	FET.PQ <(R3)+>
+	RETURN
+
+FET$PQ::SUBR	<TAG>
+	CALB	FET.PQ <@TAG(R5)>
+	RETURN
+
+FET.PQ::SUBR	<TAG>
+	MOV	CMNADR,R4	;Point R4 at CUI common.
+	FET.NODE TREE=PARMTREE,LEVEL=PQ.LVL,TAG=TAG(R5)
+				;Fetch parameter qualifier.
+	IFCS			;If we didn't find it then
+	FET.NODE TREE=QUALTREE,LEVEL=CQ.LVL,TAG=TAG(R5)
+				;  Look for a command qualifier.
+	ENDIF
+	CALLR	PUTCMN		;Put the results in CUI common.
+
+.DSABL	LSB
+GLOBAL	<CMNADR,PARMTREE>
+
+.SBTTL	FET.A -- Fetch a non-keyword argument
+;+
+; FET.A--Fetch a non-keyword argument 
+;
+; THREADED USAGE:
+;	$FETA
+;
+; MACRO USAGE:
+;	CALBX   FET.A
+;
+; BP2 USAGE:
+;	CALL FET$A BY REF
+;
+; DESCRIPTION:
+;	This is used after a successful FET.CQ or FET.PQ, to fetch the text 
+;	argument associated with the qualifier.  It can be used repeatedly
+;	to fetch each of a list of arguments.
+;
+; OUTPUTS:
+; 	R0=U.CMN+U.STAT=0 if success.
+;	R0=U.CMN+U.STAT=-1 if failure.  (The qualifier has no args, 
+;			or no more args.)
+;-
+
+; THREADED BINARY:
+;	.WORD	U$FTA
+
+.MACRO	$FETA
+	 .WORD	U$FTA
+	.GLOBL	U$FTA
+	.ENDM	$FETA
+
+.ENABL	LSB
+
+$FETA::
+U$FTA::	CALB	FET.A
+	RETURN
+
+FET$A::
+FET.A::	SUBR
+	MOV	CMNADR,R4	;Point R4 at CUI common.
+	FET.NEXT 		;Fetch the first or next non-keyword
+				;argument (if any). Let routine figure out
+				;what level to use.
+	CALLR	PUTCMN		;Put the results in CUI common.
+	;RETURN
+
+.DSABL	LSB
+
+.SBTTL	FET.KA -- Fetch a keyword argument
+;+
+; FET.KA--Fetch a keyword argument.
+;
+; THREADED USAGE:
+;	$FETKA	argtag
+;
+; MACRO USAGE:
+;	CALBX	FET.KA <#argtag>
+;
+; BP2 USAGE:
+;	CALL FET$KA BY REF (argtag%)
+;
+; DESCRIPTION:
+;	FET.KA is used after a successful FET.CQ or FET.PQ, to fetch 
+;	a keyword argument associated with the qualifier.
+;	"argtag" is the tag (keyword code) of the node to fetch.
+;
+; OUTPUTS:
+;	R0=U.CMN+U.STAT=0 if success.
+; 	R0=U.CMN+U.STAT=-1 if failure (the qualifier does not have the 
+;		specified keyword arg).
+;-
+
+; THREADED BINARY:
+;	.WORD	U$FTKA
+;	.WORD	argtag
+;
+
+.MACRO	$FETKA	TAG
+	 .WORD	U$FTKA,TAG
+	.GLOBL	U$FTKA
+	.ENDM	$FETKA
+
+.ENABL	LSB
+
+
+$FETKA::
+U$FTKA::CALB	FET.KA <(R3)+>
+	RETURN
+
+FET$KA::SUBR	<TAG>
+	CALB	FET.KA <@TAG(R5)>
+	RETURN
+
+FET.KA::SUBR	<TAG>
+	MOV	CMNADR,R4	;Point R4 at CUI common.
+	FET.NODE TAG=TAG(R5)	;Fetch the first or next argument (if any).
+				;Let the routine figure out what level we're at
+	BR	PUTCMN		;Put the results in CUI common.
+	;RETURN
+
+.DSABL	LSB
+GLOBAL	<CMNADR>
+
+.SBTTL	FET.K -- Fetch next keyword argument (or first)	
+;+
+; FET.K -- Fetch next keyword argument (or first)
+;
+; THREADED USAGE:
+;	$FETK
+;
+; MACRO USAGE:
+;	CALBX	FET.K 
+;
+; BP2 USAGE:
+;	CALL FET$K BY REF 
+;
+; DESCRIPTION:
+;	FET.K is used after a successful FET.CQ or FET.PQ, to fetch 
+;	the first or next keyword argument associated with the qualifier.
+;
+; OUTPUTS:
+;	R0=U.CMN+U.STAT=0 if success.
+; 	R0=U.CMN+U.STAT=-1 if failure (the qualifier does not have any
+;		[more] arguments).
+;	U.CMN+U.KEY= keyword tag of node fetched or 0 if non-keyword argument
+;-
+
+; THREADED BINARY:
+;	.WORD	U$FTK
+;
+
+.MACRO	$FETK	
+	 .WORD	U$FTK
+	.GLOBL	U$FTK
+	.ENDM	$FETK
+
+.ENABL	LSB
+
+
+$FETK::									;012
+U$FTK::	CALB	FET.K 							;012
+	RETURN								;012
+
+FET$K::	SUBR								;012
+	CALB	FET.K 							;012
+	RETURN								;012
+
+FET.K::	SUBR								;012
+	MOV	CMNADR,R4	;Point R4 at CUI common.		;012
+	CALBX	U$FETK <#0,#0,#0> ;Fetch the (next) argument		;012
+	.BR	PUTCMN		;Put the results in CUI common.		;012
+
+.DSABL	LSB
+GLOBAL	<CMNADR>
+
+.SBTTL	PUTCMN -- Put results in CUI common
+;+
+; PUTCMN -- Put results in CUI common
+;
+; INPUTS:
+;	R0=0	=>	fetch succeeded
+;	  <>0	=>	fetch failed
+;	R1	->	node we just fetched if fetch succeeded
+;	R4	->	CUI common
+;
+; CALL	PUTCMN
+;
+; OUTPUTS:
+;	R0 unchanged.
+;	U.CMN+U.STAT =	R0
+;	Other registers random.
+;	Contents of node transferred to CUI common if previous fetch
+;		was successful.
+;-
+
+.ENABL	LSB
+
+PUTCMN:	CLR	U.PRES(R4)	;Assume fetched element is not present.
+	MOV	#-1,U.NO(R4)	;So set up "NO" prefix.
+	CLR	U.LEN(R4)	;Also, set no string length.
+	MOV	R0,U.STAT(R4)	;Give status back to CUSP.
+	IFZE			;If the fetch succeeded then
+	COM	U.PRES(R4)	;  Flag that the fetched element is present.
+	MOV	N.DATE(R1),U.DATE(R4)
+	MOV	N.TIME(R1),U.TIME(R4)
+				;  Transfer date and time, if node represents
+				;  a date and time.
+	MOV	N.TAG(R1),U.KEY(R4)					;012
+				;  Move in keyword type (or 0 if none)	;012
+	CLR	U.NO(R4)	;  Guess no /NO prefix.
+	BIT	#NF.AFFIRM,N.FLAG(R1)
+				;  Is affirmative flag set?
+	IFZE			;    If not then
+	COM	U.NO(R4)	;      There was a /NO prefix.
+	ENDIF
+
+; Transfer text, if node represents text.
+
+	MOV	N.TXTPOS(R1),R2	;  Get position of substring.
+	MOV	R2,U.POS(R4)	;  Transfer position of substring.
+	MOV	N.TXTLEN(R1),R3	;  Transfer length
+	MOV	R3,U.LEN(R4)	;  of substring.
+	IFNZ			;  If there is any length then
+	CMP	R3,#U.MAXL	;    Does it exceed maximum length?
+	IFHI			;    If so then
+	MOV	#U.PLNG,R0	;      Say ?Parameter or argument too long.
+	MOV	R2,LX.ERP	;      Position of item is position of error.
+	BR	20$		;      Quit.
+	ENDIF			;    Endif
+
+	ADD	#CMDBUF-1,R2	;    Point at the text in the command line.
+	ADD	#U.STR,R4	;    Point at string buffer in CUI common.
+	TST	R3		;    Ensure against null count
+	BEQ	12$		;    Nothing to move if count is zero
+10$:	MOVB	(R2)+,(R4)+	;    Move ...
+	SOB	R3,10$		;    the text.
+12$:	MOV	CMNADR,R2	;    Point to CUI common
+	MOV	U.LEN(R2),R2	;    Get length of text just moved
+	NEG	R2		;
+	ADD	#U.MAXL,R2	;    Subtract it from maximum string length
+	BEQ	20$		;    Nothing to pad with nulls.	
+15$:	MOVB	#0,(R4)+	;    Null-pad ...
+	SOB	R2,15$		;    the text.
+	ENDIF			;  Endif
+	ENDIF			;Endif
+20$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<CMDBUF,U.PLNG,LX.ERP,CMNADR>
+
+.SBTTL	FET.CS -- Fetch Command String
+;+
+; FET.CS -- Fetch Command String
+;
+; THREADED USAGE:
+;	$FETCS
+;
+; MACRO USAGE:
+;	CALBX	FET.CS 
+;
+; BP2 USAGE:
+;	CALL FET$CS BY REF 
+;
+; DESCRIPTION:
+;	FET.CS fetches the entire command string, if the command
+;	string does not exceed the size of the buffer in CUI
+; 	command (127 characters).
+;
+;	This is primarily useful for DCL.
+;
+; OUTPUTS:
+;	R0=U.CMN+U.STAT=0 if success.
+; 	R0=U.CMN+U.STAT=U.LONG (?Command too long) 
+;			if command string is too long for buffer.
+;-
+
+; THREADED BINARY:
+;	.WORD	U$FTCS
+
+.MACRO	$FETCS
+	 .WORD	U$FTCS
+	.GLOBL	U$FTCS
+	.ENDM	$FETCS
+
+.ENABL	LSB
+
+U$FTCS::CALB	FET.CS
+	RETURN
+
+FET.CS::
+FET$CS::SUBR
+	CLR	R0		;Preset no error.
+	MOV	CMNADR,R4	;Point R4 at CUI common.
+	MOV	#CMDBUF,R2	;Point at command buffer.
+	MOV	CMDLEN,R3	;Get length of command string.
+	MOV	R3,U.LEN(R4)	;Transfer length of command string.
+	IFNZ			;If there is text then
+	CMP	R3,#U.MAXL	;  Does it exceed maximum length?
+	IFHI			;  If so then
+	MOV	#U.LONG,R0	;    Say ?Command too long.
+	BR	20$		;    Quit.
+	ENDIF
+	ADD	#U.STR,R4	;  Point at string buffer in CUI common.
+10$:	MOVB	(R2)+,(R4)+	;  Move ...
+	SOB	R3,10$		;  the text.
+	ENDIF			;Else no text.
+20$:	MOV	CMNADR,R5	;Point R4 at CUI common.
+	MOV	R0,U.STAT(R5)	;Give status to CUSP.
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<CMNADR,CMDBUF,CMDLEN,U.LONG>
+.END

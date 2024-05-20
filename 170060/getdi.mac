@@ -1,0 +1,148 @@
+	$BEGIN	GETDI,<29.1>,<Common get directory ID for GETDID and GETDIR>
+
+; 
+; THIS  SOFTWARE  IS FURNISHED UNDER A LICENSE AND MAY
+; BE USED OR COPIED ONLY IN ACCORDANCE WITH THE  TERMS
+; OF SUCH LICENSE.
+;  
+; COPYRIGHT (c) 1985, 1982 BY DIGITAL EQUIPMENT CORPORATION.
+; ALL RIGHTS RESERVED.
+; 
+; Peter H. Lipman
+;
+; Previously modified by
+;
+;	Loni Brown
+;	S. Ruzich
+;
+; Modified by
+;
+;	Michael Pettengill	10-October-1983
+;		MLP106 - Make .GTDID and .GTDIR behave correctly
+;			in regards to the default directory
+;
+
+;
+; **-..GTDI-Get directory ID
+;
+; This routine is entered from either .GTDIR or .GTDID to get the
+; file ID of the specified directory.  It operates somewhat differently
+; from ..PSDI in that it preserves most of the name block and doesn't
+; assume that the FDB is going to be used for a file operation.
+; It does, however, assign the LUN specified in the FDB and sets up
+; the status bits associated with the device in the FDB.
+;
+; The basic operation of this routine is to
+;	1) Assign the LUN
+;	2) If the LUN is assigned to either a non file structured device
+;	   or to a single directory device, then exit after filling in
+;	   the DID field with the MFD File ID (4,4,0).
+;	3) Otherwise save the filename, type, and version.
+;	4) If the address of the directory string descriptor is null
+;	   or the string is null, or the string is "[]" or "<>", then
+;	   lookup the default directory else lookup the specified
+;	   directory.
+;	5) Restore the filename, type, and version to the FNB and
+;	   return with the status from the directory lookup.
+;
+; Inputs:
+;	R0=FDB address
+;	R1=File name block address
+;	R2=Directory string descriptor or zero if default to be used
+; Outputs:
+;	C=0 if OK, C=1 if error, F.ERR(R0) set to reason
+;	N.DID(R1) 6 bytes set to directory ID found
+;	Preserves N.FNAM, N.FTYP, N.FVER, N.DVNM, N.UNIT in FNB
+;	Rest of FNB zeroed
+;
+; The caller (.GTDIR/.GTDID) must have saved register R1-R5 (.SAVR1);
+; thus, all registers will be preserved.
+;
+
+..GTDI::MOV	#1,F.ERR(R0)	; Initialize error status
+	MOV	R2,-(SP)	; ASSLUN clobbers R2
+	CALL	..ALUN		; Assign the LUN and verify FSR presence
+	MOV	(SP)+,R2	; Restore R2
+	BCS	50$		; If CS get out
+	BITB	#FD.DIR,F.RCTL(R0) ; Directory device?
+	BEQ	40$		; If EQ no
+	BITB	#FD.SDI,F.RCTL(R0) ; Single directory device?
+	BNE	40$		; If NE yes
+
+; Preserve file name, type, and version in the file name block.
+; This area is used in the process of looking up the directory.
+
+	.IF	EQ,R$RSTS
+
+	ASSUME	N.FTYP,N.FNAM+6
+	ASSUME	N.FVER,N.FTYP+2
+	ASSUME	N.STAT,N.FVER+2
+	MOV	R1,R5		; Copy address of FNB
+	ADD	#N.FNAM,R5	; Point to area to save
+	MOV	(R5)+,-(SP)	; N.FNAM
+	MOV	(R5)+,-(SP)	; N.FNAM+2
+	MOV	(R5)+,-(SP)	; N.FNAM+4
+	MOV	(R5)+,-(SP)	; N.FTYP
+	MOV	(R5)+,-(SP)	; N.FVER
+	CLR	(R5)		; N.STAT, ensure no wildcard
+	MOV	R5,-(SP)	; Save pointer to end of saved area
+	MOV	R2,R5		; Directory string specified?
+	BEQ	20$		; If EQ no
+	CMP	#2,(R5)+	; Is the directory explicitly default?
+	BNE	10$		; If NE no
+	MOV	(R5),R5		; Point to directory string
+	MOVB	(R5)+,R4	; Get first bracket
+	SWAB	R4		; And then
+	BISB	(R5),R4		; The second bracket
+	CMP	#"][,R4		; Valid square brackets?
+	BEQ	20$		; If EQ yes
+	CMP	#"><,R4		; How about angle brackets?
+	BEQ	20$		; If EQ yes
+
+; Parse and lookup the appropriate directory.  No registers need be
+; preserved by either routine.
+
+10$:	CALL	..DIRF		; A directory specified or syntax error
+	BR	30$		; Join common code
+20$:	CALL	..PDI		; Lookup the default directory
+
+; Restore the saved fields to the FNB.  Exit with the status from the
+; parse and lookup.
+
+30$:	MOV	(SP)+,R5	; Retreive pointer to saved area
+	MOV	(SP)+,-(R5)	; N.FVER
+	MOV	(SP)+,-(R5)	; N.FTYP
+	MOV	(SP)+,-(R5)	; N.FNAM+4
+	MOV	(SP)+,-(R5)	; N.FNAM+2
+	MOV	(SP)+,-(R5)	; N.FNAM
+	RETURN			;
+
+	.IFF
+
+	CALLR	..DIRF		;Call ..DIRF and exit to caller
+
+	.ENDC
+
+; Set directory ID to master file directory (MFD)
+
+40$:
+	.IF	EQ,R$RSTS
+
+	MOV	#4,N.DID(R1)	; MFD is always FID (4,4)
+	MOV	#4,N.DID+2(R1)	;
+	CLR	N.DID+4(R1)	; also CLC
+
+	.IFF
+
+	CLR	N.DID(R1)	; also CLC
+
+	.ENDC
+
+50$:	RETURN			;
+
+;
+;
+	$END	GETDI
+;
+;
+	.END

@@ -1,0 +1,793 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+TITLE	EXL,<EXTEND/WINDOW TURN FOR LARGE FILES>,0A,10-MAY-91,MHB/ABC/SJK/JTC/DRP/KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR EXTLRG
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	JTC  11-Oct-81	Added "ALLRES" flag to make EXT always resident
+;  002	DRP  05-NOV-82	Modified the extend error code to return correct
+;			error text. Split the overlay into two overlays.
+;
+;				[RSTS/E V9.0]
+;  003  DRP  18-Nov-83	Moved code into the OPN phase
+;  004	DRP  02-Apr-84	Add logged-in quota support
+;  005  MNB  20-Apr-84	REQUE, WINDOW, and WINERR moved in from CTL
+;  006	MNB  23-Apr-84	Added asynch I/O EXTEND support
+;  007  MNB  18-May-84	Fixed EXTERR for asynch I/O
+;  008  DRP  17-May-84	Fixed XCDQTA's SP offset
+;  009	KPH  25-Jun-84	Bugfixes
+;  010	DRP  06-Jul-84	Changed quota checking code
+;  011	KPH  29-Aug-84	Make all code I-only
+;			Keep error traps disabled in EXTERR
+;			Fix incorrect update of W$REN for asynch I/O
+;
+;				[RSTS/E V9.1]
+;  012	KPH  21-Feb-85	Changes for system stack window turn
+;  013  KPH  01-Jul-85	Clustersize optimization fallback
+;
+;				[RSTS/E V9.2]
+;  014  KPH  17-Dec-85	Make powerfail mode work
+;
+;				[RSTS/E V9.3]
+;  015  KPH  22-Feb-86	Support move of SYDVR out of RSTS phase
+;  016  KPH  16-Jul-86	Fix EXTER2 error handling
+;
+;				[RSTS/E V10.0]
+;  017	FEK  03-Oct-89	Fix async I/O extend crossing 65536 boundary to not
+;			use the rest of the disk
+;-
+
+
+	IONLY			;Invoke FIP macro definitions for I-space ;011
+
+	DEFORG	EXL
+
+GLOBAL	<SYSLRG>		;ENSURE CORRECT LINK
+
+.SBTTL	EXTEND A CLOSED FILE
+
+;+
+; EXTCLS - EXTEND A CLOSED FILE.
+;
+;	R0 =  UNIT
+;	R3 =  LINK OF NAME ENTRY
+;	R4 -> FIRQB
+;		FQSIZ  = SIZE
+;	FIPCLU = File cluster size
+;	FIBUF HAS SOME DIRECTORY BLOCK
+;	FIPUNT = Unit
+;
+;	CALL	EXTCLS
+;
+;	All registers are preserved.
+;
+;	C = 0 if file successfully extended
+;	C = 1 if no disk space available for extend
+;-
+
+.ENABL	LSB
+
+EXTCLS::REGSCR			;Save all registers			;013
+	MOV	#EXTER2,@#FIPERX ;Set FIP error exit for extend close	;013
+	MOV	SP,FIPESP	;Save the SP for errors			;013
+	CALLX	RDE		;GET THE NAME ENTRY INTO FIBUF
+	CLR	R1		;DEFINITELY NO WCB YET
+	MOV	FQSIZ(R4),R0	;GET THE SIZE TO BE LSB
+	MOVB	FQSIZM(R4),R2	; AND MSB
+	MOV	R4,-(SP)	;Copy the FIRQB pointer			;004
+	ADD	#FQPPN,(SP)	; and point to the PPN			;004
+	MOV	R2,-(SP)	;SAVE THE MSB SIZE
+	CLR	-(SP)		;SET 0 AS DESIRED RETRIEVAL ENTRY NUMBER
+	MOV	FQNENT(R4),R2	;GET FILE POSITIONING DCN
+	BEQ	50$		;IF NONE, START AT BEGINNING OF DISK
+	BR	EXTGO		;NOW GO DO THE EXTEND WITH POSITIONING
+
+GLOBAL	<FIPUNT,FIPCLU,FIPERR,FIPERX>					;013
+
+.SBTTL	EXTEND AN OPEN FILE
+
+;+
+; EXTFQ - EXTEND AN OPEN FILE.
+;
+;	R4 -> FIRQB (REALLY A DSQ!)
+;
+;	AMOUNT TO EXTEND IS IN "W$NXT" OF THE WCB.
+;-
+
+	FQFENT	EXT,,,PHASE	;FILE EXTENDS COME HERE			;003
+
+	CALLX	WOMSAT		;ENSURE S.A.T. BUFFER IS CLEAN
+	CALL	REQUE,R1	;RE-QUEUE REQUEST, WRITEC, GET WCB POINTER ;005
+	MOV	#EXTERR!1,@#FIPERX ;SET ALTERNATE ERROR EXIT		;009
+	MOV	W$FCB(R1),-(SP)	;Get the FCB pointer			;004
+	ADD	#F$PPN-F$CLUS,(SP) ; and point to the PPN		;004
+	MOV	DSQMSC(R4),R0	;Get WRK ->				;006
+	MOV	XRBLK(R0),R2	;Get starting block number LSB		;006
+	MOVB	XRBLKM(R0),R3	; and MSB, then				;006
+	ADD	DSQTOT(R4),R2	;  add # blks in Xfer to get		;006
+	ADCB	R3		;R3/R2 = END+1 blk # (MSB/LSB)		;006
+	MOV	W$FCB(R1),R5	;Get FCB -> @ F$CLUS			;006
+	MOVB	F$SIZM-F$CLUS(R5),R0 ;Get current file size MSB, then	;006
+	SUB	F$SIZL-F$CLUS(R5),R2 ; and LSB to get			;006
+	SBC	R3		;R3/R2 = # Extend blocks (MSB/LSB)	;017
+	SUB	R0,R3		;Subtract from END+1 file size MSB	;017
+	BMI	30$		;Extend already done, turn window...	;017
+	BNE	10$		;Very large extend... go for it		;009
+	TST	R2		;Has this extend been done?		;009
+	BEQ	25$		;Yes, go turn windows			;014
+10$:	MOV	(R5),-(SP)	;GET THE CLUSTER SIZE			;009
+	NEG	(SP)		; AND MAKE IT A MASK			;006
+	MOV	-(R5),R0	;GET THE CURRENT FILE SIZE LSB		;006
+	NEG	R0		; AND COMPUTE -SIZE			;006
+	BIC	(SP)+,R0	;  TO COMPUTE AMOUNT OF "FREE" EXTEND	;006
+	TST	R3		;IS EXTEND AMOUNT VERY LARGE?		;006
+	BNE	20$		;YES, CAN'T DO IT ALL FOR FREE		;006
+	CMP	R2,R0		;IS DESIRED <= FREE AMOUNT?		;006
+	BHI	20$		;NO, MUST DO REAL EXTEND		;006
+	MOV	R2,R0		;YES, PARTIALLY INCREASE SIZE (IT'S ALL FREE) ;006
+20$:	ADD	R0,(R5)		;NO, UPDATE FCB SIZE TO BIGGEST ALLOWED	;006
+	ADCB	-(R5)		; IN BOTH PLACES			;006
+	SUB	R0,R2		;DECREASE EXTEND AMOUNT BY FREE EXTEND TAKEN ;006
+	SBC	R3		; AS A DOUBLE WORD			;006
+	BNE	40$		;Lots of more extend to do...		;009
+	TST	R2		;Was the entire extend free?		;009
+	BNE	40$		;No, so more to do			;009
+25$:	BIT	#WC$AEX,W$WCB(R1) ;Free extend, but must we do real extend? ;014
+	BNE	40$		;Yes, so go do a real extend		;009
+30$:	JMP	EXTWIN		;No, make this a window turn		;009
+40$:	MOV	R3,-(SP)	;Stack amount to extend MSB		;006
+	MOV	R2,-(SP)	;Stack amount to extend LSB		;012
+	MOV	#-1,W$REN(R1)	;Invalidate the current R.E. #		;006
+	MOV	DSQMSC(R4),R2	;Put WRK -> here for GETREN		;006
+	CALLM	GETREN,SYDAP5	;Calculate retrieval entry number	;015
+	INC	R2		; AND ADD ONE FOR COUNTING DOWN
+	MOV	(SP)+,R0	;Restore amount to extend LSB		;012
+	MOV	R2,-(SP)	;STACK THE DESIRED RETRIEVAL ENTRY NUMBER
+	CALLX	RNE		;READ FILE'S NAME ENTRY
+50$:	MOV	#1,R2		;GUESS AT POSITIONING AT DCN 1
+	.BR	EXTGO		;GO DO IT
+
+.DSABL	LSB
+
+GLOBAL	<FIPERX>
+
+; ALL SET TO REALLY DO THE EXTEND
+;
+;	R0 =  AMOUNT TO EXTEND LSB (POSSIBLY 0)
+;	R1 -> WCB (OR 0)
+;	R2 =  DCN TO START ALLOCATION
+;	R3 =  LINK OF NAME ENTRY
+;	R4 -> FIRQB
+;	R5 -> NAME ENTRY
+;	SP -> (0) DESIRED RETRIEVAL ENTRY # + 1 FOR WINDOW
+;	      (1) AMOUNT TO EXTEND MSB (POSSIBLY 0) / ERROR INDICATOR (0)
+;	      (2) -> PPN						;004
+;	FIPCLU = FILE CLUSTER SIZE
+
+.ENABL	LSB
+
+EXTGO:	CLR	-(SP)		;MAKE ROOM FOR LINK TO DESIRED WINDOW R.E.
+	MOV	R1,-(SP)	;SAVE THE WCB POINTER ON STACK
+	MOV	R4,-(SP)	;SAVE FIRQB POINTER ON STACK
+	MOV	R3,-(SP)	;SAVE N.E. LINK ON STACK
+	ADD	#UAA,R5		;POINT TO THE A.E. LINK WORD IN N.E.
+	MOV	(R5)+,-(SP)	; AND SAVE THE A.E. LINK
+	CLR	-(SP)		;SET 0 ADDED INITIALLY MSB
+	CLR	-(SP)		; AND LSB
+	MOV	R5,-(SP)	;SAVE POINTER TO R.E. CHAIN START IN N.E.
+	MOVB	@#FIPUNT,R1	;GET UNIT NUMBER
+	ASL	R1		; TIMES 2 FOR WORD ADDRESSING
+	CMP	UNTLVL(R1),(PC)+ ;Support extended quota data		;004
+	 .BYTE	2,1							;004
+	BLO	20$		;No, no QTB entry for this PPN		;004
+	CMP	@10.*2(SP),(PC)+ ;Account [0,1]?			;004
+	 .BYTE	1,0							;004
+	BEQ	20$		;Yes, again no QTB entry		;004
+	INC	10.*2(SP)	;Set a flag indicating should have a QTB ;004
+	BIT	#UO.NQT,UNTOPT(R1) ;Mounted /NOQUOTA?			;004
+	BNE	20$		;Yes, then skip the quota check		;004
+	TSTPRV	EXQTA,@#FIPRVM	;Allowed to exceed quotas?		;010
+	BNE	20$		;Yes, then no need to check		;010
+	REGSAV			;Save current register values		;004
+	MOV	R0,R1		;Copy the extend amount LSB		;004
+	MOVB	TOS.R5+<10.*2>(SP),R2 ;Get the extend amount MSB also	;004
+	MOV	TOS.R5+<11.*2>(SP),R0 ;Need the pointer to the PPN	;004
+	DEC	R0		; without the flag			;004
+	MOV	@#FIPCLU,R3	;Now finally we get the file cluster size ;004
+	CALL	CHKQTA		;Will this request exceed quota?	;004
+	BCC	10$		;No					;004
+	ERROR	QUOTA		;Yes, so report the error		;013
+
+10$:	REGRES			;Restore the register contents		;004
+20$:	MOV	R2,SATPTR(R1)	;SET ALLOCATION START (BEGINNING IF NO CHAIN)
+	BIT	(R5)+,#UL.BLO!UL.CLO!UL.ENO ;DOES THE CHAIN EXIST?
+	BEQ	60$		;NO, SO FORCE R.E. CREATION (R5 .AND. 17 = 0)
+	TST	-(R5)		;YES, CORRECT BACK TO R.E. LINK
+30$:	CALLX	RDEPRV		;READ NEXT R.E. KEEPING PREVIOUS LINK
+	BEQ	40$		;NO MORE
+	DEC	8.*2(SP)	;UP TO THE ONE WANTED FOR WINDOW LATER?
+	BNE	30$		;NO
+	MOV	R3,7*2(SP)	;YES, SAVE LINK TO GET BACK R.E. FOR LATER
+	BR	30$		;LOOP UNTIL END OF CHAIN
+
+40$:	MOV	R2,R3		;RESTORE LINK OF LAST R.E. IN CHAIN
+	MOV	R5,(SP)		;REPLACE POINTER ON STACK
+50$:	MOV	(R5)+,SATPTR(R1) ;SKIP A WORD (LINK INITIALLY)
+	BIT	R5,#20-1	;TOO FAR?
+	BEQ	60$		;IF SO, THEN QUIT NOW
+	TST	(R5)		;ELSE, IS THIS CELL FREE
+	BNE	50$		;IF NOT, THEN KEEP GOING
+60$:	MOV	R3,-(SP)	;GOT IT, SO SAVE R.E. LINK
+	MOVB	10.*2(SP),R1	;GET EXTEND AMOUNT MSB
+	BIS	R0,R1		;AMOUNT TO EXTEND = 0?
+	BEQ	EXTFIN		;YES, SO JUST UPDATE DISK		;003
+	MOV	@#FIPCLU,R1	;SET UP FOR CLUSTER SIZE
+
+GLOBAL	<FIPUNT,SATPTR,FIPCLU,UNTLVL,UNTOPT,FIPRVM>			;010
+
+; REAL WORK OF EXTEND
+;
+;	R0 =  AMOUNT TO EXTEND LSB
+;	R1 =  FILE CLUSTER SIZE
+;	R5 -> INTO CURRENT R.E.
+;	SP -> (0) LINK OF CURRENT R.E.
+;	      (1) -> TO LINK WORD OF CURRENT R.E.
+;	      (2) AMOUNT EXTENDED LSB (0)
+;	      (3) AMOUNT EXTENDED MSB (0)
+;	      (4) LINK OF A.E.
+;	      (5) LINK OF N.E.
+;	      (6) -> FIRQB
+;	      (7) -> WCB (OR 0)
+;	      (8) LINK TO DESIRED RETRIEVAL ENTRY
+;	      (9) DESIRED RETRIEVAL ENTRY NUMBER
+;	     (10) AMOUNT TO EXTEND MSB / ERROR INDICATION (0)
+;	     (11) -> PPN (Bit 0 = 1 indicates PPN has a QTB entry)	;004
+;	FIPCLU = FILE CLUSTER SIZE
+
+70$:	CALLX	GETCLU		;GET A CLUSTER
+	BCS	95$		;NO MORE ARE LEFT			;013
+	BIT	R5,#20-1	;ROOM TO PUT IT ON THIS R.E.?
+	BNE	90$		;YEP, SO GO DO IT
+	CALLX	GDE		;NOPE, SO GET ANOTHER R.E. BLOCK
+	BCS	100$		;NO MORE, SO QUIT RIGHT NOW
+	DEC	9.*2(SP)	;UP TO DESIRED ENTRY FOR LATER WINDOWING?
+	BNE	80$		;NO
+	MOV	R3,8.*2(SP)	;YES, SAVE LINK TO IT
+80$:	MOV	R3,R4		;SAVE NEW R.E. LINK
+	MOV	(SP)+,R3	; AND GET BACK OLD R.E. LINK
+	CALLX	RDE		;  AND READ OLD LINK
+	BIS	R4,@(SP)+	;NOW LINK NEW R.E. INTO CHAIN
+	MOV	R4,R3		;GET NEW LINK BACK
+	CALLX	RDESV		; AND READ BACK IN NEW RIB
+	MOV	R5,-(SP)	;SET UP POINTER
+	MOV	R3,-(SP)	; AND THE LINK
+	TST	(R5)+		;SKIP THE LINK WORD
+90$:	MOV	R2,(R5)+	;STASH THE CLUSTER IN THE R.E.
+	MARK	FIBUF		; AND MARK BUFFER
+	ADD	R1,2*2(SP)	;ADD AMOUNT TO COUNTER TOTAL
+	ADC	3*2(SP)		; AND CARRY
+	SUB	R1,R0		;SEE IF ANY MORE ARE NEEDED
+	SBCB	10.*2(SP)	; BY COUNTING DOWN THE AMOUNT
+	BCS	120$		;IF OVERFLOW, QUIT (R0 = AMOUNT OF OVEREXTEND)
+	BNE	70$		;IF STILL NON-0, WE HAVE A LONG WAY TO GO
+	TST	R0		;IS THE AMOUNT LEFT REALLY 0?
+	BNE	70$		;IF SO, THEN GO GET MORE CLUSTERS
+	BR	120$		;IF NOT, WE ARE FINISHED
+
+; We come here if there is no room left on the disk to extend the file.
+;
+; If this is a brand new file, we will de-allocate the space and return
+; with carry set to our caller.
+;
+; If this is an extend of an existing file, we will finish up the extend
+; and report an error to the user.
+
+95$:	TST	7.*2(SP)	;Are we creating a new file?		;013
+	BNE	110$		;No, not this time			;013
+	MOV	5.*2(SP),R3	;Yes, get N.E. pointer for new file	;013
+	CALLX	RDE		;And read it in				;013
+	MOV	UAR(R5),R0	;Get link to first R.E.			;013
+	CLR	UAR(R5)		;And clear the link to it		;013
+	MARK	FIBUF		;Mark FIBUF for writing			;013
+	MOV	FIPCLU,R1	;Get the file clustersize		;013
+	CALLX	XRE		;And deallocate the space		;013
+	MOV	FIPESP,SP	;Reset the stack			;013
+	SEC			;Set carry for failure			;013
+	RETURN			;And get out				;013
+
+; ERROR - CAN'T GET DIRECTORY CLUSTER OR FILE CLUSTER
+
+100$:	CALLX	RETCLU		;RETURN THE CLUSTER FOR OTHERS
+110$:	CLR	R0		;CLEAR OUT # WE NEED (NO PARTIAL)
+	INCB	10.*2+1(SP)	; AND SIGNAL THAT ERROR OCCURED
+
+120$:	CALLX	WOMSAT		;ENSURE UPDATED S.A.T. IS ON DISK	;002
+	.BR	EXTFIN		;Finish up				;003
+
+.DSABL	LSB
+
+GLOBAL	<FIPUNT,FIPCLU,FIQUE,FIPESP>					;013
+
+; EXTEND IS FINISHED
+;
+;	R0 =  THE AMOUNT OF OVER-EXTEND
+;	SP -> (0) LINK OF CURRENT R.E.
+;	      (1) -> TO LINK WORD OF CURRENT R.E.
+;	      (2) AMOUNT EXTENDED LSB
+;	      (3) AMOUNT EXTENDED MSB
+;	      (4) LINK OF A.E.
+;	      (5) LINK OF N.E.
+;	      (6) -> FIRQB
+;	      (7) -> WCB (OR 0)
+;	      (8) LINK TO DESIRED RETRIEVAL ENTRY
+;	      (9) DESIRED RETRIEVAL ENTRY NUMBER
+;	     (10) ?? / ERROR INDICATION (<>0 IF ERROR)
+;	     (11) -> PPN (Bit 0 = 1 indicates PPN has a QTB entry)	;004
+
+.ENABL	LSB
+
+EXTFIN:	CMP	(SP)+,(SP)+	;DUMP THE NOW USELESS LINK/POINTER
+	NEG	R0		;FIX AMOUNT OF OVEREXTEND
+	SUB	R0,(SP)		;COMPUTE TRUE TOTAL ADDED
+	MOV	(SP)+,R0	;POP TOTAL LSB OFF STACK
+	MOV	(SP)+,R2	;GET MSB ADDED
+	SBC	R2		; AND CORRECT IT FOR OVEREXTEND
+	MOV	(SP)+,R3	;GET BACK A.E. LINK WORD
+	CALLX	RDE		; AND READ THE ACCOUNTING ENTRY
+	CMP	(R5)+,(R5)+	;POINT TO SIZE WORD
+.ASSUME	USIZ EQ 4
+	TST	2*2(SP)		;Is this an open file?			;012
+	BNE	20$		;Yes, so don't update directory now	;012
+
+; Since there is no WCB, implying that this is not an open file, we
+; will set the filesize in the accounting entry to be the extend amount.
+
+	MOV	R0,(R5)		;Set new filesize LSB			;013
+	ADD	#UCLUS-USIZ,R5	;Advance to UCLUS in accounting entry	;013
+	MOV	FIPCLU,(R5)	;And set the clustersize		;013
+	TST	R2		;Is this a large file?			;012
+	BEQ	10$		;No, so all set up			;012
+	MOV	R2,-(R5)	;Yes, set the LSB size			;013
+.ASSUME	<URTS+4> EQ	UCLUS
+	CLR	-(R5)		;And set the large file flag		;013
+10$:	MARK	FIBUF		;Indicate that FIBUF needs to be written out
+20$:	REGSAV			;Save current register contents		;012
+	MOV	R0,R1		;Get the amount extended LSB (R2 = MSB)	;004
+	MOV	TOS.R5+<7.*2>(SP),R0 ;Get the PPN pointer		;004
+	BIT	#1,R0		;Do we have a QTB entry to deal with?	;004
+	BEQ	30$		;No, that's easy			;004
+	DEC	R0		;Yes, we only want the PPN ->		;004
+	MOV	@#FIPCLU,R3	; and the file cluster size		;004
+	CALL	ADDUSG		;Update the usage in the QTB entry	;004
+30$:	REGRES			;Restore the register contents		;004
+	MOV	(SP)+,R3	;FINAL RESTORE OF N.E. LINK
+	MOV	(SP)+,R4	;ALSO RESTORE FIRQB POINTER
+	MOV	(SP)+,R1	; AND ALSO THE WCB POINTER
+	BEQ	90$		;IF NON-EXISTENT THEN NO WCB
+
+; This is an open file, so we will have to update the FCB and the
+; accounting entry. The first thing that we do is write out the
+; directory buffer, to assure that the file size in the FCB does
+; not reflect retrieval entires which are not out on disk.
+; The next thing to do is update the size in the FCB and then set
+; the size from the FCB into the accounting entry.
+
+	CALLX	WRITEC		;Write out directory before changing FCB ;012
+	MOV	W$FCB(R1),R3	;GET POINTER TO FCB
+	ADD	R0,-(R3)	;ADD THE LSB EXTEND AMOUNT TO FCB SIZE LSB
+	MOV	(R3),(R5)+	;Update size in accounting entry from FCB
+.ASSUME UDC EQ <USIZ+2>
+	MOVB	-(R3),R0	;GET THE CURRENT SIZE MSB
+	ADC	R0		; ADD CARRY FROM LSB ADDITION
+	ADD	R2,R0		;  AND ADD MSB EXTEND AMOUNT
+	MOVB	R0,(R3)+	;PUT NEW MSB SIZE INTO FCB
+	BEQ	40$		;IF NEW MSB SIZE IS 0, DON'T CLOBBER RTS NAME
+	CMP	(R5)+,(R5)+	;Advance to URTS			;012
+.ASSUME	URTS EQ <UDC+4>
+	CLR	(R5)+		;SET FLAG SAYING LARGE FILE
+	MOV	R0,(R5)		; AND PUT MSB SIZE INTO A.E.
+40$:	MARK	FIBUF		;Be sure accounting entry gets written out ;012
+	MOV	F$WCB-F$SIZL(R3),R5 ;GET POINTER TO FIRST WCB FOR THIS FILE
+50$:	TST	W$NXT(R5)	;IS THERE AN FBB FOR THE NEXT R.E.?
+	BPL	60$		;IF SO, WINDOW IS OK (BEFORE EXTENSION BLOCKS)
+	MOV	#-1,W$REN(R5)	;WINDOW IS NEAR THE END, INVALIDATE IT
+60$:	MOV	W$WCB(R5),R5	;GET POINTER TO NEXT WCB
+	BIC	#40-1,R5	;REMOVE FLAG BITS
+	BNE	50$		;LOOP UNTIL DONE
+	MOV	R3,R0		;COPY FCB POINTER
+	ADD	#F$WFND-F$SIZL,R0 ; AND INDEX TO FBB OF FIRST R.E.
+	TST	(R0)		;IS THERE AN FBB HERE?
+	BPL	70$		;YES
+	CALLX	RNE		;NO, GET BACK THE NAME ENTRY
+	MOV	UAR(R5),R3	;PICK UP LINK TO FIRST R.E.
+	CALLX	PAKFBB		;LOAD THE FBB FOR THE FIRST WINDOW
+70$:	CALLX	WRITEC		;ENSURE DIRECTORY BUFFER IS FLUSHED IF NEEDED
+	MOV	(SP)+,R3	;GET LINK TO DESIRED RETRIEVAL ENTRY
+	TST	(SP)+		;DUMP JUNK COUNTER
+	SWAB	(SP)+		;CHECK FOR ERRORS
+	BNE	95$		;Got one, go give a NOROOM error	;013
+	TST	(SP)+		;Junk the PPN pointer			;004
+	CALLX	RDE		;GET RETRIEVAL ENTRY DESIRED
+	MOV	DSQMSC(R4),R2	;Put WRK -> here for GETREN		;006
+	MOV	#-1,W$REN(R1)	;Invalidate current retrieval entry number ;012
+	CALLM	GETREN,SYDAP5	;Now compute the R.E. number		;015
+	TST	(R0)+		;ADVANCE WCB POINTER TO W$REN
+	MOV	R2,(R0)+	;SET R.E. # OF CURRENT WINDOW
+	TST	(R0)+		;INDEX TO W$NXT
+	MOV	(R5)+,R3	;PICK UP LINK TO NEXT R.E.
+	CALLX	PAKFBB		;SET UP FBB FOR READING NEXT WINDOW
+	MOV	#7,R2		;COUNT OF R.P.'S TO LOAD
+80$:	MOV	(R5)+,(R0)+	;LOAD THAT WINDOW
+	SOB	R2,80$		; UNTIL DONE
+EXTWIN:	MOVB	FQJOB(R4),R0	;GET JOB'S JOB NUMBER
+	MOV	JOBTBL(R0),R3	; AND GET JOB DATA POINTER
+	CALLM	FILSET,SYDAP5	;COMPLETE THE FILE SERVICE SET UP	;015
+	BR	DOTURN		; AND GO TURN THAT WINDOW...
+
+GLOBAL	<JOBTBL,FIPUNT,FIPCLU>						;004
+
+; EXIT FROM EXTENDING A CLOSED FILE
+
+90$:	CMP	(SP)+,(SP)+	;JUNK DESIRED RE DATA
+	MOVB	@#FIPUNT,R0	;RESTORE CORRECT UNIT
+	SWAB	(SP)+		;CHECK FOR ERRORS AFTER EXTEND OF CLOSED FILE
+	BEQ	100$		;SIMPLY EXIT IF NONE
+95$:	ERROR	NOROOM		;We got an error, go report it		;013
+
+100$:	TST	(SP)+		;Junk the PPN pointer			;004
+	;CLC			;Indicate success			;013
+	RETURN			;And the file is now extended!		;013
+
+;+
+; EXTERR - Error trap for extending an open file
+; EXTER2 - Error trap for extending a closed file
+;
+; We get here if there was an error trying to extend the file. The
+; error could be from a disk error, or our use of the ERROR macro.
+;
+; For EXTERR, we will put the error that we got into DSQERR and queue
+; the DSQ off to the process that requested the extend. EXTERR requests
+; have the "don't post error" bit set, since they are not explicit
+; user requests, and can happen during the processing of asynchronous
+; I/O, and it wouldn't be good to return some random error code to
+; whatever explicit directive happens to be running.
+;
+; For EXTER2, we will simply delete the new file and exit from FIP.
+; Since extends of new files are explicit FIP functions, we are able
+; to use the standard posting facility.
+;
+;	R0 = Error code
+;-
+
+EXTERR:	MOV	#1,@#FIPERX	;Disable private error trap		;011
+	MOV	@#FIQUE,R4	;GET THE QUEUE BASE TO FIND
+	MOV	-(R4),R4	; THE DSQ(FIRQB) POINTER WE SAVED
+	MOVB	R0,DSQERR(R4)	;Report error in the DSQ		;007
+	CALLX	DISKER		;Queue DSQ to completion queue		;007
+	JMPX	FIEXIX		;Fip's back-door exit			;007
+
+EXTER2:	MOV	FIPESP,SP	;Restore SP value from before error	;016
+	TST	(SP)+		;Dump the register restore		;016
+	REGRES			;But restore the registers right now	;016
+	CALLX	DELNEW		;Delete new entry and return QTB	;010
+	JMPX	FIEXIT		;Back to FIP, returning error to user	;004
+
+.DSABL	LSB
+
+GLOBAL	<FIPUNT,FIPERX,FIQUE,JBWAIT,FIPAR,FIPESP>			;016
+
+.SBTTL	WINDOW TURNER
+
+;+
+; WINFQ - ALIGN WCB WINDOW.
+;
+;	R4 -> FIRQB (REALLY A DSQ!)
+;-
+
+	FQFENT	WIN,,,PHASE	;WINDOW TURN REQUESTS COME HERE
+
+	CALL	REQUE,R1	;RE-QUEUE REQUEST, WRITEC, GET WCB POINTER ;005
+DOTURN:	MOV	#WINERR!1,@#FIPERX ;SET UP ERROR EXIT FOR TURNING	;009
+	BR	WINDOW		;GO DO THE REAL WORK OF TURNING		;005
+
+GLOBAL	<FIPERX>
+
+
+.SBTTL	THE REAL WORK OF THE WINDOW TURNER
+
+.ENABL	LSB
+
+10$:	CALLX	RDENXT		;READ NEXT WINDOW INTO MEMORY
+	BEQ	80$		;END-OF-CHAIN IS FATAL
+20$:	SOB	R2,10$		;LOOP FOR EACH WINDOW TO TURN
+	MOV	(SP)+,(R0)+	;Set the new retrieval entry #		;011
+	TST	(R0)+		;And advance to W$NXT in WCB		;011
+.ASSUME	W$NXT	EQ	W$REN+4
+	MOV	(R5)+,R3	;GET LINK TO NEXT R.E.
+	CALL	PAKFBB		;PACK THE FBB FOR NEW NEXT WINDOW
+	MOV	#7,R2		;COPY SEVEN RETRIEVAL POINTERS
+30$:	MOV	(R5)+,(R0)+	; FROM DIRECTORY
+	SOB	R2,30$		;  TO WCB
+WINDOW:	CALLM	FILSTA,SYDAP5	;START TRANSFER(S)			;015
+	BNE	50$		;TURN WINDOWS				;015
+40$:	JMPX	FIEXIX		;BACK DOOR EXIT FROM FIP, CLEARING FIPERX
+
+50$:	MOV	R2,-(SP)	;Save desired retrieval entry number	;011
+	MOV	(R0)+,R5	;GET FCB @ F$CLUS POINTER, ADVANCE TO W$REN
+	BCS	60$		;BRANCH IF BACKWARD TURN REQUIRED
+	SUB	(R0),R2		;FORWARD TURN, COMPUTE # RETRIEVAL ENTRIES
+.ASSUME	W$REN	EQ	W$FCB+2
+	MOV	R0,R5		;COPY WCB @ W$REN POINTER		;011
+	CMP	(R5)+,(R5)+	;ADVANCE TO FBB FOR READING NEXT WINDOW ;011
+.ASSUME	W$NXT	EQ	W$REN+4
+	BR	70$		;GO GET THE WINDOW
+
+60$:	INC	R2		;Backwards, get the count to read	;011
+	ADD	#F$WFND-F$CLUS,R5 ;POINT TO FBB FOR FIRST WINDOW
+70$:	CALLX	RFE		;READ FIRST/NEXT WINDOW FROM FBB
+	BR	20$		;ENTER COUNTING LOOP
+
+80$:	ERROR	BADDIR		;ILLEGAL RETRIEVAL ENTRY CHAIN
+
+; WE GET ENTERED HERE IF A (FATAL) DISK ERROR OCCURS DURING PROCESSING
+
+WINERR:	MOV	@#FIQUE,R4	;GET THE QUEUE BASE TO FIND
+	MOV	-(R4),R4	; THE DSQ(FIRQB) POINTER WE SAVED
+	MOV	DSQMSC(R4),R1	;Get -> to XRB and			;032
+	MOV	XRTIME(R1),R1	; RESTORE THE WCB POINTER ALSO		;032
+	MOV	#-1,W$REN(R1)	;FORCE ANOTHER WINDOW TURN NEXT TIME
+	CLR	DSQTOT(R4)	;INDICATE THIS AS THE LAST XFER IN SEQUENCE
+	MOVB	R0,DSQERR(R4)	;Set up the error code to return	;009
+	CALLX	DISKER		; AND QUEUE IT INTO THE COMPLETION QUEUE
+	BR	40$		;NOW GO EXIT CLEANLY...
+
+.DSABL	LSB
+
+GLOBAL	<FIQUE>
+
+;+
+; REQUE - RELINK FIP'S QUEUE THROUGH THE STACK FOR WIN/EXT
+;
+;	R4 -> FIRQB TO RELINK
+;
+;	CALL	REQUE,R1
+;
+;	R1 -> WCB (IF R4 WAS DSQ)
+;	FIQUE RELINKED
+;	FIBUF FLUSHED
+;-
+
+REQUE:	CALLX	WRITEC		;ENSURE THE DIRECTORY BUFFER IS CLEAN
+	MOV	(R4),(SP)	;REPLACE OLD REGISTER WITH PTR TO NEXT
+	MOV	SP,@#FIQUE	; AND RE-QUEUE THROUGH FIP STACK TO FREE DSQ
+	MOV	R4,-(SP)	;SAVE THE DSQ(FIRQB) POINTER
+	MOV	R1,-(SP)	;SAVE RETURN ADDRESS
+	MOV	DSQMSC(R4),R1	;Get -> to XRB and			;032
+	MOV	XRTIME(R1),R1	; GET WCB POINTER FROM DSQ		;032
+	RETURN
+
+GLOBAL	<FIQUE>
+
+;+									;004
+; CHKQTA - Quota check routine						;004
+;									;004
+;	R0 -> PPN							;004
+;	R1 =  Extend amount LSB						;004
+;	R2 =  Extend amount MSB						;004
+;	R3 =  File cluster size						;004
+;									;004
+;	CALL	CHKQTA							;004
+;									;004
+;	Caller should save all registers before calling			;004
+;									;004
+;	C = 0	Quota not exceeded					;004
+;	C = 1	Quota exceeded						;004
+;-
+
+CHKQTA::DEC	R3		;Make the cluster size a mask		;004
+	ADD	R3,R1		; and add it to the ext. amt. LSB	;004
+	ADCB	R2		;Add the possible overflow to the MSB	;004
+	BIC	R3,R1		;Now finish the rounding up		;004
+	MOV	@#FIPUNT,-(SP)	;Save the current FIPUNT and FIPGEN	;004
+	MOVB	(SP),R3		;Get just the Fip Unit Number
+	ASL	R3		; and make it FUN * 2			;004
+	CLR	-(SP)		;Need some work space			;004
+	CLR	-(SP)		;Assume logged-out quota will be used	;004
+	MOVB	@#SYSUNT,@#FIPUNT ;Get the FUN of the system disk	;004
+	BIT	#UC.PRI,UNTCNT(R3) ;Private disk (original FUN)?	;004
+	BEQ	20$		;No public?				;004
+	CALLX	SERQTB		;Get the QTB entry on the system disk	;004
+	BCS	10$		;None, then we use the logout quotas	;004
+	BIT	#^C<UC.CNT>,QTBOPN(R5) ;Any logged-in user's?		;004
+	BEQ	10$		;No, then logged-out quotas it is	;004
+	DEC	(SP)		;Yes, then we'll use the logged-in quotas ;004
+10$:	MOV	4(SP),@#FIPUNT	;Restore the original FIPUNT and FIPGEN	;004
+	MAP	FIP,DATA	;Remap FIP				;004
+	CALLX	SERQTB		; and get the QTB entry on that unit	;004
+	BCS	50$		;Should always be there			;004
+	CALL	GETQTA		;Go get the right quotas		;004
+	ADD	QTBCRL(R5),R1	;Add the current usage to the ext. amt.	;004
+	ADCB	R2		;Take care of the overflow		;004
+	MOVB	QTBCRM(R5),R4	;Now get the MSB part			;004
+	ADD	R4,R2		; and add that in			;004
+	BR	70$		;Go check the quota			;004
+
+GLOBAL	<FIPUNT,SYSUNT,UNTCNT>						;004
+
+20$:	CALLX	SERQTB		;Get the QTB on the system disk		;004
+	BCS	50$		;Should always be there in this case	;004
+	BIT	#^C<UC.CNT>,QTBOPN(R5) ;Any logged in user's?		;004
+	BEQ	30$		;No, then we'll use the logged-out quota ;004
+	DEC	(SP)		;Yes, then logged-in quotas it is	;004
+30$:	CALL	GETQTA		;Get the quotas				;004
+40$:	ADD	QTBCRL(R5),R1	;Add the current usage to the ext. amt.	;004
+	ADCB	R2		;Take care of the overflow		;004
+	MOVB	QTBCRM(R5),R4	;Now get the MSB part			;004
+	ADD	R4,R2		; and add that in			;004
+	MAP	FIP,DATA	;Remap FIP				;004
+	MOV	R2,-(SP)	;Save R2 from NXTUN2			;004
+	MOV	#UC.MNT!UC.PRI!UC.NFS,R2 ;Set up mask for public disks	;011
+	CALLX	NXTUN2,R1,	;Get the next public disk 		;011
+	 BR	60$		;None, then go check the quota		;004
+	MOV	(SP)+,R2	;Otherwise, restore R2			;004
+	CALLX	SERQTB		; and get the QTB for that unit		;004
+	BCC	40$		;Found it, go add in the usage		;004
+50$:	CRASH			;Not there, die				;004
+
+60$:	MOV	(SP)+,R2	;Restore R2				;004
+70$:	CMP	R2,2(SP)	;Usage MSB = quota MSB?			;004
+	BNE	75$		;No, go check for greater than		;010
+	CMP	R1,(SP)		;Usage LSB > quota LSB?			;004
+75$:	BHI	90$		;Yes, then over quota			;010
+80$:	TST	(PC)+		;Indicate not over quota		;004
+	;CLC
+90$:	SEC			;Indicate over quota			;004
+	BIT	(SP)+,(SP)+	;Junk the quota values (C not changed)	;004
+100$:	MAP	FIP,DATA	;Make sure FIP is mapped		;004
+	MOV	(SP)+,@#FIPUNT	;Restore the original FIPUNT and FIPGEN	;004
+	RETURN			; and return to caller			;004
+
+GLOBAL	<FIPUNT>							;004
+
+;+									;010
+; GETQTA - Get the correct disk quota	(called from CHKQTA)		;010
+;									;010
+;	R5 -> Disk Quota Blockette in FIBUF				;010
+;	SP -> (0) Return address					;010
+;	      (2) Quota flag						;010
+;			0 = Return logged-out quotas			;010
+;		     <> 0 = Return logged-in quotas			;010
+;	      (4) Place to return the MSB portion of the quota		;010
+;									;010
+;	CALL	GETQTA							;010
+;									;010
+;	R5 -> Disk Quota Blockette in FIBUF				;010
+;	SP -> (0) Return address					;010
+;	      (2) Quota LSB portion					;010
+;	      (4) Quota MSB portion					;010
+;-									;010
+
+GETQTA:	TST	2(SP)		;Using logged-in quotas?		;004
+	BNE	120$		;Yes, then go get them			;004
+	MOV	QTBLOL(R5),2(SP) ;No, get the logged-out quota LSB	;004
+	MOVB	QTBLOM(R5),4(SP) ; and MSB part too			;004
+	BR	130$		;Clean up and return			;004
+
+120$:	MOV	QTBLIL(R5),2(SP);Get the logged-in quota LSB		;004
+	MOVB	QTBLIM(R5),4(SP) ; and MSB also				;004
+130$:	RETURN			;Return to our caller			;004
+
+;+									;004
+; ADDUSG - Add the usage to the QTB entry				;004
+;									;004
+;	R0 -> PPN							;004
+;	R1 =  Extend amount LSB						;004
+;	R2 =  Extend amount MSB						;004
+;	R3 =  File cluster size						;004
+;									;004
+;	CALL	ADDUSG							;004
+;									;004
+;	Caller should save all registers before calling			;004
+;-
+
+ADDUSG::DEC	R3		;Make the cluster size a mask		;004
+	ADD	R3,R1		; and add it to the ext. amt. LSB	;004
+	ADCB	R2		;Add the possible overflow to the MSB	;004
+	BIC	R3,R1		;Now finish the rounding up		;004
+	CALLX	SERQTB		;Get the QTB entry			;004
+	BCC	10$		;Found it, now go update usage		;004
+	CRASH			;Not there, oops!			;004
+
+10$:	MOVB	QTBCRM(R5),R3	;Get the MSB of usage in a register	;004
+	ADD	R1,QTBCRL(R5)	;Add in the extend amount LSB		;004
+	ADCB	R3		; and the possible overflow		;004
+	ADD	R2,R3		;Now add the ext. amt. MSB		;004
+	MOVB	R3,QTBCRM(R5)	;Update the MSB in the QTB entry	;004
+	BISB	#Q.UPDC,QTBFLG(R5) ;Indicate that disk needs updating	;004
+	MAP	FIP,DATA	;Make sure FIP is mapped		;004
+	RETURN			; and return to our caller		;004
+
+
+;+									;004
+; SUBUSG - Subtract file size from usage				;004
+;									;004
+;	R0 -> PPN							;004
+;	R1 =  File Cluster Size						;004
+;	R3 =  File Size LSB						;004
+;	R4 =  File Size MSB						;004
+;	FIBUF has any block of the directory				;004
+;									;004
+;	CALL	SUBUSG							;004
+;									;004
+;	All registers saved						;004
+;									;004
+;	The contents of FIBUF must be restored on exit. The rest of	;004
+;	the delete code in CTL requires that the current directory	;004
+;	be there.							;004
+;-									;004
+
+	TMPORG	OPNDSP,0
+	.WORD	SUBUSG
+	UNORG
+
+SUBUSG:	REGSCR			;Save all current register values	;004
+	MOV	@#FIBFBN+F.FBNL,-(SP) ;Save the current FIBUF contents LSB ;004
+	MOV	@#FIBFBN,-(SP)	; along with the FUN and MSB		;004
+	DEC	R1		;Make the cluster size a mask		;004
+	ADD	R1,R3		; and add it to the ext. amt. LSB	;004
+	ADCB	R4		;Add the possible overflow to the MSB	;004
+	BIC	R1,R3		;Now round down				;004
+	CALLX	SERQTB		;Get the QTB entry			;004
+	BCS	10$		;None, have to go to disk		;004
+	BISB	#Q.UPDC,QTBFLG(R5) ;Found it, set the update flag	;004
+	BR	20$		; and go update the usage		;004
+
+10$:	MOV	R3,-(SP)	;Save the file size LSB from SDM	;004
+	CALLX	SDM		;Get this accounts name entry		;004
+	BCS	30$		;Not found				;004
+	MOV	#AA.QUO,R0	;We want the disk quota blockette	;004
+	CALLX	SAA		;Go read it				;004
+	BCS	30$		;Should have been there			;004
+	MOV	(SP)+,R3	;Restore the file size LSB		;004
+	MARK	FIBUF		;Make sure updated usage is written out	;004
+20$:	MOVB	AQ.CRM(R5),R1	;Get the MSB of usage in a register	;004
+.ASSUME	AQ.CRM EQ QTBCRM
+	SUB	R3,QTBCRL(R5)	;Subtract file size LSB from the usage	;004
+.ASSUME	AQ.CRL EQ QTBCRL
+	SBCB	R1		; and account for possible borrow	;004
+	SUB	R4,R1		;Subtract file size MSB from the usage	;004
+	MOVB	R1,QTBCRM(R5)	;Update the MSB in the QTB entry	;004
+	MAP	FIP,DATA	;Make sure FIP is mapped		;004
+	MOV	(SP)+,R3	;Get the saved FUN and FBN MSB		;004
+	MOV	(SP)+,R2	;Get the saved FBN LSB			;004
+	CALLRX	READ		;Restore the previous contents if needed ;011
+	;RETURN			; and return to our caller		;011
+
+30$:	ERROR	BADDIR		;Directory is corrupt			;004
+
+GLOBAL	<FIBFBN,FIBUF>							;004
+
+.END
+

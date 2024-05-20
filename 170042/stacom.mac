@@ -1,0 +1,302 @@
+.INCLUDE /CMN:COMMON/							;003
+.INCLUDE /CMN:KERNEL/							;003
+.INCLUDE /INIT:INIPFX/							;003
+.INCLUDE /INIT:FLC/							;003
+.INCLUDE /CMN:CFGDEF/							;004
+TITLE	STACOM,<RSTS/E INIT - START COMMON>,0A,10-MAY-91,RVR/WJS/VAM/PJH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for STACOM
+
+;+
+;
+;			[RSTS V9.0]
+;  000	WJS  22-Aug-83	CREATION - COPIED FROM V8.0-06
+;
+;			[RSTS V9.1]
+;  001  VAM  11-Sep-85	Add NOSTAR global
+;
+;			[RSTS V9.4]
+;  002	PJH  03-Mar-87	Move PARLOC to stop INIDEF bug (MEMTBL)
+;
+;			[RSTS V9.6]
+;  003  KPH  13-Oct-87	Add .INCLUDEs
+;			Add support for large jamming
+;			Add configuration file reader
+;
+;			[RSTS V9.7]
+;  004  VAM  30-Jan-89	Reorganize configuration file reader.
+;			Add configuration file writer.
+;
+;			[RSTS V10.0]
+;  005  VAM  27-Jun-90	Put new file ID in CONFIG.SYS when writing it out.
+;-
+
+
+.SBTTL	Order the CSECT's
+
+	DEFORG	STACOM		; START's communication area
+	DEFORG	JAMCOD		; Jam List maintenance code
+
+.SBTTL	STACOM - Communication area for START processing
+
+	ORG	STACOM		; START communications area
+
+SWPDCN::.WORD	0		; Device cluster number of SWAP.SYS
+SWPSIZ::.WORD	0		; Size of SWAP.SYS in blocks
+ECC70::	.WORD	0		;  =2 if any 11/70 ECC memory
+PARUNI::.WORD	0		;  <>0 if any UNIBUS parity
+MAXMEM::.WORD	0		; First K of non-existent memory
+CRSDCN::.WORD	0		; Starting DCN of crash file
+ODTSIZ::.WORD	0		; Size in bytes of Monitor ODT or 0 if absent
+LDRMMU::.WORD	0		; MMU address of final loader and its data
+MONBLK::.WORD	0		; Number of blocks of Monitor to load
+NOSTAR::.WORD	0		; Flag set by One-Shot to inhibit startup.
+PARLOC::.BLKW0	16.		; 1 word/possible CSR containing CSR address
+PARRNG::.BLKW0	16.		; 1 word/CSR - range (+100000 if no address)
+JAMOFF:	.WORD	0		; Current offset in extended jamming area ;003
+				; Bit 0 = 0 for table jamming		;003
+				; Bit 0 = 1 for pair jamming		;003
+JAMSIZ	==:	8192.*2		; Jam list size is 8K words		;003
+
+	FLC	GBL
+
+.SBTTL	Manage the list of jam pointers and values
+
+;+
+;	As START gathers information on what changes are required
+;	to the Monitor tables, it builds a 'jam list'.
+;
+;	START builds the table in SATBUF (at offset JAMLST, just above
+;	the DS table), and we move it into extended memory as needed
+;	(using the routine MOVJAM).
+;
+;	There can be two types of entries in the list, multi-word
+;	and paired:
+;
+;	Multiword entries consist of a word count (n),
+;		a destination address, and n words to put there.
+;	Paired entries consist of a negative pair count (n),
+;		followed by n word pairs (contents, destination address).
+;
+;	The pair count is maintained by MOVJAM.
+;-
+
+	ORG	JAMCOD
+
+.SBTTL	JAMBY2 - Prepare to generate paired jam list entries
+
+;+
+;	CALLX	JAMBY2
+;	  .
+;	  .
+;	generate pair entries
+;
+;-
+
+JAMBY2::CMP	R5,#SATBUF+<14.*1000> ;Is jam list end getting close?	;003
+	BHIS	10$		;Yes, move the jam list			;003
+	BIT	#1,JAMOFF	;No, are we generating pairs now?	;003
+	BNE	20$		;Yes, all set				;003
+10$:	CALL	MOVJAM		;Move what we've jammed so far		;003
+	CLR	(R5)+		;Preset a zero as the pair count	;003
+	INC	JAMOFF		;Indicate that we're doing pairs	;003
+20$:	RETURN			;And we're done				;003
+
+.SBTTL	JAMBYN - Prepare to generate multi-word jam list entries
+
+;+
+;
+;	R5 -> Just past last thing in jam list
+;
+;	CALLX	JAMBYN
+;
+;	R5 -> Base of jam list
+;
+;	Paired list is closed out if necessary
+;-
+
+JAMBYN::.CALLR	MOVJAM		;Nothing to do but move the jam list	;003
+
+.SBTTL	MOVJAM	Move the jam list to extended memory
+
+;+
+; MOVJAM - Move the jam list to extended memory
+;
+;	R5 -> Just past last thing entered in jam list
+;
+;	CALL	MOVJAM
+;
+;	R5 -> Base of jam list
+;
+; This routine sets up the count for paired jamming, and then moves
+; the jam list to extended memory.
+;-
+
+MOVJAM:	CMP	R5,#SATBUF+<15.*1000> ;Have we used too much of jam list? ;003
+	BHIS	40$		;Yes, give a fatal error		;003
+	REGSCR			;Save all registers			;003
+	MOV	#JAMLST,R0	;Point to start of jam list		;003
+	BIT	#1,JAMOFF	;Jamming pairs?				;003
+	BEQ	10$		;No, nothing to close off		;003
+	DEC	JAMOFF 		;Yes, clear the flag			;003
+	MOV	R5,R4		;Copy current jam list pointer		;003
+	TST	-(R4)		;Account for count at start of list	;003
+	SUB	R0,R4 		;Compute # of pairs *4			;003
+	BEQ	30$		;None, reset jam list pointer and exit	;003
+	ASR	R4		;Now get the number of pairs times two	;003
+	ASR	R4		;Now get the actual number		;003
+	SUB	R4,(R0)		;And store it at the jam list base	;003
+10$:	MOV	JAMOFF,R3	;Get current mapping offset 		;003
+	CLR	R2		;And clear MSB for divide		;003
+	DIV	#100,R2		;Now get the MMU offset and remainder	;003
+	ADD	JAMMMU,R2	;Now get the value for PAR6		;003
+	ADD	#140000,R3	;And the virtual address		;003
+	CALLX	KPARSU		;Set up null mapping			;003
+	MOV	#1,@#MMUSR0	;Now enable memory management		;003
+	MOV	R2,@#KISAR6	;Map the extended jam list		;003
+20$:	CMP	R0,R5		;Moved the entire jam list yet?		;003
+	BEQ	30$		;Yes, go reset pointer and exit		;003
+	MOV	(R0)+,(R3)+	;Move a word of the jam list		;003
+	ADD	#2,JAMOFF	;Update the offset for later		;003
+	CMP	JAMOFF,#JAMSIZ	;Jamming too much?			;003
+	BLO	20$		;No, loop				;003
+	ERF	<"Extended memory jam list overflow">,INLINE		;003
+
+30$:	MOV	#JAMLST,TOS.R5(SP) ;Reset jam list pointer		;003
+	CLR	@#MMUSR0	;Turn off memory management		;003
+	RETURN			;And exit				;003
+
+40$:	ERF	<"SATBUF jam list overflow">,INLINE                     ;003
+
+GLOBAL	<SATBUF,JAMLST,KTUSR3>						;003
+
+.SBTTL	JAMINI - Initialize for jam list
+
+JAMINI::MOV	#JAMLST,R5	; Set up jam list start pointer		;003
+	CLR	JAMOFF		; Set initial offset			;003
+	RETURN
+
+GLOBAL	<JAMLST>							;003
+
+.SBTTL	JAMEND	End the jam list
+
+JAMEND::CALL	MOVJAM		; Move what we have so far		;003
+	CLR	(R5)+		; Write out the final word		;003
+	CALLR	MOVJAM		; And exit moving the final word	;003
+
+.SBTTL	JAMNWD - Add an n-word table to the jam list
+
+;+
+;	CALLX	JAMNWD,R4,<COUNT,ADDRESS OF DEST. ADDRESS,PTR TO TABLE>
+;-
+                                                                   
+JAMNWD::MOV	R0,-(SP)	; Save R0
+	MOV	R1,-(SP)
+	CALL	JAMBYN		; Be sure we are in table mode
+	MOV	(R4)+,R0	; Get count
+	MOV	R0,(R5)+	; Add to jam list
+	MOV	@(R4)+,(R5)+	; Add address to jam list
+	MOV	(R4)+,R1	; Point to table                            
+10$:	MOV	(R1)+,(R5)+	;  and move it in
+	SOB	R0,10$
+	MOV	(SP)+,R1	; Restore registers
+	MOV	(SP)+,R0
+	RETURN	R4
+
+.SBTTL	Configuration File Routines
+
+.ENABL	LSB								;004+
+;+
+; WRITCF - Write contents of CFGBUF into [0,1]CONFIG.SYS
+; READCF - Read contents of [0,1]CONFIG.SYS into CFGBUF
+;
+; No setup is necessary.
+;
+;	CALL	WRITCF	or
+;	CALL	READCF
+;
+; For WRITCF:
+;
+;	C=0	Everything OK
+;	C=1	[0,1]CONFIG.SYS not found or error occurred while writing
+;
+;	Bytes CFG$VE (version number) and CFG$RE (revision level) are
+;	updated to reflect current version/revision.
+;
+; For READCF:
+;
+;	C is meaningless.
+;	If [0,1]CONFIG.SYS not found or error occurred while reading, or
+;	the version number in CONFIG.SYS didn't match the current version,
+;	then all locations in CFGBUF are zeroed.
+;
+; All registers preserved.
+;-									;004-
+
+WRITCF::PUSH	<R0,R1>		;Save registers, as promised.		;004
+	MOV	#<<400*CFG.RE>+CFG.VE>,CFGBUF+CFG$VE			;005
+				;Say it's the latest version.		;005
+.ASSUME	<CFG$VE & 1>  EQ  0	;CFG$VE must be on word boundary...	;005
+.ASSUME	CFG$RE	EQ  CFG$VE+1	; ...and CFG$RE must be high byte.	;005
+	MOV	#WRITE.,DISPAD	;Set up to write CFGBUF into CONFIG.SYS	;004
+	CALL	50$		;And, do it!				;004
+	BR	40$		;Go back (C set/cleared by WRIT.X).	;004
+
+READCF::PUSH	<R0,R1>		;Save registers, as promised.		;004
+	MOV	#READ.,DISPAD	;Set up to read CONFIG.SYS into CFGBUF	;004
+	CALL	50$		;And, do it!				;004
+	BCS	20$		;Something bad happened - clear CFGBUF.	;004
+	CMPB	CFGBUF+CFG$VE,#CFG.VE					;004
+				;Current version?			;004
+	BEQ	40$		;Yes, all set				;004
+20$:	MOV	#CFGBUF,R0	;Point to CFGBUF.			;004
+30$:	CLR	(R0)+		;Clear out a word			;004
+	CMP	R0,#CFGBUF+CFGSIZ;End of the buffer yet?		;004
+	BNE	30$		;No, loop				;004
+40$:	POP	<R1,R0>		;Get registers back (C unaffected).
+	RETURN			;And, go back.				;004
+
+;+
+;	This is the local read/write routine.  The address of the entity
+;	to be called (READ. or WRITE.) is put into DISPAD by READCF
+;	or WRITCF above.
+;-
+
+50$:	CALLX	LOK5..,R5	;Set up to look up			;004
+	 .RAD50	/CONFIG/	;The CONFIG.SYS file			;004
+	 .RAD50	/SYS/		; ...					;004
+	BCS	60$		;Didn't find it!!  Oh well...		;004
+	MOV	#FC...,R1	;R1 -> FCB for CONFIG.SYS		;004
+	CLR	FCNVB(R1)	;Ensure we start with block zero	;004
+	MOV	#CFGSIZ/2,R0	;Set up byte count for file		;004
+	CALL	@DISPAD,R5	;Call the correct routine.		;004
+	 .WORD	CFGBUF		;It goes into/comes from CFGBUF.	;004
+60$:	RETURN			;Go back (with C set/cleared).		;004
+
+DISPAD:	.WORD	0		;A general-purpose word (usually used	;004
+				; as a dispatch address).		;004
+
+.DSABL	LSB								;004
+
+GLOBAL	<FILDSQ,FC...,CFGBUF,WRITE.,READ.>				;004
+
+.END

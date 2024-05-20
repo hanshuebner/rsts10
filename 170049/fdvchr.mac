@@ -1,0 +1,2110 @@
+	.SBTTL	FDVCHR	- FORM DRIVER CHARACTER PROCESSING
+	.SBTTL	
+	.SBTTL	FDV SYSTEM INDEPENDENT CODE FOR CHARACTER PROCESSING
+	.SBTTL
+	.SBTTL
+
+;
+;
+;		      COPYRIGHT (C) 1987 BY
+;		DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+;
+;
+; MODULE:	FDVCHR	- Form Driver Character Processing
+;		          (System Independent Module)
+;
+; VERSION:	V2.1
+;
+; AUTHOR:	Cheryl Vedoe
+;
+; DATE:		12-November-81
+;
+; MODIFIED BY:
+;
+;	Cheryl Vedoe	06-March-82	Update CURLFT routine so that it
+;					  is easier to understand
+;	Fred Knight	28-Feb-83	Source clear patches from V7.2
+;		001
+;
+;	Paul Morgan	10-Jul-87	Moved escape-sequence parsing in from
+;					the RSTS terminal service.  Also added
+;					8-bit and VT200/VT300 support.
+;
+
+	.SBTTL	FIXDEC	- Process Input for Fixed Decimal Field
+
+;++
+; FIXDEC
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine handles input for a fixed decimal field. In
+;	order to process a fixed decimal field, the Form Driver
+;	considers the portion of the field to the left of the decimal
+;	point a right justified field with whatever attributes were
+;	defined for the field as a whole and the portion to the right
+;	of the decimal point a left justified, zero filled field. A
+;	dummy field descriptor and line/col entry are used to process
+;	fixed decimal fields.
+;
+;	The cursor is initially positioned on the decimal point (the
+;	hanging cursor position for the left portion fo the field) to
+;	prompt for input. Input is accepted as for a right justified
+;	field until a decimal point is entered causing the cursor to
+;	move to the right portion of the field to accept input as in
+;	a left justified field.
+;
+;	Cursor left and cursor right allow the operator to move
+;	around in the entire field. 
+;
+;	In deleting characters, the fixed decimal field is treated as the
+;	two separate fields described above, except that the delete key
+;	will cause the cursor to move from the right portion of the field
+;	to the left and continue deleting. Delete character entered when
+;	the cursor is to the right of the decimal point causes the cursor
+;	to be positioned on the decimal point, logically deleting the
+;	character though nothing is actually erased. Further deletes
+;	remove characters from the left portion of the fixed decimal field.
+;
+;	The input mode in a fixed decimal field cannot be altered by the
+;	terminal operator.
+;
+; CALLING SEQUENCE:
+;
+;	JMP	FIXDEC
+;
+;	This routine branches to TRMINP when input in the fixed decimal
+;	field is terminated.
+;
+; INPUT:
+;
+;	R0 =  Address of routine to call to process input
+;	R3 -> Line/col entry for field
+;	R4 -> Field desc
+;	R5 -> Data area
+;--
+
+	.ENABL	LSB
+FIXDEC:
+	MOV	I$FXPT(R5),R3		; Pointer to dummy line/col entry
+	MOV	L$DESC(R3),R4		; Pointer to field desc	
+
+; Echo character
+
+	CMP	#ECHO,R0		; Echo char?
+	BNE	10$			; Br if not
+	BIT	#D2$RTJ,(R4)		; (D$ATT2) In left portion of field?
+	BEQ	70$			; If not, process input
+	CMP	I$ROFF(R5),D$RLEN(R4)	; Else hanging cursor position?
+	BNE	70$			; If not, process input
+	CMPB	#'.,R2			; Else check for . entered
+	BEQ	50$			; If so, move to right portion
+	BR	70$			; Else process input
+
+; Delete field
+
+10$:	CMP	#DELFLD,R0		; Delete field?
+	BNE	20$			; Br if not
+	MOV	I$LPTR(R5),R3		; Get line/col entry for entire field
+	MOV	L$DESC(R3),R4		; Get field desc pointer
+	CALL	(R0)			; Delete whole field
+	CALL	INITFX			; Start over in field
+	BR	80$			; Position cursor and wait for input
+
+; Cursor left and delete character
+
+20$:	CMP	#DELCHR,R0		; Delete char?
+	BEQ	30$			; Br if so
+	CMP	#CURLFT,R0		; Cursor left?
+	BNE	40$			; Br if not
+30$:	BIT	#D2$RTJ,(R4)		; (D$ATT2) In right portion of field?
+	BNE	70$			; If so, process input
+	TST	I$ROFF(R5)		; Else at start of field?
+	BNE	70$			; If not, process input
+	CALL	FXDCL			; Else move to left portion of field
+	BR	80$			; Position cursor and wait for input
+
+; Cursor right
+
+40$:	CMP	#CURGHT,R0		; Cursor right?
+	BNE	60$			; Br if not
+	BIT	#D2$RTJ,(R4)		; (D$ATT2) In left portion of field?
+	BEQ	70$			; If not, process input
+	CMP	I$ROFF(R5),D$RLEN(R4)	; Else hanging cursor position?
+	BNE	70$			; If not, process input
+50$:	CALL	FXDCR			; Else move to right portion of field
+	BR	80$			; Position cursor and wait for input
+
+; All other input
+
+60$:	MOV	I$LPTR(R5),R3		; Get line/col entry for entire field
+	MOV	L$DESC(R3),R4		; Get field desc pointer
+70$:	CALL	(R0)			; Process input
+	TST	R2			; Field terminator?
+	BGE	90$			; If not wait for input
+	JMP	TRMINP			; Else field done
+
+80$:	CALL	INIPOS			; Position cursor for input
+90$:	RETURN				; Wait for input
+	.DSABL	LSB
+
+	.SBTTL	FXDCL	- Set Up Left Portion of Fixed Decimal Field
+
+;++
+; FXDCL
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine sets up the dummy field descriptor and line/col
+;	entry to process input in the left portion of the fixed decimal
+;	field. This portion of the field is processed as a right
+;	justified, numeric field. The video attributes and clear 
+;	character specified for the fixed decimal field are used for
+;	this portion of the field. Other attributes which are not 
+;	applicable are ignored.
+;
+;	This routine assumes that the dummy data structures are currently
+;	set up for the right portion of the field (that following the decimal
+;	point). This is always the case when this routine is called. As
+;	a result, the video attributes, attributes word 1 (indicating a
+;	numeric field), and the line/col entry pointer are not initialized
+;	in the dummy field descriptor and the field descriptor pointer in
+;	the line/col entry is not initialized.
+;
+; INPUT:
+;
+;	R3 -> Dummy line/col entry for fixed decimal field
+;	R4 -> Dummy field desc for fixed decimal field
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	R3, R4, R5 preserved
+;--
+
+	.ENABL	LSB
+FXDCL:
+	MOV	I$LPTR(R5),R1		; Get line/col entry for entire field
+	MOV	L$DESC(R1),R2		; Get field desc for entire field
+	MOV	(R2),(R4)		; (D$ATT2) Attributes for field
+	BIS	#D2$RTJ,(R4)		; (D$ATT2) Make right justified field
+	BIC	#<D2$REQ!D2$FUL!D2$TAB>,(R4) ; (D$ATT2) Ignore some attributes
+	MOV	(R1),(R3)		; Line/col value for field
+	MOV	L$RESP(R1),L$RESP(R3)	; Response buffer pointer
+	MOV	I$FXLN(R5),D$RLEN(R4)	; Length of left portion of field
+	RETURN
+	.DSABL	LSB
+
+	.SBTTL	FXDCR	- Set Up Right Portion of Fixed Decimal Field
+
+;++
+; FXDCR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine sets up the dummy field descriptor and line/col 
+;	entry to process input in the right portion of the fixed
+;	decimal field. This portion of the field is processed as a left
+;	justified, numeric field. The video attributes for the whole
+;	field are used. The clear character is always a zero. The fill
+;	character for this portion of the field is always a zero. If the
+;	fixed decimal field was assigned the autotab attribute, it is
+;	assigned to this portion of the field. Other attributes which
+;	are not applicable are ignored.
+;
+;	This routine assumes that the dummy data structures are currently
+;	set up for the left portion of the field (that preceding the decimal
+;	point). This is always the case when this routine is called. As
+;	a result, the video attributes, attributes word 1 (indicating a
+;	numeric field), and the line/col entry pointer are not initialized
+;	in the dummy field descriptor and the field descriptor pointer in
+;	the line/col entry is not initialized.
+;
+; INPUT:
+;
+;	R3 -> Dummy ine/col entry for fixed decimal field
+;	R4 -> Dummy field desc for fixed decimal field
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	R3, R4, R5 preserved
+;--
+
+	.ENABL	LSB
+FXDCR:
+	MOV	I$LPTR(R5),R1		; Get line/col entry for entire field
+	MOV	L$DESC(R1),R2		; Get field desc for entire field
+	MOVB	#'0,D$CLRC(R4)		; Clear character is 0
+	MOV	(R2),(R4)		; (D$ATT2) Use attributes for field
+	BIS	#D2$ZFL,(R4)		; (D$ATT2) Make zero filled field
+	BIC	#<D2$RTJ!D2$REQ!D2$FUL>,(R4) ; (D$ATT2) Ignore some attributes
+	MOV	D$RLEN(R4),R0		; Get length of left portion of field
+	MOV	D$RLEN(R2),D$RLEN(R4)	; Response length for right portion =
+	SUB	R0,D$RLEN(R4)		;   total - length of left portion 
+	ADD	R0,L$RESP(R3)		; Get response buffer pointer
+	INC	R0			; Offset to column for right portion 
+	SWAB	R0			; In high byte
+	ADD	R0,(R3)			; Line/col value for right portion 
+	RETURN
+	.DSABL	LSB
+
+	.SBTTL	INITFX	- Initialize Fixed Decimal Field for Input
+
+;++
+; INITFX
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine initializes a fixed decimal field for input.
+;	The portions of the field on either side of the decimal 
+;	point in a fixed decimal field are in general handled as
+;	separate fields. Input is accepted in the left portion as
+;	for a right justified field; input is accepted in the
+;	right portion as for a left justified field. The cursor
+;	is initially positioned on the decimal point (the hanging
+;	cursor position for the left portion of the field).
+;
+; INPUT:
+;
+;	R3 -> Line/col entry for field
+;	R4 -> Field desc
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	R3 -> Dummy line/col entry for fixed decimal field
+;	R4 -> Dummy field desc for fixed decimal field
+;
+;	All other registers preserved
+;--
+
+	.ENABL	LSB
+INITFX:
+	$SAV50				; Save all registers
+	FXDLEN				; Get length of left portion of field
+					;   in R0
+	MOV	R0,I$FXLN(R5)		; Save length of left portion of field
+	MOV	R5,R2			; Pointer to data area
+	ADD	#I$FXDS,R2		; Pointer to dummy field desc
+	MOV	D$VATT(R4),D$VATT(R2)	; Use video attr, clear char for field
+	MOV	(R4),(R2)		; (D$ATT2) Attributes for field
+	BIS	#D2$RTJ,(R2)		; (D$ATT2) Make right justified field
+	BIC	#<D2$REQ!D2$FUL!D2$TAB>,(R2) ; (D$ATT2) Ignore some attributes
+	MOV	#D1$NUM,D$ATT1(R2)	; Numeric field
+	MOV	R0,D$RLEN(R2)		; Move to field desc
+	CLRB	D$PLEN(R2)		; No picture in field desc
+	MOV	R5,R1			; Get pointer to line/col entry
+	ADD	#I$FXLC,R1		; Got it
+	MOV	R1,I$FXPT(R5)		; Save it in data area
+	MOV	R1,D$LNCL(R2)		; Move it to field desc
+
+	MOV	(R3),(R1)		; Initialize line/col value
+	MOV	R2,L$DESC(R1)		; Initialize field desc pointer
+	MOV	L$RESP(R3),L$RESP(R1)	; Initialize response buffer pointer
+	MOV	R2,TOS.R4(SP)		; Return new field desc pointer
+	MOV	R1,TOS.R3(SP)		; Return new line/col entry pointer
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	SCRLAR	- Define a Scrolled Area 
+
+;++
+; SCRLAR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine defines a scrolled area to the VT100 terminal.
+;
+; INPUT:
+;
+;	R3 =  First line of scrolled area
+;	R4 =  Last line of scrolled area
+;
+; OUTPUT:
+;
+;	R2 modified
+;
+;	All other registers preserved
+;--
+
+	.ENABL	LSB
+SCRLAR:
+	ESCSEQ	CTLSEQ			; Control seqence introducer
+	MOV	R3,R2			; First line of scrolled area
+	OUTPRM				; Convert to ASCII and output
+	MOVB	#';,R2			; Separator
+	STRBYT				; Output it
+	MOV	R4,R2			; Last line of scrolled area
+	OUTPRM				; Convert to ASCII and output
+	MOVB	#'r,R2			; Terminator
+	STRBYT				; Output it
+	CLR	I$CURP(R5)		; Clear saved cursor position
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	Escape Sequences
+
+;
+; VT100 Escape Sequences
+;
+
+INI100:	.BYTE	ESC,'<			; Set ANSI mode
+	.BYTE	ESC,'),'0,NUL		; Select graphics for G1 char set
+
+CLN100:	.BYTE	ESC,'7			; Save cursor			;001
+	.BYTE	ESC,'[,'r		; Scrolling region to entire screen
+	.BYTE	ESC,'8			; Restore cursor		;001
+	.BYTE	ESC,'#,'5		; Do a single width line
+	.BYTE	ESC,'[,'K		; Now erase this line
+	.BYTE	ESC,'[,'B,NUL		; And move down 1 line
+
+CSC100:	.BYTE	ESC,'[,'H,ESC,'[,'J,NUL	; Clear entire screen
+
+LST100:	
+	.BYTE	ESC,'[,'2,'4,';,'1,'H	; Move to bottom of screen
+	.BYTE	CR,ESC,'[,'J,NUL	; Clear to end of line
+					; (ESC,[,J restores single width)
+
+END100:
+	.BYTE	ESC,'[,'2,'4,';,'1,'3,'2,'H,NUL ; Move to bottom right 
+						;   of screen
+
+CTL100:
+DIR100:
+	.BYTE	ESC,'[,NUL		; Control sequence introducer
+
+SIZ80:	.BYTE	ESC,'[,'?,'3,'l,NUL	; Set 80 column mode
+
+SIZ132:	.BYTE	ESC,'[,'?,'3,'h,NUL	; Set 132 column mode
+
+RVS100:	.BYTE	ESC,'[,'?,'5,'h,NUL	; Set screen black on white
+
+NRM100:	.BYTE	ESC,'[,'?,'5,'l,NUL	; Set screen white on black
+
+DBW100:	.BYTE	ESC,'#,'6,NUL		; Double-wide single line
+
+DWD100:	.BYTE	ESC,'#,'3,NUL		; Double-wide double line top
+
+DWB100:	.BYTE	ESC,'#,'5,NUL		; Double-wide double line bottom
+
+
+
+SFW100:	.BYTE	ESC,'D,NUL		; Scroll forward (up)
+
+SBW100:	.BYTE	ESC,'M,NUL		; Scroll backward (down)
+
+SIZ100:
+	.BYTE	ESC,'[,'H		; Home
+	.BYTE	ESC,'[,'2,'4,'B		; Down
+	.BYTE	ESC,'[,'1,'3,'2,'C 	; Move right
+	.BYTE	ESC,'[,'6,'n		; Report cursor position
+	.BYTE	NUL
+
+ATT100:	.BYTE	ESC,'[,'c,NUL		; Get device attributes
+
+;
+; VT52 Escape Sequences
+;
+
+INI52:	.BYTE	CR,ESC,'[,'?,'2,'l	; Set VT52 mode for VT100
+	.BYTE	CR,SPC,SPC,SPC,CR	; Erase those characters on VT52
+	.BYTE	ESC,'\,NUL		; Out of hold screen mode for VT52
+
+CLN52:	.BYTE	ESC,'K,ESC,'B,NUL	; Clear line and move to next
+
+CSC52:	.BYTE	ESC,'H,ESC,'J,NUL	; Clear entire screen
+
+LST52:	.BYTE	ESC,'Y,67,40,ESC,'K,NUL	; Clear last line
+
+END52:
+	.BYTE	ESC,'Y,67,157,NUL	; Move to lower right corner of screen
+
+DIR52:	.BYTE	ESC,'Y,NUL		; Direct cursor addressing
+	.EVEN
+
+;
+; VT100 escape sequence list
+;
+
+ESC100:	.WORD	INI100			; Initialize terminal
+	.WORD	CLN100			; Clear a line
+	.WORD	CSC100			; Clear the entire screen
+	.WORD	LST100			; Move to last line and clear it
+	.WORD	END100			; Move to lower right corner
+	.WORD	DIR100			; Direct cursor addressing introducer
+	.WORD	CTL100			; Control sequence introducer
+	.WORD	SIZ80			; Set screen to 80 columns
+	.WORD	SIZ132			; Set screen to 132 columns
+	.WORD	RVS100			; Set screen to black on white
+	.WORD	NRM100			; Set screen to white on black
+	.WORD	DBW100			; double-wide, single line
+	.WORD	DWD100			; double-wide, double line top
+	.WORD	DWB100			; double-wide, double line bottom
+	.WORD	SFW100			; Scroll forward (up)
+	.WORD	SBW100			; Scroll backward (down)
+	.WORD	SIZ100			; Size terminal screen
+	.WORD	ATT100			; Get terminal attributes
+
+
+;
+; VT52 escape sequence list
+;
+
+ESC52:	.WORD	INI52			; Initialize terminal
+	.WORD	CLN52			; Clear a line
+	.WORD	CSC52			; Clear the entire screen
+	.WORD	LST52			; Move to last line and clear it
+	.WORD	END52			; Move to lower right corner
+	.WORD	DIR52			; Direct cursor addressing introducer
+
+;
+; Offsets in escape sequence lists
+;
+
+INITRM	= 0				; Initialize terminal
+CLRLIN	= 2				; Clear a line
+CLRSCR	= 4				; Clear the entire screen
+LSTLIN	= 6				; Move to last line and clear it
+ENDLST	= 10				; Move to lower right corner
+DIRCUR	= 12				; Direct cursor addressing introducer
+CTLSEQ	= 14	; VT100 only		; Control sequence introducer
+COL80	= 16	; VT100 only		; Set screen to 80 columns
+COL132	= 20	; VT100 only		; Set screen to 132 columns
+RVSVID	= 22	; VT100 only		; Set screen to black on white
+NRMVID	= 24	; VT100 only		; Set screen to white on black
+DWIDSL	= 26	; VT100 only		; double-wide, single line
+DWDDLT	= 30	; VT100 only		; double-wide, double line top
+DWDDLB	= 32	; VT100 only		; double-wide, double line bottom
+SCLFWD	= 34	; VT100 only		; Scroll forward (up)
+SCLBWD	= 36	; VT100 only		; Scroll backward (down)
+SIZSCR	= 40	; VT100 only		; Size terminal screen
+DEVATT	= 42	; VT100 only		; Get terminal attributes
+
+
+	.SBTTL	CHRLST, ESCLST, GLDESC, GLDCHR - Character Processing Lists
+
+;+
+; CHRLST
+;
+;	Process special characters.  The order of these table entries should be
+;	modified according to the expected frequency of their associated
+;	characters.
+;-
+
+CHRLST:
+	.WORD	CR,CHRTRM		; carriage return field terminator
+	.WORD	DEL,DELCHR		; Delete character
+	.WORD	LF,DELFLD		; Delete field
+	.WORD	ESC,ESCTER		; ESC character
+	.WORD	0,CHRTRM		; default for now 
+
+;+
+; ESCLST
+;
+;	Process escape sequences
+;-
+
+ESCLST:
+	.WORD	'C,CURGHT		; Move cursor right
+	.WORD	'D,CURLFT		; Move cursor left
+	.WORD	'R,INSERT		; Change to insert mode
+	.WORD	'P,GOLD			; Gold prefix key
+	.WORD	0,ESCTRM		; Process as terminator
+
+;+
+; GLDESC
+;
+;	Process escape sequence as part of gold sequence
+;-
+
+;+
+; GLDCHR
+;
+;	Process non-escape sequence key (including control keys)
+;	as part of gold sequence.
+;-
+
+GLDCHR:
+	.WORD	0,GCTERM		; Process as terminator
+
+	.SBTTL	GOLD	- Start Gold Key Sequence
+
+;++
+; GOLD
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine is called when the GOLD function key is entered.
+;
+; INPUT:
+;
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	IM$GLD set in I$MISC(R5) to indicate GOLD key sequence started
+;--
+
+	.ENABL	LSB
+GOLD:
+	BIS	#IM$GLD,I$MISC(R5)	; Set bit for GOLD sequence
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	ESCTRM	- Field Terminated by Escape Sequence Key
+	.SBTTL  ESCCLR  - Clear The Escape Sequence Flags
+
+;++
+; ESCTRM
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine is called when a key which transmits an escape
+;	sequence terminates input a field.
+;
+; INPUT:
+;
+;	R2 = Last character of escape sequence in low byte
+;
+; OUTPUT:
+;
+;	R2 modified to indicate escape sequence and terminator
+;	    TRMKEY => terminator
+;	    ESCKEY => terminator key transmits escape sequence
+;--
+
+	.ENABL	LSB
+ESCTRM:
+	BIS	#TRMKEY!ESCKEY,R2	; Indicate escape seq and term
+	BIT	#IM$GLD,I$MISC(R5)	; in a gold sequence?
+	BEQ	ESCCLR			; branch if not
+	BIS	#GLDKEY,R2		; signal gold escape terminator
+ESCCLR:	BIC	#IS$CSI!IS$ESC!IS$SS3!IS$LEV,I$FDST(R5)	; reset all esc. bits
+	BIC	#IM$ESC,I$MISC(R5)
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	CHRTRM	- Field Terminated by ASCII Character
+
+;++
+; CHRTRM
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine is called when a key which transmits an ASCII
+;	character terminates input a field.
+;
+; INPUT:
+;
+;	R2 = ASCII character in low byte
+;
+; OUTPUT:
+;
+;	R2 modified to indicate terminator
+;	    TRMKEY => terminator
+;--
+
+	.ENABL	LSB
+CHRTRM:
+	BIS	#TRMKEY,R2		; Indicate terminator character
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	GETERM	- Field Terminated by <GOLD><escape>
+
+;++
+; GETERM
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine is called when a <GOLD><escape> sequence
+;	terminates input a field.
+;
+; INPUT:
+;
+;	R2 = Last character of escape sequence in low byte
+;
+; OUTPUT:
+;
+;	R2 modified to indicate escape sequence and terminator
+;	    TRMKEY => terminator
+;	    ESCKEY => terminator key transmits escape sequence
+;	    GLDKEY => GOLD sequence
+;--
+
+	.ENABL	LSB
+GETERM:
+	BIS	#TRMKEY!ESCKEY!GLDKEY,R2 ; Indicate <GOLD><esc> and term
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	GCTERM	- Field Terminated by <GOLD><char>
+
+;++
+; GCTERM
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine is called when a <GOLD><character> sequence
+;	terminates input a field.
+;
+; INPUT:
+;
+;	R2 = ASCII character in low byte
+;
+; OUTPUT:
+;
+;	R2 modified to indicate escape sequence and terminator
+;	    TRMKEY => terminator
+;	    GLDKEY => GOLD sequence
+;--
+
+	.ENABL	LSB
+GCTERM:
+	BIS	#TRMKEY!GLDKEY,R2	; Indicate Gold/char and term
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	ECHO	- Echo Input
+
+;++
+; ECHO
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	If the character in R2 is valid input for the current position
+;	in the field, this routine echoes the character according to the
+;	current input mode as follows:
+;
+;	      . In overstrike mode (for both left and right justified
+;		fields), the character is echoed at the current cursor
+;		position (replacing what is displayed) and the cursor
+;		advanced one data position to the right. Input is illegal
+;		if the cursor is in the hanging cursor position.	  
+;
+;	      . In insert mode for a left justified field, the contents of
+;		the field are shifted to the right beginning with the
+;		character the cursor is positioned on to open a space to
+;		insert the character typed. The cursor moves one data
+;		position to the right, remaining on the same character. Input
+;		is illegal if the cursor is in the hanging cursor position.
+;
+;	      . In insert mode for a right justified field, the contents of
+;		the field are shifted left beginning with the character to
+;		the left of the cursor to open a space to insert the character
+;		typed. The cursor remains in the same position. Input is
+;		illegal if the leftmost data position does not contain the
+;		fill character.
+;
+;	The fill character for the field is always echoed as the clear
+;	character.
+;
+; INPUT:
+;
+;	R2 =  Character entered
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;	R5 -> Data area
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response 
+;	I$FOFF(R5) = Offset in field
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response 
+;	I$FOFF(R5) = Offset in field
+;--
+
+	.ENABL	LSB
+ECHO:
+
+;
+; Validate input
+;
+
+	$SAV50				; Save all registers
+	CALL	EDTCHR			; Edit char entered
+	BCS	120$			; If C-SET invalid input
+	FILCHR				; Get fill char for field in R0
+	MOV	L$RESP(R3),R1		; Get response buffer pointer
+
+	BIT	#IS$INS,I$FDST(R5)	; Insert mode?
+	BEQ	60$			; Br if overstrike mode
+
+;
+; Insert mode
+;
+;	R0 =  Fill character
+;	R1 -> Response buffer
+;	R2 =  Character entered in low byte
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;
+
+	BIT	#D2$RTJ,(R4)		; (D$ATT2) Right justified field?
+	BNE	30$			; Br if so
+
+; Left justified field
+
+	CALL	LSTCHR			; Current char trailing fill char?
+					; (or hanging cursor position)
+	BCC	60$			; If so, process as overstrike
+	ADD	D$RLEN(R4),R1		; Pointer past response
+	CMPB	R0,-(R1)		; Fill char in last position?
+	BNE	130$			; If not, invalid input
+
+	MOV	D$RLEN(R4),R2		; Response length
+	SUB	I$ROFF(R5),R2		; Response length - current offset - 1
+	DEC	R2			;   = number of bytes to shift
+
+10$:	MOVB	-(R1),1(R1)		; Shift response buffer contents right
+	SOB	R2,10$			;
+
+20$:	MOVB	TOS.R2(SP),(R1)		; Insert char
+	PRTRSP				; Print field
+	CALL	MOVRGT			; Move cursor right in field
+	BR	90$			; Done
+
+; Right justified field
+
+30$:	CMPB	R0,(R1)			; Fill char in first position?
+	BNE	130$			; If not, invalid input
+
+	MOV	I$ROFF(R5),R2		; Current offset in response
+	BEQ	130$			; If 0, insert invalid
+	DEC	R2			; Offset - 1 = number bytes to shift
+	BEQ	50$			; If eq nothing to shift
+
+40$:	MOVB	1(R1),(R1)+		; Shift response buffer contents left
+	SOB	R2,40$			; 
+	
+50$:	MOVB	TOS.R2(SP),(R1)		; Insert char
+	MOV	I$CURP(R5),R2		; Save cursor position
+	PRTRSP				; Print field
+	MOVCUR				; Restore cursor
+	BR	90$			; Done
+
+;
+; Overstrike mode
+;
+;	R0 =  Fill character
+;	R1 -> Response buffer
+;	R2 =  Character entered in low byte
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;
+
+60$:	CMP	I$ROFF(R5),D$RLEN(R4)	; Hanging cursor?
+	BEQ	130$			; If so, invalid input
+	ADD	I$ROFF(R5),R1		; Current position in response
+	MOVB	R2,(R1)			; Update char position in resp buffer
+	CLRCHR				; Replace space with clear char
+70$:	BIT	#D2$NEC,(R4)		; (D$ATT2) No echo field?
+	BNE	80$			; If so don't display
+	PRTBYT				; Print the character
+	INCB	I$CURC(R5)		; Update the cursor position
+80$:	CALL	MOVRGT			; Move cursor right from original
+					;   position
+
+; Check for auto-tab
+
+90$:	BIT	#D2$TAB,(R4)		; (D$ATT2) Auto-tab field?
+	BEQ	110$			; If eq no
+	CMP	I$ROFF(R5),D$RLEN(R4)	; Hanging cursor position?
+	BNE	110$			; If ne no, ok
+	BIT	#D2$RTJ,(R4)		; (D$ATT2) Right justified field?
+	BEQ	100$			; If not, auto-tab
+	CMPB	R0,@L$RESP(R3)		; Else check first char = fill char?
+	BEQ	110$			; Br if so, don't auto-tab
+100$:	MOV	#100000,TOS.R2(SP)	; Return auto-tab terminator
+
+110$:	BIS	#IS$ALT,I$FDST(R5)	; Set bit for field altered
+120$:	RETURN				;
+
+; Invalid input
+
+130$:
+
+;+
+; ERROR
+;
+	ERROR	<>
+;
+; Cannot echo character in current position.
+;-
+	.DSABL	LSB
+
+	.SBTTL	INSERT	- Change Input Mode to Insert
+
+;++
+; INSERT
+;
+; FUNCTIONAL DESCRIPTION:
+;
+; 	This routine changes the current input mode to insert if it
+;	is legal to do so. Insert mode is illegal for a field with a
+;	mixed picture definition. The input mode for a fixed decimal
+;	field cannot be modified by the user.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	I$FDST(R5) set for insert mode if valid
+;--
+
+	.ENABL	LSB
+INSERT:
+	BIT	#D2$DEC,(R4)		; (D$ATT2) Fixed decimal field?
+	BNE	20$			; If so, illegal to change input mode
+	BIT	#D1$MIX,D$ATT1(R4)	; Mixed picture for field?
+	BNE	20$			; If so, insert mode illegal
+	BIS	#IS$INS,I$FDST(R5)	; Else switch modes
+10$:	RETURN				;
+
+20$:
+
+;+
+; ERROR
+;
+	ERROR	<>
+;
+; Changing to insert mode is illegal for the current field.
+;-
+	.DSABL	LSB
+
+	.SBTTL	OVRSTK	- Change Input Mode to Overstrike
+
+;++
+; OVRSTK
+;
+; FUNCTIONAL DESCRIPTION:
+;
+; 	This routine changes the current input mode to overstrike if
+;	it is legal to do so. The input mode for a fixed decimal
+;	field cannot be modified by the user.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	I$FDST(R5) set for overstrike mode if valid
+;--
+
+	.ENABL	LSB
+OVRSTK:
+	BIT	#D2$DEC,(R4)		; (D$ATT2) Fixed decimal field?
+	BNE	20$			; If so, illegal to change input mode
+	BIC	#IS$INS,I$FDST(R5)	; Else switch modes
+10$:	RETURN				;
+
+20$:
+
+;+
+; ERROR
+;
+	ERROR	<>
+;
+; Changing to overstrike mode is illegal for the current field.
+;-
+	.DSABL	LSB
+
+	.SBTTL	EDTCHR	- Edit Character
+
+;++
+; EDTCHR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	Data is edited as it is entered on a character basis according
+;	to the field definition based on the following attributes:
+;
+;		alphabetic (A-Z,a-z,space)
+;		alphanumeric (A-Z,a-z,space,0-9)
+;		numeric (0-9)
+;		signed numeric (0-9 . + - ,)
+;		any displayable character
+;
+;	To ensure that character validation works properly, right justified
+;	fields cannot have mixed picture definitions and insert mode is
+;	illegal for fields with mixed picture definitions.
+;
+; INPUT:
+;
+;	R2 =  Character in low byte
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;	R5 -> Data area
+;
+;	I$FOFF(R5) = Current offset in field
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	C-CLR if valid char
+;	C-SET if invalid char
+;--
+
+	.ENABL	LSB
+EDTCHR:
+	$SAV50				; Save all registers
+	CMPB	R2,#CHRMAX		; Valid character?
+	BHI	ANYERR			; Br if not
+	MOV	#VLDTBL,R0		; Pointer to validation table
+	BIT	#D1$MIX,D$ATT1(R4)	; Mixed picture for field?
+	BNE	20$			; If ne yes
+
+;
+; Single picture value (picture not included in field desc)
+;
+
+10$:	TST	(R0)			; End of table?
+	BEQ	40$			; If eq yes
+	TST	(R0)+			; Else point to bit setting
+	BIT	(R0)+,D$ATT1(R4)	; Bit set?
+	BNE	50$			; If ne yes, validate char
+	CMP	(R0)+,(R0)+		; Else point to next entry
+	BR	10$			; Check
+
+;
+; Mixed picture
+;
+
+20$:	MOV	R4,R1			; Field desc pointer
+	ADD	#D$PLEN,R1		; Pointer to picture length
+	TSTB	(R1)+			; Skip length byte
+	ADD	I$FOFF(R5),R1		; Current position in picture
+30$:	TST	(R0)			; End of table?
+	BEQ	40$			; If eq yes, any char valid
+	CMPB	(R0),(R1)		; Picture char match?
+	BEQ	40$			; If eq yes
+	ADD	#10,R0			; Else point to next entry
+	BR	30$			;
+40$:	CMP	(R0)+,(R0)+		; Get bit setting for valid char
+
+;
+; Check for valid character
+;
+
+50$:	BITB	(R0),CHRTBL(R2)		; Check for valid character
+	BEQ	90$			; Br if not
+
+;
+; If signed numeric check for multiple sign characters (+ -) or
+; decimal points.
+;
+
+60$:	CMP	(R0),#SIGNUM		; Signed numeric?
+	BNE	80$			; If not done
+	MOV	L$RESP(R3),R1		; Response buffer pointer
+	MOV	D$RLEN(R4),R4		; Response length
+	MOV	#'-,R3			; If +, also check for -
+	CMPB	R2,#'+			; + entered?
+	BEQ	70$			; Br if so
+	MOV	#'+,R3			; If -, also check for +
+	CMPB	R2,#'-			; - entered?
+	BEQ	70$			; Br if so
+	CLR	R3			; If . anything else valid
+	CMPB	R2,#'.			; . entered?
+	BNE	80$			; Br if not
+
+70$:	CMPB	R2,(R1)			; Compare with response buffer
+	BEQ	90$			; Br if char in response invalid input
+	CMPB	R3,(R1)+		; Else compare other char
+	BEQ	90$			; Br if char in response invalid input
+	SOB	R4,70$			; Else check next character
+80$:	CLC				; Done
+	RETURN				;
+
+;
+; Invalid character type
+;
+
+90$:	TST	(R0)+			; Point to error routine address
+	JMP	@(R0)			; And go there
+
+	.DSABL	LSB
+
+;
+; Error routines for invalid character type
+;
+ 
+ANYERR:
+;+
+; ERROR
+;
+	ERROR	<NON-DISPLAYABLE CHARACTER>
+;
+; No validation is required in the current position. However, the 
+; character entered cannot be displayed and therefore is invalid.
+;-
+
+ALPERR:
+;+
+; ERROR
+;
+	ERROR	<ALPHABETIC REQUIRED>
+;
+; An alphabetic character (A-Z,a-z,'space') is required in the
+; current position.
+;-
+
+NUMERR:
+;+
+; ERROR
+;
+	ERROR	<NUMERIC REQUIRED>
+;
+; A numeric character (0-9) is required in the current position.
+;-
+
+ALNERR:
+;+
+; ERROR
+;
+	ERROR	<ALPHANUMERIC REQUIRED>
+;
+; An alphabetic or numeric character is required in the current position.
+;-
+
+SNMERR:
+;+
+; ERROR
+;
+	ERROR	<SIGNED NUMERIC REQUIRED>
+;
+; A valid signed numeric character (0-9 . - + ,) is required in
+; the current position.
+;-
+
+ESCERR:
+;+
+; ERROR
+;
+	BIC	#IS$CSI!IS$ESC!IS$SS3!IS$LEV,I$FDST(R5)	; reset all esc. bits
+	BIC	#IM$ESC,I$MISC(R5)
+ESCIGN:	RETURN		; ESCIGN -> ignore character in escape sequence
+
+;
+; An invalid escape sequence was detected.
+;-
+
+
+	.SBTTL	CHRTBL	- Character Validation Table
+
+;
+; Bits 0 thru 2 are used to identify the "mode" of each character for
+; escape sequence processing.
+;
+
+	MODE0	= 0		; edit/function key sequence delimiter
+	MODE1	= 1		; edit/function key sequence
+	MODE2	= 2		; keypad sequence
+	MODE3	= 3		; '?, '[, 'O keypad sequence
+	MODE4	= 4		; PF-key sequence
+	MODE5	= 5		; cursor-control sequence
+;	MODE6	= 6		; '[  CSI escape sequence
+	MODE7	= 7		; special character
+
+;
+; Escape sequence mode bit mask
+;
+
+	MODMSK	= 177770		; 177770 octal = 1111 1111 1111 1000 
+	VALMSK	= 177407		; 177407 octal = 1111 1111 0000 0111
+;
+; Bit definitions for character validation
+;
+
+	ALPHA	= 10			; Alphabetic required
+	ALPNUM	= 20			; Alphanumeric required
+	NUMERC	= 40			; Numeric required
+	SIGNUM	= 100			; Signed numeric required
+	ANYCHR	= 200			; Any displayable character
+
+;++
+; CHRTBL
+;
+;	This table contains a one byte entry for each of the 256
+;	eight-bit ASCII characters. The appropriate bits are set
+;	in each table entry for the picture types for which the
+;	character is valid input.
+;--
+
+CHRTBL:
+	.BYTE	0					; NUL
+	.BYTE	0					; SOH
+	.BYTE	0					; STX
+	.BYTE	0					; ETX
+	.BYTE	0					; EOT
+	.BYTE	0					; ENQ
+	.BYTE	0					; ACK
+	.BYTE	0					; BEL
+	.BYTE	0					; BS
+	.BYTE	0					; HT
+	.BYTE	MODE7					; LF
+	.BYTE	0					; VT
+	.BYTE	0					; FF
+	.BYTE	MODE7					; CR
+	.BYTE	0					; SO
+	.BYTE	0					; SI		
+	.BYTE	0					; DLE
+	.BYTE	0					; DC1
+	.BYTE	0					; DC2
+	.BYTE	0					; DC3
+	.BYTE	0					; DC4
+	.BYTE	0					; NAK
+	.BYTE	0					; SYN
+	.BYTE	0					; ETB
+	.BYTE	MODE7					; CAN
+	.BYTE	0					; EM
+	.BYTE	0					; SUB
+	.BYTE	MODE7					; ESC
+	.BYTE	0					; FS
+	.BYTE	0					; GS
+	.BYTE	0					; RS
+	.BYTE	0					; US
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; Space
+	.BYTE	ANYCHR					; !
+	.BYTE	ANYCHR					; "
+	.BYTE	ANYCHR					; #
+	.BYTE	ANYCHR					; $
+	.BYTE	ANYCHR					; %
+	.BYTE	ANYCHR					; &
+	.BYTE	ANYCHR					; '
+	.BYTE	ANYCHR					; (
+	.BYTE	ANYCHR					; )
+	.BYTE	ANYCHR					; *
+	.BYTE	ANYCHR!SIGNUM				; +
+	.BYTE	ANYCHR!SIGNUM				; ,
+	.BYTE	ANYCHR!SIGNUM				; -
+	.BYTE	ANYCHR!SIGNUM				; .
+	.BYTE	ANYCHR					; /
+	.BYTE	ANYCHR!NUMERC!ALPNUM!SIGNUM!MODE1	; 0
+	.BYTE	ANYCHR!NUMERC!ALPNUM!SIGNUM!MODE1	; 1
+	.BYTE	ANYCHR!NUMERC!ALPNUM!SIGNUM!MODE1	; 2
+	.BYTE	ANYCHR!NUMERC!ALPNUM!SIGNUM!MODE1	; 3
+	.BYTE	ANYCHR!NUMERC!ALPNUM!SIGNUM!MODE1	; 4
+	.BYTE	ANYCHR!NUMERC!ALPNUM!SIGNUM!MODE1	; 5
+	.BYTE	ANYCHR!NUMERC!ALPNUM!SIGNUM!MODE1	; 6
+	.BYTE	ANYCHR!NUMERC!ALPNUM!SIGNUM!MODE1	; 7
+	.BYTE	ANYCHR!NUMERC!ALPNUM!SIGNUM!MODE1	; 8
+	.BYTE	ANYCHR!NUMERC!ALPNUM!SIGNUM!MODE1	; 9
+	.BYTE	ANYCHR					; :
+	.BYTE	ANYCHR					; ;
+	.BYTE	ANYCHR					; <
+	.BYTE	ANYCHR					; =
+	.BYTE	ANYCHR					; >
+	.BYTE	ANYCHR!MODE3				; ?
+	.BYTE	ANYCHR					; @
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE5		; A
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE5		; B
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE5  		; C
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE5		; D
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; E
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; F
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; G
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; H
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; I
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; J
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; K
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; L
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; M
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; N
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE3		; O
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE4		; P
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE4		; Q
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE4		; R
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE4		; S
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; T
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; U
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; V
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; W
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; X
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; Y
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; Z
+	.BYTE	ANYCHR!MODE3				; [
+	.BYTE	ANYCHR					; \
+	.BYTE	ANYCHR					; ]
+	.BYTE	ANYCHR					; ^
+	.BYTE	ANYCHR					; _
+	.BYTE	ANYCHR					; `
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; a
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; b
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; c
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; d
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; e
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; f
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; g
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; h
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; i
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; j
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; k
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; l
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; m
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; n
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; o
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; p
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; q
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; r
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; s
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; t
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; u
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; v
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; w
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; x
+	.BYTE	ANYCHR!ALPHA!ALPNUM!MODE2		; y
+	.BYTE	ANYCHR!ALPHA!ALPNUM			; z
+	.BYTE	ANYCHR					; {
+	.BYTE	ANYCHR					; |
+	.BYTE	ANYCHR					; }
+	.BYTE	ANYCHR!MODE0				; ~
+	.BYTE	MODE7					; DEL
+	.BYTE	0					; reserved
+	.BYTE	0					; reserved
+	.BYTE	0					; reserved
+	.BYTE	0					; reserved
+	.BYTE	0					; IND
+	.BYTE	0					; NEL
+	.BYTE	0					; SSA
+	.BYTE	0					; ESA
+	.BYTE	0					; HTS
+	.BYTE	0					; HTJ
+	.BYTE	0					; VTS
+	.BYTE	0					; PLD
+	.BYTE	0					; PLU
+	.BYTE	0					; RI
+	.BYTE	0					; SS2
+	.BYTE	MODE7					; SS3
+	.BYTE	0					; DCS
+	.BYTE	0					; PUI
+	.BYTE	0					; PU2
+	.BYTE	0					; STS
+	.BYTE	0					; CCH
+	.BYTE	0					; MW
+	.BYTE	0					; SPA
+	.BYTE	0					; EPA
+	.BYTE	0					; reserved
+	.BYTE	0					; reserved
+	.BYTE	0					; reserved
+	.BYTE	MODE7					; CSI
+	.BYTE 	0					; ST
+	.BYTE	0					; OSC
+	.BYTE	0					; PM
+	.BYTE	0					; APC
+	.BYTE	0					; reserved
+	.BYTE	ANYCHR				; ¡ inverted !
+	.BYTE	ANYCHR				; ¢ cent sign
+	.BYTE	ANYCHR				; £ pound sign
+	.BYTE	0				; reserved
+	.BYTE	ANYCHR				; ¥ yen sign
+	.BYTE	0				; reserved
+	.BYTE	ANYCHR				; § section sign
+	.BYTE	ANYCHR				; ¨ general currency sign
+	.BYTE	ANYCHR				; © copyright sign
+	.BYTE	ANYCHR				; ª feminine ordinal indicator
+	.BYTE	ANYCHR				; « angle quotation mark left
+	.BYTE 	0				; reserved
+	.BYTE 	0				; reserved
+	.BYTE 	0				; reserved
+	.BYTE 	0				; reserved
+	.BYTE	ANYCHR				; ° degree sign
+	.BYTE 	ANYCHR				; ± plus/minus sign
+	.BYTE	ANYCHR				; ² superscript 2
+	.BYTE	ANYCHR				; ³ superscript 3
+	.BYTE	0				; reserved
+	.BYTE 	ANYCHR				; µ micro sign
+	.BYTE	ANYCHR				; ¶ paragraph sign, pilcrow
+	.BYTE	ANYCHR				; · middle dot
+	.BYTE   0				; reserved
+	.BYTE	ANYCHR			; ¹ superscript 1
+	.BYTE 	ANYCHR			; º masculine ordinal indicator
+	.BYTE	ANYCHR			; » angle quotation mark right
+	.BYTE	ANYCHR			; ¼ fraction one quarter
+	.BYTE	ANYCHR			; ½ fraction one half
+	.BYTE	0			; reserved
+	.BYTE	ANYCHR			; ¿ inverted question mark
+	.BYTE	ANYCHR			; À uppercase A with grave accent
+	.BYTE	ANYCHR			; Á uppercase A with acute accent
+	.BYTE	ANYCHR			; Â uppercase A with circumflex accent
+	.BYTE	ANYCHR			; Ã uppercase A with tilde
+	.BYTE	ANYCHR			; Ä uppercase A with diaresis mark
+	.BYTE	ANYCHR			; Å uppercase A with ring
+	.BYTE   ANYCHR			; Æ uppercase A with dipthong
+	.BYTE	ANYCHR			; Ç uppercase C with cedilla
+	.BYTE	ANYCHR			; È uppercase E with grave accent
+	.BYTE	ANYCHR			; É uppercase E with acute accent
+	.BYTE	ANYCHR			; Ê uppercase E with circumflex accent
+	.BYTE	ANYCHR			; Ë uppercase E with diaresis mark
+	.BYTE	ANYCHR			; Ì uppercase I with grave accent
+	.BYTE	ANYCHR			; Í uppercase I with acute accent
+	.BYTE	ANYCHR			; Î uppercase I with circumflex accent
+	.BYTE	ANYCHR			; Ï uppercase I with diaresis mark
+	.BYTE   0			; reserved
+	.BYTE	ANYCHR			; Ñ uppercase N with tilde
+	.BYTE	ANYCHR			; Ò uppercase O with grave accent
+	.BYTE	ANYCHR			; Ó uppercase O with acute accent
+	.BYTE	ANYCHR			; Ô uppercase O with circumflex accent
+	.BYTE	ANYCHR			; Õ uppercase O with tilde
+	.BYTE	ANYCHR			; Ö uppercase O with diaresis mark
+	.BYTE	ANYCHR			; × uppercase OE ligature
+	.BYTE	ANYCHR			; Ø uppercase O with slash
+	.BYTE	ANYCHR			; Ù uppercase U with grave accent
+	.BYTE	ANYCHR			; Ú uppercase U with acute accent
+	.BYTE	ANYCHR			; Û uppercase U with circumflex accent
+	.BYTE	ANYCHR			; Ü uppercase U with diaresis mark
+	.BYTE	ANYCHR			; Ý uppercase Y with diaresis mark
+	.BYTE	0			; reserved
+	.BYTE	ANYCHR			; ß German lowercase sharp s
+	.BYTE 	ANYCHR			; à lowercase a with grave accent
+	.BYTE	ANYCHR			; á lowercase a with acute accent
+	.BYTE	ANYCHR			; â lowercase a with circumflex accent
+	.BYTE	ANYCHR			; ã lowercase a with tilde
+	.BYTE	ANYCHR			; ä lowercase a with diaresis mark
+	.BYTE	ANYCHR			; å lowercase a with ring
+	.BYTE	ANYCHR			; æ lowercase ae dipthong
+	.BYTE	ANYCHR			; ç lowercase c with cedilla
+	.BYTE	ANYCHR			; è lowercase e with grave accent
+	.BYTE	ANYCHR			; é lowercase e with acute accent
+	.BYTE	ANYCHR			; ê lowercase e with circumflex accent
+	.BYTE	ANYCHR			; ë lowercase e with diaresis mark
+	.BYTE	ANYCHR			; ì lowercase i with grave accent
+	.BYTE	ANYCHR			; í lowercase i with acute accent
+	.BYTE	ANYCHR			; î lowercase i with circumflex accent
+	.BYTE	ANYCHR			; ï lowercase i with diaresis mark
+	.BYTE	0			; reserved
+	.BYTE	ANYCHR			; ñ lowercase n with tilde
+	.BYTE	ANYCHR			; ò lowercase o with grave accent
+	.BYTE	ANYCHR			; ó lowercase o with acute accent
+	.BYTE	ANYCHR			; ô lowercase o with circumflex mark
+	.BYTE	ANYCHR			; õ lowercase o with tilde
+	.BYTE	ANYCHR			; ö lowercase o with diaresis mark
+	.BYTE	ANYCHR			; ÷ lowercase oe ligature
+	.BYTE	ANYCHR			; ø lowercase o with slash
+	.BYTE	ANYCHR			; ù lowercase u with grave accent
+	.BYTE	ANYCHR			; ú lowercase u with acute accent
+	.BYTE	ANYCHR			; û lowercase u with circumflex accent
+	.BYTE	ANYCHR			; ü lowercase u with diaresis mark
+	.BYTE	ANYCHR			; ý lowercase y with diaresis mark
+	.BYTE	0			; reserved
+	.BYTE	0			; reserved
+
+CHRMAX	= . - CHRTBL - 1		; Maximum character value = 377 (octal)
+
+	.SBTTL	VLDTBL	- Validation Table
+
+;++
+; VLDTBL
+;
+; 	Each entry of this table contains a picture character, the
+;	corresponding bit setting in the field attributes word in
+;	a form, the bit setting in the character validation table,
+;	and the error routine to be called in the case of invalid
+;	input.
+;--
+
+VLDTBL:
+	.WORD	'A,D1$ALP,ALPHA,ALPERR	; Alphabetic required
+	.WORD	'C,D1$ALN,ALPNUM,ALNERR	; Alphanumeric required
+	.WORD	'9,D1$NUM,NUMERC,NUMERR	; Numeric required
+	.WORD	'N,D1$SNM,SIGNUM,SNMERR	; Signed numeric required
+	.WORD	'X,0,ANYCHR,ANYERR	; Any displayable char
+	.WORD	0,0,ANYCHR,ANYERR	; Unknown picture, any char
+
+	.SBTTL	ESCAPE SEQUENCE PARSING DISPATCH TABLES
+	.SBTTL	       
+	.SBTTL	ESCDIS	-  ESC escape sequences
+	.SBTTL
+;++
+; Escape sequence parsing dispatch tables.  These tables are used to dispatch
+; to the proper routines to process the characters in a previously detected
+; escape sequence.
+;-
+
+;
+; Escape sequences starting with ESC.
+;
+
+ESCDIS:	.WORD	EDISEQ		
+	.WORD	EDISEQ		; top-row & edit key escape sequence
+	.WORD	KPSEQ		; auxiliary keypad escape sequence
+	.WORD	ESCIGN		; ignore '[, 'O, '?
+	.WORD	PFSEQ		; PF function key escape sequence
+	.WORD	CURSEQ		; cursor-control key escape sequence
+	.WORD	ESCERR		; error detected in escape sequence
+	.WORD	ESCERR		
+
+
+
+	.SBTTL	CURGHT	- Cursor Right
+
+;++
+; CURGHT
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine moves the cursor right one data position in the
+;	field skipping over embedded text characters. The operation is
+;	illegal if the cursor is in the hanging cursor position or if
+;	the character the cursor is currently positioned on is invalid
+;	for that position in the field.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;	R5 -> Data area
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response 
+;	I$FOFF(R5) = Offset in field
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	C-SET if cursor right invalid
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response 
+;	I$FOFF(R5) = Offset in field
+;--
+
+	.ENABL	LSB
+CURGHT:
+	$SAV50				; Save all registers
+	CMP	I$ROFF(R5),D$RLEN(R4)	; Hanging cursor position?
+	BEQ	20$			; If hanging cursor invalid
+	CALL	VALPOS			; Validate char
+	BCS	10$			; Br if not valid - error message
+					;   displayed by validation routine
+	CALL	MOVRGT			; Else move cursor right
+10$:	RETURN				;
+
+20$:
+
+;+
+; ERROR
+;
+	ERROR	<>
+;
+; Cursor right is illegal.
+;- 
+	.DSABL	LSB
+
+	.SBTTL	MOVRGT	- Move Right in Field
+
+;++
+; MOVRGT
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine moves the cursor right one data position in 
+;	the current field, skipping over embedded text characters.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc
+;	R5 -> Data area
+;
+;	I$ROFF(R5) = Offset in response
+;	I$FOFF(R5) = Offset in field
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response 
+;	I$FOFF(R5) = Offset in field 
+;--
+
+	.ENABL	LSB
+MOVRGT:
+	$SAV50				; Save all registers
+	INC	I$FOFF(R5)		; Move right in field
+	INC	I$ROFF(R5)		; Move right in response
+	CMP	I$ROFF(R5),D$RLEN(R4)	; Hanging cursor position?
+	BEQ	UPDCUR			; Br if so
+	MOV	R4,R1			; Get field desc pointer
+	ADD	#D$PLEN,R1		; Get pointer to picture length
+	TSTB	(R1)+			; Check picture length
+	BEQ	UPDCUR			; Br if no picture
+	ADD	I$FOFF(R5),R1		; Else get pointer into picture
+10$:	MOVB	(R1)+,R2		; Get char from picture
+	TXTCHR				; Text char?
+	BCC	UPDCUR			; Br if not
+	INC	I$FOFF(R5)		; Else move cursor right in field
+	BR	10$			; Check next picture char
+	.DSABL	LSB
+
+	.SBTTL	MOVLFT	- Move Left in Field
+
+;++
+; MOVLFT
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine moves the cursor left one data position in
+;	the current field, skipping over embedded text characters.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc
+;	R5 -> Data area
+;
+;	I$ROFF(R5) = Offset in response
+;	I$FOFF(R5) = Offset in field
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response 
+;	I$FOFF(R5) = Offset in field 
+;--
+
+	.ENABL	LSB
+MOVLFT:
+	$SAV50				; Save all registers
+	MOV	R4,R1			; Get field desc pointer
+	ADD	#D$PLEN,R1		; Get pointer to picture length
+	TSTB	(R1)+			; Check picture length
+	BEQ	20$			; Br if no picture
+	ADD	I$FOFF(R5),R1		; Else get pointer into picture
+10$:	MOVB	-(R1),R2		; Get byte from picture
+	TXTCHR				; Text character?
+	BCC	20$			; Br if not
+	DEC	I$FOFF(R5)		; Else move left in field
+	BR	10$
+20$:	DEC	I$FOFF(R5)		; Move left in field
+	DEC	I$ROFF(R5)		; Move left in response
+	.DSABL	LSB
+
+;
+; Fall through to UPDCUR
+;
+
+	.SBTTL	UPDCUR	- Update Cursor Position in Field
+
+;++
+; UPDCUR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine updates the cursor position based on the
+;	current offset in the field.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R5 -> Data area
+;
+;	I$FOFF(R5) = Current offset in field
+;
+; OUTPUT:
+;
+;	R2 modified
+;
+;	I$CURP(R5) = Cursor position
+;--
+
+	.ENABL	LSB
+UPDCUR:	MOV	I$FOFF(R5),R2		; Get offset into field
+	SWAB	R2			; Move offset to high byte
+	ADD	(R3),R2			; Add line/col value for field
+	MOVCUR				; Position cursor
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	CURLFT	- Cursor Left
+
+;++
+; CURLFT
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine processes the cursor left key. The cursor is
+;	moved left one data position in the current field, skipping
+;	over embedded text characters. The operation is illegal if
+;	the cursor is in the leftmost data position in the field or
+;	if the character to the left of the cursor is invalid for
+;	that position in the field.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;	R5 -> Data area
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response 
+;	I$FOFF(R5) = Offset in field
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	C-SET if cursor left invalid
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response 
+;	I$FOFF(R5) = Offset in field
+;--
+
+	.ENABL	LSB
+CURLFT:
+	$SAV50				; Save all registers
+	TST	I$ROFF(R5)		; Any data to left of cursor?
+	BEQ	50$			; Error if not
+	DEC	I$ROFF(R5)		; Get offset to char to move to
+	MOV	I$FOFF(R5),-(SP)	; Save current offset in field
+	MOV	I$ROFF(R5),I$FOFF(R5)	; Get offset in field corresponding
+					;   to new offset in response
+	TSTB	D$PLEN(R4)		; Field picture included?
+	BEQ	30$			; Br if not
+	MOV	R4,R0			; Field descriptor pointer
+	ADD	#D$PICT,R0		; Get pointer to picture
+	MOV	I$ROFF(R5),R1		; Get offset in response
+	INC	R1			; Exit loop at the correct time	;008
+10$:	MOVB	(R0)+,R2		; Get character from picture
+	TXTCHR				; Is it a text character?
+	BCC	20$			; Br if not
+	INC	I$FOFF(R5)		; Else inc offset in field
+	BR	10$			; And check next character
+20$:	SOB	R1,10$			; Dec offset in response and check
+					;   next character
+30$:	CALL	VALPOS			; Validate char
+	MOV	(SP)+,I$FOFF(R5)	; Restore offset in field
+	INC	I$ROFF(R5)		; Restore offset in response
+	BCS	40$			; Br if char invalid - error message
+					;   displayed by validation routine
+	CALL	MOVLFT			; Else move left in field
+40$:	RETURN				;
+
+50$:
+
+;+
+; ERROR
+;
+	ERROR	<>
+;
+; Cursor left is illegal.
+;-
+	.DSABL	LSB
+
+	.SBTTL	VALPOS	- Validate Character in Response Buffer
+
+;++
+; VALPOS
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine validates the character in the current
+;	position in the response buffer. It is used to determine
+;	if it is valid to move the cursor within a field. The
+;	cursor cannot be moved past an invalid character.
+;	Invalid characters are possible because default values
+;	are not validated and the fill character may not be valid
+;	input for a field.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R5 -> Data area
+;
+;	I$ROFF(R5) = Offset in response to character to validate
+;	I$FOFF(R5) = Offset in field
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	C-CLR if character valid
+;	C-SET if invalid
+;--
+
+	.ENABL	LSB
+VALPOS:
+	MOV	L$RESP(R3),R1		; Response buffer pointer
+	ADD	I$ROFF(R5),R1		; Pointer to current char
+	MOVB	(R1),R2			; Get the character
+	BIC	#177400,R2		; cancel the sign extend 
+	CALL	EDTCHR			; Edit character
+	RETURN				; Return with status
+	.DSABL	LSB
+
+	.SBTTL	DELCHR	- Delete Character
+
+;++
+; DELCHR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine deletes the data character to the left of the
+;	cursor, skipping over text characters.
+;
+;	To preserve the validity of character validation, delete character
+;	in overstrike mode is equivalent to the cursor left operation
+;	(with one exception) and the same rules apply. The exception is that
+;	in a left justified field, if the cursor is positioned on a fill
+;	character and all characters in the field to the right of the cursor
+;	are the fill character, the character to the left of the cursor is
+;	actually erased.
+;
+;	In insert mode, the data character to the left of the cursor is
+;	erased. If the field is left justified, the contents are collapsed
+;	from right to left to justify the field; if right justified, the
+;	contents of the field are collapsed left to right. The fill
+;	character is put in the position left empty in the response and
+;	the clear character is displayed.
+;
+;	If there are no data positions in the current field to the left of
+;	the cursor, the operation is illegal.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;	R5 -> Data area
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response 
+;	I$FOFF(R5) = Offset in field
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	C-SET if cursor at leftmost data position in field
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response
+;	I$FOFF(R5) = Offset in field
+;--
+
+	.ENABL	LSB
+DELCHR:
+	$SAV50				; Save all registers
+	TST	I$ROFF(R5)		; Any data to left of cursor?
+	BEQ	110$			; If not, invalid input
+	FILCHR				; Get fill char for field in R0
+	MOV	L$RESP(R3),R2		; Get response buffer pointer
+	ADD	I$ROFF(R5),R2		; Current position in response
+	DEC	R2			; Position to delete
+	BIT	#IS$INS,I$FDST(R5)	; Insert mode?
+	BEQ	50$			; Br if not
+
+;
+; Insert mode
+;
+
+	BIT	#D2$RTJ,(R4)		; (D$ATT2) Right justified field?
+	BEQ	30$			; Br if not
+
+; Right justified field
+
+	MOV	I$ROFF(R5),R1		; Offset in response
+	DEC	R1			; -1 = number of bytes to shift
+	BEQ	20$			; Br if none
+10$:	MOVB	-(R2),1(R2)		; Else shift response buffer contents
+	SOB	R1,10$			;
+
+20$:	MOVB	R0,(R2)			; Put fill char in response buffer
+	MOV	I$CURP(R5),R2		; Save cursor position
+	PRTRSP				; Print response
+	MOVCUR				; Restore the cursor position
+	BR	100$			;
+
+; Left justified field
+
+30$:	CALL	LSTCHR			; Current char trailing fill char?
+	BCC	80$			; If so process as overstrike
+
+	MOV	D$RLEN(R4),R1		; Response length - offset to char to
+	SUB	I$ROFF(R5),R1		;   delete = number of bytes to shift
+
+40$:	MOVB	1(R2),(R2)+		; Shift response buffer contents left
+	SOB	R1,40$			;
+	MOVB	R0,(R2)			; Put fill char in response buffer
+	PRTRSP				; Print response
+	CALL	MOVLFT			; Move cursor left
+	BR	100$			;
+
+
+;
+; Overstrike mode
+;
+
+; Right justified field
+
+50$:	BIT	#D2$RTJ,(R4)		; (D$ATT2) Left justified field?
+	BNE	CURLFT			; Move cursor left if not
+
+; Left justified field
+
+60$:	CALL	LSTCHR			; Current char trailing fill char?
+	BCS	CURLFT			; Move cursor left if not
+
+80$:	MOVB	R0,(R2)			; Else put fill char in resp buffer
+	CALL	MOVLFT			; Move cursor left
+	BIT	#D2$NEC,(R4)		; (D$ATT2) No-echo field?
+	BNE	90$			; Br if so
+	MOV	I$CURP(R5),-(SP)	; Save cursor position
+	MOV	R0,R2			; Get fill char in R2
+	CLRCHR				; Replace space with clear char
+	PRTBYT				; Output character
+	INCB	I$CURC(R5)		; Update cursor position
+	MOV	(SP)+,R2		; Get correct cursor position
+	MOVCUR				; And put the cursor there
+90$:
+100$:	BIS	#IS$ALT,I$FDST(R5)	; Indicate field altered
+	RETURN				;
+
+110$:
+
+;+
+; ERROR
+;
+	ERROR	<>
+;
+; Delete character is illegal.
+;-
+	.DSABL	LSB
+
+	.SBTTL	LSTCHR	- Check for Trailing Fill Character
+
+;++
+; LSTCHR
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine is used for left justified fields to determine
+;	if all characters in the field to the right of and including
+;	the current character are the fill character. If so, the
+;	C-bit is clear on return.
+;
+;	If the current position is the hanging cursor position
+;	and there are no trailing fill characters, the C-bit is
+;	clear on return.
+;
+; INPUT:
+;
+;	R0 =  Fill character for field
+;	R3 -> Line/col entry
+;	R4 -> Field desc 
+;	R5 -> Data area
+;
+;	I$ROFF(R5) = Offset in response
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	C-CLR if first trailing fill char
+;	C-SET if not
+;--
+
+	.ENABL	LSB
+LSTCHR:
+	$SAV50				; Save all registers
+	MOV	L$RESP(R3),R1		; Response buffer pointer
+	MOV	D$RLEN(R4),R2		; Response length
+	ADD	R2,R1			; Point past response
+10$:	CMPB	R0,-(R1)		; Fill char?
+	BNE	20$			; Br if not
+	SOB	R2,10$			; Else check next char
+20$:	CMP	I$ROFF(R5),R2		; Is it before the current position?
+					; If so, trailing fill char (C-CLR,
+					;   otherwise C-SET)
+	RETURN				;
+	.DSABL	LSB
+
+	.SBTTL	DELFLD	- Delete Field
+
+;++
+; DELFLD
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine deletes the current field. The fill character
+;	is moved into the response buffer and the specified clear
+;	character  is displayed in the field. The cursor is moved to
+;	the initial position for the field (the leftmost data position
+;	or the hanging cursor position depending on whether the field
+;	is left or right justified).
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;	R5 -> Data area
+;
+; OUTPUT:
+;
+;	All registers preserved
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response 
+;	I$FOFF(R5) = Offset in field
+;--
+
+	.ENABL	LSB
+DELFLD:
+	$SAV50				; Save all registers
+	CLR	R1			; 0 length
+	FLDVAL				; Clear field
+	CALL	INIPOS			; Position cursor to solicit input
+	BIS	#IS$ALT,I$FDST(R5)	; Set bit for field altered
+	RETURN
+	.DSABL	LSB
+
+
+	.SBTTL	CSITRM	- Process CSI escape sequence
+	.SBTTL	ESCTRM	- Process ESC escape sequence
+	.SBTTL	SS3TRM  - Process SS3 escape sequence
+;++
+; CSITRM
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine starts the parsing of a CSI escape sequence.
+;
+; INPUT:
+;
+;	
+; OUTPUT:
+;
+;
+;--
+
+	.ENABL	LSB
+
+ESCTER: BIS	#IS$ESC,I$FDST(R5)		; signal starting ESC escape seq
+	BIS	#IM$ESC,I$MISC(R5)		; signal generic escape seq
+	RETURN
+
+	.DSABL	LSB
+
+	
+	.SBTTL	INIPOS	- Move to Initial Position in Field
+
+;++
+; INIPOS
+;
+; FUNCTIONAL DESCRIPTION:
+;
+;	This routine moves the cursor to the initial position in 
+;	a field to solicit input. For a left justified field,
+;	the cursor is positioned at the leftmost data position;
+;	for a right justified field, the cursor is moved to the
+;	hanging cursor position (to the right of the last data
+;	position in the field).
+;
+;	This routine works on the assumption that no field consists
+;	entirely of text characters.
+;
+; INPUT:
+;
+;	R3 -> Line/col entry
+;	R4 -> Field desc entry
+;	R5 -> Data area
+;
+;	I$CURP(R5) = Cursor position
+;	I$ROFF(R5) = Offset in response
+;	I$FOFF(R5) = Offset in field
+;--
+
+	.ENABL	LSB
+INIPOS:
+	$SAV50				; Save all registers
+	CLR	R1			; Clear registers to use
+	CLR	R0			;
+	BIT	#D2$RTJ,(R4)		; (D$ATT2) Right justified field?
+	BNE	20$			; Br if so
+
+; Left justified
+
+	BIC	#IS$INS,I$FDST(R5)	; Default to overstrike mode
+	CLR	I$ROFF(R5)		; Initial offset in response = 0
+	ADD	#D$PLEN,R4		; Pointer to picture length
+	BISB	(R4)+,R1		; Get picture length
+	BEQ	50$			; Br if no picture
+10$:	MOVB	(R4)+,R2		; Get char from picture
+	TXTCHR				; Text char?
+	BCC	50$			; Br if not
+	INC	R0			; Else move over text char
+	BR	10$			; Check next char in picture
+
+; Right justified
+
+20$:	BIS	#IS$INS,I$FDST(R5)	; Default to insert mode
+	MOV	D$RLEN(R4),I$ROFF(R5)	; Initial offset in resp = resp length
+	ADD	#D$PLEN,R4		; Pointer to picture length
+	BISB	(R4)+,R0		; Get picture length
+	BEQ	40$			; Br if no picture
+	ADD	R0,R4			; Else point past picture
+30$:	MOVB	-(R4),R2		; Get char from picture
+	TXTCHR				; Text char?
+	BCC	50$			; Br if not
+	DEC	R0			; Else dec offset in field
+	BR	30$			; Check next char in picture
+40$:	MOV	I$ROFF(R5),R0		; Get response length
+
+50$:	MOV	R0,I$FOFF(R5)		; Update offset in field
+	MOV	R0,R2			; Get offset into field
+	SWAB	R2			; Move offset to high byte
+	ADD	(R3),R2			; Add line/col value for field
+	SETCUR				; Position cursor
+	BIT	#IM$BUF,I$MISC(R5)	; Print it?
+	BNE	60$			; Br if not
+	PRTBUF				; Else do it
+60$:	RETURN				;
+	.DSABL	LSB
+
+
+
+
+	.SBTTL
+	.SBTTL

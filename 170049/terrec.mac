@@ -1,0 +1,1395 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+.INCLUDE /CMN:HDRDEF/
+TITLE	TERREC,<Command Recall subroutines>,0J,27-MAR-92,JFM
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	TERREC EDIT HISTORY
+
+;+
+;
+;			[RSTS/E V10.0]
+;  000  JFM  11-Sep-89	Creation
+;  001  JFM  06-Oct-89	Revert back to user preference mode upon recall
+;			Close overview comment (still more to add to comment)
+;  002	JFM  17-Oct-89	Add DCLRCL routine for DCL RECALL command support
+;  003	JFM  30-Oct-89	Bits moved around in DDB
+;			Fixed bug in RECALL n (when there's not even 1 command)
+;  004	JFM  14-Nov-89	Returned bits to pre-003 days due to PPC (product
+;			planning committee) recommendation.  Moved code out
+;			of RECINI into KBVDR to get current command read level.
+;  005	JFM  13-Dec-89	Moved initialization of job header from MEM.MAC to here
+;			Don't store more than 255 characters per command
+;			Error with BADFUO if illegal operation in RECALL
+;			Save register in recall erase (initialization) routine
+;			Test for NOECHO, so characters aren't stored
+;			Add routine which cleans up after CTRL/C
+;  006	JFM  18-Jan-90	Levels in CURLVL are now bits
+;			Added truncate and concatenate functions for CUI
+;			RECPUT now saves and restores mapping.  Created PUTCHR
+;  007	JFM  15-Feb-90	Add CKSTRT.  Routine to ensure at start of line
+;			Add GETDDB.  Used as new way determine if ICF read 
+;			Go back to end of command set after ^C hit
+;  008	JFM  18-Feb-90	CURLVL is now TTRFLG, DDFLG3 is now TTFLG3
+;			Test for CUILVL after ensuring recall pointers set up
+;  009	JFM  06-Mar-90	Save prompt position at time of DCL RECALL x command
+;  010	JFM  14-Mar-90	Everything is now done at PR3 except putting command
+;			to terminal (OUTCMD).
+;  011	JFM  16-May-90	RECPUT no longer saves and restores mapping, 
+;			Don't store characters if NOECHO, but do fix pointers
+;  012	JFM  24-May-90	Return PRVIOL in RCLRD, RCLWRI if not from DCL
+;			Created common code routine RCLRW
+;  013	JFM  31-May-90	Implement code review comments
+;  014	JFM  04-Jun-90	Make sure class driver mapped in APR6 I-space in RCLWRI
+;  015	JFM  12-Jun-90	Fix bug in RECINI when checking for RTS level
+;
+;			[RSTS/E V10.1]
+;
+;  016	JFM  31-May-91	Handle case of private delims extracted from recall buf
+;  017	JFM  19-Jun-91	Rename RECCC to RECSTR, and make it global
+;  018	JFM  24-Jun-91	Unglobalized RECSTR
+;  019	JFM  09-Sep-91	Map TERCLS *before* calling CHKDLM in OUTCMD routine.
+;  020	JFM  20-Mar-92	Call RECSTR if recall not allowed
+;-
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	TERREC
+
+.SBTTL	Overview of command recall
+
+.REM	*
+
+This will serve as a guide for those who must maintain this module in the 
+future.  
+
+History:
+
+The command line editing and recall project was started in V9.6 when the
+terminal driver was split into more manageable parts.  Most of the service 
+routines were already coded in TERLED.MAC along with pointers for the
+future developer as to how to implement command recall by recalling the 
+last command from CORE COMMON.  Command line editing and this limited recall 
+scheme was implemented via control characters only.  
+
+For V10.0, escape sequence parsing was added to TERLED.MAC, as well as 
+an implemention to store commands in, and retrieve commands from a new area
+called the job header.  The job header region isn't new either - in V9.6
+we ran with job headers for a while, but released with a header size of 0.
+This following description shows how the storage and retrieval of the commands 
+is done.
+
+Description:
+
+There is one recall buffer, which starts at #JHBUFS and ends at #JHBUFE, which
+stores 3 types of commands separately:  DCL commands (DCL), Other run-time 
+system commands (RTS), and program commands (PRG).  When going from DCL -> RTS,
+DCL -> PRG, or RTS -> PRG, the commands are saved for later retrieval.  This
+is known as going to a LOWER level.  When backing to a higher level, i.e. 
+exiting a program, or switching from an RTS to DCL, commands entered at that
+lower level are lost.  
+
+The recall buffer is allocated using a dynamic scheme, with each level grabbing
+a chunk of the buffer.  If the buffer is not fully used when going to a LOWER
+level, then the remaining portion of the buffer is used for that lower level.
+Nothing is wasted.  If hardly any commands are stored when a program is run,
+the program may utilize practically the entire buffer.  Each level is granted
+a portion of the buffer:  DCL can take up to 50% of the buffer.  (For the 
+exact proportions, see HDRDEF.MAC, the job header definition file).  RTS 
+can take up to 50% also, so long as DCL plus RTS does not exceed 75%.  This
+means that PRG is always guaranteed at least 25% of the buffer.  If each
+region was at it's maximum, then DCL would occupy the first 50%, RTS the next
+25% leaving 25% for PRG.  If DCL took up only 10% before the user switched to
+another RTS, then the RTS can go up to 60%, leaving 40% for PRG.  Last example,
+if DCL took up to 30%, RTS cannot use it's entire 50% because it wouldn't
+leave enough for the PRG level; therefore RTS can take up to 45% and PRG 25%.
+
+The calculation for how much room the level can take up is done in the
+RECINI routine.  That routine is also responsible for saving away pointers
+when going to a lower level, or restoring pointers when going to a higher
+level.  Once the end is determined for a particular level, the commands
+just wrap inside that region.  When full, commands typed typically replace
+the earliest command, as space is needed.  When this wrap takes place,
+JHWRAP bit is set to indicate that fact.  
+
+There are a bunch of start pointers:
+
+	JHBUFS = the start of the entire recall region.  This is a constant.
+	JHBSTR = the start of the current level; DCL, RTS, or PRG.  For DCL,
+		 it is always JHBUFS since it's the start of the recall region.
+	JHSTR  = the start of the commands in the current level.  It is the
+		 same as JHBSTR until the commands wrap, at which point the
+		 start is somewhere in the middle of the buffer, with the
+		 commands forming a "ring" inside the buffer.
+	JHDCLS = the saved start when going from DCL to a lower level.  This
+		 is restored into JHSTR when re-entering the DCL level.
+	JHRTSS = the saved start when going from RTS to the PRG level.  If you
+		 went directly from DCL to PRG, this is the same as JHDCLE.
+		 This is restored into JHSTR when re-entering the RTS level.
+
+Likewise, there are a bunch of end pointers.  Note that end pointers always 
+point to the end + 1 of whatever it is the end of.  This is done to make
+handling the "rings" inside each level easier to deal with.  The end pointers
+are:
+
+	JHBUFE = the end of the entire recall region.  This is a constant.
+	JHBEND = the end of the current level; DCL, RTS, or PRG.  For PRG,
+		 it is always JHBUFE since it's the end of the recall region.
+		 For DCL and RTS, it is calculated using the 50%, 75% rule
+		 (i.e. DCL gets 50% max, RTS gets 50% too, so long as DCL+RTS
+		 is not more than 75%).
+	JHEND  = the end of the commands in the current level.  This pointer
+		 keeps track of the first byte available for the next command.
+		 It holds the place of the end of the last command typed.  
+		 Once a level wraps, JHEND is compared against JHSTR to see if 
+		 a command needs to get wiped out to make room for the new 
+		 command being entered.
+	JHDCLE = the saved end when going from DCL to a lower level.  This
+		 is restored into JHEND and JHCUR when re-entering the DCL 
+		 level.
+	JHRTSE = the saved end when going from RTS to the PRG level.  If you
+		 went directly from DCL to PRG, this is the same as JHDCLE.
+		 This is restored into JHEND and JHCUR when re-entering the RTS
+		 level.
+	
+
+There is only one other pointer, and that is JHCUR.  
+
+	JHCUR  = the position of the current command.  It has two purposes:
+
+		 First, to keep track of which command is being presented
+		 when the user types up/down arrows.  JHSTR and JHEND tell
+		 the RECUP and RECDWN routines when the start or end has
+		 been reached.
+
+		 Second, it keeps track of the beginning of the current command
+		 while characters are being copied into the recall buffer. The
+		 next section describes the method of storing a command in the
+		 buffer.
+
+How commands are stored
+
+Commands are stored using a byte count at the beginning of the command as well
+as at the end.  This means that there are only two bytes of overhead in the
+buffer per command.  (This is more efficient than having pointers, and is easier
+to work with.)  In this very small buffer region, notice how commands are
+stored.  Two commands have been entered so far:  "ABCDEF" and "lmnop".  The 
+numbers in the buffer are the length of the commands.  There is a length byte 
+before and after each command. (Notice that JHBEND points to the character
+AFTER the end of the region.)
+
+    +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+    | 6 | A | B | C | D | E | F | 6 | 5 | l | m | n | o | p | 5 |   |   |
+    +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      ^                                                           ^        ^
+      |                                                           |        |
+   JHBSTR                                                       JHEND    JHBEND
+   JHSTR                                                        JHCUR    
+
+Now look what happens when the command "TUV" is entered.  Notice that 
+the characters wrap at JHBEND, and the first command is effectively wiped out.
+Even though some of the characters are still there, the command is gone 
+because JHSTR now points to the second command, "lnmop".
+
+    +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+    | U | V | 3 | C | D | E | F | 6 | 5 | l | m | n | o | p | 5 | 3 | T |
+    +---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      ^           ^                   ^                                    ^
+      |           |                   |                                    |
+   JHBSTR       JHEND               JHSTR                                JHBEND
+                JHCUR
+
+As alluded to in the previous section, characters are added to the buffer by 
+incrementing JHEND (and making it JHBSTR when it is equal to JHBEND).  Moving 
+the character into @JHEND, and incrementing the character count pointed to by
+JHCUR.  JHCUR stays where it is until the end of the command, at which time
+the character count is copied from @JHCUR to @JHEND, JHEND is bumped again,
+and finally JHEND (the pointer) is copied into the cell JHCUR, to get into 
+the situation above.
+
+Any more questions?
+
+See the code.  All of the routines which deal with pointers in the recall
+buffer are contained in this module.  
+
+*
+
+.SBTTL	RECSTR	Fix recall pointers to ensure we're at start of command
+;+
+; RECSTR - Fix recall pointers to ensure we're at start of command
+;
+; Inputs:
+;	JOB is resident
+;	Priority is PR3
+;
+; Format:
+;	CALLMI  RESTR,KBDDSP ; Called from CAL.MAC in EMT phase
+;
+; Outputs:
+;	Recall pointers fixed up if required
+;
+; Description:
+;	If the user types in a very long line, beyond his input buffer
+;	quota, the line, as much as been typed so far, is shipped to the 
+;	user's buffer.  Whenever we write to the user's buffer, we also
+;	store the command in the recall buffer.  However, if the user hits
+;	CTRL/C, then the .READ is aborted via posting (see DOPOST in CAL.MAC)
+;	and the read is over.  However, we never saw a delimiter, so the
+;	recall pointers are still set up.  If the user now types a DOWN ARROW,
+;	the current pointer is not equal to the end, and things get messed
+;	up.  Thus this routine is born.
+;
+;	This routine is also called because it's possible (due to a detach) we 
+;	lost the fact that recall is disabled for this .READ.  If the user 
+;	buffer is short (like EDT's 1 character buffer), and the read fills
+;	up, this routine will fix up the pointers, since there's no delimiter.
+;	This routine is called from RECINI in this module so that if recall
+;	is not allowed, we're always set up to be at the start of the command
+;	for the next time recall is allowed.
+;-
+.ENABL	LSB
+
+	TMPORG	KBDDSP,30
+	.WORD	RECSTR							;017
+	UNORG
+
+RECSTR:	MAP	PUSH,APR=6,DATA	;Save current mapping			;017
+	CALL	MAPJH		;Map the job header			;005
+	CALL	CKSTRT		;Make sure we're at start of a command	;007
+	MOV	JHEND,JHCUR	;Go back to the end of command list	;007
+	MAP	POP,APR=6,DATA	;Restore APR6 mapping			;005
+	RETURN			;All done				;005
+
+.DSABL	LSB
+
+.SBTTL	RECINI	Initialize RECALL pointers, etc
+;+
+; RECINI - Initialize RECALL pointers, etc
+;
+; Inputs:
+;	R0 = Unit # * 2
+;	R1 -> DDB
+;	R3 -> XRB (not needed here)
+;	TTNREC set in TTFLG3
+;	Priority is PR3
+;
+; Format:
+;	CALL	RECINI
+;
+; Outputs:
+;	R0, R1 preserved
+;	R4     trashed
+;
+;	If C=1 then 
+;		Recall not currently allowed
+;		TTNREC in TTFLG3 left set
+;
+;	If C=0 then
+;		JHBEND	(Buffer end) points to first UNAVAILABLE byte in buffer
+;		JHBSTR	(Buffer start) points to first available byte in buffer
+;		JHSTR	(Start pointer) points to earliest command in buffer, 
+;			 or JHBSTR if no commands in buffer
+;		JHEND	(End pointer) points to next byte to fill, or JHBSTR 
+;			 if no commands in buffer
+;		JHCUR	(Current pointer) points to the current command, or 
+;		 	JHBSTR if no commands in buffer
+;
+; No need to:
+;	1) Check for command file active - that's already done since this 
+;	   routine is not called, and neither is RECPUT.
+;	2) Check binary mode, since RECPUT isn't called if binary mode
+;	3) Set TTNREC in TTFLG3, it's done on input to this routine
+;-
+.ENABL	LSB
+
+RECINI::CALLM	RECOK,KINAP5	;Is recall not allowed for any reason?	;004
+	BCS	RECSTR		;No, get out ensuring we're at start 	;020
+	
+	; TTRFLG(R1) = Level of this read (low 4 bits)
+	;      JHLVL = Level of previous read
+
+	BICB	#TTNREC,TTFLG3(R1) ;Recall is allowed			;008
+	MOVB	TTRFLG(R1),R4	;Get command level of this read		;008
+	MOV	R0,-(SP)	;Save unit number * 2
+	MOV	R1,-(SP)	;Save DDB pointer
+	CALL	MAPJH		;Map the job header
+	TST	JHBEND		;Has the job header been set up?	;005
+	BNE	20$		;Yes, all set then			;005
+	CALL	RCLERA		;No, initialize recall pointers		;005
+20$:	BIT	#CUILVL,R4	;CUI level?				;008
+	BNE	120$		;Yes, so don't change levels, C=0	;008
+	BIC	#^C<DCLLVL!RTSLVL!PRGLVL>,R4 ;Clear out unneeded bits	;008
+	CMPB	R4,JHLVL	;Are levels the same as they were?	;005
+	BEQ	120$		;Yes, everything is set up		;013
+	BGT	70$		;No, going to a higher level		;013
+				;No? Then we must be going to a lower level
+.ASSUME	DCLLVL	GT RTSLVL						;006
+.ASSUME	RTSLVL	GT PRGLVL						;006
+
+;
+; Going from a higher level to a lower level (DCL=highest, PRG=lowest)
+; No matter what level we're ending up at, the current end starts
+; that level, so figure that out first.
+;
+
+	MOV	JHEND,R0	;Buffer end is where we'll be starting next
+	BITB	#JHWRAP,JHFLG	;Did we wrap in buffer (used whole thing)?
+	BEQ	30$		;No, we're okay then
+	MOV	JHBEND,R0	;Yes, use buffer end then
+30$:	BITB	#DCLLVL,JHLVL	;Was the previous level DCL?
+	BEQ	40$		;No, it must have been RTS
+	;
+	; Previous level was DCL, set up to come back safely
+	;
+	MOV	JHSTR,JHDCLS	;Save current DCL start
+	MOV	JHEND,JHDCLE	;Save current DCL end
+	MOV	R0,JHLVL1	;Set up first split (DCL-RTS split)
+	MOV	R0,JHRTSS	;Assume we're going to program level
+	MOV	R0,JHRTSE	; and set up RTS start and end
+	BITB	#RTSLVL,R4	;Stopping at RTS level?			;015
+	BEQ	50$		;No, we were right.  Go set up pointers	;015
+	;
+	; Compute where the RTS buffer should end
+	;
+	MOV	R0,JHBEND	;Set up to calculate buffer end
+	ADD	#RTSBSZ,JHBEND	;Get end
+	CMP	JHBEND,#JHBUFS+RTSMAX ;Can we use that much buffer?
+	BLOS	60$		;Yes, go set up start, current, end pointers
+	MOV	#JHBUFS+RTSMAX,JHBEND ;No, use up to max
+	BR	60$		;And then set up start, current, end pointers
+
+	;
+	; Now do RTS -> PRG level
+	;
+40$:	MOV	JHSTR,JHRTSS	;Save current RTS start
+	MOV	JHEND,JHRTSE	;Save current RTS end
+50$:	MOV	R0,JHLVL2	;Set up second split
+	MOV	#JHBUFE,JHBEND	;Set up buffer end (use rest of buffer for PRG)
+60$:	MOV	R0,JHBSTR	;Set buffer start
+	MOV	R0,JHSTR	;Initialize buffer start as start
+	MOV	R0,JHCUR	;Initialize buffer start as current
+	MOV	R0,JHEND	;Initialize buffer start as end
+	BR	110$		;And exit
+
+;
+; Going from a lower level to a higher level (PRG=lowest, DCL=highest)
+;
+
+70$:	BITB	#DCLLVL,R4	;Going to DCL level?
+	BEQ	80$		;No, must be going to RTS level
+	;
+	; Going back to DCL level from RTS or PRG
+	;
+	MOV	#JHBUFS,JHBSTR	;Use beginning of buffer
+	MOV	#JHBUFS+DCLBSZ,JHBEND ;End of buffer (maximum)
+	MOV	#JHDCLS,R1	;Point to DCL start
+	.ASSUME	JHDCLE	EQ JHDCLS+2
+	MOV	JHLVL1,R0	;Get DCL/RTS split
+	BR	100$		;Restore pointers and check to see if we wrapped
+	
+80$:	;
+	; Going back to RTS level from PRG
+	;
+	MOV	JHLVL1,JHBSTR	;Use previous split as beginning of buffer
+	MOV	JHBSTR,JHBEND	;Set up to calculate buffer end
+	ADD	#RTSBSZ,JHBEND	;Get end
+	CMP	JHBEND,#JHBUFS+RTSMAX ;Can we use that much buffer?
+	BLOS	90$		;Yes, then leave it alone
+	MOV	#JHBUFS+RTSMAX,JHBEND ;No, use up to max
+90$:	MOV	#JHRTSS,R1	;Point to RTS storage 
+	.ASSUME	JHRTSE	EQ JHRTSS+2
+	MOV	JHLVL2,R0	;Get RTS/PRG split
+100$:	MOV	(R1)+,JHSTR	;Reset start pointer
+	MOV	(R1),JHEND	;Reset end pointer	
+	MOV	(R1),JHCUR	;Reset current pointer
+	BISB	#JHWRAP,JHFLG	;Assume we wrapped
+	CMP	R0,JHBEND	;Has end wrapped?
+	BEQ	110$		;Yes					;013
+	BICB	#JHWRAP,JHFLG	;We did not wrap (yet)
+
+	; Common exit
+
+110$:	MOVB	R4,JHLVL	;Set current level in job header
+120$:	MOV	(SP)+,R1	;Restore DDB pointer
+	MOV	(SP)+,R0	;Restore unit number * 2
+	MAP	TERAP6,APR=6,DATA ;Map the driver again
+	CLC			;Recall is allowed, pointers set up	;013
+	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<TERAP6>
+
+.SBTTL	RECALL	Check if we should  recall a command
+;+
+; RECALL - Check if we should  recall a command
+;
+; Inputs:
+;	R0 =  Unit # * 2 (required for the ECHOIN routine)
+;	R1 -> Job's DDB
+;	R2 =  ^B (=2) for recall up, ^N (=14) for recall down
+;	R3 -> XRB @ XRBC (not needed here)
+;	Priority is PR3
+;
+;	CALLMI	RECALL,KBDAP5
+;
+; Outputs:
+;	R4 = random
+; 	Terminal driver mapping is restored on exit
+;	Command, if any, is put in output buffer or line is cleared
+;
+;-
+.ENABL	LSB
+
+	TMPORG	KBDDSP,26
+	.WORD	RECALL
+	UNORG
+
+RECALL:	CALL	RECINI		;Initialize the recall pointers (so 
+				; that the correct level is set up)
+	BCS	50$		;Recall isn't allowed? Shouldn't happen	;004
+	;
+	; Recalling a command, so go back to original editing mode
+	;
+	ASLB	TTFLG3(R1)	;Set up to copy bit 15			;008
+.ASSUME	TTEMOD	EQ 200		;					;003
+	MOVB	TCHAR2(R1),R4	;Get terminal characteristic byte	;003
+	ASLB	R4		;Set C bit if TTIEDT bit set		;003
+.ASSUME	TTIEDT	EQ 200		;					;003
+	RORB	TTFLG3(R1)	;Set TTEMOD if bit 15 set in TCHAR2	;008
+	;
+	; Map job header
+	;
+	CALL	MAPJH		;Map the job header
+	CALL	CKSTRT		;Make sure we're at the start		;007
+	CMPB	R2,#'B-100	;Which way do we recall?		;005
+	BNE	20$		;Down					;005
+	CALL	RECUP		;Up					;005
+	BR	30$		;Join up				;005
+
+20$:	CALL	RECDWN		;Down					;005
+30$:	BCS	40$		;No command to recall			;005
+	CALL	OUTCMD		;Output command onto user's terminal	;002
+40$:	MAP	TERAP6,APR=6,DATA ;Restore terminal driver mapping
+	CALLX	CHKLIN		;Get the echo going
+50$:	RETURN			;And get out				;005
+
+.DSABL	LSB
+
+GLOBAL	<TERAP6>
+
+.SBTTL	RECUP	Recall previous command
+;+
+; RECUP - Recall previous command
+;
+; Inputs:
+;	JHCUR	(Current pointer) points to the current command
+;	JHSTR	(Start pointer) points to earliest command in buffer
+;	JHEND	(End pointer) points to next byte to fill
+;	JHBEND	(Buffer end) points to first UNAVAILABLE byte in buffer
+;	JHBSTR	(Buffer start) points to first available byte in buffer
+;	JHFLG	(Header flags) set up possibly with JH2FAR set already
+;
+;	Job header is mapped through APR6
+;	Priority is PR3
+;
+; Outputs:
+;	C=1 if no previous command
+;	C=0 otherwise and
+;		R5 -> Length within the job header buffer.  The command
+;			follows the length, but may wrap at any time back to
+;			the beginning of the buffer.
+;		JHCUR = R5
+;-
+.ENABL	LSB
+
+RECUP:	CMP	JHCUR,JHSTR	;At beginning already?
+	BEQ	10$		;Yes, go indicate we went to far	;013
+	MOV	JHCUR,R5	;Get current command
+	CALL	20$		;Get length of command in R5		;013
+	CLR	-(SP)		;Get cell on stack
+	BISB	(R5),(SP)	;Get length of previous command
+	SUB	(SP)+,R5	;Get to beginning of previous command
+	CALL	20$		;Get length of previous command		;013
+	BR	40$		;Adjust current command and exit
+
+10$:	BISB	#JH2FAR,JHFLG	;Indicate he went too far up
+	BR	70$		;Indicate no more commands
+
+	; SUBROUTINE: Get previous character or length, adjust pointer 
+	;	      if necesesary
+
+20$:	DEC	R5		;Point to previous character or length
+	CMP	R5,JHBSTR	;Before beginning of buffer?
+	BHIS	30$		;No, no problem
+	MOV	JHBEND,-(SP)	;Yes, wrap around to end (by adding
+	SUB	JHBSTR,(SP)	; difference between end and start
+	ADD	(SP)+,R5	; to caluculated address)
+30$:	RETURN
+
+.SBTTL	RECDWN	Recall next command
+;+
+; REDWN - Recall next command
+;
+; Inputs:
+;	JHCUR	(Current pointer) points to the current command
+;	JHSTR	(Start pointer) points to earliest command in buffer
+;	JHEND	(End pointer) points to next byte to fill
+;	JHBEND	(Buffer end) points to first UNAVAILABLE byte in buffer
+;	JHBSTR	(Buffer start) points to first available byte in buffer
+;	JHFLG	(Header flags) set up possibly with JH2FAR set
+;
+;	Job header is mapped through APR6
+;	Priority is PR3
+;
+; Outputs:
+;	C=1 if no next command
+;	C=0 otherwise and
+;	  	R5 -> Length within the job header buffer.  The command
+;			follows the length, but may wrap at any time back to
+;			the beginning of the buffer.
+;		JHCUR = R5
+;-
+
+RECDWN:	CMP	JHCUR,JHEND	;Are we at end already?
+	BEQ	70$		;Yes, so indicate failure
+	MOV	JHCUR,R5	;Get current command
+	BITB	#JH2FAR,JHFLG	;So many ups we went too far?
+	BNE	50$		;Yes?  Give him back current command
+	CLR	-(SP)		;Get cell on top of stack
+	BISB	(R5)+,(SP)	;Get length and increment pointer
+	ADD	(SP)+,R5	;Get to trailing command length
+	INC	R5		;Get to start of next command
+	CMP	R5,JHBEND	;Past end of buffer?
+	BLO	40$		;No, no problem
+	SUB	JHBEND,R5	;Loop back again
+	ADD	JHBSTR,R5	;And we've found the start of command
+40$:	MOV	R5,JHCUR	;This is now the current command
+	CMP	R5,JHEND	;Are we at the end now?
+	BEQ	70$		;Yes, that's no good, no more commands
+50$:	BICB	#JH2FAR,JHFLG	;Got command, clear this condition
+60$:	TST	(PC)+		;Clear C, indicate command is there
+70$:	SEC			;Set C, indicate no more commands
+	RETURN			;Return
+
+.DSABL	LSB
+
+.SBTTL	OUTCMD	Output a command onto user's terminal
+;+
+; OUTCMD - Output a command onto user's terminal
+;
+; Inputs:
+;	R0 =  Unit number * 2
+;	R1 =  DDB
+;	R5 -> Command
+;	Priority is PR3
+;	Job Header mapped in APR6 D-space
+;	TERCLS mapped in APR6 I-space (I&D space machines only)
+;	
+; Format:
+;	CALL OUTCMD
+;
+; Outputs:
+;	R0 	unchanged
+;	R1	unchanged
+;	R2    = last character of user's command
+;	R3-R5	random 
+;	APR6 D-space mapping random (either TERCLS or Job Header)
+;	TERCLS mapped in APR6 I-space (I&D space machines only)
+;
+;-
+.ENABL	LSB
+
+OUTCMD:	CLR	R3		;Clear command length byte count	;016
+	BISB	(R5)+,R3	;And pick up the byte count		;016
+	SPLC	5		;Raise to 5 to lock out interrupts	;010
+10$:	CMP	R5,JHBEND	;;At end of buffer?
+	BLO	20$		;;No, all set
+	MOV	JHBSTR,R5	;;Yes, adjust by wrapping around
+20$:	MOVB	(R5)+,R2	;;Fetch a character
+	MAP	TERAP6,APR=6,DATA ;;Map the class driver		;019
+	CALLX	CHKDLM		;;Is character a private delimiter?	;016
+	BCS	30$		;;Yes, so stop right now		;016
+	MOV	R3,-(SP)	;;Save work registers			;016
+	MOV	R5,-(SP)	;; ...
+	CALLM	ECHOIN,KINAP5	;;Process the input character
+	CALL	MAPJH		;;Restore job header mapping
+	MOV	(SP)+,R5	;;Restore work registers
+	MOV	(SP)+,R3	;; ...					;016
+	SOB	R3,10$		;;Loop for the whole thing
+30$:	SPLC	3		;;Enable interrupts again		;016
+	RETURN			;And we're done
+
+.DSABL	LSB
+
+.SBTTL	RECPUT	Put a character into the recall buffer
+;+
+;
+; RECPUT - Put a character into the recall buffer
+;
+; Inputs:
+;	R1 -> DDB
+;	R2 =  character
+;	R3 -> XRB @ XRBC
+;	R4 = scratch
+;	R5 -> user's buffer
+;	Class Driver mapped in APR6
+;	Priority is PR3
+;
+; Format:
+;	CALL RECPUT
+;
+; Outputs:
+;	R4 destroyed, all other registers preserved
+;	TERCLS is left mapped in APR6
+;
+; Called by KBDVR to put characters into the recall buffer.  This routine
+; is not called if we are in the middle of an escape sequence, thus escape
+; sequences are never put into the recall buffer.
+;-
+.ENABL	LSB
+
+RECPUT::BITB	#TTNREC,TTFLG3(R1) ;Is recall allowed right now?	;008
+	BNE	60$		;No, get out
+	;
+	; Check to see if the character is a private delimiter.  If	;016
+	; not, then check to see if it's a RETURN.  Do it in this order	;016
+	; in case RETURN is a private delimiter. If we find a delimiter	;016
+	; (private or standard), we've found the end of the command.	;016
+	;								;016
+	CALLX	CHKDLM		;Is this character a private delimiter?	;016
+	BCS	30$		;Yes, read is complete			;016
+	CMPB	R2,#015		;Is character a carriage return?	;016
+	BEQ	60$		;Ignore it, catch the ensuing line feed ;016
+	MOV	#TTDLIM,R4	;Get address of delimiter list
+10$:	CMPB	R2,(R4)+	;Delimiter?
+	BLO	10$		;No, keep looping
+	BEQ	30$		;Yes, found end of command
+	;
+	; Insert a character into the recall buffer
+	;
+	BIT	#NOECHO,DDFLAG(R1) ;Echo disabled?			;013
+	BNE	60$		;Yes, don't store anything then		;013
+	CALL	MAPJH		;Map the job header
+	TSTB	JHFLG		;At start of command?
+.ASSUME	JHSTRT	EQ 200
+	BMI	20$		;No, we're in middle
+	MOV	JHEND,JHCUR	;Inserting a new command
+	CLRB	@JHEND		;Clear command byte count
+	CALL	RECINC		;Increment end pointer past byte count
+	BISB	#JHSTRT,JHFLG	;We're no longer at start
+20$:	CALL	PUTBUF		;Put the character into the buffer	;006
+	BR	50$		;And we're done				;006
+
+	;
+	; Read is complete, clean up, but don't bother to store empty command
+	;
+30$:	CALL	MAPJH		;Map the job header
+	TSTB	JHFLG		;Did any characters get inserted?
+.ASSUME	JHSTRT	EQ 200
+	BPL	40$		;No, we haven't left the start!
+	BICB	#JHSTRT!JH2FAR,JHFLG ;Indicate at start of command
+				;Clear flag indicating too many ups
+	MOVB	@JHCUR,@JHEND	;Copy character count
+	CALL	RECINC		;Increment end pointer
+	CALL	RECMAT		;Check if command matched previous
+40$:	MOV	JHEND,JHCUR	;Make end ptr current
+50$:	MAP	TERAP6,APR=6,DATA ;Map the class driver again		;011
+60$:	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<TTDLIM,TERAP6>
+
+.SBTTL	PUTBUF	Put a character into the recall buffer
+;+
+; PUTBUF - Put a character into the recall buffer
+;
+; Inputs:
+;	R2 = character
+;	JHCUR -> beginning of command (length byte)
+;	JHEND -> position to insert character
+;	Priority is PR3
+;
+; Outputs:
+;	R2 unchanged
+;	JHCUR -> beginning of command, length byte incremented by one
+;	JHEND -> position to insert NEXT character
+;
+;-
+.ENABL	LSB
+
+10$:	DECB	@JHCUR		;Latch at 255. length			;005
+	RETURN			;All done				;006
+
+PUTBUF:	INCB	@JHCUR		;Increment input byte count		;005
+	BEQ	10$		;Don't store char if command too long	;005
+	MOVB	R2,@JHEND	;Put at end of command
+	.CALLR	RECINC		;Increment pointer, ready for next char	;013
+
+.DSABL	LSB
+
+.SBTTL	RECINC	Increment the recall end pointer
+
+;+
+; RECINC - Increment the recall end pointer
+;
+; Inputs:
+;	JHEND	(End pointer) points to next available character cell,
+;		which just got filled and needs to get advanced.
+;	JHSTR	(Start pointer) points to earliest command in buffer
+;	JHBEND	(Buffer end) points to first UNAVAILABLE byte in buffer
+;	JHBSTR	(Buffer start) pointer to the first available byte in buffer
+;
+;	Job header is mapped through APR6, data space
+;	Priority is PR3
+;
+; Format:
+;	CALL RECINC
+;
+; Outputs:
+;	JHEND	(End pointer) advanced to next location to store character.
+;	JHSTR	(Start pointer) may have been advanced to next command
+;	  	if JHEND reaches the start.
+;	JHWRAP 	(Bit in JHFLG) set if JHEND advanced beyond JHBSTR, thus
+;		wrapping back to beginning of buffer
+;	All registers preserved
+;
+;-
+.ENABL	LSB
+
+RECINC:	INC	JHEND		;Increment END pointer
+	CMP	JHEND,JHBEND	;Beyond buffer end?
+	BLO	10$		;No, then we're okay
+	MOV	JHBSTR,JHEND	;Yes, wrap around to the beginning
+	BISB	#JHWRAP,JHFLG	;Indicate that we wrapped
+10$:	CMP	JHEND,JHSTR	;About to insert over start?
+	BNE	20$		;No, then everything is ready to insert
+	CLR	-(SP)		;Clear cell for byte count
+	BISB	@JHSTR,(SP) 	;Get length of first command
+	INC	(SP)		;Account for leading length		;002
+	INC	(SP)		;Account for trailing length		;002
+	ADD	(SP)+,JHSTR	;Add string length and 2 length bytes	;002
+	CMP	JHSTR,JHBEND	;Beyond buffer end?
+	BLO	20$		;No, everything is set
+	SUB	JHBEND,JHSTR	;Loop around
+	ADD	JHBSTR,JHSTR	;And we've found the start again
+20$:	RETURN			;All done
+
+.DSABL	LSB
+
+.SBTTL	RECMAT	Check if command matched previous
+;+
+; RECMAT - Check if command matched previous
+;
+; Inputs:
+;	JHCUR -> start of command just entered
+;	Priority is PR3
+;
+; Format:
+; 	CALL	RECMAT
+;
+; Outputs:
+;	JHCUR -> previous command if considered a match, otherwise unchanged
+;
+; Description:
+;	Two commands are matching if they match exactly, case SENSITIVE,
+;	ignoring any TRAILING spaces.  This is the VMS rules for matching
+;	a command.
+;-
+.ENABL	LSB
+
+RECMAT:	REGSCR			;Save all registers, we need them all
+	MOVB	JHFLG,-(SP) 	;Save job header flags
+	MOV	JHCUR,-(SP) 	;Save pointer to latest command
+	MOV	(SP),R1 	;R1 -> command just entered
+	CALL	RECUP		;Get command entered just before that
+	BCS	50$		;No previous command, this won't match anything
+	MOV	JHCUR,R2 	;R2 -> previous command
+	CLR	R3		;Set up for length
+	BISB	(R1),R3		;R3 = length of latest command
+	MOV	R3,R5		;Save length
+	CLR	-(SP)		;Get cell for length of previous command
+	BISB	(R2),(SP)	;Get length of previous command
+	CMPB	(R1),(R2)	;Is it the shorter length?
+	BLE	10$		;Yes, or else equal
+	MOV	(SP),R3		;Get length of shorter command
+10$:	SUB	(SP)+,R5	;Get difference of lengths
+20$:	CALL	INC1		;Increment pointer to most recent command
+	CALL	INC2		;Increment pointer to command before that
+	CMPB	(R1),(R2)	;Characters match?
+	BNE	50$		;No, these commands don't match
+	SOB	R3,20$		;Check all characters in shorter command
+
+	;All characters matched up to length of shorter command.  All the
+	;characters left in the longer command must be spaces, or no match
+
+	TST	R5		;Which command was longer?
+	BEQ	40$		;Neither!  Command matched
+	BPL	30$		;Current command longer
+	NEG	R5		;Make length difference positive
+	MOV	R2,R1		;Use R2's pointer
+30$:	CALL	INC1		;Increment previous command pointer
+	CMPB	(R1),#40	;Was character a space?
+	BNE	50$		;No, then no match
+	SOB	R5,30$		;Keep checking ...
+
+40$:	MOV	(SP),JHEND	;Make previous command last again
+50$:	TST	(SP)+		;Pop the current command
+	MOVB	(SP)+,JHFLG 	;Restore flags
+	RETURN			;Return, restoring registers
+
+INC1:	INC	R1		;Increment pointer into last command
+	CMP	R1,JHBEND	;Beyond end?
+	BLO	60$		;No, it's okay
+	MOV	JHBSTR,R1	;Yes, wrap
+60$:	RETURN			;All done
+
+INC2:	INC	R2		;Increment pointer into previous command
+	CMP	R2,JHBEND	;Beyond end?
+	BLO	70$		;No, it's okay
+	MOV	JHBSTR,R2	;Yes, wrap
+70$:	RETURN			;All done
+
+.DSABL	LSB
+
+.SBTTL	DCLRCL	DCL RECALL command support
+;+
+; DCLRCL - DCL RECALL command support
+;
+; Inputs are those from MSG.MAC:
+;	R0 =  EMT code = 60(8)
+;	R1 -> JOBDA @ JOBF = JDB+2
+;	R2 -> -22 into JBPPN table (formerly JBDA @ JOBF)
+;	R3 -> Mapped XRB
+;	R4 -> Mapped FIRQB
+;	R5 =  Send/Receive code for RECALL = SR$RCL = 15(8)
+;	Priority is PR3
+;
+; Input in FIRQB:
+;	FIRQB+FQFIL   = SR$RCL
+;	FIRQB+FQPPN   = 0 to read a command 
+;			1 to write a command 
+;			2 to erase buffers (RECALL/ERASE)
+;			3 to concatenate the 2 previous commands
+;			4 to truncate the current command
+;	FIRQB+FQPPN+1 = flag byte:  BIT0 set = Insert space (FQPPN=3 only)
+;				    BIT7 set = delete last (FQPPN=0,1 only)
+;	FIRQB+FQNAM1  = index range 1-65535 (FQPPN=0,1 only)
+;		      = length of commands after truncate (FQPPN=4 only)
+;
+; Input in XRB, valid on read, ignored on write:
+;	XRB+XRLEN     = Length of output buffer, in bytes
+;	XRB+XRBC      = must be 0 for read
+;	XRB+XRLOC     = Starting address of buffer
+;
+; Format:
+;	CALLMR	DCLRCL (from MSG module after SES1 dispatches to MSG)
+;
+; Output:
+;
+; Description:
+;	Through the .MESAG send/receive SYScall, this function has three 
+;	forms:  read a command into the user's buffer; write a command to
+;	the terminal; and erase (initialize) the recall buffer.
+;
+;	The read and write functions have been set up to return the CURRENT 
+;	level, as opposed to the DCL level; so users from other keyboard 
+;	monitors and even applications can have access to previous commands. 
+;	
+;	The truncate and concatenate functions are here for CUI to use to 
+;	strip off comments and hyphens, and to append peices of commands 
+;	together after continue or parameter prompting has occured.
+;-
+.ENABL	LSB
+
+RCLDSP:	.WORD	RCLRD		; 0 = Read				;006
+	.WORD	RCLWRI		; 1 = Write				;006
+	.WORD	RCLERA		; 2 = Erase				;006
+	.WORD	RCLCON		; 3 = Concatenate			;006
+	.WORD	RCLTRU		; 4 = Truncate				;006
+DSPSIZ	=: .-RCLDSP/2							;006
+
+DCLRCL::MOV	FQNAM1(R4),R0	;R0 = index or truncation point
+	MOVB	FQPPN(R4),R2	;R2 = operation 
+	MOVB	FQPPN+1(R4),R4	;R4 = flags				;006
+	CMPB	R2,DSPSIZ	;Operation legal?			;006
+	BHIS	10$		;No, error with BADFUO			;013
+	ASL	R2		;Make operation an offset
+	MAP	PUSH,DATA,APR=6	;Save mapping of user's lowcore
+	MOV	(SP),R5		;R5 = User's low core mapping
+	CALL	MAPJH		;Map the job header 
+	CALL	@RCLDSP(R2)	;Do the function
+	MAP	POP,DATA,APR=6	;Restore mapping of user's lowcore
+	RETURN			;All done
+
+10$:	ERROR	BADFUO		;Error, indicate illegal operation	;013
+
+.DSABL	LSB
+
+.SBTTL	RCLRD	Read a command from recall buffer
+;+
+; RCLRD - Read a command from recall buffer
+;
+; Inputs:
+;	R0 = Index of the command to get
+;	R1 ->JDB+2
+;	R2 = operation = 0
+;	R3 ->XRB
+;	R4 = flags (bit 7 is for deleting command)
+;	R5 = User's lowcore mapping
+;	Job header is mapped in APR6, data space
+;	Priority is PR3
+;
+; Outputs:
+;	Command is written to user's buffer
+;	User's lowcore mapped
+;	We return to our caller's caller.
+;
+; 	If the user's buffer is not large enough to hold the command,
+;	the buffer is loaded with as much as will fit, and the size of 
+;	the command NOT stored is posted in XRB+XRCI.
+;
+; Description:
+; 	Fullfil the DCL RECALL/ALL command, or any request to return a
+;	particular command.  
+;-
+.ENABL	LSB
+
+RCLRD:	CALL	RCLRW		;Do common RECALL read and write code	;012
+	CALL	GETCMD		;Get the command based on index
+	TST	R0		;Were there enough commands in buffer?
+	BNE	NOCMD		;No, then return NOSUCH
+	MOV	R5,R4		;R4 -> Command in Job header 
+	BISB	(R4)+,R0	;Get length of command (and bump pointer, 
+				;  which will be checked before each use)
+	MAP	R2,APR=6,DATA	;Map user's lowcore
+	CLRB	XRCI(R3)	;Assume whole command will fit		;013
+	CMPB	R0,(R3)		;Is whole command going to fit?		;013
+.ASSUME	XRLEN	EQ 0
+	BLOS	15$		;Yes, that's nice			;013
+	MOV	R0,XRCI(R3)	;Set size of command			;013
+.ASSUME	XRCI&1	EQ 0							;013
+	SUB	(R3),XRCI(R3) 	;Compute size of data not sent		;013
+.ASSUME	XRLEN	EQ 0
+.ASSUME	XRCI&1	EQ 0							;013
+	MOV	(R3),R0		;This is the maximum size we can send	;013
+.ASSUME	XRLEN	EQ 0
+15$:	MOV	R0,XRBC(R3)	;Set byte count, up to buffer length	;013
+	BEQ	30$		;Zero?  Short buffer! Get out.		;013
+	CALLX	SCRUMX		;Now map the user's buffer (R5 -> buffer)
+	MOV	@DPAR6,R3	;Save mapping to user's buffer
+	;
+	; Loop - move characters, making sure to map the job header before 
+	;	 getting a character, and map the user's buffer before 
+	;	 putting it.
+	;
+10$:	CALL	MAPJH		;Map the job header
+	CMP	R4,JHBEND	;Did we go beyond end?
+	BLO	20$		;No, continue
+	MOV	JHBSTR,R4	;Yes, wrap around to beginning
+20$:	MOVB	(R4)+,R2	;Get a character
+	MAP	R3,APR=6,DATA	;Map user's buffer
+	PUTUSR			;Put the character into the user's buffer
+	SOB	R0,10$		;Continue til no more
+30$:	RETURN			;All done
+
+.DSABL	LSB
+
+.SBTTL	RCLWRI	Write a command to the user's terminal
+;+
+; RCLWRI - Write a command to the user's terminal
+;
+; Inputs:
+;	R0 = Index of the command to write, cannot be 0
+;	R1 ->JDB+2
+;	R2 = operation * 2 = 2
+;	R3 ->XRB
+;	R4 = flags (bit 7 is for deleting command)
+;	R5 = User's lowcore mapping
+;	Job header is mapped in APR6, data space
+;	Priority is PR3
+;
+; Outputs:
+;	Command is put to the user's terminal (unless no command found)
+;	User's lowcore mapped
+;	We return to our caller's caller.
+;
+; Description:
+; 	Fullfil the DCL RECALL n or RECALL txt command, DCL requests the 
+;	number of the command, and we put that command into the user's 
+;	buffer.  No errors are possible, however, no action is taken if
+;	the user requests a command and none are in the buffer (besides the
+;	RECALL command itself, which is already stripped).
+;-
+.ENABL	LSB
+
+RCLWRI:	CALL	RCLRW		;Do common RECALL read and write code	;012
+	CALL	GETCMD		;Get command based on index
+	BEQ	10$		;None, just return
+	MAP	TERAP6,CODE,APR=6 ;Ensure TERCLS mapped in APR6 I space	;014
+	CALL	GETDDB		;Get a pointer to DDB, remap job header	;007
+	MOVB	DDHORZ(R1),PMTPOS(R1) ;Set the horizontal position	;009
+	MOVB	DDUNT(R1),R0	;Get unit number in R0
+	ASL	R0		;Make it unit number * 2
+	CALLR	OUTCMD		;Output requested command, and return	;013
+
+RCLRW:	BITB	#DCLLVL,JHLVL	;Is curent level DCL?			;012
+	BEQ	20$		;No, return protection violation	;012
+	TST	R0		;Index = 0?				;013
+	BEQ	30$		;Yes, that's no good			;013
+	MOV	R5,R2		;R2 -> User's low core			;012
+	CALL	RCLDEL		;Delete the RECALL command if requested
+	BCS	NOCMD		;No command there, simply get out	;013
+10$:	RETURN			;All done here
+
+NOCMD:	ERROR	NOSUCH		;Error with NOSUCH (adjusts stack if nec)
+
+20$:	ERROR	PRVIOL		;Error with PRVIOL (adjusts stack)	;012
+
+30$:	ERROR	BADFUO		;Error with BADFUO, illegal index	;013
+
+.DSABL	LSB
+
+GLOBAL	<NOSUCH,PRVIOL,BADFUO>
+
+.SBTTL	RCLERA	Erase the recall buffer
+;+
+; RCLERA - Erase the recall buffer
+;
+; Inputs:
+;	Job header is mapped in APR6, data space
+;	Priority is PR3
+;
+; Outputs:
+;	All recall pointers and recall flags in job header initialized
+;	All registers preserved
+;
+; Description:
+; 	Do RECALL/ERASE request to initialize all recall buffers.
+;
+;	Also called after memory is zeroed out to set up recall pointers
+;	for the first time.  This is done by testing JHBEND for 0.
+;	JHBEND (buffer end) cannot be zero except when job header memory 
+;	is zeroed in MEM.MAC.
+;
+;-
+.ENABL	LSB
+
+RCLERA:	MOV	R4,-(SP)	;Save register				;005
+	MOV	#JHFLG,R4	;Set up to initialize buffer	
+.ASSUME	JHFLG&1 EQ 0
+	MOV	#DCLLVL*400+0,(R4)+ ; Initialize JHFLG and JHLVL	;013
+.ASSUME	JHLVL	EQ JHFLG+1
+	CLR	(R4)+		; Initialize JHLVL1
+.ASSUME	JHLVL1	EQ JHLVL+1
+	CLR	(R4)+		; Initialize JHLVL2
+.ASSUME	JHLVL2	EQ JHLVL1+2
+	MOV	#JHBUFS,(R4)+	; Initialize JHBSTR			;013
+.ASSUME	JHBSTR	EQ JHLVL2+2
+	MOV	#JHBUFS+DCLBSZ,(R4)+ ;Initialize JHBEND			;013
+.ASSUME	JHBEND	EQ JHBSTR+2
+	MOV	#JHBUFS,(R4)	; Initialize JHCUR		
+.ASSUME	JHCUR	EQ JHBEND+2
+	MOV	(R4)+,(R4)	; Initialize JHSTR		
+.ASSUME	JHSTR	EQ JHCUR+2					
+	MOV	(R4)+,(R4)	; Initialize JHEND		
+.ASSUME	JHEND	EQ JHSTR+2					
+	MOV	(R4)+,(R4)	; Initialize JHDCLS		
+.ASSUME	JHDCLS	EQ JHEND+2					
+	MOV	(R4)+,(R4)	; Initialize JHDCLE		
+.ASSUME	JHDCLE	EQ JHDCLS+2					
+	MOV	(R4)+,(R4)	; Initialize JHRTSS		
+.ASSUME	JHRTSS	EQ JHDCLE+2					
+	MOV	(R4)+,(R4)	; Initialize JHRTSE		
+.ASSUME	JHRTSE	EQ JHRTSS+2					
+	MOV	(SP)+,R4	;Restore register			;005
+	RETURN			;All done
+
+.DSABL	LSB
+
+.SBTTL	RCLCON	Concatenate two pieces of a command
+;+
+; RCLCON - Concatenate two pieces of a command
+;
+; Inputs:
+;	R0 = Index of the command to get
+;	R1 ->JDB+2 
+;	R2 = operation * 2 = 6
+;	R3 ->XRB
+;	R4 = flags (bit 0 is for adding a space)
+;	R5 = User's lowcore mapping
+;	Job header is mapped in APR6, data space
+;	Priority is PR3
+;
+; Outputs:
+;	Two commands are pasted together
+;
+; Used by CUI to concatenate two commands after a continue or paramter prompt.
+;-
+.ENABL	LSB
+
+RCLCON:	CALL	GETDDB		;Get a pointer to DDB, remap job header	;007
+	BITB	#ICFLVL,TTRFLG(R1) ;ICF Read?				;008
+	BNE	50$		;Yes, so just get out			;007
+	CALL	RECUP		;Recall the previous command		;006
+	BCS	50$		;No previous command?  Nothing to do!	;006
+	MOV	R5,R2		;R2 -> beginning of CMD2		;006
+	CALL	RECUP		;Recall the command before that		;006
+	BCS	50$		;No previous command? Nothing to do!	;006
+	
+	; R2 -> CMD2 (initial length byte)
+	; R5 -> CMD1 (initial length byte)
+
+	MOV	#JHEND,R0	;Get address of end pointer		;006
+	MOV	R5,(R0)		;(R0) = location of end of CMD1		;006
+	CLR	-(SP)		; Get length of CMD1			;006
+	BISB	(R5),(SP)	; ...					;006
+	ADD	(SP)+,(R0)	; Adding the start to the length	;006
+	INC	(R0)		; Incrementing it 			;006
+	CMP	(R0),JHBEND	; Did it wrap?				;006
+	BLO	10$		; No, we're okay			;006
+	SUB	JHBEND,(R0)	; Yes, adjust back into the beginning	;006
+	ADD	JHBSTR,(R0)	; ...					;006
+10$:	MOV	R2,R5		;R5 -> initial length byte of CMD2	;006
+	ASR	R4		;Are we supposed to add a space?	;006
+	BCC	20$		;No, then don't				;006
+	MOV	#40,R2		;Get a space character			;006
+	CALL	PUTBUF		;And put it into the buffer		;006
+20$:	CLR	R1		;Clear a spot for length of CMD2	;006
+	BISB	(R5),R1		;R1 = length of CMD2 (cannot be 0)	;006
+30$:	INC	R5		;Point to next character		;006
+	CMP	R5,JHBEND	;Go beyond end?				;006
+	BLO	40$		;No, we're okay				;006
+	MOV	JHBSTR,R5	;Make it the beginning			;006
+40$:	MOVB	(R5),R2		;Get character				;006
+	CALL	PUTBUF		;Put it into the recall buffer		;006
+	SOB	R1,30$		;Loop for length of CMD2		;006
+	MOVB	@JHCUR,@JHEND	;Copy length				;006
+	CALL	RECINC		;Update end pointer			;006
+	MOV	JHEND,JHCUR	;Make current pointer point at end	;006
+50$:	RETURN			;All done!				;006
+
+.DSABL	LSB
+
+.SBTTL	RCLTRU	Truncate a command
+;+
+; RCLTRU - Truncate a command
+;
+; Inputs:
+;	R0 = length to truncate command to 
+;	R1 ->JDB+2 (unused)
+;	R2 = operation * 2 = 10 (unused)
+;	R3 ->XRB (unused)
+;	R4 = flags, (unused) 
+;	R5 = User's lowcore mapping (unused)
+;	Job header is mapped in APR6, data space
+;	Priority is PR3
+;
+; Outputs:
+;	Previous command is truncated to indicated length
+;	No errors are possible
+;	All registers random
+;
+;-
+.ENABL	LSB
+
+RCLTRU:	CALL	GETDDB		;Get a pointer to DDB, remap job header	;007
+	BITB	#ICFLVL,TTRFLG(R1) ;ICF Read?				;008
+	BNE	30$		;Yes, so just get out			;007
+	MOV	R0,R2		;R2 = Truncation point			;006
+	BEQ	DODEL		;0 means delete the last command	;006
+	MOV	#1,R0		;We want the first command		;006
+	CALL	GETCMD		;Get it					;006
+	BEQ	30$		;No command to truncate, get out	;006
+	CMPB	R2,(R5)		;Is truncate point > command length?	;006
+	BHIS	30$		;Yes, nothing to do			;006
+	MOVB	R2,(R5)		;Set new length				;006
+	ADD	R2,R5		;Adjust current pointer to end		;006
+	INC	R5		;Move to trailing byte location		;006
+	CMP	R5,JHBEND	;Pointer beyond end?			;006
+	BLO	10$		;No, we're okay				;006
+	SUB	JHBEND,R5	;Yes, adjust back into the beginning	;006
+	ADD	JHBSTR,R5	; ...					;006
+10$:	MOVB	R2,(R5)		;Set length into buffer			;006
+	INC	R5		;Set up to point beyond length		;006
+	CMP	R5,JHBEND	;Beyond end?				;006
+	BLO	20$		;No, all okay				;006
+	MOV	JHBSTR,R5	;Go back to beginning			;006
+20$:	MOV	R5,JHCUR	;Set current pointer			;006
+	MOV	R5,JHEND	;Set end pointer			;006
+30$:	RETURN			;Truncation complete			;006
+
+.DSABL	LSB
+
+.SBTTL	RCLDEL	Delete the last command if requested
+;+
+; RCLDEL - Delete the last command if requested
+;
+; Inputs:
+;	R4 = flags (bit 7 is for deleting command)
+;	Job header is mapped
+;	Priority is PR3
+;
+; Format:
+;	CALL RCLDEL
+;
+; Outputs:
+;	All registers unchanged
+;	C = 1 if no command to delete (shouldn't happen but ...)
+;	C = 0 if command deleted, with JHCUR, JHEND pointing to new last command
+;-
+.ENABL	LSB
+
+RCLDEL:	TSTB	R4		;Check whether to delete this command (C=0)
+	BPL	10$		;Branch if we're not supposed to delete last
+DODEL:	MOVB	JHFLG,-(SP)	;Save command flags!
+	CALL	RECUP		;Recall last command
+	MOVB	(SP)+,JHFLG	;Restore flags
+	MOV	JHCUR,JHEND	;Make previous one last
+10$:	RETURN			;All done
+
+.DSABL	LSB
+
+.SBTTL	CKSTRT	Ensure we're at start of line
+;+
+; CKSTRT - Ensure we're at start of line
+;
+;	JHSTRT set in JHFLG if we ARE NOT at start of line
+;	Job header is mapped
+;	Priority is PR3
+;
+;	CALL	CKSTRT
+;
+;	Pointers lined up if JHSTRT was set
+;	JHSTRT set in JHFLG
+;
+; If we aren't at the start of a command (JHSTRT set in JHFLG), it means 
+; the user must have typed a really long command, which was sent to the
+; user's .READ buffer once the number of characters reached input buffer 
+; quota.  We don't reset the JHCUR pointer becase we can still put more 
+; characters into this command.  We know we're not at end of command because
+; we haven't detected a delimiter in the user's input buffer.
+;  
+; This routine is called from two places, once in RECALL, in case he
+; starts to type in that long command, and hits an up/down arrow after
+; the first portion of that command was put into the buffer.  The other 
+; location is from RECCC, in case he hits ^C to abort that long command.
+; In either case, if we're not at the start of the command, then we set 
+; the end pointer = current pointer, and that fixes things up.
+;-
+.ENABL	LSB
+
+CKSTRT:	TSTB	JHFLG		;Are we at the "start" of the line?	;007
+.ASSUME	JHSTRT	EQ 200
+	BPL	10$		;Yes, then no problem			;007
+	MOV	JHCUR,JHEND	;No, then adjust end pointer		;007
+	BICB	#JHSTRT,JHFLG	;We're now at the start if a new cmd	;007
+	CLRB	@JHEND		;Set count to zero			;007
+10$:	RETURN			;All done				;007
+
+.DSABL	LSB
+
+.SBTTL	GETCMD	Get command based on index
+;+
+; GETCMD - Get command based on index
+;
+; Inputs:
+;	R0 = index, cannot be 0
+;	Job header is mapped, with all pointers set up
+;	Priority is PR3
+;	
+; Outputs:
+;	Z = 0 if at least one command found
+;		R5 -> command based on index (from RECUP)
+;		Job header pointers, flags unchanged
+;		R0 = 0 if command matches index
+;		R0 > 0 if not that many commands found
+;	Z = 1 if NOT even one command was found
+;+
+.ENABL	LSB
+
+GETCMD:	MOV	R0,-(SP)	;Save the index
+	MOVB	JHFLG,-(SP)	;Save job header flags
+	MOV	JHCUR,-(SP)	;Save current pointer
+	;
+	; Loop backwards based on index
+	;				
+10$:	CALL	RECUP		;Get the previous command to read or write
+	BCS	20$		;No (more) commands
+	SOB	R0,10$		;Loop for entire index
+20$:	MOV	(SP)+,JHCUR	;Restore current pointer
+	MOVB	(SP)+,JHFLG	;Restore flags
+	CMP	(SP)+,R0	;Did any commands match?
+	RETURN			;Give results to caller
+
+.DSABL	LSB
+
+.SBTTL	GETDDB	Get a DDB pointer from JDB pointer
+;+
+; GETDDB - Get a DDB pointer from JDB pointer
+;
+; 	R1 -> JDB+2
+;	Job (thus job header) is mapped in D-space APR6
+;	Priority is PR3
+;
+;	CALL	GETDDB
+;
+;	R1 -> DDB
+;	Job (thus job header) remapped in D-space APR6
+;
+;-
+.ENABL	LSB
+
+GETDDB:	MAP	FIPPOL		;Map fip pool 
+	MOV	@-(R1),R1	;Get pointer to DDB
+	.CALLR	MAPJH		;Exit mapping the job header
+
+.DSABL	LSB
+
+.SBTTL	MAPJH	Map the job header
+;+
+; MAPJH - Map the job header
+;
+; Inputs:
+;	JOBDA is job's JDB, job is resident
+;	Priority is PR3
+;
+; Format:
+; 	CALL	MAPJH
+;
+; Outputs:
+;	Job is loaded into APR6 data space, the 1st K is the job header
+;	All registers preserved
+;
+;-
+.ENABL	LSB
+
+MAPJH:	MOV	R4,-(SP)	;Get a scratch register
+	MOV	JOBDA,R4	;Get pointer to users JDB
+	MAP	JDMCTL+M.PHYA(R4),APR=6,DATA ;Map the job header
+	MOV	(SP)+,R4	;Restore register
+	RETURN			;All done
+
+.DSABL	LSB
+
+.END

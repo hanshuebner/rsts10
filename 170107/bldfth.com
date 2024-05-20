@@ -1,0 +1,39 @@
+$! BLDFTH.COM - Com file to build the FORTH RTS
+$!
+$ 
+$ IF F$ENVI("PROCEDURE") .NES. F$SEARCH("UNSUPP$:BLDFTH.COM") THEN GOTO SOURCE_KIT
+$ ASSIGN UNSUPP$: IN
+$ ASSIGN UNSUPP$: OUT
+$ GOTO START
+
+$SOURCE_KIT:
+$ ASSIGN D:[170,107] IN
+$ ASSIGN D:[170,107] OUT
+
+$START:
+$ _RUN $MACRO
+OUT:FORTH,OUT:FORTH/C=IN:FORTH
+$ _EOD
+
+$ _RUN $LINK
+OUT:FORTH,OUT:FORTH/A/W,OUT:FORTH/U:4000/H:177776=OUT:FORTH,CMN:ERR.STB
+PATCH
+$ _EOD
+
+$ _RUN $SILUS
+OUT:FORTH.RTS,TT:=OUT:FORTH
+$ _EOD
+
+$!
+$! Disable logfile so the remove of the RTS does not show up as an error
+$! if it's not currently installed.  We want this command procedure to
+$! complete with no errors.
+$!
+$_SET NOON
+$ LOG_FILE = F$ENVIRONMENT("LOG_FILE")
+$_IF LOG_FILE .NES. "" THEN SET LOGFILE/DISABLE
+$_REMOVE/RUN FORTH
+$_IF LOG_FILE .NES. "" THEN SET LOGFILE/ENABLE
+$_SET ON
+$_INSTALL/RUN OUT:FORTH.RTS
+$ _EXIT

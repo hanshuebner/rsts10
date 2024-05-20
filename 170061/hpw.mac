@@ -1,0 +1,837 @@
+	.TITLE	HPW - Hash user password
+	.IDENT	/02.01/
+
+;
+;		Copyright (c) 1988  by
+;	Digital Equipment Corporation, Maynard
+;	 Massachusetts.  All rights reserved.
+;
+; This  software  is  furnished  under  a license and may be used
+; and  copied  only in  accordance with the terms of such license
+; and with  the inclusion  of the above  copyright  notice.  This
+; software  or any other  copies  thereof, may not be provided or
+; otherwise made  available to any other person.  No title to and
+; ownership of the software is hereby transfered.
+;
+; The information  in this document is subject  to change without
+; notice and should not be construed as a commitment  by  Digital
+; Equipment Corporation.
+;
+; DIGITAL assumes no responsibility for the use or reliability of
+; its software on equipment that is not supplied by DIGITAL.
+;
+;	Brian S. McCarthy	06-September-1984
+;
+; This module performs an irreversible encryption of an arbitrary
+; length string of ASCII data via the PURDY algorithm.
+;
+;
+; Modified for RSX-11M-PLUS version 4.2 by:
+;
+;	B. S. McCarthy	30-Sep-88	02.01
+;
+;		BM412 -- Don't suppress encryption if username is blank
+;			but password is not
+;
+;
+	.MCALL	ACTDF$
+
+	ACTDF$
+	.PAGE
+
+;+
+; Definitions of constants and coefficients.
+;-
+
+;	Two very large prime exponents
+
+	N  = 377		; High word for both exponents
+
+	N0 =  -3		; 2^24 -   3 is first exponent,
+				;            this is low word
+
+	N1 = -63.		; 2^24 - 63. is second exponent,
+				;            this is low word
+
+;	Large prime (P) for modulus.
+;
+;		2^32 - 59. is the largest quadword prime
+
+	A = 59.
+
+	PH = 177777		; High half of large prime
+
+	PL = - A		; Low half of large prime
+
+;	Table of coefficients for polynomial
+;
+;		All coefficients assumed to have 48 leading 1s
+;
+
+CTBL:	.WORD	 -83.		; C1
+	.WORD	-179.		; C2
+	.WORD	-257.		; C3
+	.WORD	-323.		; C4
+	.WORD	-363.		; C5
+
+;	Stack size needed below
+
+	STKSIZ = 100.*2.	; For now, use 100. word stack
+
+	.PAGE
+
+;+
+; ** - HPW - Hash user password (High level language)
+;
+; Calling sequence:
+;
+;	CALL HPW (acnt_rec, password,len_pass, operation, result)
+;
+; Inputs:
+;
+;	acnt_rec  = Character buffer containing account file record
+;	password  = Character variable containing password
+;	len_pass  = Integer variable containing length of password
+;	operation = Integer - 1 for validate password, 0 for encrypt
+;
+; Output:
+;
+;	result    = Integer returned as 0 if no validation,
+;	            1 if validation successful
+;
+;-
+
+HPW::	MOV	2(R5),R0	; Get address of accpunt file record
+	MOV	4(R5),R2	; Get address of password string
+	MOV	@6(R5),R3	; and length
+	MOV	@10(R5),R1	; Get operation code
+	MOV	R5,-(SP)	; Save pointer to argument list
+	CALL	$HPW 		; Do encryption stuff
+	MOV	(SP)+,R5	; Restore argument pointer
+	MOV	R1,@12(R5)	; Restore argument pointer
+	RETURN			; back to caller
+
+	.PAGE
+
+;+
+; ** - $HPW - Hash user password (Macro)
+;
+; Inputs:
+;
+;	R0 = Address of account file record
+;	R1 = operation flag (1 = validate, 0 = encrypt)
+;	R2 = Address of password  string
+;	R3 = Length  of password  string
+;
+; Output:
+;
+;	If validating:
+;
+;		C = 1 if validation did not occur
+;			R1 =  0 if no password match
+;			R1 = -1 if unimplemented hash algorithm
+;		C = 0 if validated
+;-
+
+$HPW::				; Hash user password
+
+;	Save non-volatile registers and create return to restore
+
+	MOV	R5,-(SP)	; Save
+	MOV	R4,-(SP)	;  registers
+	CALL	10$		; Go do password handling
+	MOV	(SP)+,R4	; Restore
+	MOV	(SP)+,R5	;  registers
+	RETURN			;
+10$:				;
+
+;	If creating account record, always use PURDY hashing
+
+	TST	R1		; Was operation validate?
+	BEQ	180$		; If EQ no, always use PURDY
+
+;	We're validating - see if old style record
+
+	TSTB	A.ENCT(R0)	; Old style password in record?
+	BEQ	20$		; If NE go encrypt
+	CMPB	#1,A.ENCT(R0)	; Is it PURDY encrypted?
+	BEQ	180$		; If EQ yes, go do it
+	MOV	#-1,R1		; Indicate unknown algorithm
+	SEC			; Indicate verify failed
+	RETURN			; Back to caller
+
+;	See if there's a user supplied ENCRPT routine, and call
+
+20$:	MOV	#ENCRPT,R4	; Is there a user supplied ENCRPT?
+	BEQ	40$		; If EQ no, use plaintext
+	CMP	R3, #6		; Use "ENCRPT" only if old account record
+	BGT	170$		;   so pwd len must be lt six bytes
+	MOV	#20040, -(SP)	; Push six bytes of blanks onto stack 
+	MOV	#20040, -(SP)	;   as buffer for blank-filled "ENCRPT" 
+	MOV	#20040, -(SP)	;   style password checking
+	MOV	#6, -(SP)	; Count of bytes to remove
+	MOV	R0,-(SP)	; Save important register
+	MOV	SP, R0		; Point to password (ENCRPT style)
+	CMP	(R0)+, (R0)+	; Adjust to point to buffer
+	MOV	R0, -(SP)	; Save buffer pointer
+30$:	MOVB	(R2)+, (R0)+	; Now move password into buffer
+	SOB	R3, 30$		; Must be le 6 chars if old "encrpt" 
+	MOV	(SP), R0	; Restore buffer pointer
+	CALL	(R4)		; Call routine
+	MOV	(SP)+, R2	; Restore buffer pointer in r2
+	MOV	(SP)+,R0	;  Restore important register
+	MOV	#6,R3		; Assume 6 character length
+	BR	42$		; Skip to compare passwords
+
+;	Test plaintext password
+
+40$:	CLR	-(SP)		; Bytes of password buffer on stack
+42$:	MOV	R0,R4		; Point to account record
+	ADD	#A.PSWD,R4	; Point to password text
+	CMP	#6,R3		; Password <= 6 chars?
+	BHIS	60$		; If HIS yes
+	MOV	#6,R3		; Maximize to 6 chars.
+60$:	MOV	#6,-(SP)	; Calculate residual
+	SUB	R3,(SP)		; count in account record
+
+;	Compare input password to record
+
+80$:	CMPB	(R2)+,(R4)+	; Password match?
+	BNE	140$		; If NE, no, validation failed
+	SOB	R3,80$		; Go until end of input password
+
+;	If input password less than 6 characters, make sure rest
+;	of password is blank in account file record.
+
+	MOV	(SP)+,R3	; Get residual character count
+	BEQ	120$		; If EQ validation successful
+100$:	CMPB	#40,(R4)+	; Rest of password record blanks?
+	BNE	160$		; If NE no
+	SOB	R3,100$		; Loop 'til end of password record
+
+;	Password validation successful
+
+120$:	MOV	(SP)+, R1	; Retrieve bytes of password buffer to
+	ADD	R1, SP		;   clear from stack
+	MOV	#1,R1		; Indicate success status
+	CLC			; And shorthand
+	RETURN			; Back to caller
+
+;	Password validation has failed
+
+140$:	TST	(SP)+		; Clear residual character count
+160$:	MOV	(SP)+, R1	; Retrieve bytes of password buffer to
+	ADD	R1, SP		;   clear from stack
+170$:	CLR	R1		; Indicate failed due to mismatch
+	SEC			; Indicate failed
+	RETURN			; back to caller
+
+;	Set up to call PURDY algorithm
+
+180$:	MOV	R1,-(SP)	; Save create/validate flag
+	MOV	R0,-(SP)	; Save address of account record
+	MOV	A.SALT(R0),R4	; Get salt value
+	ADD	#A.LNM,R0	; Form pointer to username
+	MOV	R0,R1		; Copy name pointer
+	ADD	#14.,R1		; Point past last name field
+182$:	CMPB	#40,-1(R1)	; This character non blank?
+	BNE	184$		; If NE yes, reached real 
+	DEC	R1		; Point back one more character
+	CMP	R1,R0		; Reached end of name field yet?
+	BHI	182$		; If HI no, keep going
+184$:	SUB	R0,R1		; Calculate length of username
+
+;	Call PURDY algorithm
+
+	CALL	$PURDY		; Encrypt user password
+
+	MOV	10(SP),R0	; Restore pointer to account record
+	ADD	#A.HPW,R0	; Point to hashed password field
+
+;	If validating, compare hashed password.
+
+	TST	12(SP)		; Validating ?
+	BEQ	220$		; If EQ no, go set password
+
+	CMP	(SP)+,(R0)+	; Does this word match?
+	BNE	200$		; If NE no
+	CMP	(SP)+,(R0)+	; Does this word match?
+	BNE	201$		; If NE no
+	CMP	(SP)+,(R0)+	; Does this word match?
+	BNE	202$		; If NE no
+	CMP	(SP)+,(R0)+	; Does this word match?
+	BNE	203$		; If NE no
+	CMP	(SP)+,(SP)+	; Clean off words saved before PURDY
+	MOV	#1,R1		; Indicate success
+	CLC			;
+	RETURN
+
+200$:	TST	(SP)+		; Clean off hashed password
+201$:	TST	(SP)+		; Clean off hashed password
+202$:	TST	(SP)+		; Clean off hashed password
+203$:	CMP	(SP)+,(SP)+	; Clean off words saved before PURDY
+	CLR	R1		; Indicate failed
+	SEC			;
+	RETURN			; Back to user
+
+;	Set password in account record
+
+220$:	MOVB	#1,A.ENCT-A.HPW(R0) ; Set encryption type
+	MOV	(SP)+,(R0)+	; Insert
+	MOV	(SP)+,(R0)+	;  hashed
+	MOV	(SP)+,(R0)+	;   password
+	MOV	(SP)+,(R0)+	;    value
+	CMP	(SP)+,(SP)+	; Clean off words saved before PURDY
+	RETURN
+
+	.PAGE
+
+;+
+; ** - PURDY - Perform PURDY encryption algorithm (High level language)
+;
+; Calling sequence:
+;
+;	CALL PURDY (username,len_user,password,len_pass,salt,quad)
+;
+; Inputs:
+;
+;	username = Character variable containing username
+;	len_user = Integer variable containing length of username
+;	password = Character variable containing password
+;	len_pass = Integer variable containing length of password
+;	salt     = Integer variable containing 16-bit random salt
+;
+; Output:
+;
+;	quad     = quadword to receive encrypted value of
+;		   username/password/salt combination
+;
+;-
+
+PURDY::	MOV	2(R5),R0	; Get address of username string
+	MOV	@4(R5),R1	; and length
+	MOV	6(R5),R2	; Get address of password string
+	MOV	@10(R5),R3	; and length
+	MOV	@12(R5),R4	; Get salt value
+	MOV	R5,-(SP)	; Save pointer to argument list
+	CALL	$PURDY		; Do encryption stuff
+	MOV	10(SP),R5	; Restore argument pointer
+	MOV	14(R5),R0	; Point to quadword for return
+	MOV	(SP)+,(R0)+	; Copy
+	MOV	(SP)+,(R0)+	;  the
+	MOV	(SP)+,(R0)+	;   Quadword 
+	MOV	(SP)+,(R0)+	;    value
+	TST	(SP)+		; Get rid of saved R5
+	RETURN			; back to caller
+
+	.PAGE
+
+;+
+; ** - $PURDY - Perform PURDY encryption algorithm (Macro)
+;
+; Inputs:
+;
+;	R0 = Address of user name string
+;	R1 = Length  of user name string
+;	R2 = Address of password  string
+;	R3 = Length  of password  string
+;	R4 = 16 bit SALT value
+;
+; Output:
+;
+;	(SP) = Quadword encrypted value
+;-
+
+$PURDY::MOV	SP,R5		; Copy stack pointer
+	SUB	#STKSIZ,SP	; Allocate temporary space
+	MOV	(R5)+,-(SP)	; Copy return address
+	CLR	-(R5)		; Initialize value of Quadword
+	CLR	-(R5)		; Initialize value of Quadword
+	CLR	-(R5)		; Initialize value of Quadword
+	CLR	-(R5)		; Initialize value of Quadword
+
+;	If the password or the username are null, return null
+;	encryption value.
+
+	TST	R3		; Length of password zero?
+	BEQ	20$		; If EQ yes
+
+;	Save username descriptor and salt for later
+
+	MOV	R0,-(SP)	; Save address of username
+	MOV	R1,-(SP)	; Save length of username
+	MOV	R4,-(SP)	; Save salt
+
+;	Clear out stack so we can see how much is used (temporary)
+
+	MOV	R5,-(SP)	; Save pointer
+	MOV	#<<STKSIZ/2>-4>,R4 ; Number of words in stack
+10$:	CLR	-(R5)		; Clear a word
+	SOB	R4,10$		; 'til done
+	MOV	(SP)+,R5	; Get address of word again
+
+;	Collapse password into quadword
+
+	CALL	COLAPS		; Fold in password
+
+;	Add in salt value
+
+	CLR	R2		; Initialize a register
+	BISB	4(R5),R2	; Get high byte
+	SWAB	R2		; and put it there
+	BISB	3(R5),R2	; Get low part
+	ADD	(SP)+,R2	; Include salt value
+	MOVB	R2,3(R5)	; Write back low byte
+	SWAB	R2		; and swap parts around
+	MOVB	R2,4(R5)	; and write back low part
+
+;	Collapse username into quadword
+
+	MOV	(SP)+,R3	; Retrieve length of username
+	MOV	(SP)+,R2	; and address
+	TST	R3		; Length of username 0 ?
+	BEQ	15$		; If EQ yes, don't fold it in
+	CALL	COLAPS		; Colaps value
+15$:				; Reference label
+
+;	Calculate polynomial
+
+	CALL	PURDYP		; Do polynomial
+
+;	Repair stack and return
+
+	MOV	(R5)+,6(R5)	; Copy polynomial
+	MOV	(R5)+,6(R5)	;  value over
+	MOV	(R5)+,6(R5)	;   original quadword
+	MOV	(R5)+,6(R5)	;    value
+
+20$:	MOV	(SP)+,-(R5)	; Copy return pointer
+	MOV	R5,SP		; Adjust stack pointer
+	RETURN			; and back to the user
+	.PAGE
+
+;+
+; ** - COLAPS - Colapse ASCII stirng into the quadword
+;
+; Inputs:
+;
+;	R2 = address of string
+;	R3 = length of string
+;	R5 = address of quadword
+;-
+
+COLAPS:	MOV	R3,R0		; Copy length left in string
+	BIC	#^C<7>,R0	; Take length modulus 8
+	ADD	R5,R0		; Form index into quadword
+	MOVB	(R0),R1		; Get current byte
+	MOVB	(R2)+,R4	; Get next byte of string
+	ADD	R4,R1		; Add them
+	MOVB	R1,(R0)		; Replace byte
+	SOB	R3,COLAPS	; Repeat 'til string exhausted
+	RETURN			; Back to caller
+
+	.PAGE
+
+;+
+; ** - PURDYP - calculate PURDY polynomial
+;
+;	This routine takes a quadword (U) and applies the following
+;	function to it:
+;
+;	F(x) = x^n0 + x^n1*c1 + x^3*c2 + x^2*c3 +x*c4 + c5
+;
+; Inputs:
+;
+;	(R5) = Quadword value U
+;
+;	R5 points to top of stack of at least 50. words.
+;
+; Outputs:
+;
+;	(R5) = F(U)
+;-
+
+PURDYP:	MOV	#CTBL,R4	; Point to table of coefficients
+
+;						Contents of R5 stack
+;						--------------------
+;
+;							[ U ]
+
+; Step  1 - Calculate U mod P
+
+	CALL	MODPQ		; Do modulus		[ U ]
+
+; Step  2 - Calculate A = U^n1
+
+	CALL	COPY		; Duplicate U		[ U U ]
+	MOV	#N,R0		; Set up high exp.
+	MOV	#N1,R1		; Set up low exp
+	CALL	EXP		; Do exponentiation	[ U A ]
+
+; Step  3 - Calculate B = U^(n0-n1)
+
+	CALL	COPY2		; Duplicate U		[ U A U ]
+	CLR	R0		; Set up high exp.
+	MOV	#<N0-N1>,R1	; Set up low exp.
+	CALL	EXP		; Do exponentiation	[ U A B ]
+
+; Step  4 - Calculate B = B + c1 = U^(n0-n1) + c1
+
+	CALL	ADDQC		; Add coefficient	[ U A B ]
+
+; Step  5 - Calculate A = B * A  = U^n0 + U^n1*c1
+
+	CALL	MULQ		; Multiply		[ U A ]
+
+; Step  6 - Calculate B = U * c2
+
+	CALL	COPY2		; Copy U		[ U A U ]
+	CALL	PUSHC		; Push coefficient	[ U A U c2 ]
+	CALL	MULQ		; Multiply		[ U A B ]
+
+; Step  7 - Calculate B = B + c3 = U*c2 + c3
+
+	CALL	ADDQC		; Add coefficient	[ U A B]
+
+; Step  8 - Calculate B = B * U  = U^2*c2 + U*c3
+
+	CALL	COPY3		; Copy U		[ U A B U ]
+	CALL	MULQ		; Multiply		[ U A B ]
+
+; Step  9 - Calculate B = B + c4 = U^2*c2 + U*c3 + c4
+
+	CALL	ADDQC		; Add coefficient	[ U A B ]
+
+; Step 10 - Calculate B = B * U  = U^3*c2 + U^2*c3 + U*c4
+
+	CALL	COPY3		; Copy U		[ U A B U ]
+	CALL	MULQ		; Multiply		[ U A B ]
+	
+; Step 11 - Calculate B = B + c5 = U^3*c2 + U^2*c3 + U*c4 + c5
+
+	CALL	ADDQC		; Add coefficient	[ U A B ]
+
+; Step 12 - Calculate A = A + B
+;		= x^n0 + x^n1*c1 + x^3*c2 + x^2*c3 +x*c4 + c5
+
+	CALL	ADDQ		; Add terms		[ U A ]
+
+	RETURN			; Done.
+	.PAGE
+
+;+
+; ** - MULQ - Multiply quadwords on the stack
+;
+;	[ A B ] -> [ A*B ]
+;
+;	A is referred to as z/y and B is referred to as v/u
+;-
+
+MULQ:				; Reference label
+
+;	Save coefficient table pointer and possibly exponent
+
+	MOV	R0,-(SP)	; Exponent
+	MOV	R1,-(SP)	;
+	MOV	R4,-(SP)	; Table pointer
+
+;	Obtain products of high longwords (v*z)
+
+	MOV	R5,R4		; Copy pointer to words for ease
+	MOV	16(R4),-(R5)	; Copy zh
+	MOV	14(R4),-(R5)	; Copy zl
+	MOV	6(R4),-(R5)	; Copy vh
+	MOV	4(R4),-(R5)	; Copy vl
+	CALL	MULLU		; Multiply
+	CALL	MODPQ		; Take product modulo P
+	CALL	PQLSH		; Normalize
+
+;	Obtain inner longword products (v*y)
+
+	MOV	12(R4),-(R5)	; Copy yh
+	MOV	10(R4),-(R5)	; Copy yl
+	MOV	6(R4),-(R5)	; Copy vh
+	MOV	4(R4),-(R5)	; Copy vl
+	CALL	MULLU		; Multiply
+	CALL	MODPQ		; Take product modulo P
+
+;	Obtain outer longword product (u*z)
+
+	MOV	16(R4),-(R5)	; Copy zh
+	MOV	14(R4),-(R5)	; Copy zl
+	MOV	2(R4),-(R5)	; Copy uh
+	MOV	(R4),-(R5)	; Copy ul
+	CALL	MULLU		; Multiply
+	CALL	MODPQ		; Take product modulo P
+
+;	Collapse results so far
+
+	CALL	ADDQ
+	CALL	ADDQ
+	CALL	PQLSH
+
+;	Obtain product of low longwords (u*y)
+
+	MOV	12(R4),-(R5)	; Copy yh
+	MOV	10(R4),-(R5)	; Copy yl
+	MOV	2(R4),-(R5)	; Copy uh
+	MOV	(R4),-(R5)	; Copy ul
+	CALL	MULLU		; Multiply
+	CALL	MODPQ		; Take product modulo P
+	CALL	ADDQ		; Collapse result
+
+;	Clean stack and reset pointer
+
+	ADD	#10,R4		; Clean one quadword off stack
+	MOV	(R5)+,(R4)+	; Copy
+	MOV	(R5)+,(R4)+	;  quadword
+	MOV	(R5)+,(R4)+	;   into right
+	MOV	(R5)+,(R4)+	;    place
+	SUB	#10,R4		; Point back over result
+	MOV	R4,R5		; Reset math stack pointer
+
+;	Restore coefficient table pointer and possibly exponent
+
+	MOV	(SP)+,R4	; Table pointer
+	MOV	(SP)+,R1	;
+	MOV	(SP)+,R0	; Exponent
+
+	RETURN			; Return to caller
+
+;+
+; ** - MULLU - Multiply longwords on the stack (unsigned)
+;
+;	[ A B ] -> [ A*B ]
+;-
+
+MULLU:	MOV	6(R5),R0	; Get high half of first word (H1)
+	MOV	2(R5),R1	; Get high half of second word (H2)
+	MOV	R0,-(R5)	; Save H1 for later
+	CALL	MULWU		; Form H1*H2 subproduct
+	MOV	6(R5),R0	; Pick up low halves L1
+	MOV	2(R5),R1	; and L2
+	MOV	R2,10(R5)	; Save first subproduct (Q4)
+	MOV	R3,6(R5)	; and Q3
+	MOV	R1,-(R5)	; Save L2 for later
+	CALL	MULWU		; Form L1*L2 subrpoduct
+	MOV	6(R5),R1	; Get H2 again
+	MOV	R2,6(R5)	; Save lowest subproduct (Q2)
+	MOV	R3,4(R5)	; and Q1
+	CALL	MULWU		; Form H2*L1 subproduct
+	ADD	R3,6(R5)	; Add low part of subprod to Q2
+	ADC	10(R5)		; Prop. carry to Q3
+	ADC	12(R5)		; and Q4
+	ADD	R2,10(R5)	; Add high part of subp. to Q3
+	ADC	12(R5)		; Prop carry to Q4.
+	MOV	(R5)+,R0	; Retrieve L2
+	MOV	(R5)+,R1	; and H1
+	CALL	MULWU		; form H1*l2 subproduct
+	ADD	R3,2(R5)	; Add low part to Q2
+	ADC	4(R5)		; Prop carry to Q3
+	ADC	6(R5)		; and Q4
+	ADD	R2,4(R5)	; Add high part to Q3
+	ADC	6(R5)		; Prop carry to Q4
+	RETURN			; Return to caller
+
+;+
+; ** - MULWU - Multiply words (unsigned)
+;
+; 	Inputs:
+;		R0,R1 = multiplier, multiplicand.
+;
+;	Output:
+;
+;		R2,R3 = High/low half of the result
+;
+;-
+
+MULWU:	MOV	R0,R2		; Copy first operand
+	MUL	R1,R2		; Do signed multiply
+	TST	R0		; If first operand was negative
+	BPL	10$		; (If PL not neg) then compensate
+	ADD	R1,R2		; by adding second oper.*2^16.
+10$:	TST	R1		; If second operand was negative
+	BPL	20$		; (If PL not neg) then compensate
+	ADD	R0,R2		; by adding first oper.*2^16.y
+20$:	RETURN			; Return to caller
+	.PAGE
+
+;+
+; ** - PQLSH - Leave horrendous by-product on stack
+;
+;	[ A -> A+H ] Where H is the horrendous number
+;		     (Can you tell I don't understand this part?)
+;-
+
+PQLSH:	MOV	6(R5),-(R5)	; Copy high half of quadword
+	MOV	6(R5),-(R5)	; (high longword, that is)
+	CLR	-(R5)		; Push long word value
+	MOV	#A,-(R5)	; of A onto the stack
+	CALL	MULLU		; Multiply
+	MOV	12(R5),16(R5)	; Multiply quadword
+	MOV	10(R5),14(R5)	; by 2^32 by shifting
+	CLR	12(R5)		; 32 bits to the
+	CLR	10(R5)		; left
+	JMP	ADDQ		; And add results together.
+	.PAGE
+;+
+; ** - MODPQ - Calculate top value of R5 stack Mod P
+;
+;	[ A ] -> [ AmodP ]
+;-
+	.ENABL	LSB
+
+MODPQ:	CMP	#177777,6(R5)	; Is the high word all ones?
+	BNE	10$		; If NE no, can't be greater than P
+	CMP	#177777,6(R5)	; Is the next high word all ones?
+	BNE	10$		; If NE no, can't be greater than P
+	CMP	#177777,6(R5)	; Is the next high word all ones?
+	BNE	10$		; If NE no, can't be greater than P
+	CMP	#177777,6(R5)	; Is the low word greater than P
+	BHIS	10$		; If HIS no
+MODPQA:	ADD	#A,(R5)		; Add A to lowest word
+	ADC	2(R5)		; and
+	ADC	4(R5)		;  propagate
+	ADC	6(R5)		;   carry bit
+10$:	RETURN
+
+	.DSABL	LSB
+	.PAGE
+
+;+
+; ** - ADDQC - Add coeffecient from R4 table to top of R5 stack
+;
+;	[ A ] -> [ A+Cnext ]
+;-
+
+ADDQC:	CALL	PUSHC		; Push the coefficient
+
+;+
+; ** - ADDQ - Add top two words of R4 stack
+;
+;	[ A B ] -> [ A+B ]
+;-
+
+ADDQ:	CLR	R0		; A place to remember carrys
+
+	ADD	(R5)+,6(R5)	; Add low word
+	ADC	(R5)		; Propagate carry up operand
+	ADC	2(R5)		;
+	ADC	4(R5)		;
+	ROR	R0		; Remember if carry out of top
+	ADD	(R5)+,6(R5)	; Add next word
+	ADC	(R5)		; Propagate carry up operand
+	ADC	2(R5)		;
+	ROR	R0		; Remember if carry out of top
+	ADD	(R5)+,6(R5)	; Add next word
+	ADC	(R5)		; Propagate carry up operand
+	ROR	R0		; Remember if carry out of top
+	ADD	(R5)+,6(R5)	; Add high word
+	ROR	R0		; Remember if carry out of top
+	BNE	MODPQA		; If NE, there was carry, always mod.
+	BR	MODPQ		; check if modulus needed
+
+	.PAGE
+;+
+;	Stack value copy routines
+;-
+
+;+
+; ** - COPY - Copy top value on R5 stack
+;
+;	[ A ] -> [ A A ]
+;-
+
+COPY:	MOV	6(R5),-(R5)	; Copy highest word
+	MOV	6(R5),-(R5)	; Copy next highest word
+	MOV	6(R5),-(R5)	; Copy second lowest word
+	MOV	6(R5),-(R5)	; Copy lowest word
+	RETURN
+
+;+
+; ** - COPY2 - Copy second value on R5 stack
+;
+;	[ A B ] -> [ A B A ]
+;-
+
+COPY2:	MOV	16(R5),-(R5)	; Copy highest word
+	MOV	16(R5),-(R5)	; Copy next highest word
+	MOV	16(R5),-(R5)	; Copy second lowest word
+	MOV	16(R5),-(R5)	; Copy lowest word
+	RETURN
+
+;+
+; ** - COPY3 - Copy third value on R5 stack
+;
+;	[ A B C ] -> [ A B C A ]
+;-
+
+COPY3:	MOV	26(R5),-(R5)	; Copy highest word
+	MOV	26(R5),-(R5)	; Copy next highest word
+	MOV	26(R5),-(R5)	; Copy second lowest word
+	MOV	26(R5),-(R5)	; Copy lowest word
+	RETURN
+
+;+
+; ** - REP2 - Pop top value on R5 stack, replace second value with it
+;
+;	[ A B C D ] -> [ A D A ]
+;-
+
+REP2:	MOV	(R5)+,16(R5)	; Copy highest word
+	MOV	(R5)+,16(R5)	; Copy next highest word
+	MOV	(R5)+,16(R5)	; Copy second lowest word
+	MOV	(R5)+,16(R5)	; Copy lowest word
+	RETURN
+
+;+
+; ** - PUSHC - Push coefficient from R4 table
+;
+;	[ A ] -> [ A Cnext ]
+;-
+
+PUSHC:	MOV	#177777,-(R5)	; Top three words
+	MOV	#177777,-(R5)	;  of all coefficients
+	MOV	#177777,-(R5)	;   are all -1
+	MOV	(R4)+,-(R5)	; Copy variable part
+	RETURN
+
+	.PAGE
+
+;+
+; ** - EXP - Calculate exponential value
+;
+;	[ A ] -> [ A^n ]
+;
+;	High part of N in R0, low part in R1
+;-
+
+EXP:	MOV	R4,-(SP)	; Save coefficient table pointer
+	MOV	R5,R4		; Save pointer to argument
+	CALL	COPY		; Make a copy of variable
+	MOV	#1,(R4)+	; Initialize
+	CLR	(R4)+		;  quadword
+	CLR	(R4)+		;   temporary
+	CLR	(R4)		;    to 1
+10$:	BIT	#1,R1		; This bit set in exponent
+	BEQ	20$		; If EQ no, don't multiply
+	CALL	COPY		; Copy variable
+	CALL	COPY3		; Copy temporary
+	CALL	MULQ		; Multiply
+	CALL	REP2		; replace temporary
+	TST	R0		; Any bits left in high part of exp?
+	BNE	20$		; If NE yes, keep going
+	BIT	#177776,R1	; Any bits left to look at?
+	BEQ	30$		; If EQ no, leave now
+;	C-CLR?
+20$:	ROR	R0		; Shift exponent right
+	ROR	R1		; one bit
+	CALL	COPY		; Copy current variable
+	CALL	MULQ		; and square it
+	BR	10$		; go again
+30$:	ADD	#10,R5		; Pop copy of variable
+	MOV	(SP)+,R4	; Restore coefficient table pointer
+	RETURN			; Back to caller
+
+	.END

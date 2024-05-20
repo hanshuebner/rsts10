@@ -1,0 +1,368 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element CNDTL.MAC
+;  *4    25-JUN-1987 12:47:05 STEVENS "Added .IF P1 and .IF P2 directives"
+;  *3    18-AUG-1986 11:18:00 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:11:26 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:33:51 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element CNDTL.MAC
+	.NLIST							;Edit Level 02
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	CNDTL	- Conditional assembly directives
+	.SBTTL	CNDTL	- Conditional assembly directives
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Too many people to list here
+;
+;   Created:	From the dust and dirt
+;
+;  Abstract:	CNDTL	- Conditional assembly directives
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;	001	Jrw	25-Jul-83	Update for 8-bit support
+;					Remove temp linker fix.
+;	002	Jrw	26-Nov-85	Don't evaluate condition argument if
+;					already in unsatisfied condition.
+;					Example:
+;					.IF	NE,0
+;					.MACRO	FOO COND,ARG1,ARG2
+;					.IF	COND,<ARG1>-<ARG2>
+;					.ENDC;	COND,<ARG1>-<ARG2>
+;					.ENDM
+;					.ENDC;	NE,0
+;--
+
+
+;+
+; GENCND
+;
+; The macro "GENCND" is used to specify conditional
+; arguments.  It takes two or three arguments:
+;
+;	1-	Mnemonic
+;	2-	Subroutine to be called
+;	3-	If non-blank, complement condition
+;-
+
+.MACRO	GENCND	MNE,SUBR,TOGGLE		;Generate conditional
+	.RAD50	/MNE/
+.IF	B,<TOGGLE>
+	.WORD	SUBR
+.IFF;	B,<TOGGLE>
+	.WORD	SUBR+1
+.ENDC;	B,<TOGGLE>
+.ENDM	GENCND
+
+;	Dispatch table
+
+	PURE	CNDSEC,D,GBL
+
+CNDBAS::
+	GENCND	B,	TCB		;.IF B	<STR>
+	GENCND	DF,	TCONDF		;.IF DF	SYM
+	GENCND	DIF,	TCID,	F	;.IF DIF <STR1>,<STR2>
+	GENCND	EQ,	TCONEQ		;.IF EQ	EXP
+	GENCND	G,	TCONGT		;.IF G	EXP
+	GENCND	GE,	TCONLT,	F	;.IF GE	EXP
+	GENCND	GT,	TCONGT		;.IF GT	EXP
+	GENCND	IDN,	TCID		;.IF IDN EXP
+	GENCND	L,	TCONLT		;.IF L	EXP
+	GENCND	LE,	TCONGT,	F	;.IF LE	EXP
+	GENCND	LT,	TCONLT		;.IF LT	EXP
+	GENCND	NB,	TCB,	F	;.IF NB	<STR>
+	GENCND	NDF,	TCONDF,	F	;.IF NDF SYM
+	GENCND	NE,	TCONEQ,	F	;.IF NE	EXP
+	GENCND	NZ,	TCONEQ,	F	;.IF NZ	EXP
+	GENCND	Z,	TCONEQ		;.IF Z	EXP
+	GENCND	P1,	TCONP1		;.IF P1				[+GTS]
+	GENCND	P2,	TCONP1, F	;.IF P2				[+GTS]
+CNDTOP::
+
+
+	PURE	PUREI,I
+.SBTTL	IIF  - Immediate IF
+.SBTTL   IF  - Micro programmed conditional
+.SBTTL  IFT  - If true
+.SBTTL  IFF  - If false
+.SBTTL  IFTF - If true or false
+.SBTTL  ENDC - End conditional
+
+;+
+; IIF	- IMMEDIATE IF
+; IF	- MICRO PROGRAMMED CONDITIONAL
+; IFT	- IF TRUE
+; IFF	- IF FALSE
+; IFTF	- IF TRUE OR FALSE
+; ENDC	- END CONDITIONAL
+;
+; These routines handle all the conditional assembly
+; directives that MACRO-11 supports.
+;-
+
+IIF::	CALL	TCON		;Test argument
+	TST	R3		;Was it satisfied?
+	BMI	30$		;Branch if not, FALSE
+	CMP	#CH.COM,R5	;Comma?
+	BNE	10$		;Branch if not
+	CALL	GETCHR		;Else bypass it.
+10$:	MOV	CHRPNT,R1	;Save current line buffer location
+	CALL	SETNB		;Set to non-blank
+	BIT	#LC.CND,LCMASK	;Conditional suppression?
+	BEQ	20$		;Branch if not.
+	MOV	R1,LCBEGL	;Else suppress all up to comma
+20$:	CLR	ARGCNT		;ZAP argument count
+	CALL	ZAPCPX		;Cleanup complex expr scratch list
+	CALLR	STMNT		;Go process the statement.
+
+30$:	CLR	R5		;False, but no "Q" error
+	BR	ENDCX		;Merge.
+
+
+.ENABL LSB
+
+IFDF::	MOV	SYMBOL+2,SYMBOL	;Treat second half as argument
+	CALL	TCONF		;Examine it
+	BR	10$		;
+
+IF::	CALL	TCON		;Test argument
+10$:	MOV	#CNDLVL,R1	;Point to level
+	CMP	@R1,#15.	;Room for another?
+	BGT	IFOERR		;Branch if not, error.
+	INC	@R1		;Else, bump level
+	ASL	R3		;Set carry to true (0) or false (1)
+	ROR	-(R1)		;Rotate into cndmsk
+	ASL	R3
+	ROR	-(R1)		;Ditto for cndwrd
+	BR	ENDCX
+.DSABL LSB
+
+
+IFT::	MOV	CNDMSK,R3	;Get current condition
+	BR	IFTF		;Merge
+
+IFF::	MOV	CNDMSK,R3	;Get current condition
+	COM	R3		;Use complement and fall through
+
+IFTF::	TST	CNDLVL		;Condition in progress?
+	BLE	IFOERR		;Branch if not, error.
+	ASL	CNDWRD		;Move off current flag
+	ASL	R3		;Set carry
+	ROR	CNDWRD		;Move on
+	BR	ENDCX		;
+
+ENDC::	MOV	#CNDLVL,R1	;Point to level
+	TST	@R1		;In conditional?
+	BLE	IFOERR		;Branch if not, error.
+	DEC	(R1)		;Else decrement
+	ASL	-(R1)		;Reduce mask
+	ASL	-(R1)		;  and test word
+ENDCX:	BIT	#LC.CND,LCMASK	;Suppression requested?
+	BEQ	20$		;Branch if not.
+	MOV	LBLEND,R0	;Yes, any label?
+	BEQ	10$		;  no, suppress whole line
+	MOV	R0,LCENDL	;Yes, list only label
+	BR	20$
+
+10$:	BIS	#LC.CND,LCFLAG	;Mark conditional
+20$:	RETURN
+IFOERR:	ERROR	O		;Condition error
+	RETURN
+
+
+.SBTTL	TCON  - Conditional Dispatcher
+.SBTTL  TCONF - Alternate entry for TCON 
+
+;++
+; TCON
+; TCONF
+;
+; These routines decode the argument on the conditional
+; statement, and dispatch to the correct handling routine.
+;
+;--
+.ENABL LSB
+
+TCON:	CALL	GSARG		;Get a symbolic argument
+TCONF:				;Alternate entry.
+
+;;.IF	DF,RT11			;Temporary fix for RT-11 base level	;JR+
+;;	MOV	#CNDROL,R0	;Set up table for RT-11 LINKER
+;;	MOV	#CNDBAS,ROLBAS(R0) ;
+;;	MOV	#CNDTOP,ROLTOP(R0) ;
+;;.ENDC;	DF,RT11			;End of temporary fix			;JR-
+
+	MOV	CNDWRD,-(SP)	;Get current conditional status...
+	BIS	CNDMEX,(SP)+	; and macro exit (.mexit) status
+	BNE	10$		;If unsat or mexit, don't evaluate
+	SCANW	CNDROL		;Scan for argument
+	BEQ	IFAERR		;Branch if not found, error.
+	MOV	SYMBOL+2,R1	;Get address
+	ASR	R1		;Low bit used for toggle flag
+	SBC	R3		;R3 Goes to -1 if odd
+	ASL	R1		;Back to normal (and even)
+	CALL	TSTARG		;Bypass comma
+	CALLR	@R1		;Jump to handler
+
+IFAERR:	ERROR	A		; General "A" error for conditionals
+10$:	CLR	R5		;Setup for no "Q" error
+	RETURN			;
+
+TCONP1:	TST	PASS		;Is this Pass 1?			[+GTS]
+	BR	15$		;Z=1 means yes; Z=0 means no		[+GTS]
+
+TCONEQ:	CALL	ABSEXP		;EQ/NE, test expression. Must be ABS
+15$:				;					[+GTS]
+	BEQ	30$		;Branch if zero
+20$:	COM	R3		;Else toggle - false.
+30$:	RETURN			;
+
+TCONGT:	CALL	ABSEXP		;Get a ABS expression
+	BGT	30$		;Branch if true
+	BR	20$
+
+TCONLT:	CALL	ABSEXP		;Get an ABS expression
+	BLT	30$		;Branch if true
+	BR	20$
+.DSABL LSB
+
+
+.SBTTL TDONDF - Handle .IFDF and .IFNDF conditionals
+
+;+
+; TCONDF
+; Handle .IFDF and .IFNDF conditionals
+;-
+
+TCONDF:	MOV	R3,R1		;Save initial condition
+	CLR	R2		;Set "&"
+	CLR	R3		;Start off true
+10$:	CALL	GETSYM		;Get a regular symbol
+	BNE	20$		;Branch if regular symbol found
+	CALL	SETSYM		;Reset symbol pointer to begining.
+	MOV	R2,-(SP)	;Save R2
+	MOV	#10.,R2		;Not symbol, perhaps local symbol?
+	CALL	CVTNUM		;See if we get a number...
+	MOV	(SP)+,R2	;Restore R2
+	TST	R0		;Test results of CVTNUM
+	BEQ	IFAERR		;Give "A" error, unknown type of argument.
+	CMP	R5,#'$		;Number, terminated by "$"?
+	BNE	IFAERR		;Branch if not, can't be a symbol.
+	CALL	GETNB		;Skip over the '$'.
+	MOV	R1,-(SP)	;Save some regs
+	MOV	R2,-(SP)
+	CALL	LSRCH		;Search for local symbol
+	MOV	(SP)+,R2	;Restore regs
+	MOV	(SP)+,R1
+	BR	30$		;and join common code.
+
+20$:	CALL	SSRCH		;Search the user symbol table
+	CALL	CRFREF		;CREF the reference
+30$:	CLR	R0		;Assume defined
+	BIT	#DEFFLG,MODE	;Good guess?
+	BNE	40$		;Branch if so, defined!
+	COM	R0		;Else toggle - false.
+40$:	CMP	R0,R3		;Match with previous & or !
+	BEQ	50$		;Branch if so, ok.
+	MOV	R2,R3		;Else toggle
+	COM	R3
+50$:	MOV	R1,R2		;Assume "&"
+	CMP	R5,#CH.AND	; "&"?
+	BEQ	60$		;Branch if so, AND operation.
+	CMP	R5,#CH.IOR	;Perhaps OR?
+	BNE	70$		;Branch if not, unknown.
+	COM	R2		;Else, toggle mode
+60$:	CALL	GETNB		;Bypass op
+	BR	10$		;Loop.
+
+70$:	TST	R1		;IFDF?
+	BEQ	80$		;Branch if so, done.
+	COM	R3		;Else, toggle
+80$:	RETURN
+
+
+.SBTTL	TCB - Handle .IF NB,<STR>
+.SBTTL TCID - Handle .IF IDN,<STR1>,<STR2>
+
+;+
+; TCB	-	Handle .IF NB,<STR> conditional directive.
+; TCID	-	Handle .IF IDN,<STR1>,<STR2> conditional directive.
+; 
+;-
+.ENABL LSB
+
+TCB:	BEQ	20$		;Ok if null.
+	CALL	GMARGF		;Isolate argument
+	CALL	SETNB		;Bypass any blanks
+	BEQ	60$		;True if pointing at delimiter
+	BR	50$		;Else false
+
+10$:	ERROR	A		;Naughty, "A" error for you.
+20$:	RETURN			;
+
+TCID::	BEQ	10$		;Error if null
+	CALL	GMARGF		;Isolate first arg
+	MOV	CHRPNT,R1	;Save character pointer
+	TST	-(R0)
+	MOV	-(R0),R2	;Pointer to terminator
+	CALL	RMARG		;Return this arg
+	CALL	GMARG		;Get the next
+	BEQ	10$		;Error of second null too.
+	MOV	CHRPNT,R5	;Save character pointer for second argument
+30$:	CLR	R0		;Clear for BISB
+	BISB	(R1)+,R0	;Get character from first argument field
+	CMP	R1,R2		;Is it the last?
+	BLOS	40$		;Branch if not
+	CLR	R0		;Else, clear it
+40$:	CLR	R4		;Clear for BISB
+	BISB	@R5,R4		;Get character from second arg field
+	BIT	#ED.LCM,EDMASK	;Is .DSABL LCM in affect? (Default)
+	BEQ	45$		;Branch if not, don't upper case characters.
+	BITB	#CT.LC,CTTBL(R0) ;Is character in R0 lower case?
+	BEQ	41$		;Branch if not.
+	BICB	#40,R0		;Else upper case the letter.
+41$:	BITB	#CT.LC,CTTBL(R4) ;Is other character lower case?
+	BEQ	45$		;Branch if not, done.
+	BICB	#40,R4		;Else upper case the letter.
+45$:	CMPB	R0,R4		;Do the characters match?
+	BNE	50$		;Branch if not.
+	TSTB	(R5)+		;At end of second argument string?
+	BEQ	60$		;Branch if so, good show!
+	BR	30$		;Else try again
+
+50$:	COM	R3		;False, toggle condition
+60$:	CALLR	RMARG		;Ok, restore argument
+.DSABL LSB
+
+
+	.END

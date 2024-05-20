@@ -1,0 +1,1019 @@
+TITLE	ONLPAT,<ON-LINE PATCHER FOR RSTS/E>,0A,10-MAY-91,ABC/SJK/SHG/AWR/CEK/KMF
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR ONLPAT
+;+
+;
+;  000  RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	RVR  29-Aug-80	FIXED "/" PARSING
+;  002	AWR  03-MAY-81	FIXED ^C HANDLING (V7.0 PATCH 17.6.1 M)
+;
+;  000  CEK  11-Jan-82  CREATION - COPIED FROM V7.1-11
+;  001  CEK  11-Jan-82  Allowed patch to res overlay, its size, and bit mask
+;  002	WJS  28-Sep-83	Use of new SILNDX module
+;  003	KMF  05-Jan-84	Update for 8-bit terminal (unset parity bit)
+;  004	KCG  30-Aug-84	Made <CR> mean default on 'File to Patch ?' question.
+;  005	KCG  07-Sep-84	Cleared the Default library PPN.
+;-
+
+
+
+.SBTTL	DEFINITIONS AND MACROS
+
+.MCALL	..V1..
+
+..V1..
+
+.MCALL	.SRESET,.PRINT,	.TTYIN,	.CSISPC,.WAIT,	.EXIT,	.READW,	.WRITW
+.MCALL	.LOOKUP,.ENTER,	.TTYOUT,.RCTRLO
+.MCALL	.CLOSE, .GTLIN
+
+GLOBAL	<QFLAG>
+
+.MACRO	PRINT	TX
+	TMPORG	ONLTXT
+.DSABL	CRF
+$$$$$$	=	.
+.ENABL	CRF
+.NLIST	BEX
+	 .ASCII	TX
+.LIST	BEX
+	UNORG
+	 JSR	R5,PRINT
+.DSABL	CRF
+	  .WORD	$$$$$$
+.ENABL	CRF
+.ENDM	PRINT
+
+.MACRO	INERR	TX,TG
+	TMPORG	ONLTXT
+.DSABL	CRF
+$$$$$$	=	.
+.ENABL	CRF
+.NLIST	BEX
+.IF	B	<TG>
+	 .ASCIZ	<15><12>TX
+.IFF
+TG:	 .ASCIZ	<15><12>TX
+.ENDC
+.LIST	BEX
+	UNORG
+	 JSR	R5,INERR
+.DSABL	CRF
+	  .WORD	$$$$$$
+.ENABL	CRF
+.ENDM	INERR
+
+.SBTTL	ONLINE PATCH INITIALIZATION - GET COMMAND FILE
+
+	DEFORG	ONLPAT
+	DEFORG	SILNDX							;002
+
+	ORG	ONLPAT							;002
+
+.ENABL	LSB
+
+ONLPAT:	MOV	SYSPTR,R0	;Point to R/W area
+	CMPB	SYSVER(R0),#3	;Is this version 3 or greater?
+	BHIS	10$		;Yup, all is copacetic
+	PRINT	<"?Incompatible version of RT11 emulator"<0>>
+	.EXIT			;Leave
+10$:	MOV	#XREAD,H.READ	;Set up READ. intercept
+	MOV	#XWRITE,H.WRIT	;Set up WRITE. intercept
+	MOV	#XLOKF,H.LOKF	;Set up file lookup intercept
+	MOV	#XLOKE,H.LOKE	;Set up file opened intercept
+	MOV	#XEXIT,H.EXIT	;Set up exit intercept
+	MOV	#XEXIT,H.CTLC	;Set up CTRL/C intercept
+	MOV	#PUTLOG,H.TYPE	;Output requests get logged, too
+	MOV	#SILNAM+2,R1	;Point to installed SIL name
+	CLR	(R1)		;Clear it out for now
+	CLR	-(R1)		; Both words
+	MOV	#1,@SYSPTR	;Lookup is in account [0,1]
+	.LOOKUP	0,#INITSY	;Try to open [0,1]INIT.SYS
+	BCS	20$		;No good
+	MOV	FIRQB+FQDEV,SY0DEV ;Save the device name for SY0:
+	MOV	FIRQB+FQDEVN,SY0DVN ;Save SY0: device unit number
+	CLR	R0		;Read the first block
+	.READW	0,#CMDBUF,#256.	; into the command file buffer
+	BCS	20$		;Error, skip it
+	MOV	CMDBUF+72,R2	;Get the location of SILNAM in the file
+	MOV	R2,R0		;Copy it
+	BIC	#^C<777>,R2	;Isolate offset into block
+	BIC	R2,R0		;Isolate block number * 1000
+	SWAB	R0		;Get block number into
+	ROR	R0		; low byte
+	.READW	0,#CMDBUF,#256.	;Read the proper block
+	BCS	20$		;Error, skip it
+	MOV	CMDBUF(R2),(R1)+ ;Set up installed sil name
+	MOV	CMDBUF+2(R2),(R1)+ ; as 2 RAD50 words
+20$:	.CLOSE	0		;Close the INIT.SYS file
+
+GLOBAL	<H.READ,H.WRIT,H.LOKF,H.LOKE,H.EXIT,H.CTLC,H.TYPE,SILNAM>
+
+RESTRT:	MOV	#SCCAA,R0	;Point to CTRL/Z trap area
+	CLR	2(R0)		;Disable the trap
+	EMT	375		; in the monitor
+	CLR	DEFFNM		;No default file name for this sequence
+	CLR	DONECT		;Zero patches done so far
+	CLR	SKIPCT		;Zero patches skipped so far
+	.SRESET			;Clean up all channels
+	MOV	#CMDBUF,R5	;Point to buffer for reply
+	.GTLIN	R5,#CMDF.Q	;Ask command file question and get reply
+	CALL	CVT$$B		;Clean up the line			;003
+	.CSISPC	R5,#DFEXTS,R5	;Parse the line
+	BCC	80$		;No syntax error
+50$:	MOVB	@#FIRQB,R0	;Get the error code
+	BNE	70$		;If any
+60$:	MOV	#SASYNE,R0	;Else use syntax error
+70$:	.ERRPRT			;Print the error
+	PRINT	<" - try again"<0>>
+	BR	RESTRT		;Go try again
+
+GLOBAL	<SASYNE>
+
+80$:	TST	(SP)+		;Any switches?
+	BNE	60$		;Yes, error
+	MOV	R1,-(SP)	;Save reg				;005
+	MOV	SYSPTR,R1	;Get pointer to User unique table	;005
+	MOV	LIBPPN(R1),SAVLIB ;Save RTs library PPN			;005
+	CLR	LIBPPN(R1)	;Trash the library PPN (no need for it)	;005
+	MOV	(SP)+,R1	;Restore reg				;005
+	CLR	CMDBYT		;Force command file read
+	CLR	CMDBLK		;Assume input is from a file
+	MOV	#CMDBUF+<3*5*2>,R0 ;Point to parsed input file spec
+	TST	(R0)		;Is there an input file?
+	BEQ	90$		;No, use terminal input
+	.LOOKUP	3		;Yes, look it up
+	BCS	50$		;Oops, error
+	CMPB	FIRQB+FQFLAG,#TTYHND ;Is it TTY input?
+	BNE	100$		;Nope, use the file for real
+	.CLOSE	3		;Yes, close the terminal
+90$:	DEC	CMDBLK		;Set flag for terminal command input
+100$:	MOV	#-1,LOGBLK	;Assume log file is absent
+	MOV	#512.,LOGBYT	;Count 512 bytes left in buffer
+	MOV	#LOGBUF,LOGPTR	;Next byte is first byte
+	CLR	LOGCHR		;No previous character logged
+	MOV	#CMDBUF,R5	;Point to output spec as parsed
+	TST	(R5)		;Anything there?
+	BEQ	NEWPAT		;No
+	CLR	LOGBLK		;Aha, log file is present, flag it
+	.LOOKUP	0,R5		;Yes, try to open existing file
+	BCS	120$		;Can't do it, go try to create
+	TST	FIRQB+FQFLAG	;Is it random access?
+	BPL	120$		;Nope, close and reopen for output
+	DEC	R0		;Correct file length to get last block
+	BMI	120$		;Zero length file, recreate it
+	MOV	R0,LOGBLK	;Set number of highest block
+	.READW	0,#LOGBUF,#256.	;Get the last block in
+	BCS	50$		;Error, report it
+	MOV	#LOGBUF+512.,R0	;Point to end of block
+	MOV	R0,LOGBYT	;Copy pointer to end
+110$:	TSTB	-(R0)		;Scan for non-null byte
+	BEQ	110$		; in last block
+	INC	R0		;Point to first available byte
+	MOV	R0,LOGPTR	;Set pointer
+	SUB	R0,LOGBYT	;Compute number of bytes left in block
+	MOV	#14,R2		;Put a form feed in the log
+	CALL	PUTLOG		;Do it
+	BR	NEWPAT		;Ready to fly
+
+120$:	.CLOSE	0		;Close the logging channel
+	.ENTER	0,R5		;Enter the log file
+	BCS	50$		;Error, report it
+
+NEWPAT:	MOV	#CHETAG,R0	;Point to the cache tags
+130$:	MOV	#-1,(R0)+	;Clear out the cache
+	CMP	R0,#ENDTAG	;Done?
+	BLO	130$		;No
+	CLR	LOOKOK		;Lookup is ok
+	CLR	RUNMON		;Not patching the running monitor (yet)
+	CLR	VERERR		;No verification error yet
+	MOV	#SCCAA,R0	;Point to set CTRL/Z trapper
+	INC	2(R0)		;Set it
+	EMT	375		;Do it
+	MOV	#170$,R0	;Set pointer for CTRL/C traping
+	.SETCC			;Set trap
+140$:	CALL	LKAHED		;Look ahead 1 character in cmd file
+	CMPB	R0,#'!		;Is this a comment?
+	BNE	160$		;No, go to the patcher
+150$:	CALL	GETBYT		;Yes, copy comment to log
+	MOV	R0,R2		;Move byte over for init typer
+	CALLX	TYPE		;Log it
+	CMPB	R0,#12		;End of line?
+	BNE	150$		;No, more of the comment
+	BR	140$		;Yes, try for another comment
+
+160$:	MOV	SYSPTR,R1	;R1 -> the RT system table		;005
+	MOV	SAVLIB,LIBPPN(R1) ; Restore the saved library PPN	;005
+	MOV	#ZERO,R1	;Point to fake out preset answer
+	MOV	@#USERSP,SP	;Reset the stack pointer
+	JMPX	INIPAT		;Start the patching
+
+170$:	MOV	SYSPTR,R1	;R1 -> the RT system table		;005
+	MOV	SAVLIB,LIBPPN(R1) ; Restore the saved library PPN	;005
+	.RCTRLO			;Reset CTRL/O
+	PRINT	<"?Patch procedure aborted - patch not installed"<0>>
+	.EXIT
+
+.DSABL	LSB
+
+GLOBAL	<RUNMON>
+
+.SBTTL	CLEAN UP AT END OF PATCH
+
+.ENABL	LSB
+
+XEXIT:	TST	SAVLIB		;Any saved library PPN?			;005
+	BEQ	10$		;No, Leave it as is			;005
+	MOV	R1,-(SP)	;Save register				;005
+	MOV	SYSPTR,R1	;R1 -> RTs system table			;005
+	MOV	SAVLIB,LIBPPN(R1) ; Restore library PPN			;005
+	MOV	(SP)+,R1	;  and restore register			;005
+10$:	TST	@#BADPAT	;Is it a bad patch?
+	BNE	20$		;No, refuse to install it
+	TST	VERERR		;Was there a verification error?
+	BEQ	30$		;No
+20$:	PRINT	<"Patch complete - no modifications made"<0>>
+	INC	SKIPCT		;Count it as skipped
+	BR	70$		;Skip it
+
+30$:	TST	R1		;Any modifications made?
+	BNE	40$		;Yes, go do them on disk
+	PRINT	<"Patch complete - no modifications requested"<0>>
+	BR	70$		;No modifications are easily done
+
+GLOBAL	<BADPAT>
+
+40$:	PRINT	<"Patch complete"<0>>
+	INC	DONECT		;Count it as done
+	MOV	#PR0,-(SP)	;Let a 'JSR' return with an 'RTI'
+	CALL	150$		;Enable CTRL/C trapping
+	MOV	#CHETAG,R1	;Point to the cache tags
+	MOV	#CACHE,R2	;Point to the cache blocks
+50$:	MOV	(R1)+,R0	;Get a cache block number
+	BMI	60$		;Nothing in this slot
+	.WRITW	16,R2,#256.	;Write the block
+	BCC	60$		;Got it
+	PRINT	<"Fatal output error"<0>>
+	.EXIT
+
+60$:	ADD	#512.,R2	;Point to next cache block
+	CMP	R1,#ENDTAG	;Done?
+	BLO	50$		;No
+70$:	CLR	R0		;Disable
+	.SETCC			; CTRL/C trapping
+	TST	CMDBLK		;Input from terminal?
+	BMI	90$		;Yes, finish up
+	MOV	#14,R0		;End the patch with a form feed
+	CALL	PUTLG0		;Put it in the log
+	.TTYOUT			;Type it, too
+	CALL	LKAHED		;Check the next character
+	BCS	90$		;If no more, end the patch sequence
+	CMPB	R0,#14		;Form feed here?
+	BNE	80$		;No, start a new patch
+	CALL	GETBYT		;Yes, skip the form feed
+	CALL	LKAHED		;Try for the byte after the <FF>
+	BCS	90$		;If none, end the patch sequence
+80$:	JMP	NEWPAT		;Continue
+
+90$:	CLR	R2		;Finish log file with 0 bytes
+100$:	CMP	LOGBYT,#512.	;Is the buffer empty?
+	BEQ	110$		;Yes, all done
+	CALL	PUTLOG		;No, put a zero byte
+	BR	100$		;Continue
+
+110$:	.CLOSE	0		;Close out the log file
+	MOV	DONECT,R0	;Get number of patches done
+	CALL	130$		;Print number
+	PRINT	<" installed"<0>>
+	MOV	SKIPCT,R0	;Get number of patches skipped
+	BEQ	120$		;None, easily done
+	CALL	130$		;Type the count
+	PRINT	<" skipped"<0>>
+120$:	PRINT	<<0>>
+	JMP	RESTRT		;Restart
+
+130$:	CALL	TYPDEC		;Type the number
+	PRINT	<" patch"<200>>
+	DEC	R0		;One?
+	BEQ	140$		;Yup, use singular
+	PRINT	<"es"<200>>
+140$:	RETURN
+
+150$:	MOV	R0,-(SP)	;Save a register
+	MOV	#150$,R0	;Enable CTRL/C traps
+	.SETCC			;Set the trap
+	MOV	(SP)+,R0	;Restore
+	RTI			;Done
+
+.DSABL	LSB
+
+.SBTTL	GET INPUT LINE FROM CONTROL FILE
+
+.ENABL	LSB
+
+INPLIN::MOV	R0,-(SP)	;Save R0
+	MOV	R5,-(SP)	;Save R5
+	MOV	(R5),R5		;Get pointer to user buffer
+	MOV	R5,-(SP)	;Save buffer pointer
+	CLR	SEQSKP		;No skipping here
+INPNXT:	MOV	(SP),R5		;Reset buffer pointer
+	CALL	GETLIN		;Get a line from terminal or file
+	TST	CMDBLK		;Input from terminal?
+	BMI	90$		;Yes, no verification
+	MOV	R1,-(SP)	;Save R1 for GETUNQ
+	MOV	R5,R1		;Copy text pointer
+	CALLX	GETUNQ,R5,QUESTS ;Try to find the question
+	MOV	R1,R5		;Set pointer to end of text
+	MOV	(SP)+,R1	;Restore R1
+	TST	SEQSKP		;Are we skipping for sequencing?
+	BEQ	20$		;No
+10$:	TSTB	(R5)+		;End of line?				;AWR002
+	BEQ	INPNXT		;Yes, get another line			;AWR002
+	CMPB	-1(R5),#'^	;Was it an uparrow/circumflex?		;AWR002
+	BNE	10$		;No, try the next character		;AWR002
+	CMPB	(R5),#'C	;Yes; is this the "^C" combination?	;AWR002
+	BNE	10$		;No, continue the scan			;AWR002
+	MOV	R5,R0		;R0,R5 -> "C"				;AWR002
+	DEC	R0		;Point R0 to "^C" for print		;AWR002
+	INC	R5		;Point past "^C" string			;AWR002
+	CLRB	(R5)		;Make a null to end the string		;AWR002
+	MOV	R0,R5		;R5 -> "^C" for further processing	;AWR002
+	CALL	ASCIZ0		;Now print the "^C"			;AWR002
+	CALL	TYPECR		;End it with CR/LF			;AWR002
+	CLR	SEQSKP		;Clear the flag
+	BR	90$		;Return to him the ^C
+
+20$:	CMP	QFLAG,#4	;Is INIT asking for a base address?
+	BNE	30$		;No, so skip special module farce
+	CMP	QMODES(R0),#6	;Yes, is there an offset pending?
+	BNE	30$		;Nope
+	TST	MODOVR		;Yes, was the most recent module 'OVR'?
+	BEQ	30$		;No
+	TST	OVBASE		;Yes, was the base a module start?
+	BNE	40$		;Yup, change to module 'FIP'
+30$:	CMP	QFLAG,QMODES(R0) ;Are we at the right mode?
+	BEQ	80$		;Yes
+	INERR	<"Command file sequence error">
+	MOV	#-1,SEQSKP	;Set to skip to next sequence
+	BR	INPNXT		;Get a new line
+
+40$:	MOV	CMDPTR,R0	;Get pointer to command file buffer
+50$:	TSTB	(R5)+		;Find the end of the parameter string
+	BNE	50$		; which we are about to give the patcher
+	DEC	R5		;Back up to the null byte
+	MOVB	#12,-(R0)	;Later, we will force current <CR><LF>
+	MOVB	#15,-(R0)	;Back down we go
+60$:	MOVB	-(R5),-(R0)	;Fill in his response to the offset query
+	INC	CMDBYT		;Command file buffer is bigger
+	DEC	CMDPTR		;Pointer is earlier
+	CMP	R5,(SP)		;Done?
+	BHI	60$		;Not yet
+	MOV	#FIPALT,R5	;Point to alternate FIP text
+70$:	MOVB	-(R5),-(R0)	;Back it into the buffer
+	BNE	70$		;Until ended
+	ADD	#FIPASZ+2,CMDBYT ;More bytes (include the <CR><LF> above)
+	SUB	#FIPASZ+2,CMDPTR ;Back up the pointer
+	CLR	MODOVR		;Module isn't OVR for long
+	BR	INPNXT		;Go get the CTRL/Z to back up to module
+
+80$:	CALL	@QJUMP(R0)	;Go do the right thing for this question
+90$:	TST	QFLAG		;File name question?
+	BNE	120$		;No, no more processing
+	MOV	#^RSY0,LOKDEV	;Assume the system device
+	CMPB	(R5),#12	;Line feed?
+	BEQ	120$		;Yes, all done
+	MOV	R5,R0		;Yes, copy pointer to name
+	.DOFSS			;Try parsing it
+	BCS	120$		;Error is very bad
+	MOV	#FIRQB+FQPPN,R0	;Point to parsed PPN+name
+	MOV	(R0)+,LOKPPN	;Set PPN to look for
+	MOV	#AUXFNM,R5	;Point to buffer for parsed file name
+	CALLX	RAD$FN		;Convert file name to RAD50
+	CLRB	(R5)		;Make it ASCIZ
+	MOV	#^RDK ,LOKDEV	;Normally, look on public structure
+	MOV	#FIRQB+FQDEV,R0	;Point to parsed name
+	TST	(R0)		;Was there one?
+	BEQ	110$		;No, use default
+	MOVB	(R0)+,R5	;Get a byte
+	MUL	#50,R5		;Shift by RAD50
+	CLR	-(SP)		;Make room on stack
+	MOVB	(R0)+,(SP)	;Get a byte without sign extend
+	ADD	(SP),R5		;Add it in
+	SUB	#'A-1*50+'A-1,R5 ;Unbias the RAD50
+	MUL	#50,R5		;Shift again
+	MOVB	(R0)+,(SP)	;Get unit number
+	TSTB	(R0)		;Is it real?
+	BEQ	100$		;No
+	ADD	(SP),R5		;Yes, add it in
+	ADD	#^R  0,R5	; and bias up to RAD50 digit
+100$:	TST	(SP)+		;Dump the stack word
+	MOV	R5,LOKDEV	;Set up device to look on
+110$:	MOV	#AUXFNM,R5	;Point to NAME.EXT
+	CALL	CVT$$B		;Remove blanks				;003
+120$:	MOV	(SP)+,R0	;Restore buffer pointer
+	CLR	SWTCH		;We have not found a switch yet
+	TST	QFLAG		;File name question?
+	BNE	130$		;No, so ignore switches (/ is now an operator)
+	CALL	SAVSWT		;Check and save any switches
+130$:	MOVB	(R5)+,(R0)+	;Move the rest of the string down
+	BEQ	140$		;End of string, finish up
+	BR	130$		;Continue loop
+140$:	TST	SWTCH		;Was there a switch?
+	BEQ	150$		;Nope
+	CALL	RESSWT		;Yes, restore the switch
+150$:	MOV	(SP)+,R5	;Restore return address
+	MOV	(SP)+,R0	;Restore R0
+	MOV	(R5)+,(SP)	;Return buffer address in R5
+	RETURN	R5		;Done
+
+.DSABL	LSB
+
+GLOBAL	<LOKPPN,LOKDEV>
+
+SAVSWT:	REGSCR			;Save the registers
+10$:	TSTB	(R0)		;Are we at the end of the line
+	BEQ	30$		;Yes, no switches to save
+	CMPB	(R0)+,#'/	;Is there a switch?
+	BNE	10$		;Nope, keep looking
+	DEC	R0		;Point back to switch
+	MOV	#SWTCH,R1	;R1 -> area to save switches in
+20$:	MOVB	(R0)+,(R1)+	;Save the switches
+	BNE	20$		;The string is ASCIZ
+30$:	RETURN
+
+RESSWT:	REGSCR			;Save the registers
+	MOV	#SWTCH,R1	;R1 -> save area for switch
+	DEC	R0		;R0 -> null after string
+10$:	MOVB	(R1)+,(R0)+	;Restore the switches
+	BEQ	20$		;Done if ends in a zero
+	CMPB	(R1),#12	;Carriage return?
+	BNE	10$		;Keep moving in the switches
+	CLRB	(R0)		;Make it asciz
+20$:	RETURN
+
+.SBTTL	CHECK OUT COMMAND LINE FORMAT
+
+.ENABL	LSB
+
+; Process the 'file to patch?' question
+
+FILEQ:	CLR	MODOVR		;Module surely isn't OVR
+	TSTB	(R5)		;File to patch question. Any file?
+	BEQ	10$		;No, get it from the terminal
+	CMPB	(R5),#'?	;Yes, but is it 'cancel preset name'?
+	BNE	30$		;Nope, use file name in control file
+	CLRB	DEFFNM		;Yes, so clear preset name if any
+10$:	MOV	#DEFFNM,R5	;Point to possible default
+	TSTB	(R5)		;Is there one set?
+	BNE	30$		;Yes, use it and echo it
+20$:	COM	CMDBLK		;No, turn off command file input
+	CALL	GETLIN		;Get line from terminal
+	COM	CMDBLK		;Restore input from file
+	RETURN			;Done with file question
+
+; Process the 'Module name?' question
+
+MODQ:	CLR	MODOVR		;Module question. Assume it isn't OVR
+	CMP	(R5),#"OV	;Could it be?
+	BNE	30$		;Nah
+	CMP	2(R5),#'R	;Perhaps...
+	BNE	30$		;Nope
+	INC	MODOVR		;Yup, set special OVR flag
+OFFQ:				;Simply echo for offset question
+30$:	MOV	R5,R0		;Copy pointer to text
+	CALLX	ASCIZ0		;Print it, entering it in the log
+	CALLRX	TYPECR		;New line on echo & log, done
+
+BASEQ:	CLR	OVBASE		;Base question. Assume not a fip module
+	TST	MODOVR		;Are we trying for OVR?
+	BEQ	30$		;Nope, this is easy
+	MOV	R5,-(SP)	;Save the text pointer
+	MOV	#OVRBAS,R0	;Point to area for base address
+	MOVB	(R5)+,(R0)+	;Copy first byte
+	BEQ	40$		;If null, not a FIP module start
+	MOVB	(R5)+,(R0)+	;Copy second byte
+	BEQ	40$		;If null, not a FIP module start
+	MOVB	(R5)+,(R0)+	;Copy third byte
+	BEQ	40$		;If null, not a FIP module start
+	CMPB	(R5),#'0	;Form is 'XXXNST', so is this a digit?
+	BLO	40$		;Nope
+	CMPB	(R5),#'9	;Maybe...
+	BHI	40$		;Nope, not a module
+	MOVB	(R5)+,(R0)+	;Yup, move it
+	CMPB	(R5),#'S	;Last two should be 'ST', are they?
+	BNE	40$		;No
+	MOVB	(R5)+,(R0)+	;Yes
+	CMPB	(R5),#'T	;Is it really?
+	BNE	40$		;No
+	MOVB	(R5)+,(R0)+	;Yes
+	TSTB	(R5)		;We're at the end now, right?
+	BNE	40$		;Nope
+	COM	OVBASE		;Yes, set the flag for goodness
+40$:	MOV	(SP)+,R5	;Restore R5
+	BR	30$		;Go echo stuff
+
+PRMPT:	MOV	#INPNXT,(SP)	;For lines to skip, set to skip
+	RETURN			;Return (no check on offset)
+
+; Check out the line as if it were a prompt line
+
+CHECK:	CALL	CHKOLD,R4,<Q6,QFLAG+2> ;Check out the base
+	BCC	50$		;Good
+	PRINT	<"Base<>"<200>>
+	CALL	OPRINT		;Print the number
+50$:	CALL	CHKOLD,R4,<Q6,QFLAG+4> ;Check out the offset
+	BCC	60$		;Good
+	PRINT	<"Offset<>"<200>>
+	CALL	OPRINT		;Print the number
+60$:	MOV	#Q3,80$		;Assume byte mode
+	CLR	TEMP		;Clear for high byte
+	MOVB	@QFLAG+10,TEMP	;Set up the byte value
+	TST	QFLAG+6		;Is it byte mode?
+	BMI	70$		;Yes
+	MOV	#Q6,80$	;No, set up for word mode
+	MOV	@QFLAG+10,TEMP	;Get word to check against
+70$:	CALL	CHKOLD,R4	;Call the checker
+80$:	 .WORD	0,TEMP		;3 or 6 '?', or compare vs old value
+	BCC	90$		;Good
+	PRINT	<"Old<>"<200>>
+	CALL	OPRINT
+90$:	CMPB	(R5)+,#'?	;End in a question mark?
+	BNE	100$		;No, bad line
+	TSTB	(R5)		;Null response (answer from user)?
+	BEQ	110$		;Yes, go get it
+	CMPB	(R5)+,#40	;Nope, gotta have a space here
+	BEQ	30$		;Ok if there, go echo and log it
+100$:	CALL	INERR,R5,INVLIN	;Else it's an invalid line
+	BR	30$		;Echo and log it
+
+110$:	MOV	#AUXBUF,R5	;Point to buffer for user answer
+	BR	20$		;Go get it
+
+.DSABL	LSB
+
+.SBTTL	PRINT AN OCTAL NUMBER
+
+.ENABL	LSB
+
+OPRINT:	MOV	R0,-(SP)	;Save argument
+	MOV	R0,-(SP)	;Get a working copy
+	MOV	#30,R0		;Magic routine
+	SEC
+10$:	ROL	(SP)
+	ROLB	R0
+	.TTYOUT
+	MOV	#206,R0
+20$:	ASL	(SP)
+	BEQ	30$
+	ROLB	R0
+	BCS	20$
+	BR	10$
+
+30$:	.TTYOUT	#40		;End with a blank
+	TST	(SP)+		;Dump the copy
+40$:	MOV	(SP)+,R0	;Restore R0
+	RETURN
+
+TYPDEC:	MOV	R0,-(SP)	;Save R0
+	MOV	R5,-(SP)	;Save R5
+	MOV	#50$,R5		;Point to buffer
+	CALLX	NUM$		;Convert number to string
+	MOVB	#200,(R5)	;End without <CR><LF>
+	.PRINT	#50$		;Print it
+	MOV	(SP)+,R5	;Restore R5
+	BR	40$		;Restore R0 and return
+
+50$:	.BLKB	10
+
+.DSABL	LSB
+
+.ENABL	LSB
+
+XLOKF:	TST	LOOKOK		;Is it ok to lookup a file?
+	BEQ	30$		;Yup
+	PRINT	<"Illegal attempt to patch two files"<0>>
+	.EXIT
+
+XLOKE:	CLR	RUNMON		;Not patching the running monitor
+	MOV	#FIRQB+FQEXT,R0	;Point to end of name in FIRQB
+	CMP	(R0),#^RSIL	;Is it a SIL?
+	BNE	10$		;No
+	CMP	-(R0),SILNAM+2	;Name match?
+	BNE	10$		;No
+	CMP	-(R0),SILNAM	;Maybe?
+	BNE	10$		;No
+	CMP	-(R0),#0*400+1	;In [0,1]?
+	BNE	10$		;No
+	CMP	FIRQB+FQDEV,SY0DEV ;System device type?
+	BNE	10$		;No
+	CMP	FIRQB+FQDEVN,SY0DVN ;System device unit?
+	BNE	10$		;No
+	COM	RUNMON		;Yes, set flag saying patching installed SIL
+10$:	MOV	FIRQB+FQPPN,-(SP) ;Save the file's PPN
+	PRINT	<"File found in account ["<200>>
+	CLR	R0		;Clear for BISB
+	BISB	1(SP),R0	;Get project
+	CALL	TYPDEC		;Type it
+	MOV	#',,R0		;Separate with comma
+	.TTYOUT
+	CLR	R0		;Clear for BISB
+	BISB	(SP),R0		;Get programmer
+	CALL	TYPDEC		;Type it
+	PRINT	<"]"<0>>
+20$:	TST	(SP)+		;Dump PPN
+30$:	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<RUNMON>
+
+.SBTTL	CHECK OUT AN OLD VALUE
+
+.ENABL	LSB
+
+CHKOLD:	MOV	(R4)+,10$	;Set text pointer for EQU$$
+	CALLX	EQU$$,R4	;Check out the string for wilds
+10$:	 .WORD	0		;Pointer for 3 or 6 '?'s
+	BNE	20$		;Not wild, we must verify
+	TST	(R4)+		;Skip the data pointer
+	;CLC			;C=0 from TST above
+	RETURN	R4		;Return
+
+20$:	CLR	-(SP)		;No error yet
+	MOV	R1,-(SP)	;Save R1
+	MOV	R5,R1		;Copy for OCTNUM
+	CALLX	OCTINP		;Parse an octal number
+	MOV	R1,R5		;Restore R5 to end of string
+	MOV	(SP)+,R1	;Restore R1
+	CMP	R0,@(R4)+	;Does it match?
+	BEQ	30$		;Yes
+	DEC	(SP)		;No, set flag
+30$:	CMPB	(R5)+,#40	;Terminate with a space?
+	BEQ	40$		;Yup
+	DEC	(SP)		;Yes, set the flag
+	INERR	<"Illegal command line">,INVLIN
+40$:	BIS	(SP),VERERR	;Set verification error if any
+	ASL	(SP)+		;C=1 if any error
+	RETURN	R4		;Done
+
+.DSABL	LSB
+
+.SBTTL	GET A LINE FROM THE TERMINAL OR COMMAND FILE
+
+.ENABL	LSB
+
+GETLIN:	MOV	R3,-(SP)	;Save scratch reg
+	MOV	R5,-(SP)	;Save string buffer pointer
+	CLR	-(SP)		;Save space for a flag
+	MOV	#GETLIN,R3	;Signal start of input line
+10$:	CALL	GETBYT		;Get next line from the command file
+	BCC	20$		;Got it
+	PRINT	<"Unexpected end of file in command file"<0>>
+	.EXIT
+
+20$:	CLR	R3		;Signal no longer at the start of a cmd line
+	CMPB	R0,#';		;Is it a start of comment?
+	BNE	30$		;No, check if we are in a comment
+	CMPB	-1(R5),#''	;Was previous character a quote?
+	BEQ	30$		;Yes, this is no comment
+	CMPB	-2(R5),#'"	;Was next to previous character a double quote
+	BEQ	30$		;Yes, this is no comment
+	MOV	#-1,(SP)	;Yes, flag start of comment
+30$:	CMPB	R0,#15		;CR?					;004
+	BEQ	10$		;Yes, get the LF.			;004
+	MOVB	R0,(R5)+	;Save it
+	CMPB	R0,#12		;Line feed?
+	BEQ	50$		;Yes, done
+	CMPB	R0,#33		;Escape?
+	BEQ	50$		;Yes, done
+	CMPB	R0,#14		;Form feed?
+	BEQ	50$		;Yes, done
+	CMPB	R0,#'Z-100	;CTRL/Z ?
+	BEQ	40$		;Yes, done
+	TST	(SP)		;Are we in a comment?
+	BEQ	10$		;No, get more
+	CLRB	-(R5)		;Yes, don't store comment
+	BR	10$		;Get more
+
+40$:	MOVB	#'^,-1(R5)	;Yes, set the phony CTRL/Z
+	MOVB	#'Z,(R5)+	; in ASCII
+50$:	CLRB	(R5)		;Terminate the ASCIZ string
+	TST	(SP)+		;Remove flag from stack
+	MOV	(SP)+,R5	;Restore pointer to string
+	MOV	(SP)+,R3	;Restore scratch register
+	CMP	(R5),#12	;True line feed alone?
+	BEQ	60$		;Yes, use it
+	MOV	#4+10+20+40+200,R0 ;Do lots of trimming			;003
+	CALLX	CVT$$		;Fix up the string
+60$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	GET A BYTE FROM THE COMMAND FILE
+
+.ENABL	LSB
+
+10$:	.READW	3,#CMDBUF,#256.,CMDBLK ;Read the next buffer load
+	BCS	40$		;Error
+	MOV	#512.,CMDBYT	;Reset the byte count
+	INC	CMDBLK		;Bump the block number for next time
+	MOV	#CMDBUF,CMDPTR	;Reset the buffer pointer
+GETBYT:	TST	CMDBLK		;Input from the terminal?
+	BMI	20$		;Yes, get it
+	;CLC			;C=0 from TST above
+	DEC	CMDBYT		;One fewer bytes left
+	BMI	10$		;Nothing there, get another block
+	MOVB	@CMDPTR,R0	;Get the byte
+	INC	CMDPTR		;Bump the buffer pointer
+	BIC	#^C<377>,R0	;Leave only the low byte
+	BEQ	GETBYT		;Skip zero bytes
+	RETURN
+
+20$:	.TTYIN			;Get a byte
+	CMPB	R0,#'C-100	;CTRL/C from terminal?
+	BNE	30$		;No
+	MOV	#'Z-100,R0	;Yes, alter to CTRL/Z
+30$:	CALL	PUTLG0		;Log the character in R0
+	CLC			;We certainly got it
+	RETURN
+
+40$:	TSTB	@#52		;EOF error?
+	BNE	50$		;No, baddie
+	SEC			;Yes, return c=1
+	RETURN
+
+50$:	PRINT	<"Fatal read error on command file"<0>>
+	.EXIT
+
+.DSABL	LSB
+
+.SBTTL	LOOK AHEAD ONE CHARACTER IN COMMAND FILE
+
+.ENABL	LSB
+
+LKAHED:	TST	CMDBLK		;Input from the terminal?
+	BMI	20$		;No, return nothing
+	CALL	GETBYT		;Yes, try for a byte
+	BCS	10$		;None there, reset to error next time
+	INC	CMDBYT		;Undo the fetch
+	DEC	CMDPTR		;Refetch the same character next time
+	RETURN
+
+10$:	CLR	CMDBYT		;Reset to error again next time
+20$:	CLR	R0		;Return 0 character
+	SEC			;C=1 for a flag
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	CHECK TO SEE IF OPTION LEGAL FOR THIS TYPE OF BOOTED DEVICE
+
+CKOPT::	RETURN			;Always true in ONLPAT
+
+.SBTTL	PUT A BYTE OUT TO THE LOG FILE
+
+.ENABL	LSB
+
+PUTLOG:	TST	LOGBLK		;Is there a log file?
+	BMI	40$		;No, finish fast
+	MOV	R0,-(SP)	;Save register
+	MOV	#LOGSPC,R0	;Point to specially logged characters
+10$:	CMPB	R2,(R0)+	;Is this special?
+	BEQ	60$		;Yes, go do it
+	TSTB	(R0)		;No, any more?
+	BNE	10$		;Go if more
+20$:	MOVB	R2,@LOGPTR	;Put the byte in the buffer
+	MOV	R2,LOGCHR	;Remember last character logged
+	INC	LOGPTR		;Bump buffer pointer
+	DEC	LOGBYT		;Count down bytes left
+	BGT	30$		;More left, go away
+	.WRITW	0,#LOGBUF,#256.,LOGBLK ;Write a buffer load
+	BCS	50$		;Error?
+	MOV	#512.,LOGBYT	;Reset count to full block
+	MOV	#LOGBUF,LOGPTR	;Reset buffer pointer
+	INC	LOGBLK		;Bump the block number
+30$:	MOV	(SP)+,R0	;Restore register
+40$:	RETURN
+
+50$:	PRINT	<"Fatal write error on log file"<0>>
+	.EXIT
+
+60$:	SUB	#LOGSPC+1,R0	;Compute special character bias
+	BNE	70$		;Not line feed
+	CMPB	LOGCHR,#15	;If line feed, did we just output <CR>?
+	BEQ	20$		;Yes, let the <LF> through
+70$:	MOV	R2,-(SP)	;Save R2
+	ASL	R0		;Compute table index
+	MOV	LOGSPE(R0),R0	;Point to special logging
+	MOVB	(R0)+,R2	;Get first special character
+80$:	CALL	PUTLOG		;Log a character
+	MOVB	(R0)+,R2	;Next special character
+	BNE	80$		; if any
+	MOV	(SP)+,R2	;Restore true logging character
+	BR	30$		;Return gracefully
+
+LOGSPE:	.WORD	90$,100$,110$
+LOGSPC:	.BYTE	12,'Z-100,'C-100,0
+90$:	.ASCIZ	"<LF>"<15><12>
+100$:	.ASCIZ	"^Z"<15><12>
+110$:	.ASCIZ	"^C"<15><12>
+	.EVEN
+
+PUTLG0:	MOV	R2,-(SP)	;Save R2
+	MOV	R0,R2		;Copy byte to log
+	CMPB	R2,#15		;Is this a carriage return <CR>?
+	BNE	210$		;no, go on
+	CMP	R3,#GETLIN	;Is this <CR> the first character in the line?
+	BEQ	220$		;Yes, don't log it (use the following <LF>)
+210$:	CALL	PUTLOG		;Put it
+220$:	MOV	(SP)+,R2	;Restore R2
+	RETURN			;Done
+
+.DSABL	LSB
+
+INERR:	MOV	#-1,VERERR	;Set verification error flag
+PRINT:	MOV	R0,-(SP)	;Save R0
+	MOV	(R5)+,R0	;Point to text
+	.PRINT			;Print it
+	MOV	(SP)+,R0	;Restore R0
+	RETURN	R5
+
+.SBTTL	INTERCEPT READ/WRITE FOR CACHING
+
+.ENABL	LSB
+
+XREAD:	REGSAV			;Save registers
+	CALL	CHELOK		;Look for the block in the cache
+	BCC	10$		;Got it, return him the cached block
+	CALLRX	RESRPC		;Exit to online, do the real read
+
+10$:	MOV	(R5)+,(R4)+	;Move the cached block to the buffer
+	SOB	R0,10$		;All 256 words of it
+20$:	CALLX	REGRES,R5	;Restore his registers
+	CMP	(SP)+,(R5)+	;Bump his R5, dump the call to us
+	RETURN	R5		;Return directly to the PATCH option
+
+XWRITE:	REGSAV			;Save registers
+	MOV	SP,LOOKOK	;Can't change files now
+;	MOV	#1,R2		;Get a bit flag
+;	ASH	MODOVR,R2	;Shift it if patching OVR
+;	BIS	R2,RUNMON	;Set patch flag
+	CALL	CHELOK		;Look for this block in the cache
+	BCC	30$		;Found it, go replace it
+	MOV	#-1,R2		;Not there, look for a hole in the cache
+	CALL	CHELK1		;Tag to find is 'free'
+	BCS	50$		;Oops, cache full
+30$:	MOV	FCNVB(R1),-(R3)	;Save the block number in the tag
+40$:	MOV	(R4)+,(R5)+	;Store the block in the cache
+	SOB	R0,40$		;All 256 words of it
+	BR	20$		;Return directly to patch option
+
+50$:	PRINT	<"Verification cache full"<0>>
+	.EXIT			;Boot
+
+CHELOK:	MOV	FCNVB(R1),R2	;Target is the requested block
+	MOV	(R5)+,R4	;Point to user buffer in R4
+	CMP	R0,#256.	;Verify that it is a 1 block I/O
+	BNE	80$		;Nope, die
+CHELK1:	MOV	#CHETAG,R3	;Point to the tag list
+60$:	CMP	R2,(R3)+	;Is this it?
+	BEQ	70$		;Yes, return good pointers
+	CMP	#ENDTAG-1,R3	;Done?
+	BHIS	60$		;No, look more
+	;SEC			;'BHIS'='BCC'
+	RETURN
+
+70$:	MOV	R3,R5		;Copy tag index
+	SUB	#CHETAG+2,R5	;Compute index*2
+	ASH	#9.-1,R5	;Compute block offset into cache area
+	ADD	#CACHE,R5	;Point to the block in the cache
+	CLC			;C=0 for success
+	RETURN
+
+80$:	PRINT	<"INIT bug - read too big"<0>>
+	.EXIT
+
+.DSABL	LSB
+
+.SBTTL	TRIM ALL OF STRING EXCEPT PARITY BIT
+
+;+
+; CVT$$B - Trim all of a string except for the parity bit		;003+
+;
+;	R5 -> .ASCIZ String
+;
+;	CALL	CVT$$B
+;	
+;	R5 -> .ASCIZ String (may be shorter) at same place
+;-
+
+CVT$$B:	MOV	R0,-(SP)	;Save R0 for caller
+	MOV 	#-2,R0		;Set up mask for CVT$$
+	CALLX	CVT$$		;Convert the string
+	MOV	(SP)+,R0	;Restore R0
+	RETURN			;And go back to caller			;003-
+
+.SBTTL	DATA AREA
+
+	TMPORG	ONLTXT
+
+	.NLIST	BEX
+
+QUESTS:	.ASCII	"OPTION: PATCH"<377>
+	.ASCII	"FILE TO PATCH?"<377>
+	.ASCII	"MODULE NAME?"<377>
+	.ASCII	"BASE ADDRESS?"<377>
+	.ASCII	"OFFSET ADDRESS?"<377>
+	.ASCII	"BASE OFFSET OLD NEW?"<377>
+	.BYTE	0
+
+	UNORG
+
+QMODES:	.WORD	0,0,2,4,6,10,10
+QJUMP:	.WORD	PRMPT,FILEQ,MODQ,BASEQ,OFFQ,PRMPT,CHECK
+
+	TMPORG	ONLTXT
+
+Q6:	.ASCII	"???"
+Q3:	.ASCII	"??"
+Q1:	.ASCIZ	"? "
+
+CMDF.Q:	.ASCII	"Command file name? "<200>
+
+	.BYTE	0		;End of string below, backwards
+FIPALS:	.ASCII	"Base address? ^Z (Module is resident)"<15><12>
+	.ASCII	"Module name? FIP"<15><12>
+	.ASCII	"Base address? "
+OVRBAS:	.ASCII	"??????"<15><12>
+	.ASCII	"Offset address? "
+FIPALT:				;Start of string, backwards
+FIPASZ	=	FIPALT-FIPALS	;Size of string
+
+	UNORG
+
+LOOKOK:	.WORD	0		;<>0 if lookup is illegal
+SY0DEV:	.WORD	0		;System device name
+SY0DVN:	.WORD	0		;System device unit
+MODOVR:	.WORD	0		;=1 if in module OVR
+				;=0 otherwise
+OVBASE:	.WORD	0		;<>0 if offset is a FIP module start
+SEQSKP:	.WORD	0		;<>0 if skipping on sequence error
+VERERR:	.WORD	0		;<>0 if verification error
+DONECT:	.WORD	0		;Number of patches done
+SKIPCT:	.WORD	0		;Number of patches skipped
+TEMP:	.WORD	0		;Temporary storage
+CMDBYT:	.WORD	0		;Number of bytes left in CMDBUF
+CMDPTR:	.WORD	0		;Pointer into CMDBUF
+CMDBLK:	.WORD	0		;Block within command file (-1 if TTY)
+SWTCH:	.BLKW0	10		;Room for some saved switches
+AUXBUF:	.BLKW0	256.		;Reverse extension for OVR/FIP hack
+CMDBUF:	.BLKW0	256.		;Buffer for command file
+
+LOGCHR:	.WORD	0		;Last character logged
+LOGBYT:	.WORD	0		;Number of bytes left in LOGBUF
+LOGPTR:	.WORD	0		;Pointer into LOGBUF
+LOGBLK:	.WORD	0		;Block within log file (-1 if none)
+LOGBUF:	.BLKW0	256.		;Buffer for log file
+
+SAVLIB:	.WORD	0		;Location to Save RT's library PPN	;005
+
+DEFFNM:	.BLKW	20.		;Default file for this patch
+AUXFNM:	.BLKW0	20.		;Parsed and recreated file name
+
+INITSY:	.RAD50	"SY0INIT  SYS"	;System file name
+DFEXTS:	.RAD50	"CMDLOGLOGLOG"	;Default extensions
+SCCAA:	.BYTE	0,35
+	.WORD	0
+
+ZERO:	.WORD	0
+
+.EQUATE	NTAGS,	16.
+
+CHETAG:	.BLKW0	NTAGS
+ENDTAG:
+CACHE:	.BLKW0	NTAGS*256.
+
+	DEFORG	PATCHE
+
+	.BLKW0	128.
+
+.END	ONLPAT

@@ -1,0 +1,233 @@
+1	SUB REPLY
+	!
+	!
+	!********************************************************************
+	!
+	!	s u b p r o g r a m   t i t l e
+	!
+	!	  subprogram : REPLY
+	!	     version : V10.1
+	!	        edit : A
+	!	   edit date : 10-MAY-91
+	!	   author(s) : DBM
+	!
+	!********************************************************************
+	!
+	!		  C O P Y R I G H T
+	!
+	!
+	!		      Copyright (C) 1984, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.
+	!
+	!
+	! This software is furnished under a license and may be used and
+	! copied  only  in accordance with the terms of such license and
+	! with the  inclusion  of  the  above  copyright  notice.   This
+	! software  or  any  other copies thereof may not be provided or
+	! otherwise made available to any other person.  No title to and
+	! ownership of the software is hereby transferred.
+	!
+	! The information in this software is subject to change  without
+	! notice  and should not be construed as a commitment by Digital
+	! Equipment Corporation.
+	!
+	! DIGITAL assumes no responsibility for the use  or  reliability
+	! of its software on equipment that is not supplied by DIGITAL.
+	!
+	!********************************************************************
+	!
+	!	m o d i f i c a t i o n   h i s t o r y   l o g
+	!
+	! VER/ED	EDIT DATE	REASON
+	!
+	! T10.0-01	25-Nov-88	(DBM) Creation
+	!		28-Feb-89	(DBM) Add ORP interface
+	!
+	!********************************************************************
+	!
+	!	s u b p r o g r a m   d e s c r i p t i o n
+	!
+	!	This subprogram is called by OMSMGR to process the commands:
+	!
+	!		REPLY/ABORT=id 		[reply-text]
+	!		REPLY/PENDING=id	[reply-text]
+	!		REPLY/TO=id		[reply-text]
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	C o m p i l e   O P T I O N s
+	!
+	!********************************************************************
+
+	OPTION	TYPE = EXPLICIT
+
+	!********************************************************************
+	!
+	!	I N C L U D E   r e q u i r e d   M A P s , C O M M O N s
+	!
+	!********************************************************************
+
+	%INCLUDE "CUI:CUICMN.E2S"		! Include CUI data section
+	%INCLUDE "SYSTEM:CMNDEF.B2S"		! Include OMS common defs
+	%INCLUDE "SYSTEM:OMSKEY.B2S"		! Include CUI key definitions
+
+	EXTERNAL WORD CONSTANT	NOSUCH,		! ?Can't find file or account &
+				EOF		! ?End of file on device
+
+	DECLARE WORD CONSTANT	QUOTE = 34%	! ASCII value of (")
+
+	DECLARE STRING		TEMP		! Temp string storage
+
+	DECLARE WORD		CMDLEN, I	! Temp word storage
+
+	EXTERNAL WORD FUNCTION						      &
+			PRIVED (STRING),	! Function to check for priv  &
+			MGRSND (WORD, WORD),	! Function to send to OMS     &
+			MGRRCV (STRING, WORD, WORD, STRING) ! FN to rcv OMS ack
+
+	EXTERNAL WORD				! Patch points for OMSSUB     &
+				OMS$LO,		!   OMS Local Object Type     &
+				OMS$MM,		!   Message Max for declare   &
+				OMS$PD,		!   Raise privs for declare   &
+				OMS$PS		!   Raise privs for send
+
+	MAP (OMSREQ)	STRING	FILL = 14%,	! Layout parameter buffer     &
+			WORD	OMSCMD,		!   Command sent to OMS	      &
+				FILL(6),	!   Skip to error status word &
+				ERRSTS,		!   Error returned from call  &
+				ERRFLD		!   ORP field in error
+
+	MAP (CMDBUF)	STRING	CMDBUF = 508%	! Layout of command buffer:
+	MAP (CMDBUF)	BYTE	FLD.SEQ,	! Byte for OC$SEQ	      &
+				FLD.STS,	! Byte for reply level	      &
+			WORD	FLD.ID,		! Request number	      &
+			BYTE	FLD.TXT1,	! Byte for OC$TXT	      &
+				FLD.LEN1,	! Byte for text length	      &
+			STRING	FLD.REP1 = 250%,! String for reply text	      &
+			BYTE	FLD.TXT2,	! Byte for OC$TXT (Long reply)&
+				FLD.LEN2,	! Byte for long text length   &
+			STRING	FLD.REP2 = 250%	! String for long reply text
+
+	!	m a i n   s u b p r o g r a m   l o g i c
+
+	FLD.STS = 0%				! Assume no qualifiers found
+
+	CALL FET$CQ BY REF (ANS.Q)		! Check for /ANSWER or...
+	CALL FET$CQ BY REF (TO.Q) UNLESS U.PRES	!  /TO (Equivalent to /ANSWER)
+	IF U.PRES				! Was either specified?
+	THEN
+	  FLD.STS = STS.ANS			! Yes, set the status flag
+	ELSE
+	  CALL FET$CQ BY REF (ABO.Q)		! No, check for /ABORT
+	  IF U.PRES				!   Was it specified?
+	  THEN
+	    FLD.STS = STS.ABO			!   Yes, set the status flag
+	  ELSE
+	    CALL FET$CQ BY REF (PEN.Q)		!   No, better be /PENDING
+	    FLD.STS = STS.PEN IF U.PRES		!     Set status flag if so
+	  END IF
+	END IF
+
+	IF (FLD.STS = 0%)			! If no qualifiers found,
+	THEN
+	  PRINT "?Additional qualifier required"
+	  GOTO REPLY_END			!   Print error msg and get out
+	END IF
+
+	GOTO REPLY_END UNLESS PRIVED(PRIV.OPER)	! Get out now if not an operator
+
+	CALL FET$A BY REF			! Fetch the request number
+	FLD.ID = U.LOW				! Store it in the cmd packet
+
+	REQ.LEN = 0%				! Assume no reply text
+	CALL FET$P BY REF (STR.T)		! Check for reply text
+	IF U.PRES				! Was it specified?
+	THEN
+	  IF  (ASCII(U.STR) = QUOTE)					      &
+	  AND (ASCII(RIGHT$(U.STR, U.LEN)) = QUOTE)			      &
+	  AND (U.LEN > 2%)
+	  THEN
+	    REQ.TXT = SEG$(U.STR, 2%, U.LEN - 1%)
+	    REQ.LEN = U.LEN - 2%		! Yes, strip surrounding quotes
+	  ELSE
+	    REQ.TXT = LEFT$(U.STR, U.LEN)
+	    REQ.LEN = U.LEN			! No, save text as specified
+	  END IF
+	  GOTO SEND_REPLY			! Ready to send command to OMS
+	END IF
+
+	CALL FET$CQ BY REF (PRM.Q)		! Check for /PROMPT
+	GOTO SEND_REPLY UNLESS U.PRES		! Must not have a reply text
+
+	PRINT "Enter text of your reply below, type CTRL/Z to send:"
+	SET NO PROMPT				! Give operator the whole line
+	ON ERROR GOTO PROMPT_ERR		! Set up local trap
+	JUNK = FALSE				! Signal initial line being read
+
+	WHILE (REQ.LEN <= REQSIZ)
+	  LINPUT TEMP				! Get a line of the reply text
+	  REQ.TXT = LEFT$(REQ.TXT, REQ.LEN) +				      &
+			TEMP + CR.LF		! Store new line of reply text
+	  REQ.LEN = REQ.LEN + LEN(TEMP) + 2%	! Update the length of the reply
+	NEXT					! Get more unless reply too long
+	PRINT "?Reply text is too long"		! Sorry about that, chief.
+	GOTO REPLY_END				! Get out
+
+ PROMPT_ERR:
+	ON ERROR GO BACK UNLESS ERR = EOF	! Go back if error not EOF
+	SET PROMPT				! Turn prompting back on
+	RESUME SEND_REPLY			! Cancel error condition
+
+ SEND_REPLY:
+	FLD.SEQ = OC$SEQ			! Set sequence # field value
+	FLD.TXT1 = OC$TXT			! Say we have reply text
+	TEMP = LEFT$(REQ.TXT, REQ.LEN) + STRING$(REQSIZ - REQ.LEN, 0%)
+	LSET FLD.REP1 = TEMP			! Store first half of reply text
+	RSET FLD.REP2 = TEMP			! Store last half of reply text
+
+	IF REQ.LEN <= 250%			! Did we use both halves?
+	THEN
+	  FLD.LEN1 = WORD.TO.BYTE(REQ.LEN)	! No, set first half length,
+	  FLD.LEN2, FLD.TXT2 = 0%		!   zero out last half,
+	  CMDLEN = REQ.LEN + 6%			!   and set cmd buffer length
+	ELSE
+	  FLD.LEN1 = WORD.TO.BYTE(250%)		! Yes, set first half length,
+	  FLD.LEN2 = WORD.TO.BYTE(REQ.LEN - 250%) ! set second half length,
+	  FLD.TXT2 = OC$TXT			!   set second half field flag,
+	  CMDLEN = REQ.LEN + 8%			!   and set cmd buffer length
+	END IF
+						! Set up for OMSSUB calls:
+	OMS$PD = TRUE				! Raise privs for declare
+	OMS$PS = FALSE				! Drop privs for send
+
+	ON ERROR GO BACK			! Send ^C back to caller
+	JUNK = CTRLC				! If any occur
+
+	GOTO REPLY_END				! Quit if		      &
+	  UNLESS MGRSND(OC.REP, CMDLEN)		!   unable to send cmd packet
+
+	GOTO REPLY_END				! Quit if		      &
+	  UNLESS MGRRCV("", 90%, 15%, "acknowledgement") ! didn't get ack msg
+
+	JUNK = RCTRLC				! No further need for ^C trap
+	SELECT ERRSTS
+
+	  CASE 0%				! (No error)
+	    TEMP = "Reply sent to" + NUM$(REQ.KB) + "operator terminal"
+	    TEMP = TEMP + "s" IF (REQ.KB <> 1%)
+
+	  CASE NOSUCH
+	    TEMP = "?Request" + NUM$(FLD.ID) + "not outstanding"
+
+	  CASE ELSE
+	    TEMP = "?Program failure in " + P.NAM +	! This may be a bug   &
+	      CR.LF + ERT$(ERRSTS) + " in OMSRCV"	!   Display error/module
+
+	END SELECT
+	PRINT TEMP
+
+32767	!
+ REPLY_END:
+	END SUB

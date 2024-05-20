@@ -1,0 +1,709 @@
+1	SUB LATOUT							      
+	!								      
+	!******************************************************************** 
+	!								      
+	!	s u b p r o g r a m   t i t l e				      
+	!								      
+	!	  subprogram : LATOUT					      
+	!	     version : V10.1
+	!	     created : 27-OCT-89				      
+	!	        edit : C
+	!	   edit date : 19-JUL-91
+	!	   author(s) : SEL					      
+	!								      
+	!******************************************************************** 
+	!								      
+	!		  C O P Y R I G H T				      
+	!								      
+	!								      
+	!		      Copyright (C) 1990, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.		      
+	!								      
+	!								      
+	! This software is furnished under a license and may be used and      
+	! copied  only  in accordance with the terms of such license and      
+	! with the  inclusion  of  the  above  copyright  notice.   This      
+	! software  or  any  other copies thereof may not be provided or      
+	! otherwise made available to any other person.  No title to and      
+	! ownership of the software is hereby transferred.		      
+	!								      
+	! The information in this software is subject to change  without      
+	! notice  and should not be construed as a commitment by Digital      
+	! Equipment Corporation.					      
+	!								      
+	! DIGITAL assumes no responsibility for the use  or  reliability      
+	! of its software on equipment that is not supplied by DIGITAL.	      
+	!								      
+	!******************************************************************** 
+	!								      
+	!	s u b p r o g r a m   c a l l   f o r m a t		      
+	!								      
+	!	CALL LATOUT						      
+	!								      
+	!	Argument	I/O	Usage				      
+	!	========	===	=====				      
+	!								      
+	!******************************************************************** 
+
+	!								      
+	!	m o d i f i c a t i o n   h i s t o r y   l o g		      
+	!								      
+	!								      
+	! VER/ED	EDIT DATE	REASON
+	!								      
+	! V10.0-G1	03-Jan-90	Check for privileges 
+	! V10.0-H	09-Jan-90	Change column positions and add dialup 
+	!				 flag logic for SHOW PORT 
+	! V10.0-I	29-Jan-90	Add /[NO]ABORT qualifier to DELETE/PORT.
+	!				Add /REMOTE_PORT and /SERVICE qualifiers
+	!				to SET PORT.
+	! V10.0-I	16-Feb-90	Fix bug in SHOW PORT; SERVER printed in
+	!				wrong column when connected to a SERVICE
+	! V10.0-J	27-Feb-90	Add new log msg for DELETE/PORT/NOABORT.
+	! V10.0-J	21-Mar-90	Correct log msg for DELETE/PORT/NOABORT.
+	!				Return  /[NO]QUEUED setting on SET PORT
+	!				Display /[NO]QUEUED setting on SHOW PORT
+	! V10.0-K+	17-May-90	Assign a logical name at CREATE/PORT
+	! V10.0-L4	02-Jul-90	Fix "SHOW PORT KB:". Shorten error msgs.
+	! V10.0-L5	06-SEP-90	Change errmsg for BADNAM.
+	! V10.1-B	07-May-91	Correctly fix "SHOW PORT KB:". 
+	! V10.1-C	14-Jun-91	Just display "Connected" if Job=0.
+	!								      
+	!******************************************************************** 
+	!								      
+	!	s u b p r o g r a m   d e s c r i p t i o n		      
+	!								      
+	! Process outbound LAT commands: CREATE/PORT, DELETE/PORT,
+	! 				 ASSIGN PORT, DEASSIGN PORT,
+	! 				 SET PORT and SHOW PORT.      
+	!								      
+	!******************************************************************** 
+	!
+	!	c h a n n e l   a s s i g n m e n t s
+	!
+	!	channel #	file-spec	  description
+	!	=========	=========	  ===========
+	!	  0		  KB:		user keyboard (BP2 default)
+	!	  1		  NL:		mapped to data returned buffer 
+	!	  2		  NL:		mapped to data passed buffer 
+	!	  3		  		used for /[no]output on SHOW
+	!********************************************************************
+	!
+	!	v a r i a b l e s  /  a r r a y s   u s e d
+	!
+	!	 name			description
+	!	 ====			===========
+	!
+	!	I%,J%			FOR loop indices
+	!	CALLBUF$,		String variable for SYS call
+	!
+	!********************************************************************
+	!
+	!	s u b r o u t i n e s   u s e d
+	!
+	!	name			description
+	!	====			===========
+	!	FET$P BY REF		fetch a parameter
+	!	FET$CQ BY REF		fetch command qualifier
+	!	FET$A BY REF		fetch a non-keyword argument
+	!	FET$KA BY REF		fetch a keyword argument
+	!	U.INI BY REF		initialize CUI tables
+	!	U.DIA BY REF		get user command via CUI
+	!	DISPLY			display the syntax errors
+	!
+	!********************************************************************
+	!
+	!	f u n c t i o n s   u s e d
+	!
+	!	line #	name		description
+	!	======	====		===========
+	!
+	!********************************************************************
+	!
+	!	c o m m o n   d e c l a r a t i o n s
+	!
+	!	 name		  description
+	!	 ====		  ===========
+	!	CUICMN		CUI Common interface
+	!	LATKEY		Keyword definitions
+	!
+	!********************************************************************
+	!********************************************************************
+	!
+	!	I N C L U D E   r e q u i r e d   M A P s , C O M M O N s
+	!
+	!********************************************************************
+
+	%INCLUDE "CUI:CUICMN.B2S"		! Include CUI data section
+	%INCLUDE "SYSTEM:LATKEY.B2S"		! Include CUI common data
+
+	!********************************************************************
+	!
+	!	D E F I N E   C O N S T A N T S
+	!
+	!********************************************************************
+	!
+	! Error codes
+	!
+	DECLARE BYTE CONSTANT BADNAM = 2%
+	DECLARE BYTE CONSTANT INUSE  = 3%
+	DECLARE BYTE CONSTANT NOROOM = 4%
+	DECLARE BYTE CONSTANT NOSUCH = 5%
+	DECLARE BYTE CONSTANT NODEVC = 6%
+	DECLARE BYTE CONSTANT NOTAVL = 8%
+	DECLARE BYTE CONSTANT NOTOPN = 9%
+	DECLARE BYTE CONSTANT PRVIOL = 10%
+	DECLARE BYTE CONSTANT EOF    = 11%
+	DECLARE BYTE CONSTANT HNGDEV = 14%
+	DECLARE BYTE CONSTANT FIEXST = 16%
+	DECLARE BYTE CONSTANT DTOOOF = 17%
+	DECLARE BYTE CONSTANT BADFUO = 18%
+	DECLARE BYTE CONSTANT INTLCK = 19%
+	DECLARE BYTE CONSTANT CTRLCE = 28%
+	DECLARE BYTE CONSTANT BUFERR = 31%
+	DECLARE BYTE CONSTANT EXPERR = 49%
+	DECLARE BYTE CONSTANT NORTS  = 62%
+	DECLARE BYTE CONSTANT ERRERR = 66%
+	DECLARE BYTE CONSTANT TLNOFN = 97%
+	!
+	! Other Constants
+	!
+	DECLARE	WORD CALLBUF(40%)
+
+ MAIN:
+3000	!
+	!
+	!	M A I N    C O D I N G    A R E A
+	!
+	ON ERROR GOTO STANDARD_ERR		! Set up standard error trap
+
+						! Setup FIRQB for all the calls
+	CALLBUF(J%)  = 0% FOR J% = 0% TO 40% 	! Clear Call buffer
+	CREATED% = 0%				! Clear flag for CREATE command
+	ASSIGN% = 0%				! Clear flag for ASSIGN command
+	SET% = 0%				! Clear flags for SET command
+	SET_PORT% = 0%
+	SERVER$ = "" 				! Init data to pass
+	SERVICE$ = "" 
+	REMOTE_PORT$ = "" 
+
+	SELECT U.CMDC%				! Select the specified function
+
+	  CASE	CRPO.K%				!  CREATE/PORT command
+		CALLBUF(4%)  = 4%		!   CREATE PORT function 
+		LOG.MSG$ = "   created" 	!   End of message for /LOG
+		PRIV.NEED$ = "SWCTL"		!   SWCTL priv required	
+		GOSUB DO_SYSCALL		!   Do the syscall
+		CALL FET$CQ BY REF (TER.Q%)	!   /TERMINAL_SERVER specified?
+		IF U.PRES% THEN			!   If yes then 
+		   CALL FET$A BY REF		!    fetch the server-name
+		   SERVER$ = EDIT$(LEFT$(U.STR$,U.LEN%),32%)
+		   CALLBUF(J%) = 0% FOR J% =  0% TO 32% ! Clear Call buffer
+		   CALLBUF(J%) = 0% FOR J% = 37% TO 40% ! Clear Call buffer
+		   CREATED% = -1%			! set function flag 
+		   ASSIGN% = -1%			! Msg flag for assign
+		   GOSUB ASSIGN_PORT 			! go assign the port!
+		END IF				
+		CALL FET$CQ BY REF (NAM.Q%)	! /LOGICAL_NAME specified?
+		IF U.PRES% THEN			! If yes then 
+		   CALL FET$A BY REF		!    fetch the logical name
+		   LOGI.NAME$ = EDIT$(LEFT$(U.STR$,U.LEN%),32%)
+		   LOG.POS% = U.POS%		! Save position in case of error
+		   CALL FET$CQ BY REF (SYS.Q%)	! /SYSTEM specified?
+		   IF U.PRES% THEN		!   If yes check privs
+		      IF ASCII(SEG$(SYS(CHR$(6%)+CHR$(32%)+CHR$(1%)+ &
+			STRING$(3%,0%)+ "INSTAL"),3%,3%)) THEN  
+			    CALL DISPLY ("%System logical not assigned - INSTAL privilege required")
+			    SUBEXIT
+		      END IF
+		      CMD$="$ _ASSI/SYST/REPL " + PORT.NAME$ + " " + LOGI.NAME$
+		   ELSE
+	 	      IF POS(LOGI.NAME$,"$",1%) > 0% THEN
+		         U.POS% = LOG.POS% 
+			 CALL DISPLY ("%Logical not assigned - dollar signs are not allowed in user logical names")
+		         SUBEXIT
+		      END IF
+		      CMD$="$ _ASSIGN/REPLACE " + PORT.NAME$ + " " + LOGI.NAME$
+		   END IF
+		   V$ = SYS(CHR$(14%)+CMD$) 	!  Do the CCL ASSIGN command 
+		END IF
+
+	  CASE	DEPO.K%				!  DELETE/PORT/LAT command
+		CALLBUF(4%) = 5%		!   DELETE PORT function 
+		NOABORT% = -1%			!   Default to /NOABORT
+		LOG.MSG$ = " deleted" 		!   End of message for /LOG
+		CALL FET$CQ BY REF (ABO.Q%)	!   /[NO]ABORT qual specified?
+		IF U.PRES% THEN
+		   IF NOT U.NO% THEN
+			CALLBUF(5%) = 1% 	!   Set bit if /ABORT
+		   	NOABORT% = 0%		!   Clear flag for logging msg
+		   END IF				
+		END IF				
+		PRIV.NEED$ = "SWCTL"		!   SWCTL priv required	
+		GOSUB DO_SYSCALL		!   Do the syscall
+
+	  CASE	ASPO.K%				!  ASSIGN/PORT/LAT command
+		CALL FET$P BY REF (NAM.T%)	!   Fetch terminal_server param
+		SERVER$ = EDIT$(LEFT$(U.STR$,U.LEN%),32%)
+		ASSIGN% = -1%			!   Msg flag for assign
+		GOSUB ASSIGN_PORT		!   Check quals & setup buffer
+
+	  CASE	DAPO.K%				!  DEASSIGN/PORT/LAT command
+		CALLBUF(4%)  = 6%		!   SET PORT function 
+		CALLBUF(5%)  = 1%		!   DEASSIGN PORT subfunction 
+		LOG.MSG$ = " deassigned" 	!   End of message for /LOG
+		PRIV.NEED$ = "SWCFG"		!   SWCFG priv required	
+		GOSUB DO_SYSCALL 		!   Do the syscall
+
+	  CASE	SEPO.K%				!  SET PORT/LAT command
+		CALL FET$P BY REF (POR.T%)	! Fetch port name
+		V$ = FSS$(LEFT(U.STR$,U.LEN%)+":",1%)
+		CALLBUF(J%+10%) = ASCII(RIGHT(V$,J%)) FOR J% = 23% TO 26%  
+		PORT_TYPE% = 0%
+		SET% = -1%
+		OPEN "_NL:" AS FILE #1%, RECORDSIZE 128% ! Open a data buffer
+		FIELD #1%, 128% AS DATA.BUFF$
+		GOSUB LOOKUP_PORT
+		UNTIL BUF.LEN% = 0%
+			TYPE.CODE% = ASCII(RETURNED.DATA$)
+	    		NAME.LEN%  = ASCII(MID(RETURNED.DATA$,2%,1%))
+	    		NAME$ = MID(RETURNED.DATA$,3%,NAME.LEN%)
+			SERVER$ = NAME$ IF TYPE.CODE% = 1% 	!Specified 
+			SERVICE$ = NAME$ IF TYPE.CODE% = 2% 	!Specified 
+			REMOTE_PORT$ = NAME$ IF TYPE.CODE% = 3% !Specified 
+			SERVER$ = NAME$ IF TYPE.CODE% = 4% 	!Actual 
+			REMOTE_PORT$ = NAME$ IF TYPE.CODE% = 5% !Actual 
+			RETURNED.DATA$ = RIGHT(RETURNED.DATA$,NAME.LEN%+3%)
+			BUF.LEN% = BUF.LEN% - (NAME.LEN% + 2%)
+		NEXT
+		CLOSE #4%
+		IF SERVER$ = "" THEN
+		   PRINT "?Port not assigned to a terminal server"
+		ELSE
+		   QUEUED% = -1% IF (CALLBUF(5%) AND 128%) ! Port is queued
+		   CALLBUF(J%)  = 0% FOR J% = 0% TO 40%    ! Clear Call buffer
+		   GOSUB ASSIGN_PORT		!  Check quals & setup buffer
+		END IF
+
+	  CASE	SHPO.K%				!  SHOW PORT/LAT command
+		GOSUB SHOW_PORT
+
+	END SELECT				! End of outbound lat commands
+
+ ALL_DONE:
+	SUBEXIT					! Return to calling program
+
+ ASSIGN_PORT:
+	!	ASSIGN/PORT command
+	!
+	CALL FET$CQ BY REF (SER.Q%)		! Check for /SERVICE qualifier 
+	IF U.PRES% THEN
+	   CALL FET$A BY REF			! /SERVICE=service-name
+	   SERVICE$ = EDIT$(LEFT$(U.STR$,U.LEN%),32%) 
+	   SET_PORT% = -1% IF SET%		! Set flag if SET PORT qual 
+	END IF
+
+	CALL FET$CQ BY REF (POR.Q%)		! Check for /REMOTE_PORT qual
+	IF U.PRES% THEN
+	   CALL FET$A BY REF			! /REMOTE_PORT=port-name
+	   REMOTE_PORT$ = EDIT$(LEFT$(U.STR$,U.LEN%),32%) 
+	   SET_PORT% = -1% IF SET%		! Set flag if SET PORT qual 
+	END IF
+
+	IF ASSIGN% THEN				! Either service or port needed
+	   GOTO SERVICE_PORT_ERROR IF (SERVICE$ = "" AND REMOTE_PORT$ = "")
+	ELSE					! Check SET PORT qualifiers
+	   CALL FET$CQ BY REF (NSER.Q%)		! Check for /NOSERVICE qual
+	   IF U.PRES% THEN
+		IF REMOTE_PORT$ = "" THEN 
+		   GOTO SERVICE_PORT_ERROR 
+		ELSE
+		   SERVICE$ = ""
+	   	   SET_PORT% = -1% IF SET%	! Set flag if SET PORT qual 
+	   	END IF
+	   END IF
+	   CALL FET$CQ BY REF (NPOR.Q%)		! Check for /NOREMOTE_PORT qual
+	   IF U.PRES% THEN
+		IF SERVICE$ = "" THEN
+		   GOTO SERVICE_PORT_ERROR 
+		ELSE
+		   REMOTE_PORT$ = ""
+		   SET_PORT% = -1% IF SET%	! Set flag if SET PORT qual 
+	   	END IF
+	   END IF
+	END IF
+
+	CALL FET$CQ BY REF (QUE.Q%)		! Check for /QUEUED qualifier 
+	IF U.PRES% THEN
+	   IF U.NO% THEN			! Set it /NOQUEUED if specified
+		CALLBUF(7%) = 128% 
+		QUEUED% = 0% 
+	   ELSE					! Set it /QUEUED if specified
+		CALLBUF(8%) = 128%
+	   END IF
+	   SET_PORT% = -1% IF SET%		! Set flag if SET PORT qual 
+	ELSE					! The qualifier is missing
+	   CALLBUF(8%) = 128% IF ASSIGN%	!   default to queued on assign
+	END IF
+	QUEUED% = -1% IF CALLBUF(8%) = 128% 
+
+	IF SET% THEN 				! If SET PORT command...
+	   IF SET_PORT% THEN			!    if settings changed
+		ASSIGN% = -1% 			!    set flag for log msg 
+	   ELSE
+		RETURN 				!    exit if no settings changed
+	   END IF
+	END IF
+
+	PASSED.DATA$ = ""			! Clear out data buffer
+	OPEN "_NL:" AS FILE #2%,RECORDSIZE 128% ! Data buffer
+	FIELD #2%, 128% AS PASSED.DATA$
+	TMP$ = CHR$(0%) + CHR$(LEN(SERVER$)) + SERVER$
+	TMP$ = TMP$ + CHR$(1%) + CHR$(LEN(SERVICE$)) + SERVICE$ &
+		IF SERVICE$ <> "" 
+	TMP$ = TMP$ + CHR$(2%) + CHR$(LEN(REMOTE_PORT$)) + REMOTE_PORT$ &
+		IF REMOTE_PORT$ <> "" 
+	LSET PASSED.DATA$ = TMP$ + ""		! Set pointer to data to pass
+
+	CALLBUF(4%)  = 6%			! SET PORT function 
+	CALLBUF(11%) = 2%			! Channel # for data buffer
+	CALLBUF(13%) = LEN(TMP$)		! Length of data buffer
+	LOG.MSG$ = ""				! Blank end of log message
+	PRIV.NEED$ = "SWCFG"			! SWCFG priv required	
+	GOSUB DO_SYSCALL			! Do the syscall
+	CLOSE #2%				! Close data passed buffer
+	RETURN
+
+ SERVICE_PORT_ERROR:
+	PRINT "?At least one of the qualifiers /REMOTE_PORT or /SERVICE is required"
+	SUBEXIT
+
+
+	! Subroutines 
+
+    DO_SYSCALL:
+	!	Subroutine to load the port name/number and do the syscall for 
+	! 	the CREATE/DELETE, ASSIGN/DEASSIGN and SET commands.
+	!
+	IF ASCII(SEG$(SYS(CHR$(6%)+CHR$(32%)+CHR$(1%)+ &
+	         STRING$(3%,0%)+PRIV.NEED$),3%,3%)) THEN 
+	   PRINT "?" + PRIV.NEED$ + " privilege required"
+	   SUBEXIT				
+	END IF					! Get out if we don't have privs
+	IF NOT CREATED% THEN			! Get the local port-name
+	   CALL FET$P BY REF (POR.T%)		! Fetch port name
+	   IF U.PRES% THEN
+		V$ = FSS$(LEFT(U.STR$,U.LEN%)+":",1%)	! FSS it
+		CALLBUF(J%+10%)  = ASCII(RIGHT(V$,J%)) FOR J% = 23% TO 26%  
+		PORT.NAME$ = CHR$(CALLBUF(33%)) + CHR$(CALLBUF(34%)) &
+			+ NUM1$(CALLBUF(35%)) + ":"
+	   ELSE
+		PORT.NAME$ = ""			! Clear port name
+	   END IF
+	END IF
+	CALLBUF(0%)  = 40%			! Num of elements (for CHANGE)
+	CALLBUF(1%)  = 6%			! SYS call to FIP
+	CALLBUF(2%)  = 22%			! SEND/RCV function code
+	CALLBUF(3%)  = -12%			! SET function
+	CHANGE CALLBUF TO CALLBUF$		! Form the SYS CALL String
+	CHANGE SYS(CALLBUF$) TO CALLBUF		! Do the SYS CALL
+
+	CALL FET$CQ BY REF (LOG.Q%)		! Display logging message 
+	IF U.PRES% THEN
+		RETURN IF U.NO%			! /NOLOG requested
+	END IF
+	PORT.NAME$ = &		
+		CHR$(CALLBUF(33%))+CHR$(CALLBUF(34%))+NUM1$(CALLBUF(35%))+":" &
+		IF PORT.NAME$ = ""		! Get port chosen by create
+
+	IF NOABORT% THEN
+	   LOG.MSG$ = " marked for deletion" IF (CALLBUF(5%) AND 1%)
+	END IF
+
+	LOG.MSG$ = "Port "+ PORT.NAME$ + LOG.MSG$
+
+	IF ASSIGN% THEN
+	   PRINT LOG.MSG$; TAB(13%); "characteristics set as requested" &
+		IF SET%
+	   PRINT LOG.MSG$;
+	   IF QUEUED% THEN
+		PRINT TAB(13%); "assigned with queueing to terminal-server "; &
+				SERVER$
+		TAB1% = 39%
+		TAB2% = 55%
+	   ELSE
+		PRINT TAB(13%); "assigned without queueing to terminal-server "; SERVER$
+		TAB1% = 42%
+		TAB2% = 58%
+	   END IF
+	   PRINT TAB(TAB1%); "remote-service"; &
+		 TAB(TAB2%); SERVICE$ IF SERVICE$ <> ""
+	   PRINT TAB(TAB1%); "remote-port"; &
+		 TAB(TAB2%); REMOTE_PORT$ IF REMOTE_PORT$ <> ""
+	ELSE
+	   PRINT LOG.MSG$ 
+	END IF
+
+	RETURN
+
+ SHOW_PORT:
+	!	SHOW PORT command
+	!
+	OPEN "_NL:" AS FILE #1%,RECORDSIZE 128% ! Open a data buffer
+	FIELD #1%, 128% AS DATA.BUFF$
+
+	DIM TAB.POS%(7%)			! Show Port column positions
+	TAB.POS%(0%) = 7%			! Port Type
+	TAB.POS%(1%) = 12%			! Specified Terminal Server
+	TAB.POS%(2%) = 29%			! Specified Remote Service
+	TAB.POS%(3%) = 46%			! Specified Remote Port
+	TAB.POS%(4%) = 12%			! Actual Terminal Server
+	TAB.POS%(5%) = 46%			! Actual Remote Port
+	TAB.POS%(6%) = 63%			! Connect Status
+
+	NO.HEADING.YET% = -1%		! Set headings flag for display
+
+	CALL FET$P BY REF (POR.T%)	! Fetch port name if any
+	IF U.PRES% THEN
+	   V$ = FSS$(LEFT(U.STR$,U.LEN%)+":",1%)	! FSS it if found
+	   CALLBUF(J%+10%) = ASCII(RIGHT(V$,J%)) FOR J% = 23% TO 26%  !Copy it
+	   IF CALLBUF(36%) = 0% THEN	!Get own KB# if parameter is "KB"
+	      CALLBUF(35%) = ASCII(SEG$(SYS(CHR$(6%)+CHR$(26%)),4%,4%))
+	      CALLBUF(36%) = -1%	
+	   END IF
+	   PORT.NAME$ = CHR$(CALLBUF(33%)) + CHR$(CALLBUF(34%)) &
+			+ NUM1$(CALLBUF(35%)) + ":"
+	ELSE
+	   PORT.NAME$ = ""		! Clear port name if none was specified
+	END IF
+
+	IF PORT.NAME$ = "" THEN		! None specified
+	   ALL% = -1%			! Default to SHOW/ALL
+	   CALL FET$CQ BY REF (APP.Q%) 	! Show all application ports
+	   IF U.PRES% THEN 
+	   	ALL% = 0%		! Don't show all
+		IF U.NO% THEN
+		   PORT_TYPE% = 2%	! Just show interactive ports
+		ELSE
+		   PORT_TYPE% = 1%	! Just show application ports
+		END IF
+		GOSUB LOOKUP_PORT
+	   END IF
+	   CALL FET$CQ BY REF (INT.Q%) 	! Show all interactive ports
+	   IF U.PRES% THEN 
+	   	ALL% = 0% IF ALL%	! Don't show all
+		IF U.NO% THEN
+		   PORT_TYPE% = 1%	! Just show application ports
+		ELSE
+		   PORT_TYPE% = 2%	! Just show interactive ports
+		END IF
+		GOSUB LOOKUP_PORT
+	   END IF	
+	   IF ALL% THEN			! Show all ports
+		PORT_TYPE% = 1%		! Show application ports
+		GOSUB LOOKUP_PORT
+		PORT_TYPE% = 2%		! Show interactive ports
+		GOSUB LOOKUP_PORT
+	   END IF
+	ELSE
+	   PORT_TYPE% = 0%
+	   GOSUB LOOKUP_PORT
+	END IF
+
+	CLOSE #1%			! Close data buffer
+	PRINT #OUT_CHNL%, STRING$(80%,45%)	! Print legend at bottom of rpt
+	PRINT #OUT_CHNL%, TAB(7%); &
+		"A = Application  I = Interactive   Q = Queued  NQ = NoQueued"
+	RETURN				! Done with SHOW PORT command
+
+ LOOKUP_PORT:
+	!	Syscall to lookup a port 
+	!
+	IF PORT_TYPE% THEN
+	   MAX.KB% = 128%		! Show the maximum # of ports
+	   INDEX% = 1% 			! Start with first port found
+	ELSE
+	   MAX.KB% = 1%			! Show one specific port
+	   INDEX% = 0% 			! Don't lookup by index
+	END IF
+
+	ON ERROR GOTO SHOW_PORT_ERR		! Setup local error trap
+	FOR I% = 1% TO MAX.KB%			! Show 1 port or up to 128
+	    CALLBUF(0%)  = 40%			! Num of elements (for CHANGE)
+	    CALLBUF(1%)  = 6%			! SYS call to FIP
+	    CALLBUF(2%)  = 22%			! SEND/RCV function code
+	    CALLBUF(3%)  = 12%			! SHOW function 
+	    CALLBUF(4%)  = 7%			! SHOW PORT function 
+	    CALLBUF(5%)  = INDEX% 		! Index - start at 1st port
+	    CALLBUF(7%)  = PORT_TYPE%		! Type of port to show
+	    CALLBUF(11%) = 1%			! Channel # for data buffer
+	    CALLBUF(13%) = 128%			! Length of data buffer
+	    CHANGE CALLBUF TO CALLBUF$		! Form the SYS CALL String
+	    CHANGE SYS(CALLBUF$) TO CALLBUF	! Do the SYS CALL
+
+	    BUF.LEN% = CALLBUF(13%)+SWAP%(CALLBUF(14%))	! Returned data
+	    RETURNED.DATA$ = LEFT(DATA.BUFF$,BUF.LEN%)
+	    RETURN IF SET%			! Go back if SET PORT not SHOW
+
+	    IF CALLBUF(6%) = 1% THEN 		! Port status is connected
+		CONNECTED% = -1%		!  set flag and 
+		JOB% = CALLBUF(21%)		!  get job number 
+	    ELSE				! Port status is not connected
+		CONNECTED%, JOB% = 0%
+	    END IF
+	    QUE_POS% = 0%			! Clear queue position flag
+	    QUEUED% = 0%			! Clear queued flag
+	    CONN_IN_PROGRESS% = 0%		! Clear in progress flag
+	    IF (CALLBUF(6%) AND 4%) THEN 	! Connection status is queued
+		CONN_IN_PROGRESS% = -1%
+		QUE_POS% = CALLBUF(7%)+SWAP%(CALLBUF(8%)) ! get position if any
+		QUEUED% = -1% IF QUE_POS% 	!  set queued flag if in a queue
+	    END IF
+
+	    PORT.NAME$ = CHR$(CALLBUF(33%)) + CHR$(CALLBUF(34%)) + &
+			 NUM1$(CALLBUF(35%))
+
+	    PORT.NAME$ = PORT.NAME$ + "*" IF (CALLBUF(5%) AND 4%) !Dial-up 
+
+	    IF NO.HEADING.YET% THEN
+		PRINT #OUT_CHNL%, "Port";
+		PRINT #OUT_CHNL%, TAB(TAB.POS%(0%)); "Type";
+		PRINT #OUT_CHNL%, TAB(TAB.POS%(1%)); "Terminal Server";
+		PRINT #OUT_CHNL%, TAB(TAB.POS%(2%)); "Remote Service";
+		PRINT #OUT_CHNL%, TAB(TAB.POS%(3%)); "Remote Port";
+		PRINT #OUT_CHNL%, TAB(TAB.POS%(6%)); "Connect Status"
+		PRINT #OUT_CHNL%, "____";
+		PRINT #OUT_CHNL%, TAB(TAB.POS%(0%)); "____";
+		PRINT #OUT_CHNL%, TAB(TAB.POS%(1%)); "_______________";
+		PRINT #OUT_CHNL%, TAB(TAB.POS%(2%)); "______________";
+		PRINT #OUT_CHNL%, TAB(TAB.POS%(3%)); "___________";
+		PRINT #OUT_CHNL%, TAB(TAB.POS%(6%)); "______________"
+		NO.HEADING.YET% = 0%
+	    END IF
+	    PRINT #OUT_CHNL%, PORT.NAME$;
+	    PRINT #OUT_CHNL%, TAB(TAB.POS%(0%)); "A,"; IF (CALLBUF(5%) AND 1%)
+	    PRINT #OUT_CHNL%, TAB(TAB.POS%(0%)); "I,"; IF (CALLBUF(5%) AND 2%)
+	    IF (CALLBUF(5%) AND 128%) THEN 
+		PRINT #OUT_CHNL%, "Q"; 
+	    ELSE
+		PRINT #OUT_CHNL%, "NQ"; 
+	    END IF
+	    SERVER$  = ""
+	    SERVICE$ = ""
+	    REMOTE_PORT$  = ""
+	    UNTIL BUF.LEN% = 0%
+		TYPE.CODE% = ASCII(RETURNED.DATA$)
+	    	NAME.LEN%  = ASCII(MID(RETURNED.DATA$,2%,1%))
+	    	NAME$ = MID(RETURNED.DATA$,3%,NAME.LEN%)
+		IF NOT CONNECTED% THEN 		! Specified data
+			SERVER$ = NAME$ IF TYPE.CODE% = 1% !server(1) 
+			REMOTE_PORT$ = NAME$ IF TYPE.CODE% = 3% !remote port(3)
+		END IF
+		IF CONNECTED% THEN		! Actually connected to:
+			SERVER$ = NAME$ IF TYPE.CODE% = 4% !server(4) 
+			REMOTE_PORT$ = NAME$ IF TYPE.CODE% = 5% !remote port(5)
+		END IF  
+		SERVICE$ = NAME$ IF TYPE.CODE% = 2% !service (2)
+		RETURNED.DATA$ = RIGHT(RETURNED.DATA$,NAME.LEN%+3%)
+		BUF.LEN% = BUF.LEN% - (NAME.LEN% + 2%)
+	    NEXT
+
+	    PRINT #OUT_CHNL%, TAB(TAB.POS%(1%)); SERVER$;
+	    PRINT #OUT_CHNL%, TAB(TAB.POS%(2%)); SERVICE$; IF SERVICE$ <> "" 
+	    PRINT #OUT_CHNL%, TAB(TAB.POS%(3%)); REMOTE_PORT$; IF REMOTE_PORT$ <> "" 
+
+	    IF CONNECTED% THEN
+		IF JOB%=0% THEN
+		   PRINT #OUT_CHNL%, TAB(TAB.POS%(6%)); "Connected"
+		ELSE 
+		   PRINT #OUT_CHNL%, TAB(TAB.POS%(6%)); &
+			"Connected, Job="; NUM1$(JOB%)
+		END IF
+	    ELSE
+		IF CONN_IN_PROGRESS% THEN
+		  IF QUEUED% THEN
+		     PRINT #OUT_CHNL%, TAB(TAB.POS%(6%)); &
+			"Queue Pos = "; NUM1$(QUE_POS%)
+		  ELSE
+		     PRINT #OUT_CHNL%, TAB(TAB.POS%(6%)); "In Progress"
+		  END IF
+		ELSE
+		  PRINT #OUT_CHNL%, TAB(TAB.POS%(6%)); "Not Connected"
+	        END IF
+	    END IF
+	    CALLBUF(J%)  = 0% FOR J% = 0% TO 40% 	! Clear Call buffer
+	    INDEX% = INDEX% + 1% 			! Get next port 
+	NEXT I%
+
+ LOOKUP_NEXT:
+	ON ERROR GOTO STANDARD_ERR			! Reset std error trap
+	RETURN						! Finish SHOW command
+
+ SHOW_PORT_ERR:
+	!	Local error trapping for SHOW PORT/LAT command
+	!
+	SELECT ERR				! Select the error code
+
+	CASE NOTAVL				! No match found
+	   RESUME LOOKUP_NEXT IF PORT_TYPE% 	! Done listing ports
+	   NO_PORT$ = "?Port " + PORT.NAME$ + " does not exist"
+	   CALL DISPLY (NO_PORT$) 		! Specified port not found
+	   RESUME LOOKUP_NEXT
+
+	CASE ELSE				! Anything else
+	   RESUME STANDARD_ERR			! Goto standard error trap
+
+	END SELECT
+
+
+
+ STANDARD_ERR:
+19000	!	s t a n d a r d   e r r o r   h a n d l i n g
+	!
+	!
+	SELECT ERR				! Select the error code
+						! 
+	CASE ERRERR				! No LAT
+	  PRINT "?LAT is not installed"
+
+	CASE INUSE				! Local port is in use 
+	  CALL DISPLY ("?Port already in use")
+
+	CASE NOBUFS				! Buffer shortage
+	  PRINT "?Not enough small buffers to create the logical terminal"
+
+	CASE NODEVC				! Bad port name
+	 SELECT U.CMDC%
+	  CASE CRPO.K%
+	    CALL DISPLY ("?Not a dynamic keyboard")
+	  CASE SHPO.K%
+	    CALL DISPLY ("?Not a LAT port")
+	  CASE ELSE
+	    CALL DISPLY ("?Not a LAT application port")
+	 END SELECT
+
+	CASE BADNAM				! Bad name string
+	 U.POS% = 0%				! Don't point - it's rude
+	 SELECT U.CMDC%
+	  CASE SEPO.K%				! SET PORT
+	   CALL DISPLY ("?Name contains invalid characters")
+	  CASE ELSE				! CREATE or ASSIGN
+	   CALL DISPLY ("?Name contains invalid characters - port not assigned")
+	 END SELECT
+
+	CASE CTRLCE				! Control/C received
+	  RESUME ALL_DONE			! Quit
+
+	CASE NORTS				! DECNET not started
+	  PRINT "?DECnet is not started"
+
+	CASE ELSE				! Any other error
+	  ERR_MSG$ = ERT$(ERR) + " at line " + NUM1$(ERL) 
+	  PRINT ERR_MSG$
+
+	END SELECT
+	RESUME ALL_DONE
+
+32767	!	e n d   o f   s u b p r o g r a m			      
+ 
+	SUBEND					! End of subprogram

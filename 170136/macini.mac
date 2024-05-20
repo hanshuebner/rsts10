@@ -1,0 +1,310 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element MACINI.MAC
+;  *4    26-OCT-1989 11:13:52 STEVENS "Change default workfile size for RT-11"
+;  *3    18-AUG-1986 11:23:33 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:31:05 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:39:51 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element MACINI.MAC
+	.NLIST							;Edit Level 04
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	MACINI	- MACRO-11 initailization code
+	.SBTTL	MACINI	- MACRO-11 initailization code
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Joe Worrall
+;
+;   Created:	03-Dec-82
+;
+;  Abstract:	MACRO-11 initailization code
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;	$$$DIV	 Divide routine vector in D-SPACE
+;	$$$MUL	 Multiply routine vector in D-SPACE
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;	001	Jrw	08-Apr-83	Add code to modify LINPPG
+;					code for micro/rsx and macro-11/vax.
+;					Handle exit status correctly.
+;	002	Jrw	12-Nov-84	Call PGLEN under ALL versions.
+;	003	Jrw	06-Feb-85	Open 256. block workfile if running
+;					under RTEM.
+;	004	Jrw	11-Feb-85	Allow $PGLEN to be GBLDEF=$PGLEN:0
+;--
+
+.SBTTL	MACINI	- One time init code for MACRO-11
+
+.IF	NDF,PDPV45	;If emulated EIS supported
+	.GLOBL	MUL,DIV
+.ENDC;	NDF,PDPV45	;If emulated EIS supported
+
+.IF	DF,RT11			;If RT-11
+
+; Macro library calls
+
+	.MCALL	.GVAL,	.RCTRLO,.SETTOP,.SRESET
+
+USRLOC	=	46	;USER swap address
+
+	.PSECT	ROODAT,RW,D,GBL,CON,REL,SAV
+
+$HIGH::	.WORD	0		;MACRO-11/RT High limit as set by .SETTOP
+WRKSIZ::.WORD	256.		;Default size of workfile - bumped to 256.
+				;if MACRO/RT is run under RSTS/E.
+
+.IF	NDF,PDPV45	;If emulated EIS supported
+
+CONFG2	= 370	;Configuration word 2
+EIS	= 400	;Bit positon in CONFG2 for EIS option
+
+.IFTF;	NDF,PDPV45	;If emulated EIS support
+
+	PURE	PUREI,I
+
+MACINI::TST	$HIGH		;First time though?
+	BNE	99$		;Branch if not, skip one time code section.
+	MOV	#PUREI,@#USRLOC	;Set USR to swap over the pure code psect
+	.SETTOP #-2		;Grab all of core, swap USR
+	MOV	R0,$HIGH	;Save high address for core allocation routine
+	.GVAL	#EMAREA,#SYSGEN	;Get sysgen feature word
+	BCS	10$		;Branch if directive failed, forget it!
+	BIT	#RTEM$,R0	;Running under RTEM-11?
+	BNE	5$		;Branch if so!
+	.GVAL	#EMAREA,#0	;Get contents
+	BCS	10$		;Give up if error - assume running on RT-11
+	TST	R0		;JMP INTEN present?
+	BNE	10$		;Branch if so, not RSTS/E
+5$:	MOV	#256.,WRKSIZ	;Else bump workfile size to full capisity.
+10$:
+
+.IFT;	NDF,PDPV45	;If emulated EIS supported
+
+	.GVAL	#EMAREA,#CONFG2	;Get CONFIG2
+	BIT	#EIS,R0		;EIS Instruction set available?
+	BNE	99$		;Branch if so, all set then.
+	MOV	#MUL,$$$MUL	;Else change vectors to software math
+	MOV	#DIV,$$$DIV	;...
+
+.ENDC;	NDF,PDPV45	;If emulated EIS supported
+
+99$:	.SRESET			;Do a software reset
+	.RCTRLO			;Reset any ^O that may have been hit
+	CALL	XCTPRG		;INIT IMPURE DATA REGION
+	COMB	CLCSEC		;INDICATE LOCN CTR INFO NOT SET
+	MOV	#12*400+15,FFLOC ;SET TO CR ON FIRST PAGE ONLY		;001
+	RETURN			;Return to caller.
+
+
+.IFF;	DF,RT11		;If RT-11
+
+; Macro library calls
+
+
+	.MCALL	DIR$,	FDOP$R,	FINIT$,	SVTK$,SVTK$S
+
+;	??When SAV psects work ok, fix this section!
+
+.IF	NE,0
+
+	.PSECT	ROODAT,RW,D,GBL,SAV
+
+.IF	NDF,R$$PRO	;If not special CT version (PMA)
+
+$MACPR::.ASCII	<CR><LF>/MAC>/	;Prompt string
+				; (Name gets overlaid dyamically)
+
+.IFF;	NDF,R$$PRO	;If not special CT version (PMA)
+
+$MACPR::.ASCII	<CR><LF>/PMA>/	;Prompt string for CT version.
+
+.IFTF;	NDF,R$$PRO	;If not special CT version (PMA)
+
+.EVEN
+
+$INIT::	.WORD	0		;<>0 if MACINI has been called once
+
+.IFF;	NDF,R$$PRO	;If not special CT version (PMA)
+
+$RDID::.BLKW	5		;SAVE ID FOR LB:[1,1]
+$PDID::.BLKW	5		;SAVE ID FOR LB:[1,5]
+	$IDSIZ = . - $RDID	;SIZE TO ZERO
+
+.ENDC;	NDF,R$$PRO	;If not special CT version (PMA)
+.ENDC;	NE,0
+
+.IF	NDF,R$$PRO	;??If not special CT version (PMA)
+.IFF;	NDF,R$$PRO	;??If not special CT version (PMA)
+
+	.PSECT	MIXED,RW,D
+
+RSX:	.WORD	$LBSIZ,$RSXLB	;DATA SET DESCRIPTOR FOR
+	.WORD	$RSZ,$RSXID	;FOR RSX LIBRARY ACCOUNT
+	.WORD	0,0		;LB:[1,1]
+
+PRO:	.WORD	$PLBSZ,$PROLB	;DATA SET DESCRIPTOR FOR
+	.WORD	$PSZ,$PROID	;FOR P/OS LIBRARY ACCOUNT
+	.WORD	0,0		;LB:[1,5]
+
+$RSXLB:	.ASCII	/LB:/		;Library device name
+	$LBSIZ == . - $RSXLB
+
+$RSXID: .ASCII	/[1,1]/		;Library uic
+	$RSZ == . - $RSXID
+
+$PROLB::.ASCII	/LB:/		;Library device for P/OS
+	$PLBSZ == . - $PROLB
+
+$PROID:: .ASCII	/[1,5]/		;Library uic
+	$PSZ == . - $PROID
+.EVEN
+
+.IFTF;	NDF,R$$PRO	;If not special CT version (PMA)
+
+.IF	NDF,PDPV45	;If emulated EIS supported
+
+	PURE	DPURE,D
+
+SVTDPB:	SVTK$	SSTTAB,SSTLEN
+
+SSTTAB:	.WORD	0	;Odd address/Mem prot
+	.WORD	0	;Memory prot violation
+	.WORD	0	;T-bit trap
+	.WORD	0	;IOT trap
+	.WORD	TRPHAN	;Reserved Instruction
+SSTLEN	=<.-SSTTAB>/2
+
+.ENDC;	NDF,PDPV45	;If emulated EIS supported
+
+	PURE	PUREI,I
+.ENABL LSB
+
+MACINI::TST	$INIT	;First time though?
+	BNE	99$	;Branch if so.
+	MOV	SP,$INIT ;Flag that initialize has been done.
+
+;
+; Get and set the lines-per-page value from SYS$LP_LINES
+;
+
+	TST	#$PGLEN		;Is $PGLEN linked in?
+	BEQ	10$		;Branch if not.
+	CALL	$PGLEN		;Get the page length of the default printer
+	TST	R0		;Anything returned?
+	BEQ	10$		;Branch if not, not on a logical name system
+	SUB	#6,R0		;Leave 3 lines at top and 3 at the bottom
+	MOV	R0,LINPPG	;and save it away.
+10$:
+
+.IF	NDF,PDPV45	;If emulated EIS supported
+
+; Check if this machine has EIS, if not, setup $$$DIV and
+; $$$MUL to point to software emulation routines.
+
+	DIR$	#SVTDPB		;Set illegal instruction trap catcher
+	 .WORD	 70303		;MUL R3,R3
+TRPRET:	SVTK$S			;Reset trap control.
+
+.ENDC;	NDF,PDPV45	;IF emulated EIS supported
+
+.IFF;	NDF,R$$PRO	;If not special CT version (PMA)
+
+;	??The following may go away if SAV psect stuff is fixed!!!!
+
+	MOV	#$MACPR+2,R0	;R0 -> Macro prompt
+	MOVB	#'P,(R0)+	;Move in PMA over MAC
+	MOVB	#'M,(R0)+	;...
+	MOVB	#'A,@R0		;...
+
+.IFT;	NDF,R$$PRO	;If not special CT version (PMA)
+
+	MOV	#^RMAC,R1	;Put default task name in R1
+	CALL	$GTKNM		;Get correct task name (returns in R1)
+	MOV	#$MACPR+2,R0	;Name string addr in R0 (overlays default name)
+	CALL	$C5TA		;Convert name to ascii
+
+.IFTF;	NDF,R$$PRO	;If not special CT version (PMA)
+
+99$:	CALL	XCTPRG		;INIT IMPURE DATA REGION
+	COMB	CLCSEC		;INDICATE LOCN CTR INFO NOT SET
+	FINIT$			;INIT FILE STORAGE REGION
+
+.IFF;	NDF,R$$PRO	;If not special CT version (PMA)
+
+	MOV	#$RDID+$IDSIZ,R5 ;POINT PAST DIRECTORY SAVE AREA
+	MOV	#<$IDSIZ/2>,R0	;NUMBER OF WORDS
+100$:	CLR	-(R5)		;INITIALIZE DIRECTORY ID'S TO ZERO
+	SOB	R0,100$		;
+	MOV	#FDB1,R0	;ADDRESS OF SCRATCH FDB
+	FDOP$R	R0,#TM$LUN,#RSX	;Setup temporary LUN
+	MOV	R0,R1		;COPY FDB ADDRESS TO CALCULATE
+	ADD	#F.FNB,R1	;ADDRESS OF FILE NAME BLOCK
+	MOV	#RSX,R2		;PARSE RSX LIBRARY ACCOUNT
+	CLR	R3		;NO DEFAULT NAME BLOCK
+	CALL	.PARSE		;PARSE FOR DIRECTORY ID, DEVICE NAME
+	BCS	300$		;IF CS, ASSUME NO SUCH DIRECTORY
+	MOV	R1,R3		;COPY FILE NAME POINTER
+	ADD	#N.DID,R3	;POINT TO RETURNED DIRECTORY ID
+	CLR	4(R3)		;ALWAYS ZERO FCS SCRATCH WORD
+	MOV	#5,R4		;SAVE N.DID (DIRECTORY ID) AND
+200$:	MOV	(R3)+,(R5)+	;N.DVNM, N.UNIT (DEVICE NAME
+	SOB	R4,200$		;AND UNIT) FROM NAME BLOCK
+300$:	MOV	#PRO,R2		;PARSE P/OS LIBRARY ACCOUNT
+	CLR	R3		;NO DEFAULT NAME BLOCK
+	CALL	.PARSE		;GET FILE ID FOR DIRECTORY [1,5]
+	BCS	500$		;IF CS, NO SUCH DIRECTORY
+	MOV	#$PDID,R5	;ADDR OF DIRECTORY SAVE AREA
+	ADD	#N.DID,R1	;POINT TO DIRECTORY ID
+	CLR	4(R1)		;ALWAYS CLEAR FCS SCRATCH WORD
+	MOV	#5,R4		;NUMBER OF WDS IN NAME BLOCK
+400$:	MOV	(R1)+,(R5)+	;SAVE DIRECTORY ID
+	SOB	R4,400$		;DEVICE NAME AND UNIT
+500$:
+
+.ENDC;	NDF,R$$PRO	;If not special CT version (PMA)
+
+1000$:	RETURN		;Return to caller
+.DSABL LSB
+
+.IF	NDF,PDPV45	;If emulated EIS supported
+
+TRPHAN:	MOV	#MUL,$$$MUL	;Else change vectors to software math
+	MOV	#DIV,$$$DIV	;...
+	CMP	(SP)+,(SP)+	;Cleanup the stack
+	BR	TRPRET		;Return to mainline code.
+
+.ENDC;	NDF,PDPV45
+
+.ENDC;	DF,RT11		;If RT-11
+
+
+	.END

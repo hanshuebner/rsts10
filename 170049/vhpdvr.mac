@@ -1,0 +1,559 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+TITLE	VHPDVR,<DHU11/DHV11 compatible port driver>,0A,10-MAY-91,KPH/DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	VHPDVR EDIT HISTORY
+
+;+
+;  000  KPH  28-Jun-87	Creation - extract from TTDVR.MAC
+;  001	DRP  10-Jun-88	Clear FORCE.XOFF bit when hanging up line.
+;
+;			[RSTS/E V9.7]
+;  002	DRP  07-Dec-88	Add KP$DSB (Disable a line) routine.
+;			Add KP$SBK (Set Break), KP$CBK (Clear Break)
+;			and KP$LST (Get Line Status) routines.
+;			Merge PK's Aux. driver support
+;  003	DRP  08-Mar-89	Fix bug in VHONT where high order address is
+;			being cleared. 
+;  004	DRP  28-May-90	Source clear patch 3.3.28M.
+;-
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	VHPDVR
+
+.SBTTL	KP$SEC	Once a second service
+
+;+
+; KP$SEC - Once a second service
+;
+;	C  =  0 if no hangup
+;	C  =  1 if port driver should hangup modem
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;
+;	Priority is Pr3
+;
+; This routine is called once a second by the class driver for port
+; specific checking.
+;-
+
+.ENABL	LSB
+
+	PRTENT	SEC		;Once a second service
+
+	BIT	#TTMODM,TTINTF(R1) ;Using modem control on this line?
+	BEQ	40$		;No, nothing to do
+	ROR	R4		;Save hangup flags
+	SPLC	5		;Lock out interrupts
+	MOV	TTPARM(R1),R2	;;Pick up the line parameter word	;004
+	CALL	@KP$PRM		;; and go set it			;004
+	ROL	R4		;;HANG UP LINE?
+	BCC	20$		;;NO
+10$:	BIC	#11040,10(R3)	;;Clear RTS, DTR, and FORCE.XOFF	;001
+	JMPX	TTHGLN		;;And finish up in the class driver
+
+20$:	TSTB	MODCLK(R1)	;;MODEM TIMING OUT?
+	BNE	30$		;;YES, SO LEAVE IT ALONE
+	BIT	#10000,6(R3)	;;IS CARRIER ON?
+	BEQ	10$		;;NO, SO HANG IT UP
+	TST	MODCLK(R1)	;;CARRIER, IS IT ENABLED?
+	BPL	30$		;;YES, SO LEAVE AS IS
+.ASSUME	TTDSBL	EQ	100000
+	CALLX	DDBSET		;;ELSE, SET UP THE DDB
+30$:	BIS	#11000,10(R3)	;;ENSURE RTS AND DTR ARE ON
+	SPLC	3		;;Enable interrupts
+40$:	RETURN			;And exit
+           
+.DSABL	LSB
+
+.SBTTL	SELECT MULTIPLEXOR SUBLINE
+
+;+
+; VHSEL - SELECT MULTIPLEXOR SUBLINE.
+;          
+;	R1 -> DDB
+;	R3 -> CSR
+;
+;	CALL	VHSEL
+;-
+
+VHSEL:	MOV	R2,-(SP)	;;Get a scratch register
+	CALLX	SUBLIN		;;GET THE SUBLINE NUMBER *2
+	ASR	R2		;;SUBLINE TIMES 1 AGAIN
+	BIS	#100,R2		;;SET RX I.E.
+	MOVB	R2,(R3)		;;AND SELECT THE SUBLINE
+	MOV	(SP)+,R2	;;Restore R2
+	RETURN			;;And exit
+
+          
+.SBTTL	KP$PRM	Set line parameters
+        
+;+
+; KP$PRM - Set line parameters
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R2 =  Requested parameter word
+;	R3 -> CSR
+;
+;	Priority is PR5
+;
+; This routine is called by the class driver to set line parameters.
+; It is used anytime the software-controllable port characteristics
+; are to be changed.
+;-         
+
+.ENABL	LSB
+
+	PRTENT	PRM		;;Set line parameters
+
+	CALL	VHSEL		;;Select the subline
+	BIT	#177400,R2	;;Do they want speed 0?
+	BNE	10$		;;Nope
+	BIS	#167000,R2	;;Yes, pick highest group B
+SETLPR:	BIC	#4,10(R3)	;;Clear RX enable for this channel	;002
+	BR	20$		;;And join up
+
+10$:	BIS	#4,10(R3)	;;MAKE SURE RX ENABLE IS SET
+20$:	MOV	R2,4(R3)	;;SET THE LINE PARAMETERS
+	BIT	#TTPCOL,TTMODE(R1) ;;Using XON/XOFF mode?
+	BNE	30$		;;Yes, be sure OAUTO is set
+	BIT	#TTSYNC,TTCHAR(R1) ;;No, how about the characteristic?
+	BEQ	40$		;;No, be sure OAUTO is clear
+	BIT	#TTBIN,TTMODE(R1) ;;Yes, but are they using binary mode?
+	BNE	40$		;;Yes, be sure OAUTO is clear
+    
+30$:	BIS	#20,10(R3)	;;Set OAUTO
+	BR	50$		;;And join up
+
+40$:	BIC	#20,10(R3)	;;Clear OAUTO
+50$:	RETURN			;;And we're done
+
+.DSABL	LSB
+
+.SBTTL	VH11 INPUT INTERRUPT PROCESSING
+
+;+
+; VHINT - INPUT INTERRUPT SERVICE FOR VH LINES.
+;
+;	R0 =  VH CONTROLLER NUMBER TIMES 2
+;	PRIORITY IS INTERRUPT PRIORITY
+;
+;	...
+;
+;	RETURN
+;-
+
+	TMPORG	VHKINT,6
+	 .WORD	VHINT
+	UNORG
+
+VHINT:	MOV	VHKBN,R5	;;GET THE BASE KB
+	CALLX	MUXKBN		;;SET UP FOR THE BASE KB
+	MOV	R0,-(SP)	;;SAVE BASE KB # *2
+10$:	MOV	2(R3),R2	;;GET DATA FROM THE SILO
+	BMI	20$		;;MORE DATA, CONTINUE
+	TST	(SP)+		;;NO MORE DATA, POP BASE KB #*2
+	RETURN			;; AND EXIT FROM INTERRUPT
+
+20$:	MOV	R2,R0		;;COPY THE DATA
+	CALLX	FNDLIN		;;NOW FIND THE CORRECT LINE
+	BCS	10$		;;LINE IS ILLEGAL, IGNORE IT...
+	CMP	R2,#170000	;;IS THERE ANY MODEM INFO?
+	BLO	30$		;;IT'S NOT MODEM INFO
+	BIT	#1,R2		;;BUT IS THIS DIAGNOSTIC INFO?
+	BNE	10$		;;Yes, just ignore it
+	BIT	#TTMODM,TTINTF(R1) ;;Modem control on this line?
+	BEQ	10$		;;No, ignore the interrupt
+	CALL	VHCHEK		;;NO, SO DO RING/CARRIER CHECKING
+	BR	40$		;;And join up
+
+30$:	CALLX	TTINCH		;;Process the input character
+40$:	MOV	CSR.KB(R0),R3	;;Get CSR pointer back
+	BR	10$		;;And loop
+
+GLOBAL	<VHKBN,CSR.KB>
+
+.SBTTL	VH11 OUTPUT INTERRUPT PROCESSING
+
+;+
+; VHONT - OUTPUT INTERRUPT SERVICE FOR VH LINES.
+;
+;	R0 =  VH CONTROLLER NUMBER TIMES 2
+;	PRIORITY IS INTERRUPT PRIORITY
+;
+;	...
+;
+;	RETURN
+;-
+
+	TMPORG	VHKINT,16
+	 .WORD	VHONT
+	UNORG
+
+VHONT:	MOV	VHKBN,R5	;;GET BASE KB
+	CALLX	MUXKBN		;;SET UP FOR BASE VH LINE
+VHONT0: MOV	R0,-(SP)	;;Save the base unit number		
+	MOV	(R3),R5		;;COPY THE CSR				
+10$:	BIT	#30000,R5	;;DIAG. FAIL OR DMA ERROR?		
+	BEQ	20$		;;NO
+	CLR	R2		;;INDICATE NO "SILO" DATA
+	LOG$KB			;;AND LOG THE ERROR
+20$:	MOV	#100,R5		;;SELECT RX I.E. AND LINE 0
+30$:	MOVB	R5,(R3)		;;SELECT THE SUBLINE
+	BIT	#200,14(R3)	;;DMA IN PROGRESS?
+	BEQ	70$		;;NO SO TRY AND START IT
+40$:	TST	(R0)+		;;UP TO NEXT LINE #
+	INC	R5		;; AND NEXT LINE TO TEST
+	CMP	R5,#117		;;HAVE WE DONE ALL SUBLINES?
+	BLOS	30$		;;NO, SO CONTINUE...
+50$:	MOV	(R3),R5		;;ANY OTHER OUTPUT PENDING?		
+	BPL	60$		;;No					
+	MOV	(SP),R0		;;Yes, restore the saved unit number	
+	BR	10$		;; and restart the scan			
+
+60$:	TST	(SP)+		;;Junk the saved unit number		
+	RETURN
+
+70$:	CMP	R0,#CNT.KB*2	;;IS THE LINE LEGAL AT ALL?
+	BHIS	50$		;;NO, GET OUT
+	MOV	DEV.KB(R0),R1	;;YES, GET DDB
+	CMP	R3,CSR.KB(R0)	;;REALLY THIS MULTIPLEXER?
+	BNE	50$		;;NOPE, GET OUT INDEED
+	TST	DDFLAG(R1)	;;SCOPE STOP REQUESTED?
+	BMI	40$		;;YES, DON'T RESTART
+.ASSUME	TTSTOP	EQ	100000
+	BIT	#TTMODM,TTINTF(R1) ;;IS THERE A MODEM ON THIS LINE?
+	BEQ	80$		;;NO, SO DO NO MORE
+	BIT	#4000,6(R3)	;;CLEAR TO SEND?
+	BEQ	40$		;;NO, SO DON'T RESTART
+80$:	BIT	#200,14(R3)	;;DMA IN PROGRESS?
+	BNE	40$		;;YES, SO DO IT FIRST			
+	CALLX	DHBUFF		;;DO WE HAVE TO DO A DMA?
+	MOV	R3,R1		;;Copy high order address		;002
+	MOV	CSR.KB(R0),R3	;; and restore the CSR ->		;002
+	BCC	40$		;;NO, SO DO NEXT SUBLINE
+	BIC	#1,10(R3)	;;ENSURE DMA ABORT IS CLR		
+	MOV	R2,16(R3)	;;SET IN BYTE COUNT
+	MOV	R4,12(R3)	;;SET STARTING ADDRESS
+	BIS	#200,R1		;;Set DMA Start bit			;002
+	BIT	#20,10(R3)	;;OAUTO set?				
+	BEQ	110$		;;No, go set TX EN			;003
+	MOVB	R1,14(R3)	;;Yes, start DMA leaving TX EN alone	;003
+	BR	40$		;;Next subline				;003
+
+110$:	BIS	#100000,R1	;;Set TX EN bit				;003
+	MOV	R1,14(R3)	;;Start the DMA, setting high address	;003
+	BR	40$		;;Next subline				
+    
+GLOBAL	<VHKBN,LOG$KB,DEV.KB,CSR.KB,CNT.KB>
+
+.SBTTL	KP$DTR	Set DTR for interface
+
+;+
+; KP$DTR - Set DTR for interface
+;   
+;	R0 =  Keyboard number times two
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;
+; This routine is used by the class driver to set DTR on a modem control
+; interface.
+;-
+
+	PRTENT	DTR
+
+	CALL	VHSEL		;;Select the subline
+	MOVB	7(R3),R2	;;Get the current line status		
+	BISB	#40,R2		;; and fake a ring			
+	BR	VHDTR		;;NOW GO PROCESS THE ENABLE
+
+;+
+; VHCHEK - MODEM INTERRUPT SERVICE FOR DHV11/DHU11 LINES
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB
+;	R2 -> MODEM STATUS
+;	R3 -> CSR
+;
+;	CALL	VHMODM
+;
+;	R2 =  UNDEFINED
+;	R3 =  UNDEFINED
+;	R4 =  UNDEFINED
+;	R5 =  UNDEFINED
+;-
+
+VHCHEK:	CALL	VHSEL		;;SELECT THE SUBLINE
+VHDTR:	MOV	#20,R5		;;SET BIT FOR CARRIER ON/OFF CHECKING
+	BIT	#1000,10(R3)	;;IS DTR ON?
+	BNE	10$		;;YES, GO CHECK CARRIER STATUS
+	BIT	#40,R2		;;NO, IS LINE RINGING?
+	BEQ	20$		;;No, just exit
+	BIS	#11000,10(R3)	;;RINGING, SO SET RTS AND DTR
+	BIS	#100000,14(R3)	;;clear any XOFFs (set TX enable)	
+	JMPX	TTMRNG		;;And process this ring
+    
+10$:	JMPX	TTMCAR		;;Go do carrier checking
+
+20$:	RETURN			;;No ring or DTR, just exit
+
+.SBTTL	KP$ABT	Abort pending output
+
+;+  
+; KP$ABT - Abort pending output
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;
+;	Priority is PR5
+;
+; This routine is called by the class driver to abort any output
+; which has previously been issued by the class driver. We will
+; abort any DMA operation which may be pending.
+;-
+
+	PRTENT	ABT		;;Abort pending output
+
+	CALL	VHSEL		;;AND SELECT THE SUBLINE
+	BIS	#1,10(R3)	;;SET DMA ABORT
+	RETURN			;;And exit
+
+.SBTTL	KP$SRT	Start up output
+    
+;+
+; KP$SRT - Start up output
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;
+; This routine is called by the class driver to start up any output
+; which may have been bufferred by the port driver.
+;-
+
+.ENABL	LSB
+
+	PRTENT	SRT		;Port specific routine to start output
+    
+	CALL	SUBLIN		;;Get the subline # * 2
+	ASR	R2		;;MAKE IT SUBLINE TIMES ONE
+	BIS	#100,R2		;;ENSURE RX I.E. IS SET
+	MOVB	R2,(R3)		;;SELECT THE LINE
+	BIT	#200,14(R3)	;;IS THIS LINE ACTIVE?
+	BNE	20$		;;YES, SO DO NO MORE
+	REGSAV			;;NO, SO SAVE REGISTERS
+	BIC	#100,R2		;;CLEAR RX I.E.
+	ASL	R2		;;MAKE IT SUBLINE TIMES TWO
+	SUB	R2,R0		;; AND SHIFT UP TO BASE TIMES TWO
+	CALL	VHONT0		;;CALL INTERRUPT ROUTINE
+	REGRES			;;RESTORE REGISTERS
+20$:	RETURN			;;All done
+
+.DSABL	LSB
+
+   
+.SBTTL	KP$SUI	Suspend further input
+
+;+
+; KP$SUI - Suspend further input
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;
+; This routine is used by the class driver to request that further
+; input be suspended. If the terminal supports XON/XOFF, we will
+; request that the interface stop accepting input from the user.
+;-
+
+.ENABL	LSB
+
+	PRTENT	SUI		;Suspend further input
+
+	BIT	#TTXON,TTCHAR(R1) ;;Does terminal support XON/XOFF?
+	BEQ	10$		;;No, don't send one
+	CALL	VHSEL		;;Select the subline
+	BIS	#40,10(R3)	;;Tell the DHU/DHV to suspend input
+10$:	RETURN			;;And exit
+
+.DSABL	LSB
+
+.SBTTL	KP$RSI	Resume input
+
+;+
+; KP$RSI - Resume input
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;
+; This routine is called by the class driver to resume suspended input.
+; We will tell the DHU11/DHV11 that it can now send further input
+; to us. Note that we don't bother checking XON/XOFF since the interface
+; will only send an XON if it previously sent an XOF.
+;-
+
+	PRTENT	RSI		;Resume further input
+
+	CALL	VHSEL		;;Select the subline
+	BIC	#40,10(R3)	;;Enable input
+	RETURN			;;And exit
+
+.SBTTL	KP$DSB	Disable a line
+
+;+      								;002
+; KP$DSB - Disable a line
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;       
+; This routine is called by the class driver to disable a line by setting
+; the speed of the line to 0.
+;-									;002
+
+.ENABL	LSB
+
+	PRTENT	DSB		;Port specific routine to disable a line ;002
+           
+	CALL	VHSEL		;;Select the subline			;002
+	MOV	TTPARM(R1),R2	;;R2 = current line parameter settings	;002
+	BIC	#7400,R2	;;Clear the current input speed		;002
+	BIS	#7000,R2	;;Set input speed to highest B Group	;002
+	MOV	R2,TTPARM(R1)	;;Update current parameter settings	;002
+	JMP	SETLPR		;;Go set the LPR for this line		;002
+
+.DSABL	LSB
+
+.SBTTL	KP$SBK	Set Break
+
+;+      								;002
+; KP$SBK - Set Break
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;       
+; This routine is called by the class driver to set Break on a line.
+;-									;002
+
+.ENABL	LSB
+
+	PRTENT	SBK		;Port specific routine to set Break	;002
+           
+	CALL	VHSEL		;;Select the subline			;002
+	BIS	#10,10(R3)	;;Turn the BREAK bit on			;002
+	RETURN			;; and return to our caller		;002
+
+.DSABL	LSB
+
+.SBTTL	KP$CBK	Clear Break
+
+;+      								;002
+; KP$CBK - Clear Break
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;       
+; This routine is called by the class driver to clear Break on a line.
+;-									;002
+
+.ENABL	LSB
+
+	PRTENT	CBK		;Port specific routine to set Break	;002
+
+	CALL	VHSEL		;;Select the subline			;002
+	BIC	#10,10(R3)	;;Turn the BREAK bit off		;002
+	RETURN			;; and return to our caller		;002
+
+.DSABL	LSB
+
+.SBTTL	KP$LST	Get Line Status
+
+;+      								;002
+; KP$LST - Get Line Status
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;       
+;    On return to caller:
+;	C = 0 Line is not currently active
+;	C = 1 Line is currently active
+;
+; This routine is called by the class driver to return to caller whether
+; or not the line is currently active.
+;-									;002
+
+.ENABL	LSB
+
+	PRTENT	LST		;Port specific routine to get line status ;002
+           
+	CALL	VHSEL		;;Select the subline			;002
+	BIT	#200,14(R3)	;;Currently doing a DMA?		;002
+	BNE	10$		;;Yes, return active status		;002
+	TST	(PC)+		;;No, return not active status (C=0)	;002
+10$:	SEC			;;Set status = active			;002
+	RETURN			;;Done, return to our caller		;002
+
+.DSABL	LSB
+
+
+.SBTTL	KP$ERL	Log an error
+
+;+
+; KP$ERL - Log an error
+;          
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	KBEREG contains CSR pointer, and two words are set to be logged
+;	KBESCR contains CSR+4 pointer, and one word is set to be logged
+;	Priority is PR7
+;
+; This routine is called by the class driver in response to a LOG$KB
+; instruction.
+;-
+
+	PRTENT	ERL		;Error logging
+
+	MOV	#4*400+6,KBESCN	;;;Set up to log six words
+	MOV	KBEREG,R3	;;;Get back the CSR pointer
+	CALLR	VHSEL		;;;And exit with subline selected
+
+GLOBAL	<KBESCN,KBEREG>
+
+.END

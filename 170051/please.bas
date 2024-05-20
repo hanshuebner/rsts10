@@ -1,0 +1,395 @@
+2!		PROGRAM		: PLEASE
+5!		VERSION		: V10.1
+6!		EDIT		: A
+7!		EDIT DATE	: 10-MAY-91
+10		EXTEND		! EXTEND MODE
+11	! &
+	! &
+	! &
+	!		  C O P Y R I G H T &
+  !	&
+  !	&
+  !		      Copyright (C) 1976, 1991 by &
+  !	        Digital Equipment Corporation, Maynard, Mass. &
+  !	&
+  !	&
+  !	This software is furnished under a license and may be used and &
+  !	copied  only  in accordance with the terms of such license and &
+  !	with the  inclusion  of  the  above  copyright  notice.   This &
+  !	software  or  any  other copies thereof may not be provided or &
+  !	otherwise made available to any other person.  No title to and &
+  !	ownership of the software is hereby transferred. &
+  !	&
+  !	The information in this software is subject to change  without &
+  !	notice  and should not be construed as a commitment by Digital &
+  !	Equipment Corporation. &
+  !	&
+  !	DIGITAL assumes no responsibility for the use  or  reliability &
+  !	of its software on equipment that is not supplied by DIGITAL. &
+  !	&
+  !******************************************************************* &
+	&
+
+20	! &
+	! &
+	! &
+	!	M O D I F I C A T I O N    H I S T O R Y &
+	! &
+	&
+
+21	! VER/ED	EDIT DATE	REASON &
+	! &
+	&
+	&
+	&
+	&
+
+100	! &
+	! &
+	! &
+	!	G E N E R A L    D E S C R I P T I O N &
+	! &
+	&
+
+110	!	PLEASE PROVIDES DIRECT INTERFACE FOR COMMUNICATION &
+	!	WITH 'OPSER'. PLEASE IS USED TO SEND BOTH DATA MESSAGES &
+	!	AND OPSER COMMANDS. RESPONSES TO COMMANDS SENT TO OPSER &
+	!	ARE BROADCAST TO PLEASE'S KB:. PLEASE CAN BE RUN IN ALL &
+	!	MODES: BY THE 'RUN' COMMAND, BY A CCL COMMAND, BY A &
+	!	'CHAIN' ENTRY, AND FROM A LOGGED-OUT TERMINAL. &
+
+120	!		DATA TO BE SENT TO 'OPSER' CAN BE ENTERED IN TWO &
+	!	DIFFERENT FORMATS. MESSAGES TO BE PRINTED ON THE &
+	!	OPERATOR SERVICES CONSOLE ARE ENTERED AS "<TEXT>". &
+	!	COMMANDS TO BE EXECUTED BY 'OPSER' ARE ENTERED AS &
+	!	"/COMMAND<COMMAND PARAMETERS>. &
+	!	"COMMAND" IS THE ACTUAL COMMAND SYNTAX. &
+
+130	!		DATA MESSAGES ARE SENT DIRECTLY TO 'OPSER'. IF &
+	!	'OPSER' IS NOT PRESENT, <TEXT> WILL BE BROADCAST TO &
+	!	KB0: WITH ADDITIONAL INFORMATION STATING THAT IT WAS &
+	!	INTENDED FOR 'OPSER' AND WAS NOT ABLE TO SEND &
+	!	IT. &
+
+140	!		THE "COMMAND<COMMAND STRING>" WILL BE PREFIXED &
+	!	WITH CHR$(128%+64%) AND THEN SENT TO 'OPSER'. THE PREFIX &
+	!	BYTE INDICATES TO 'OPSER' THAT THE STRING IS TO BE &
+	!	INTERPRETED AND EXECUTED. ERRORS DETECTED BY 'OPSER' &
+	!	DURING THIS PROCESS WILL BE BROADCAST TO PLEASE'S KB:. &
+
+150	!		THE COMMAND STRING MUST BE IN THE PROPER FORMAT &
+	!	FOR 'OPSER', I.E. THE COMMAND SEPARATED FROM ANY &
+	!	PARAMETERS BY A SPACE CHARACTER. &
+	!	 (PLEASE REFER TO 'OPSER' DOCUMENTATION.) &
+
+170	!		RUN ENTRY - "RUN $PLEASE" &
+	!	PLEASE PRINTS THE PROMPT,"#", WHEN READY TO ACCEPT &
+	!	KB: INPUT AND AFTER EACH MESSAGE TEXT OR COMMAND STRING &
+	!	IS SENT TO 'OPSER'. &
+	&
+	!		CCL ENTRY &
+	!		A. PLEASE <TEXT> &
+	!		B. PLEASE /COMMAND<COMMAND PARAMETERS> &
+	!	IN EACH CASE, AFTER SENDING TO 'OPSER', PLEASE &
+	!	WILL RETURN "READY". &
+	&
+	!		CHAIN ENTRY &
+	!	THE CHAIN STATEMENT IS OF THE FORM: &
+	!	"CHAIN 'PLEASE$' 31000%" &
+	!	PRIOR TO EXECUTING THIS STATEMENT, A &
+	!	STRING MUST BE STORED IN CORE COMMON. THIS STRING IS: &
+	!	"PGMNAM"<CR>CVT%$(LINE #)<DATA STRING>, &
+	!	WHERE "PGMNAM" REFERS TO THE PROGRAM TO CHAIN BACK TO &
+	!	WHEN DATA IS SENT, &
+	!	<CR> IS A DELIMITER, LINE# IS THE LINE # IN PGMNAM &
+	!	TO CHAIN BACK TO, AND DATA STRING IS OF THE FORM: &
+	!	<TEXT> OR /COMMAND<COMMAND STRING> &
+	&
+	&
+	&
+
+300	!	I / O    C H A N N E L S &
+	&
+	&
+
+301!	CHANNEL #		USED FOR &
+
+310!		1		KB: INPUT OF DATA STRING &
+	!				WHEN "RUN" ENTRY. &
+
+400	! &
+	! &
+	! &
+	!	V A R I A B L E    D E F I N I T I O N S &
+	! &
+
+401	!	VARIABLE NAME		USE &
+
+410	!		C$		INPUT DATA STRING TO BE SENT &
+
+415	!		C%		FLAG: SET IF CMD,RESET IF MSG
+420	!		E0%		ENTRY FLAG:	0 - RUN ENTRY &
+	!						1 - CCL ENTRY &
+	!						2 - CHAIN ENTRY
+430	!		I$		VERSION/EDIT #'S
+435	!		P$		PROGRAM NAME FOR RETURN CHAIN
+440	!		P%		PROGRAM'S LINE # FOR RETURN CHAIN
+445	!		R$		EXCESS DATA TO BE RETURNED WITH &
+	!					CHAIN
+450	!		S$		DUMMY FOR SYS CALLS
+455	!		S1$		FILENAME STRING SCAN SYS CALL
+460	!		Z$		DUMMY VARIABLE FOR FSS
+465	!		Z%		WORK VARIABLE FOR "INSTR" &
+	!					FUNCTIONS &
+
+800	! &
+	! &
+	! &
+	!	F U N C T I O N / S U B R O U T I N E    D E S C . &
+	! &
+	&
+
+801!	FUNCTION/SUBROUTINE		USE &
+   !
+810	!	SYS(6,9,0)		SYSTEM HEADER INFO. &
+	!	SYS(6,-10)		FILENAME STRING SCAN &
+	!	SYS(6,18,-1,0)		SEND MESSAGE &
+	!	SYS(6,18,0,0)		REMOVE THIS JOB AS A RECVR. &
+	!	SYS(6,-21)		DROP TEMPORARY PRIVILEGES &
+	!	SYS(6,-5,0)		BROADCAST TO KB0: &
+	!	FNP$(Z$) AT LINE 15010	PACK FILENAME TO RAD50 &
+
+900	! &
+	! &
+	! &
+	!	D I M E N S I O N    S T A T E M E N T S &
+	! &
+	&
+
+910	DIM M0%(30%)			! GENERAL SYS CALL ARRAY. &
+	&
+
+999	! &
+	! &
+	! &
+	!	M A I N    C O D I N G    A R E A &
+	! &
+	&
+
+1000	ON ERROR GOTO 19000 &
+	\ E0%=0% &
+		! SET STD. ERROR TRAP. &
+		! SET FLAG TO 'RUN' ENTRY. &
+
+1010	I$="V10.1-A" &
+		! VERSION & EDIT #'S. &
+
+1020	S$=SYS(CHR$(6%)+CHR$(9%)+CHR$(0%)) &
+	\ CHANGE S$ TO M0% &
+	\ KB%=M0%(2%)/2% &
+	\ PRINT IF CCPOS(0%) <> 0% &
+	\ PRINT "PLEASE	";I$;"	"; CVT$$(RIGHT(S$,3%),4%) &
+	\ CHANGE SYS(CHR$(6%)+CHR$(14%)+STRING$(6%,0%)+CHR$(1%)) TO M0% &
+	\ JOB$="JOB:"+NUM1$(M0%(1%)/2%) &
+	\ KB$="KB:"+NUM1$(KB%) &
+	\ KB$="DET" IF KB%<0% &
+	\ PPN$="["+NUM1$(M0%(8%))+","+NUM1$(M0%(7%))+"]" &
+		! GET SYSTEM HEADER INFO. &
+		! RETURN CARRIAGE TO LEFT MARGIN. &
+		! PRINT PGM NAME, VERSION/EDIT #'S, SYSTEM INFO. &
+		! SET UP JOB NUMBER INTO JN%. &
+		! SET UP KEY BOARD NUMBER INTO KB% (KB% WILL BE <0% IF DET). &
+		! PPN$ CONTAINS USER PPN. &
+
+1030	OPEN "_KB:PLEASE.CMD" AS FILE #1% &
+		! OPEN THIS KB: AS FILE. &
+
+1040	PRINT IF CCPOS(0%) <> 0% &
+	\ PRINT #1%,"#"; &
+		! PROMPT, NOW READY FOR KB: INPUT. &
+
+1050	INPUT LINE #1%,C$ &
+	\ GOTO 1040 IF C$="" &
+		! READ FROM KB: &
+		! C$ GETS ALL CHARS. READ. &
+
+1060	ON ERROR GOTO 19000 &
+	\ S1$=CHR$(6%)+CHR$(-10%) &
+	\ S2$=CHR$(6%)+CHR$(22%)+CHR$(-1%)+CHR$(0%)+"OPSER "+STRING$(10%,0%) &
+	\ S$=SYS(CHR$(6%)+CHR$(22%)+CHR$(0%)+CHR$(0%)) &
+	\ S$=SYS(CHR$(6%)+CHR$(-21%)) &
+	\ CRLF$=CHR$(13%)+CHR$(10%) &
+		! SYS CALL STRINGS :	S1$=FILENAME STRING SCAN. &
+		!			S2$=SEND MSG. TO 'OPSER'. &
+		! SYS CALLS :	REMOVE THIS JOB AS A RECEIVER. &
+		!		DROP TEMP. PRIVILEGES. &
+
+1062	S$=SYS(CHR$(6%)+CHR$(22%)+CHR$(0%)+CHR$(0%)) &
+		! REMOVE THIS JOB AS A RECEIVER. &
+
+1070	C$=CVT$$(C$,188%) &
+	\ GOTO 1100 IF LEN(C$)=0% &
+		! DISCARD EXCESS CHARS. AND &
+		!	LEADING/TRAILING SPACES & TABS, CONVERT &
+		!	LOWER CASE TO UPPER CASE,REPLACE EMBEDDED &
+		!	SPACES & TABS WITH ONE SPACE. &
+		! IF NOTHING LEFT NO PROCESSING TO BE DONE. &
+
+1080	C%,RE.TRY%=0% &
+	\ IF LEFT(C$,1%)="/" THEN &
+		C%= -1% &
+	\	C$=CHR$(128%+64%)+RIGHT(C$,2%) &
+		! IF CMD. INDICATED, PREFIX CMD. STRING WITH CMD. TOKEN. &
+
+1090	IF LEN(C$) <= 19% THEN &
+		S$=SYS(S2$+CHR$(LEN(C$)+1%)+C$) &
+		ELSE &
+		S$=SYS(S2$+CHR$(255%)+LEFT(C$,19%)) &
+	\	C$=RIGHT(C$,20%) &
+	\	GOTO 1090 &
+		! SEND THE DATA TO 'OPSER'. &
+
+1092	IF E0% <> 2% THEN &
+		PRINT IF CCPOS(0%) &
+	\	PRINT "COMMAND SENT TO 'OPSER'" IF C%= -1% &
+	\	PRINT "MESSAGE SENT TO 'OPSER'" IF C% <> -1% &
+		! CONFIRM THAT IT WAS SENT. &
+
+1100	GOTO 1040 IF E0%=0% &
+	\ IF E0%=2% THEN &
+		S$=SYS(CHR$(8%)+R$) &
+	\	CHAIN P$ LINE P% &
+		! IF RUN ENTRY : RETURN FOR MORE DATA. &
+		! IF CHAIN ENTRY : CHAIN BACK TO CALLER WITH EXCESS DATA &
+		!	IN CORE COMMON. &
+
+1110	GOTO 32767 &
+		! IF CCL ENTRY GOTO 'END'. &
+
+1200	IF C% <> 0% THEN &
+		GOTO 1230 &
+	ELSE	C$=CRLF$+ &
+		"% MSG FROM USER:	"+DATE$(0%)+" "+TIME$(0%)+"  "+ &
+		JOB$+"  "+KB$+"  PLEASE"+PPN$+CRLF$+ &
+	"		FOR 'OPSER' BUT IT'S NOT ACTIVE : "+CRLF$+ &
+			"	"+C$+CRLF$ &
+		! ERROR TRAP RESUMES HERE IF SEND DIDN'T GO; &
+		! BUILD STRING TO BROADCAST TO KB0:. &
+
+1210	S$=SYS(CHR$(6%)+CHR$(-5%)+CHR$(0%)+C$) &
+	\ IF RECOUNT <> 0% THEN &
+		C$=RIGHT(C$,LEN(C$)-RECOUNT+1%) &
+	\	GOTO 1210 &
+		! RECOUNT <> 0% IF ALL CHARACTERS NOT BROADCAST. &
+
+1220	PRINT "% 'OPSER' NOT ACTIVE - MESSAGE BROADCAST TO KB0:" &
+			IF E0% <> 2% &
+	\ GOTO 1100 &
+		! INFORM USER THAT HIS SEND DID NOT GO AS EXPECTED. &
+
+1230	PRINT "% 'OPSER' NOT ACTIVE - COMMAND NOT SENT" &
+	\ GOTO 1100 &
+		! IF DATA WAS A CMD. PRINT ERROR MSG. &
+	&
+
+15000	! &
+	! &
+	! &
+	!	U S E R   F U N C T I O N S &
+	! &
+
+15050	DEF* FNP$(Z$)=MID(SYS(S1$+Z$),7%,4%) &
+		! FUNCTION	: PACK NAME INTO RAD50 FORMAT. &
+		! -------- &
+	&
+	&
+	&
+
+19000	! &
+	&
+	&
+	!	E R R O R    H A N D L E R &
+	&
+
+19010	IF ERL=1090% THEN &
+		RESUME 1200 IF ERR =  5% &
+	\	RE.TRY%=RE.TRY%+1% UNLESS ERR=32% &
+	\	SLEEP 5% &
+	\	RESUME 1090 IF (ERR=4% AND RE.TRY%<12%) OR ERR=32% &
+		! COULDN'T FIND 'OPSER' TO SEND TO. &
+		! AND OTHER SEND PROBLEMS. &
+		! RETRY FOR 1 MINUTE IF OPSER BUSY. &
+		! RETRY FOREVER IF NO SYSTEM SMALL BUFFERS. &
+
+19020	IF ERR = 18% AND ERL = 1060% THEN RESUME 1070 &
+		! TRAP NON-PRIV USE OF REMOVE-RECVR & DROP-PRIV CALLS. &
+
+19030	IF ERR = 11% AND ERL = 1050% THEN RESUME 32767 IF E0%=0% &
+		! TRAP ^Z FROM KB: IN 'RUN' ENTRY. &
+
+19040	IF ERR = 47% AND ERL = 1050% THEN &
+		PRINT IF CCPOS(0%) <> 0% &
+	\	PRINT "% LINE TOO LONG" &
+	\	C$="" &
+	\	RESUME 1040 &
+		! TRAP ERROR AND RESUME AT KB: PROMPT. &
+
+19100	PRINT CVT$$(RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(ERR)),3%),4%); &
+		" AT LINE "; ERL &
+	\ RESUME 1100 &
+		! TO CATCH ANY OTHER ERRORS. &
+	&
+
+30000	! &
+	! &
+	! &
+	!	C C L   E N T R Y &
+	! &
+
+30010	E0%=1% &
+	\ C$=SYS(CHR$(7%)) &
+		! SET ENTRY FLAG FOR CCL ENTRY. &
+
+30020	IF LEFT(C$,6%)="PLEASE" THEN &
+		C$=RIGHT(C$,7%) &
+	\	IF LEN(C$)=0% THEN GOTO 1000 &
+			ELSE &
+			GOTO 1060 &
+		! IF IT IS FOR US, STRIP OFF PGM NAME & PROCESS. &
+
+30030	PRINT "?DATA NOT RECOGNIZED" &
+	\ GOTO 32767 &
+		! IF NOT FOR PLEASE RETURN TO 'READY'. &
+	&
+
+31000	! &
+	! &
+	! &
+	!	C H A I N    E N T R Y &
+	! &
+
+31010	E0%=2% &
+	\ C$=SYS(CHR$(7%)) &
+		! SET ENTRY FLAG FOR CHAIN ENTRY. &
+		! GET THE DATA STRING FROM CORE COMMON. &
+
+31020	Z%=INSTR(1%,C$,CHR$(13%)) &
+	\ IF Z% <> 0% THEN &
+		P$=LEFT(C$,Z%-1%) &
+	\	P%=CVT$%(RIGHT(C$,Z%+1%)) &
+	\	C$=RIGHT(C$,Z%+3%) &
+		! SEARCH FOR <CR> AND SET P$ WITH RETURN PGM. NAME. &
+		! P% WITH RETURN PROGRAM'S LINE #. &
+		! C$ GETS DATA STRING. &
+
+31030	Z%=INSTR(1%,C$,CHR$(13%)) &
+	\ Z%=LEN(C$)+1% UNLESS Z% <> 0% &
+	\ R$=RIGHT(C$,Z%+1%) &
+	\ C$=LEFT(C$,Z%-1%) &
+	\ GOTO 1060 &
+		! SEARCH FOR ANOTHER <CR> AFTER DATA STRING. &
+		! R$ GETS ANYTHING BEYOND IT AND RETURNS IT TO CALLER. &
+		! C$ GETS THE DATA STRING UP TO THE <CR>. &
+	&
+
+32767	END

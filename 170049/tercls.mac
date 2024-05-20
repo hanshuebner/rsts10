@@ -1,0 +1,2228 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+TITLE	TERCLS,<Terminal class driver>,0D,02-AUG-91,KPH/DRP/FEK/JFM/DSD
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR TERCLS
+
+;+
+;			[RSTS V9.6]
+;  000  KPH  27-Jun-87	Creation - extract from TTDVR.MAC
+;  001	DRP  25-Nov-87	Change dispatch address for C1 control characters
+;			1,2,3, and 4.
+;  002	DRP  09-Dec-87	Move the parity computation table used by the CHROUT
+;			routine into RES. Paper driver needs it too.
+;			Source clear fix to correct Kill Phase 2 hangups.
+;  003  KPH  24-Dec-87	Modify TTHGLN to call DETJOB on dynamic keyboards
+;  004	DRP  08-Mar-88	Modify FMSQ routine to use DDLINK for queing DDBs
+;			in FMS mode needing FMS processing.
+;
+;			[RSTS V9.7]
+;  005	DRP  14-Jul-88	Source clear patch to DDBSET to not clear out
+;			TTSFLO and TTXOFF.
+;			Source clear patch to TTMRNG to clear out TTSFLO
+;			and TTXOFF during ring detection.
+;  006	FEK  07-Dec-88	Add entry to ASCOUT for pointers to a pointer
+;  007	DRP  07-Dec-88	Add routine DSBLLN to disable a line.
+;			Add routines SETBRK/CLRBRK to set and clear
+;			break on a line.
+;			Add routine LINSTS to return line status.
+;			Add routine SNDCCB to handle auxiliary driver
+;			write requests.
+;			Add auxiliary driver support.
+;  008	DRP  08-Mar-88	Fix bug in DHBUFF to check normal processing also
+;			if DDB controlled by APT.
+;
+;			[RSTS V10.0]
+;  009	JFM  21-Jun-89	Source clear patch 3.3.24, extraneous characters
+;			in input buffer because R2 is clobbered.
+;  010	DSD  22-Jun-89	Add support for CCB DMA from low core
+;			Don't abort output on hangup for auxiliary driver
+;			Added TTABRT entry point to abort output
+;  011	JFM  25-Aug-89	Add new permanent characterstic byte in DDBSET
+;  012	JFM  11-Sep-89	Change reference to SRTLIN to local call
+;  013	DRP  07-Nov-89	Add routine to call on the port driver to do any
+;			port specific open, close functions.
+;  014	DRP  17-Mar-90	Fix TTHGLN to not send abort or blow buffers away
+;			if pending close.
+;  015  BGN  29-Mar-90  Fix priority problem in SNDCCB
+;  016	JFM  22-May-90	Add BINDLM, TTMODS, and modify TTISGL to support 
+;			 binary mode process on read
+;  017	JFM  25-May-90	Help a friend, save a word in DLMMSK, using sneaky SEZ
+;
+;			[RSTS V10.1]
+;  018	JFM  30-Jul-91	Fix TTISGL and TTMODS - test TECO mode in there.
+;  019	JFM  31-Jul-91	Clear pending type ahead in DDBSET, and save code 
+;			using handy .ASSUMEs. Moved ESCPRC, ESCLST and CHKESC 
+;			routines here from TERINC.MAC
+;-
+
+.SBTTL	Set up phase header stuff
+
+	MERGE			;No APR merging
+
+	MERGE	ERRTBL,<<LOG$KB+2>-EMT> ;Merge the error table
+
+	MERGE	END		;And we're done
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	TERPAT		;Patch space
+	DEFORG	TERCLS		;Code in this module			
+
+
+	.LIBRARY	/CMN:NETDEF.SML/				;007
+	.MCALL	$CCB							;007
+	$CCB		;Define CCB offsets				;007
+
+.SBTTL	Define our .MACROs
+
+.MACRO	MAPPRT	OPT
+.IF	B	OPT
+	CALL	MAPPRT
+.MEXIT
+.ENDC	;B	OPT
+.IF	IDN	<OPT>,<SAVE>
+	CALL	MAPPCR
+.MEXIT
+.ENDC	;IDN	<OPT>,<SAVE>
+.ERROR	;Operand OPT undefined for MAPPRT macro
+.ENDM	MAPPRT
+
+.SBTTL	TERERL	Common error logging for terminals
+
+;+
+; TERERL - Common error logging for terminals
+;
+; This routine is used whenever the LOG$KB EMT is issued. We will set
+; up the common error logging contents, and then dispatch to the port
+; driver.  
+;
+; This routine sets up the common terminal error logging contents,
+; and transfers control to port driver. On entry to port driver:
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	KBEREG contains CSR pointer, and two words are set to be logged
+;	KBESCR contains CSR+4 pointer, and one word is set to be logged
+;	
+;-
+
+	ERRENT	LOG$KB		;;;Keyboard error come here
+
+TERERL:	MOVB	DDJBNO(R1),KBETBL+1 ;;;STORE THE JOB NUMBER TIMES 2
+	MOV	#KBDDBS/2,KBESIZ ;;;Set initial DDB size in words
+	ADD	KBDDBX,KBESIZ 	;;;Add in size of DDB extension
+	MOVB	DDUNT(R1),KBEUNT ;;;PUT UNIT NUMBER INTO ERROR LOG
+	MOV	R1,KBEDDB	;;;SET UP THE DDB ADDRESS
+	MOV	R2,KBETMP	;;;PUT R2 IN TEMP STORAGE
+	MOV	CSR.KB(R0),R3	;;;GET THE CSR ADDRESS
+	MOV	R3,KBEREG	;;; AND PUT IT IN THE CONTROL RECORD
+	ADD	#4,R3		;;;SKIP THE INPUT BUFFER
+	MOV	R3,KBESC4	;;; AND STORE THAT ALSO
+	MOV	#KBEDMB,R5	;;; AND TO CONTENTS SUBROUTINE
+	CLRB	KBEDSC		;;;Indicate no DM11BB subroutine
+	MOV	#-1,(R5)	;;; AND TERMINATE THE TABLE EARLY
+	MOV	#4*400+1,KBESCN	;;;Default field four to one word
+	CALL	@KP$ERL		;;;Call the port to load the table
+	MOVB	KBESIZ,KBESZ2	;;;Set up size in both places
+	MOV	#KBETBL,R5	;;;SET POINTER TO CONTROL TABLE
+	RETURN			;;;LET THE LOGGER TAKE OVER
+
+GLOBAL	<KBETBL,KBEUNT,KBEDDB,KBETMP,CSR.KB,KBEREG,KBESC4,KBEDMB,KBEDSC>
+GLOBAL	<KBESCN,KBESIZ,KBDDBX,KBESZ2>
+
+.SBTTL	TERSEC	Handle timeouts
+
+;+
+; TERSEC - Once a second service for terminals
+;
+; 	R0 =  Unit # * 2
+;	R1 -> DDB
+;
+; This routine is called once a second by the monitor to perform periodic
+; tests for terminals.
+;
+; First, we call the autobaud processor. On entry to autobaud processor:
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;
+; The autobaud processor must preserve R0 and R1.
+;
+; Then, we call the port driver for periodic checks. On entry to the
+; autobaud processor:
+;
+;	C  =  0 if no hangup
+;	C  =  1 if port driver should hangup modem
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;
+; The port driver must preserve R0 and R1.
+;-
+
+TMOTER::TSTB	DDJBNO(R1)	;Should we check autobaud?
+	BNE	10$		;No, terminal is in use
+	BITB	#TTAUTO,TTCTRL(R1) ;Maybe, doing autobaud?
+	BEQ	10$		;No, don't check autobaud
+	MAP	KINAP5,APR=5,CODE,DATA ;Map the input handler phase
+	CALL	@AUTTMR		;And call the autobaud handler
+10$:	MAPPRT			;Map the port driver			
+	MOV	CSR.KB(R0),R3	;Pick up CSR pointer
+	TSTB	MODCLK(R1)	;Are we awaiting a disconnect?
+	BEQ	20$		;No, so call port with C = 0 (from TST)
+	DECB	MODCLK(R1)	;Yes, count that second down
+	BNE	20$		;Still not zero, no hangup (C=0 from TST)
+	SEC			;Tell port to do a hangup
+20$:	JMP	@KP$SEC		;Now finish up in the port driver
+
+GLOBAL	<AUTTMR>
+
+.SBTTL	SETFLO	Set up to send XOFF or XON
+
+;+
+; SETFLO - Set up to send XOFF or XON
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;
+;	CALL	SNDXOF
+;
+; This routine is used by port drivers which do not do special handling
+; to regulate flow from terminal devices. If the interface supports
+; XON/XOFF, we will set the TTSFLO bit in the DDB and try to start up
+; the output line.
+;-
+
+SETFLO::BIT	#TTXON,TTCHAR(R1) ;;Does terminal support XON/XOFF?
+	BEQ	10$		;;No, nothing we can do
+	BIS	#TTSFLO,DDFLAG(R1) ;;Yes, set the flag
+	CALLR	SRTLIN		;;And start the output line		;012
+
+10$:	RETURN			;;Nothing we can do
+
+.SBTTL	TTSTOR	Store an output character
+
+;+
+; TTSTOR - Store an output character
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;
+;	Priority is PR5
+;
+;	CALL	TTSTOR
+;
+; This routine is used by port drivers to buffer data in the output
+; buffer chain. It is used for port drivers which use the standard
+; output buffer chain.
+;-
+
+TTSTOR::CALLX	STORE,R5,DDBUFC+FP ;;Store the character
+	RETURN			;;And exit
+
+.SBTTL	TTHGLN	Generic hangup processing
+
+;+
+; TTHGLN - Generic hangup processing
+;
+;	R0 =  Unit # * 2
+; 	R1 -> DDB
+;
+;	CALL	TTHGLN
+;
+; This routine is invoked by the port drivers to complete processing
+; after hanging up the line.
+;
+; The port driver is mapped through APR 5.
+;
+; If the line wasn't previously hung up, we will call the port driver
+; to abort any pending output. On entry to port driver:
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;
+;	Priority is PR5
+;-
+
+TTHGLN::BIT	#<DDAUXD>,(R1)	;;Owned by an auxiliary driver?		;010
+	BNE	30$		;;Yes, so just leave			;010
+.ASSUME	DDIDX	EQ	0
+	MOV	MODCLK(R1),-(SP) ;;SAVE CURRENT LINE STATE		;010
+	MOV	#TTDSBL,MODCLK(R1) ;; THEN INDICATE THIS LINE AS HUNG UP
+	BITB	#CLSPND,TTFLG3(R1) ;;Close pending?			;014
+	BEQ	5$		;;No, normal processing then		;014
+	MOV	#TTDSBL,(SP)	;;Yes, say the line is already hung up	;014
+5$:	MOVB	DDJBNO(R1),R4	;;GET JOB OWNING TERMINAL (*2)
+	BEQ	20$		;;NO JOB
+	MOV	JOBTBL(R4),R2	;;A JOB, GET JOB DATA BLOCK
+	MOV	JDJDB2(R2),R2	;; THEN JOB DATA BLOCK 2
+	MOV	R1,R3		;;COPY DDB POINTER
+	CALLX	CONNEX		;; AND COMPUTE THE CONNECT TIME
+	BIT	#TTGARD,TTMODE(R1) ;;IN GUARDED CTRL/C MODE ?
+	BNE	10$		;;YES, DETACH LINE AND POINT TO FAKE DDB
+	BIT	#DDDYNA,(R1)	;;How about a dynamic keyboard?		;003
+	BNE	10$		;;Yes, always detach those		;003
+	BCS	20$		;;NOT THE JOB'S "CONSOLE" TERMINAL (CARRY FROM CONNEX)
+10$:	CALLMI	DETJOB,KBDAP5	;;JOB'S "CONSOLE", DETACH JOB		
+20$:	TST	(SP)+		;;WAS THE LINE ALREADY HUNG UP?
+	BMI	30$		;;YES
+.ASSUME	TTDSBL	EQ	100000
+	MOV	CSR.KB(R0),R3	;;No, get CSR pointer
+	CALL	@KP$ABT		;;And abort any output in progress	
+	CALLMI	CLRTER,KBDAP5	;;NOW CLEAR OUT THE WHOLE TERMINAL
+	CALLX	IOFINI,R5,<JSTIM!JSTEL!JS.KB> ;;AWAKEN ANY JOB OWNING TERMINAL
+30$:	SPLC	3		;;BACK TO LEVEL 3 AGAIN
+	RETURN			; AND EXIT
+
+GLOBAL	<JOBTBL>							
+
+.SBTTL	FIND THE CORRECT SUBLINE ON A MULTIPLEXER
+                        
+;+
+; FNDLIN - FIND THE CORRECT SUBLINE ON A MULTIPLEXER.
+;
+;	R0 =  SUBLINE NUMBER IN BITS <11-8>
+;	R3 -> MULTIPLEXER'S CSR
+;	SP -> BASE KB # *2
+;                       
+;	CALL	FNDLIN
+;
+;	R0 =  KB # *2
+;	R1 -> DDB
+;	R4 =  LINE'S 'BAR' BIT
+;
+;	IF C=1 THEN THE SUBLINE IS ILLEGAL
+;-
+
+FNDLIN::BIC	#^C<17*400>,R0	;;ISOLATE THE SUBLINE NUMBER
+	SWAB	R0		;;NOW FORM SUBLINE NUMBER
+	ASL	R0		;; TIMES 2
+	MOV	BITWRD(R0),R4	;;GET AND SAVE THE LINE'S 'BAR' BIT
+	ADD	2(SP),R0	;;FORM THE REAL KB # *2
+	CMP	R0,#CNT.KB*2	;;LEGAL AT ALL?
+	BHIS	10$		;;NO, ERROR (EXIT C=1)
+	MOV	DEV.KB(R0),R1	;;LEGAL, GET THE DDB POINTER
+	CMP	R3,CSR.KB(R0)	;;REALLY ON THE CORRECT MULTIPLEXER?
+	BEQ	20$		;;YES, O.K., EXIT C=0 [BEQ=>BHIS=BCC]
+10$:	SEC			;;NO, ERROR, SET C=1
+20$:	RETURN			;;NOW EXIT
+
+GLOBAL	<BITWRD,DEV.KB,CSR.KB,CNT.KB>
+
+.SBTTL	GET SUBLINE NUMBER
+
+;+
+; SUBLIN - GET SUBLINE NUMBER.
+;
+;	R1 -> DDB
+;
+;	CALL	SUBLIN
+;
+;	R2 = SUB LINE NUMBER TIMES 2
+;-
+
+SUBLIN::MOVB	TTINTF+1(R1),R2	;;GET THE SUB LINE NUMBER FROM THE DDB
+	BIC	#^C<TTSUBL/400>,R2 ;;CLEAR UNWANTED BITS
+	ASL	R2		;;MAKE IT SUBLINE # TIMES 2
+	RETURN			;;THAT'S ALL
+
+.SBTTL	SET TERMINAL LINE PARAMETERS
+
+;+
+; SETPRM - SET LINE PARAMETERS.
+;       
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB
+;	PRIORITY IS PR5
+;
+;	CALL	SETPRM
+;
+; On entry to port driver:
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R2 =  Requested parameter word
+;	R3 -> CSR
+;
+;	Priority is PR5
+;-
+
+SETPRM::MOV	CSR.KB(R0),R3	;;GET THE CSR POINTER			
+	MOV	TTPARM(R1),R2	;;GET THE PARAMETER WORD
+	TST	MODCLK(R1)	;;HUNG UP?
+	BMI	10$		;;YES. DON'T CHANGE HARDWARE NOW
+.ASSUME	TTDSBL	EQ	100000
+	MAPPRT	SAVE		;;And map the port driver
+	JMP	@KP$PRM		;;And finish up there
+
+10$:	RETURN			;;ALL DONE
+
+.SBTTL	DH11/DHV11 DMA BUFFER HANDLER
+        
+;+
+; DHBUFF - OUTPUT DMA BUFFER HANDLER FOR DH11/DHV11 MUX'S
+;
+;	R1 =  DDB POINTER
+;
+;	CALL	DHBUFF
+;       
+;	IF C=1 THEN	R2 = BYTE COUNT OF BUFFER
+;			R3 = High order address (A22-A16) of buffer	;007
+;			R4 = Low order address of buffer		;007
+;
+;	IF C=0 THEN DO PROCESSING FOR NEXT SUBLINE ON RETURN
+;-
+
+DHBUFF::BIT	#<DDAUXD!DDAPT>,(R1) ;;Owned by an auxiliary driver?	;007
+	BEQ	8$		;;No, do normal processing		;007
+.ASSUME	DDIDX	EQ	0
+	MOV	R5,-(SP)	;;Get a scratch register		;007
+	MOV	TTAUXB,R5	;;Get offset to the aux. driver cells	;007
+	BEQ	9$		;;None, that's impossible		;007
+	ADD	R1,R5		;;Set up a pointer to the cells		;007
+	MOV	TTACCB(R5),R4	;;Get the CCB ->			;007
+	BNE	4$		;;Got one, go process it		;007
+2$:	MOV	(SP)+,R5	;;None, restore our scratch register	;007
+	BIT	#DDAPT,(R1)	;;Controlled by APT?			;008
+	BNE	8$		;;Yes, check for normal processing	;008
+	BR	50$		;;No, simply return, nothing to do	;008
+
+4$:	MOV	CC.SEC+MS.SIZ(R4),R2 ;;Get byte count			;007
+	BNE	6$		;;Something there, go transmit it	;007
+	MOV	#AX$XMT,TTADSP(R5) ;;Set the transmit complete fun code	;007
+	MAP	PUSH,APR=5,CODE,DATA ;;Save APR5 mapping		;007
+	MAP	TTAAP5(R5),APR=5,CODE,DATA ;;Map the auxiliary driver	;007
+	CALL	@TTAAUX(R5)	;;Go to aux driver for transmit completes ;007
+	MAP	POP,APR=5,CODE,DATA ;;Restore mapping			;007
+	MOV	R4,TTACCB(R5)	;;Set next CCB to transmit (0 if none)	;007
+	BEQ	2$		;;None, finished with the transmit	;007
+	CALLX	SETCCB		;;We have one, go setup CC.SEC		;007
+	MOV	CC.SEC+MS.SIZ(R4),R2 ;;Get byte count			;007
+6$:	CLR	CC.SEC+MS.SIZ(R4) ;;Clear count, signal for next time	;007
+	CLR	R3		;;Clear high order address		;010
+	MOV	CC.SEC+BF.VIR(R4),R5 ;;Get virtual address of data	;010
+	BIT	CC.BUF+BF.ADR(R4),#37 ;;Is this buffer in low core?	;010
+	BEQ	7$		;;Yes, so no special conversion needed	;010
+	MOV	R5,-(SP)	;;Get copy of virtual address of data	;010
+	SUB	#140000,(SP)	;; and offset it from start of sliver	;007
+	MOV	CC.BUF+BF.MMU(R4),R5 ;;Get MMU address of buffer	;007
+	ADD	EXTPOF,R5	;;Convert to I/O bus address * 100	;007
+	CLR	R4		;;No high order				;007
+	ASHC	#6,R4		;;Convert sliver to byte address	;007
+	ADD	(SP)+,R5	;;Add in the data offset		;007
+	ADC	R4		;;Double precision			;007
+	MOV	R4,R3		;;Copy high order address		;007
+7$:	MOV	R5,R4		;;Copy low order address		;010
+	MOV	(SP)+,R5	;;Restore the register			;007
+	BR	60$		;; and exit with pointers set up	;007
+
+8$:	CALL	TTSJST		;;CHECK FOR RESTARTING JOB
+	MOV	DDBUFC+EP(R1),R4 ;;GET EMPTY BUFFER
+	BEQ	50$		;;NO BUFFER CHAIN, DO NEXT SUBLINE
+	CMP	R4,DDBUFC+FP(R1) ;;ARE THE POINTERS EQUAL?
+	BNE	10$		;;NO, PROCESS THE CHARACTERS
+	DEC	R4		;;YES, FIND THE TOP
+	BIC	#40-1,R4	;; OF THE BUFFER
+	TST	(R4)+		;;  THEN POINT @ +2
+	MOV	R4,DDBUFC+FP(R1) ;;RESET THE FILL AND
+	MOV	R4,DDBUFC+EP(R1) ;; EMPTY POINTERS (REUSE THE BUFFER)
+	BR	50$		;;NOW GO TO NEXT LINE
+
+9$:	CRASH			;;Internal software failure		;007
+
+GLOBAL	<BFQ.KB,TTAUXB,SETCCB,EXTPOF>					;007
+
+10$:	BIT	R4,#37		;;SEE IF EP IS STILL IN BUFFER
+	BNE	30$		;;IF SO, GO UPDATE THE EP
+	SUB	#40,R4		;;IF JUST A BYTE BEYOND, RELEASE
+	MOV	(R4),DDBUFC+EP(R1) ;;PUT ADDRESS TO BE RETURNED
+	BNE	20$		;;A CHAIN STILL EXISTS
+	CLR	DDBUFC+FP(R1)	;;NO MORE CHAIN, CLEAR FILL POINTER ALSO
+20$:	BUFFER	RETSML		;;RETURN THE EMPTIED BUFFER
+	INC	DDBUFC+BC(R1)	;;BUMP NEG COUNT FOR RETURNED BUF
+	BR	8$		;;GO BACK AND SEE ABOUT RESTARTING
+
+30$:	MOV	DDBUFC+FP(R1),R2 ;;GET CURRENT FILL POINTER
+	MOV	R2,-(SP)	;;COPY IT
+	DEC	(SP)		;;ENSURE WITHIN ITS OWN BUFFER
+	XOR	R4,(SP)		;;MASK OFF THE EMPTY POINTER
+	BIC	#37,(SP)+	;; AND THE INTER BUFFER BITS
+	BEQ	40$		;;NO BITS. EMPTY POINTER AND FILL POINTER IN SAME BUFFER
+	MOV	R4,R2		;;DIFFERENT BUFFERS. COPY THE EMPTY POINTER
+	BIS	#37,R2		;;TURN ON ALL THE INTER BUFFER BITS
+	INC	R2		;;POINT TO BEYOND THE END (= FIRST FREE IN "BUFFER")
+40$:	MOV	R2,DDBUFC+EP(R1) ;;UPDATE THE EMPTY POINTER
+	SUB	R4,R2		;;CALCULATE BYTE COUNT
+	CLR	R3		;;No high order bits in the address	;007
+	BR	60$		;;AND GET SET TO EXIT
+
+50$:	TST	(PC)+		;;SET DO NEXT SUBLINE FLAG (CLC)
+60$:	SEC			;;SET DMA PROCESSING FLAG
+	RETURN
+
+.SBTTL	FIND THE BASE KB# FOR MULTIPLEXOR INTERRUPTS
+
+;+      
+; MUXKBN - FIND BASE KB# FOR MULTIPLEXOR INTERRUPTS.
+;
+;	R0 =  MUX CONTROLER # TIMES 2
+;	R5 -> BASE KB# TABLE
+;
+;	CALL	MUXKBN
+;       
+;	R0 =  BASE KB# TIMES 2
+;	R1 -> BASE DDB
+;	R3 -> CSR
+;-
+
+MUXKBN::ADD	R5,R0		;;POINT TO BASE KB# TIMES 2 IN TABLE
+	MOV	(R0),R0		;;NOW GET THAT BASE KB# TIMES 2
+	MOV	DEV.KB(R0),R1	;;GET THE DDB POINTER
+	MOV	CSR.KB(R0),R3	;;GET THE CSR POINTER
+	RETURN			;;GO TO THE INTERRUPT ROUTINE
+
+.SBTTL	ENABLE A DATASET
+
+;+      
+; SETDTR - ENABLE A DATASET.
+;
+;	R0 =  KEYBOARD NUMBER TIMES 2 OF DATASET
+;	R1 -> DDB OF DATASET
+;	R3 -> CSR
+;	PRIORITY IS PR5
+;       
+;	CALL	SETDTR
+;
+; On entry to port driver:
+;
+;	R0 =  Keyboard number times two
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5       
+;-
+
+SETDTR::MAPPRT	SAVE		;;Map the port driver			
+	JMP	@KP$DTR		;;Invoke the function			
+
+;+
+; TTMRNG - RING INTERRUPT PROCESSING.
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB
+;	R2 =  CARRIER ON/OFF INDICATION
+;	R5 =  BIT FOR CARRIER ON/OFF TEST
+;                             
+;	CALL	TTMRNG
+;
+;	R2 =  UNDEFINED
+;	R3 =  UNDEFINED
+;	R4 =  UNDEFINED
+;-
+  
+.ENABL	LSB
+
+TTMRNG::MOV	#40$,-(SP)	;;SET RETURN ADDRESS IF CARRIER ON
+	BIT	R2,R5		;;CARRIER ON??
+	BNE	10$		;;YES, JUST SET UP DDB
+	MOV	#70$,(SP)	;;NO, RETURN TO TIME OUT SETTER
+	MOV	#TTWRC!127.,R4	;; AND DO A 127. SECOND TIMEOUT ON CARRIER 
+10$:	TST	MODCLK(R1)	;;ALREADY ANSWERED?
+	BPL	50$		;;YES, SO DON'T SET ANYTHING UP!
+.ASSUME	TTDSBL	EQ	100000
+INIDDB:	BIC	#<TTSTOP!TTSFLO!TTXOFF>,DDFLAG(R1) ;;Clear input/output	;005
+						   ;; flow control flags ;005
+	.BR	DDBSET		;;Set up the DDB			
+
+;+
+; DDBSET - SET UP A DDB.
+;
+;	R0 =  UNIT NUMBER TIMES TWO
+;	R1 -> DDB
+;
+;	CALL	DDBSET
+;
+;	R2 =  UNDEFINED
+;	R3 -> CSR
+;-
+
+DDBSET::MOV	R1,R3		;;COPY THE DDB POINTER			
+	ADD	#MODCLK,R3	;; And point to modem timer
+	CMPB	#TTPK11,TTINTF(R1) ;;IS THIS A PSEUDO KEYBOARD?		;002
+	BNE	15$		;;NOPE					;002
+	CLR	(R3)		;;YES, SO ENABLE THE PK			;002
+15$:	TST	(R3)+		;;GET UP TO TTPARM (/PERM)		;002
+	MOV	(R3)+,TTPARM(R1) ;;SET THE NEW PARAMETER WORD
+	MOV	(R3)+,TTCHAR(R1) ;;LOAD TTCHAR
+	MOVB	(R3)+,TTFCNT(R1) ;; AND TTFCNT
+	MOVB	(R3)+,DDHORC(R1) ;;  AND DDHORC
+	MOV	(R3)+,TTCAPB(R1) ;;   AND TTCAPB			
+	MOV	(R3)+,TTCTRL(R1) ;;    AND TTCTRL and TTTYPE		;019
+.ASSUME	TTTYPE	EQ TTCTRL+1						;019
+.ASSUME	TTCTRL&1 EQ 0							;019
+	MOVB	(R3)+,(R3)+	;;	 And finally TCHAR2		;019
+.ASSUME	TTRING+13 EQ TCHAR2						;019
+	BIC	#TYPPEN,(R3)	;;Ensure TYPPEN clear			;019
+.ASSUME	TTRFLG	EQ TCHAR2+1						;019
+	BIC	#^C<TTSTOP!TTSFLO!TTXOFF!TTRSX2!TTRSX1>,DDFLAG(R1)	;005
+				;;Clear some misc. flag bits		;005
+	CALLMI	CLRDLM,KBDAP5	;;CLEAR 'MODE' AMD PRIVATE DELIMITER(S) 
+	CALLR	SETPRM		;;SET THE LINE PARAMETERS		
+
+;+
+; CHKDDB - Check the DDB for output data
+;
+;	R0 =  Unit number times two
+;	R1 -> DDB
+;
+;	CALL	CHKDDB
+;
+;	This routine is called by ENDKEY and DEAMKB. Here we check
+;	the output buffer pointers of the DDB to see if there is
+;	still any pending output. If there is, then we set the pending
+;	reset flag in DDFLAG to delay the setup of the DDB until all
+;	output has been sent. If there is no output pending, then we
+;	send a couple of nulls (fill characters to make sure all output
+;	has made it to the device) and then do the setup. Note that
+;	the nulls are only sent if we had to delay the reset.
+;-
+
+CHKDDB::CMP	DDBUFC+EP(R1),DDBUFC+FP(R1) ;;Still output data to be sent 
+	BNE	20$		;;Yes, then delay the setup		
+	BIT	#TTRSET,DDFLAG(R1) ;;Pending reset?			
+	BEQ	30$		;;No, then do the reset now		
+	BIT	#TTDFIL,DDFLAG(R1) ;;Yes, sent the fill characters?	
+	BNE	30$		;;Yes, now do the setup			
+	BIS	#TTDFIL,DDFLAG(R1) ;;No, say that we did		
+	MOV	#CHKLIN,-(SP)	;;Start the line after fill sent	
+	MOV	#2,-(SP)	;;Set the fill factor to two		
+	JMP	FTIMER		;; and off to send the nulls		
+
+20$: 	BIS	#TTRSET,DDFLAG(R1) ;;Set the pending reset flag		
+	RETURN			;; and return for now			
+
+30$:	TST	MODCLK(R1)	;;Line still connected?
+	BPL	DDBSET		;;Yes, go set it up
+.ASSUME	TTDSBL	EQ	100000
+	RETURN			;;No, so exit
+
+;+
+; TTMCAR - CARRIER INTERRUPT.
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB
+;	R2 =  CARRIER ON/OFF INDICATION
+;	R5 =  BIT FOR CARRIER ON/OFF TEST
+;
+;	CALL	TTMCAR
+;                
+;	R2 =  UNDEFINED
+;	R3 =  UNDEFINED
+;	R4 =  UNDEFINED
+;-
+
+TTMCAR::BIT	R2,R5		;;CARRIER ON OR OFF??
+	BEQ	60$		;;CARRIER WENT OFF, HOPE HE LOGGED OUT
+	BIT	#TTDSBL!TTWRC,MODCLK(R1) ;;ALREADY ENABLED & NOT WAITING?
+	BEQ	80$		;;YES, IGNORE INTERRUPT
+	BPL	40$		;;ALREADY ENABLED, SO NO DDBSET
+.ASSUME	TTDSBL	EQ	100000
+.ASSUME	TTWRC	LT	TTDSBL
+	CALL	INIDDB		;;Disabled, initialize the DDB		
+40$:	CLR	MODCLK(R1)	;;RESET MODEM CLOCK, WAITING, & ANSWERED
+	BIC	#TTHUNG,DDFLAG(R1) ;;SET THE HUNG FLAG
+	CALL	CHKLIN		;; AND START LINE GOING...
+	MOVB	DDJBNO(R1),R3	;;GET JOB OF TERMINAL (IF ANY)
+	BNE	80$		;;JUST EXIT IF SOMEONE
+	BIT	#TTNINT!TTANSB,TTCAPB(R1) ;;Noninteractive or EMS terminal? ;006
+	BNE	50$		;;Just exit				
+	BITB	#TTAUTO,TTCTRL(R1) ;;ARE WE DOING AUTO-BAUD?		
+	BNE	50$		;;YES, SO DON'T DO ANYTHING QUITE YET	
+	CALLMI	CLRTER,KBDAP5	;;ELSE CLEAR THE TERMINAL BUFFERS	
+	MOV	#15,R2		;;Set up a carriage return		
+	CALLR	TTIN09		;;And "force" that as input		
+
+50$:	RETURN			;;All done, exit
+
+60$:	BIT	#TTWRC,MODCLK(R1) ;;WERE WE WAITING FOR CARRIER?
+	BNE	80$		;;IF SO, KEEP WAITING
+	MOV	#TTWRC!5.,R4	;;ELSE START 5 SECOND TIMEOUT
+..WCAR	==	.-2	;**PATCH** SECONDS TO WAIT FOR CARRIER (BYTE)
+	BIT	#1,FETPAT+0	;;Check feature flag # 1		
+	BEQ	70$		;;Not "immediate hangup", skip		
+	MOV	#TTWRC!1,R4	;;Immediate hangup, set for one second	
+70$:	BIC	#TTHUNG,DDFLAG(R1) ;;SET PENDING HUNG TERMINAL
+	MOV	R4,MODCLK(R1)	;;LOAD THE NEW MODEM CLOCK STATUS
+80$:	RETURN			;; AND EXIT
+
+GLOBAL	<FETPAT>							
+
+.DSABL	LSB
+
+.SBTTL	TTOUT	Non-DMA character output
+
+;+
+; TTOUT - TERMINAL CHARACTER OUTPUT ROUTINE (INTERRUPT LEVEL 4 OR 5).
+;
+;	R0 =  LINE NUMBER TIMES 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	SP -> IE BIT PATTERN, RETURN ADDRESS
+;
+;	...
+;
+;	R2 =  UNDEFINED
+;	R3 -> CSR +4
+;	R4 =  UNDEFINED
+;	R5 =  UNDEFINED
+;-
+
+.ENABL	LSB
+
+TTOUT::	ADD	#6,R3		;;SKIP TO OUTPUT DATA BUFFER
+	BIT	#<DDAUXD!DDAPT>,(R1) ;;Owned by an aux. driver?		;007
+	BEQ	8$		;;No, do normal processing		;007
+	MOV	TTAUXB,R5	;;Get offset to the aux. driver cells	;007
+	BEQ	5$		;;None, that's fatal			;007
+	ADD	R1,R5		;;Set up a pointer to the cells		;007
+	MOV	TTACCB(R5),R4	;;Get the CCB ->			;007
+	BEQ	100$		;;None, so ignore the interrupt		;007
+	TST	DDFLAG(R1)	;;Have we been Xoff'd?			;007
+	BMI	100$		;;Yes, kill the interrrupt		;007
+.ASSUME	TTSTOP	EQ	100000
+	CALLX	FETCH1		;;No, get next character to transmit	;007
+	MOVB	R2,(R3)		;;Push the character out		;007
+	BIS	(SP),-(R3)	;;Ensure IE is on			;007
+	DEC	CC.SEC+MS.SIZ(R4) ;;Count down bytes to transmit	;007
+	BNE	4$		;;Not finished, exit interrupt service	;007
+	MOV	#AX$XMT,TTADSP(R5) ;;Set function code to trans. complete ;007
+	MAP	PUSH,APR=5,CODE,DATA ;;Save APR5 mapping		;007
+	MAP	TTAAP5(R5),APR=5,CODE,DATA ;;Map the auxiliary driver	;007
+	CALL	@TTAAUX(R5)	;; and dispatch to its dispatcher	;007
+	MAP	POP,APR=5,CODE,DATA ;;Restore APR5 mapping		;007
+	MOV	R4,TTACCB(R5)	;;Set next CCB to transmit (0 if none)	;007
+	BNE	2$		;;Got one, need to set up		;007
+	BIC	(SP)+,(R3)	;;None, mark the unit idle		;007
+	RETURN			;; and return to our caller		;007
+
+2$:	CALLX	SETCCB		;;Set up CC.SEC	for transmit		;007
+4$:	TST	(SP)+		;;Dump the "IE BIT PATTERN"		;007
+	RETURN			;; and return to our caller		;007
+
+5$:	CRASH			;;Fatal internal software error		;007
+
+GLOBAL	<TTAUXB,FETCH1,SETCCB>						;007
+
+8$:	BIC	#TTHUNG,DDFLAG(R1) ;;NOT HUNG IF INTERRUPTED
+	BIT	#TTSFLO,DDFLAG(R1) ;;Need to send flow control right now?
+	BEQ	20$		;;NOPE
+	BIC	#TTSFLO,DDFLAG(R1) ;;Yes, but only once
+	MOVB	#'Q-100,R2	;;Guess that is is an XOFF
+	BIT	#TTXOFF,DDFLAG(R1) ;;Good guess?
+	BEQ	10$		;;Yes, all set
+	MOVB	#'S-100,R2	;;No, it is XON, send that
+10$:	MOVB	R2,(R3)		;;Send the flow control character
+	BR	50$		;;SET IE AND EXIT
+
+20$:	TST	DDFLAG(R1)	;;STALLED FOR PAGING ?
+	BMI	100$		;;YES, SO KILL INTERRUPT
+.ASSUME	TTSTOP	EQ	100000
+30$:	CALLX	FETCH,R5,DDBUFC+EP ;;TRY TO FETCH THE NEXT CHARACTER FROM THE OUTPUT SIDE
+	BCS	90$		;;EMPTY - SET JSTEL AND KILL INTERRUPT
+40$:	MOVB	R2,(R3)		;;PUSH THE CHARACTERS OUT
+50$:	BIS	(SP)+,-(R3)	;;ENSURE IE IS ON
+	.BR	TTSJST		;;And set the output ready flag
+
+.SBTTL	TTSJST	Set output ready flag
+
+;+
+; TTSJST - SET OUTPUT READY FLAG.
+;
+;	R1 -> DDB
+;
+;	CALL	TTSJST
+;
+;	R4 =  UNDEFINED
+;-
+
+TTSJST::BIT	#<DDAUXD!DDAPT>,(R1) ;;Owned by an auxiliary driver?	;007
+	BNE	80$		;;Yes, exit doing nothing		;007
+	BIT	#TTFMS,TTMODE(R1) ;;IN FMS MODE ?
+	BEQ	TTSJS2		;;NO					;007
+	CMP	DDBUFC+BC(R1),#BFQ.KB-5	;;Yes, do we have a lot of output?
+	BLT	80$		;;Yes, don't call FMS yet
+	CMP	TTINEC+EP(R1),TTINEC+FP(R1) ;;Is their any FMS typeahead?
+	BEQ	TTSJS2		;;No, don't try to call FMS now		;007
+	.BR	FMSQ		;;Yes, queue the DDB for FMS
+
+.SBTTL	FMS QUEUER
+
+;+
+; FMSQ - QUEUE A DDB FOR FMS PROCESSING
+;                     
+;	R1 ->	DDB
+;	CALL	FMSQ
+;-
+
+FMSQ::	BITB	#FMSFLD,DDFLG2(R1) ;;ANY FIELD ACTIVE ?
+	BEQ	TTSJS2		;;NO, HANDLE IT LATER			;007
+	MOV	R1,R4		;;Yes, copy DDB pointer
+	ADD	#DDLINK,R4	;;And point to FMS link word		;004
+	TST	(R4)		;;ALREADY LINKED ?
+	BNE	TTSJS2		;;YEP					;007
+	CMP	FMSTAL,R4	;;ARE YOU SURE WE'RE NOT LINKED ?
+	BEQ	TTSJS2		;;YEP, WE'RE AT THE END			;007
+	MOV	R4,@FMSTAL	;;LINK DDB ONTO QUEUE
+	MOV	R4,FMSTAL	;; AND UPDATE THE TAIL POINTER
+	L3QSET	QKBFMS		;;SET THE FMS PROCESSOR ROLLING
+TTSJS2::TSTB	DDFLAG(R1)	;;Pending reset?			;007
+	BPL	70$		;;No					
+.ASSUME	TTRSET	EQ	200
+	MOV	R3,-(SP)	;;Save R3				
+	CALL	CHKDDB		;;Try it now				
+	MOV	(SP)+,R3	;;Restore R3				
+70$:	CALLX	IOFINC,R5,<BFQ.KB-5.,JSTEL> ;;SET THE OUTPUT READY FLAG
+80$:	RETURN			;; AND EXIT
+
+90$:	CALL	TTSJST		;;GO SET THE OUTPUT READY FLAG
+100$:	BIC	(SP)+,-(R3)	;;CLEAR INTERRUPT ENABLE
+	RETURN			;;WHEREVER
+
+GLOBAL	<FMSTAL,TTFMSB,BFQ.KB>
+
+.DSABL	LSB
+
+.SBTTL	WIPE OUT THE TERMINAL OUTPUT SIDE
+
+;+
+; TTWIPE - WIPE OUT TERMINAL OUTPUT SIDE.
+; TTABRT - ABORT TERMINAL OUTPUT					;010
+;
+;	R0 =  UNIT NUMBER TIMES TWO
+;	R1 -> DDB
+;
+;	CALL	TTWIPE
+;
+;	R2 =  UNDEFINED
+;	R3 =  Undefined
+;	R4 =  UNDEFINED
+;-
+
+TTWIPE::CALLX	CLRBUF,R5,DDBUFC+EP ;;NOW WIPE OUT OUTPUT BUFFER
+TTABRT::MAPPRT	SAVE		;;Set up port driver mapping		;010
+	MOV	CSR.KB(R0),R3	;;Get CSR pointer
+	CALL	@KP$ABT		;;Call the port driver to abort any output
+	BR	TTSJST		;;GO SET "JSTEL" AND EXIT	
+
+                 
+;+
+; TTINMX - Handle input from multiplexors
+;
+;	R0 =  Controller unit number times two
+;	R2 =  Silo overflow checking mask
+;	R5 -> Base KB number table for multiplexor
+;-
+
+TTINMX::CALL	MUXKBN		;;SET UP FOR THE BASE KB
+	BIT	(R3),R2		;;SILO OVERFLOW?
+	BEQ	10$		;;NO
+	CLR	R2		;;INDICATE NO "SILO" DATA
+	LOG$KB			;;YES, LOG AN ERROR
+10$:	MOV	R0,-(SP)	;;SAVE BASE KB # *2
+20$:	MOV	2(R3),R2	;;GET DATA FROM THE SILO
+	BMI	30$		;;MORE DATA, CONTINUE
+	TST	(SP)+		;;NO MORE DATA, POP BASE KB #*2
+	RETURN			;; AND EXIT FROM INTERRUPT
+
+30$:	MOV	R2,R0		;;COPY THE DATA
+	CALL	FNDLIN		;;NOW FIND THE CORRECT LINE
+	BCS	20$		;;LINE IS ILLEGAL, IGNORE IT...
+	CALL	TTINCH		;;LEGAL, SO PROCESS THE CHARACTER	
+	MOV	CSR.KB(R0),R3	;;Get CSR pointer back
+	BR	20$		;;AND DO ANOTHER...			
+
+GLOBAL	<LOG$KB,CSR.KB>
+
+.SBTTL	CHARACTER INPUT
+
+;+
+; TTINCH - TERMINAL CHARACTER INPUT ROUTINE.
+; 
+;	R0 =  2* LINE NUMBER
+;	R1 -> DDB
+;	R2 =  CHARACTER & OVERFLOW BIT & FRAMING ERROR BIT & PARITY ERROR BIT
+;	R3 -> CSR
+;
+;	CALL	TTINCH
+;
+;	R3 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;									;007
+; On entry we check to see if there is an auxiliary  driver in control	;007
+; of this line. If no driver is in control or if the driver is APT we	;007
+; do normal processing. Otherwise, we map the auxiliary driver and	;007
+; dispatch to it for processing of the input character.			;007
+;									;007
+; If we are dispatching to an auxiliary driver, then registers contents	;007
+; on entry to the driver will be as follows:				;007
+;									;007
+;	R1 -> Terminal DDB						;007
+;	R2 =  Recieved character (with error flags in high byte)	;007
+;	R5 -> Terminal DDB @ Auxiliary Driver cells			;007
+;-
+
+.ENABL	LSB
+
+TTINCH::BIT	#DDAUXD,(R1)	;;Owned by an auxiliary driver?		;007
+	BEQ	10$		;;No, normal processing			;007
+	MOV	TTAUXB,R5	;;Get offset to the aux. driver cells	;007
+	BEQ	5$		;;None, fatal error			;007
+	ADD	R1,R5		;;Set up a pointer to the cells		;007
+	MOV	#AX$RCV,TTADSP(R5) ;;Set the receive function code	;007
+	MAP	PUSH,APR=5,CODE,DATA ;;Save APR5 mapping		;007
+	MAP	TTAAP5(R5),APR=5,CODE,DATA ;;Map the auxiliary driver	;007
+	CALL	@TTAAUX(R5)	;;Go process the character		;007
+	MAP	POP,APR=5,CODE,DATA ;;Restore mapping			;007
+	RETURN			;;Return to our caller			;007
+
+5$:	CRASH			;;Fatal internal software error		;007
+
+10$:	BITB	#TTAUTO,TTCTRL(R1) ;;Doing autobaud?			;007
+	BEQ	15$		;;No, not this time
+	TSTB	DDJBNO(R1)	;;Maybe, is there a job there?
+	BNE	15$		;;Yes, no autobaud
+	MAP	PUSH,APR=5,CODE,DATA ;;No, autobaud, save APR5 mapping
+	MAP	KINAP5,APR=5,CODE,DATA ;;And map the input handler
+	CALL	@AUTOBD		;;Call the autobaud character processor
+	MAP	POP,APR=5,CODE,DATA ;;Restore mapping
+TTINXX:	RETURN			;;And exit
+
+15$:	BIT	R2,#040000	;;DATA OVERRUN?
+..KBPR	==	.-2	;**PATCH** MAKE 050000 TO LOG INPUT PARITY ERRORS
+	BEQ	20$		;;NO
+	LOG$KB			;;YES, SO LOG AN ERROR
+20$:	BIT	R2,#020000	;;FRAMING ERROR?
+	BEQ	30$		;;NOPE
+	TSTB	R2		;;REALLY?
+	BNE	TTINXX		;;NOPE, IGNORE IT			
+	BIT	#TTBIN,TTMODE(R1) ;;YEP, IN BINARY INPUT MODE?
+	BNE	30$		;;KEEP BREAK IF SO
+	BIT	#TTBRK,TTCHAR(R1) ;;SHOULD WE TURN BREAK INTO CTRL/C?
+	BNE	30$		;;NO. KEEP IT AS A NULL (TRASH IT LATER)
+	MOV	#'C-100,R2	;;ELSE TURN BREAK INTO A CTRL/C
+30$:	TST	DDFLAG(R1)	;;STALLED FOR PAGING?
+	BPL	TTIN09		;;NO
+.ASSUME	TTSTOP	EQ	100000
+	BIT	#TTXANY,TTCHAR(R1) ;;YES, DO "XON" ON ANY CHARACTER??
+	BEQ	TTIN09		;;NOPE, ONLY ON 'XON' AND/OR 'CONTROL/C'
+	BIT	#TTPCOL,TTMODE(R1) ;;IN INCOMING XON/XOFF PROTOCOL MODE?
+	BNE	TTIN09		;;NO AUTOMATIC XON'S IF SO
+	MOV	R2,-(SP)	;;Save RESUME char in case it's not XON	;009
+	CALL	DOXON		;;YEP, SO RE-ENABLE OUTPUT NOW
+	MOV	(SP)+,R2	;;Restore RESUME character		;009
+	.BR	TTIN09		;;Now process that character		
+
+GLOBAL	<LOG$KB,KINAP5,AUTOBD>
+
+.DSABL	LSB
+
+.SBTTL	TTIN09	Process an input character after error check
+                 
+;+
+; TTIN09 - Process an input character after error check
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R2 =  Character
+;
+;	CALL	TTIN09
+;
+;	R3 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;
+; If we need to stop further input, we will call the port driver. On
+; entry to port driver:
+;                
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;-
+
+TTIN09::MAP	PUSH,APR=5,CODE,DATA ;;Save APR5 mapping		
+	MAP	KINAP5,APR=5,CODE,DATA ;;Map the input handlers		
+	CALL	@KINICH		;;Go call the routine			
+	CALL	CHKLIN		;;And echo any output
+	CMP	FREES+2,#20.	;;Is buffer pool really low?
+	BLO	10$		;;Yes, go stop input
+	TST	TTINEC+BC(R1)	;;3rd buffer chain quota used up?
+	BLT	10$		;;Yes, try to stop further input
+	TST	TTINPT+BC(R1)	;;Is the input quota used up?
+	BGT	30$		;;No, nothing special to do		
+	BEQ	20$		;;Just used up, make program runnable	
+10$:	BIS	#TTXOFF,DDFLAG(R1) ;;Indicate that we don't want input	
+	MAPPRT			;;Now map the port driver		
+	MOV	CSR.KB(R0),R3	;;Get CSR pointer for port driver
+	CALL	@KP$SUI		;;And have it suspend further input	
+20$:	CALLX	IOFINI,R5,JS.KB	;;Make the user runnable
+	CLR	TIM.KB(R0)	;;Clear any timeouts
+30$:	MAP	POP,APR=5,CODE,DATA ;;Restore mapping			
+	RETURN			;;And exit
+
+GLOBAL	<FREES,CSR.KB,KINAP5,KINICH,TIM.KB>
+
+;+
+; TTCKBS - CORRECT FOR BACKSPACE.
+;-
+
+TTCKBS::CMPB	DDHORZ(R1),DDHORC(R1) ;;CAN WE BACK UP ?
+	BHIS	10$		;;NO, SO DON'T BOTHER
+	INCB	DDHORZ(R1)	;;BACKUP HORIZONTAL POSITION
+10$:	RETURN			;;RETURN
+
+.SBTTL	CHARACTER OUTPUT
+
+;+
+; CHOUTC - CHARACTER OUTPUT W/TRANSPARENT CONTROLS.
+; CHOUTE - CHARACTER ECHO ROUTINE (CHECK BUFFER AVAILABILITY).
+; CHOUT  - CHARACTER OUTPUT ROUTINE (DON'T CHECK BUFFER AVAILABILITY).
+;
+;	R1 -> DDB
+;	R2 =  CHARACTER
+;-
+
+.ENABL  LSB
+
+CHOUTC::CALL	CHKDLF		;;CHECK FOR NEEDING A <LF>		
+	BIT	#TTDFIL!TTNBIN,DDFLAG(R1) ;;NEED SPECIAL HANDLING HERE? 
+	BNE	CHOBIN		;;YES, SEND IT AS IS			
+	CMP	R2,#033		;;IS THE CHARACTER <ESCAPE>?		
+	BEQ	30$		;;YES, SO RESET POSITION AND SEND IT	
+	CMPB	R2,#233		;;CSI?					
+	BEQ	30$		;;YES, SO RESET POSITION AND SEND IT	
+	CMP	R2,#40		;;Is it a C0 control character?		
+	BHIS	10$		;;No					
+	CMP	R2,#10		;;Is it's ASCII value less than a BS?	
+	BLO	CHROUT		;;Yes, then send as is			
+	CMP	R2,#15		;;Is it's ASCII value greater than a CR? 
+	BHI	CHROUT		;;Yes, then send as is			
+10$:	MOVB	R2,R3		;;Copy the character - Is the sign bit set? 
+	BPL	20$		;;No, not an 8 bit character		
+	BIT	#140,R2		;;Is it a C1 control character?		
+	BNE	20$		;;No, go process the character		
+	BR	CHROUT		;;Otherwise, no processing needed	
+
+CHOUTE::CALL	CHKFRE		;;CHECK FOR FREE BUFFERS
+	BCC	CHOUT		;;SOME EXIST
+	CMP	DDBUFC+BC(R1),#-2. ;;HOW FAR OVER QUOTA ARE WE?
+	SEC			;; (PRESET C=1 FOR A FAILURE)
+	BLT	CHORTS		;;TOO FAR OVER QUOTA, EXIT C=1
+CHOUT::	CALL	CHKDLF		;;CHECK FOR NEEDING A <LF>
+	BIT	#TTDFIL!TTNBIN,DDFLAG(R1) ;;NEED SPECIAL HANDLING HERE?
+	BNE	CHOBIN		;;YES, SEND IT AS IS			
+	MOVB	R2,R3		;;Copy the character			
+20$:	ASL	R3		;;Make times for dispatching		
+	JMP	@TTODSP(R3)	;; and away we go ....			
+
+C1TOC0:	BIC	#^C<177>,R2	;;CONVERT C1 TO C0			
+	CMP	R2,#033		;;ESCAPE?				
+	BNE	CHROUT		;;NOPE					
+	BIS	#TTNBIN,DDFLAG(R1) ;;SIGNAL NEXT AS BINARY
+30$:	MOVB	DDHORC(R1),DDHORZ(R1) ;;RESET CURRENT POSITION		
+	BR	CHROUT		;; AND SEND THE CHARACTER AS IS		
+
+PRCESC:	MOV	#'$,R2		;;MAKE <ESC> INTO '$'			
+	BR	SNDCH2		;;  and send it out			
+
+;+
+; SNDCHR - Make C0 control characters appear as uparrow+character
+;	    Except for: ^G, BS, TB, LF, VT, FF, and CR
+; LOWRKS - Convert lower case to upper case prior to processing
+; SNDCH2 - Process the character
+;
+;	R1 -> DDB
+;	R2 =  CHARACTER
+;-
+
+
+SNDCHR:	BIT	#TTTECO,TTMODE(R1) ;;TECO MODE?				
+	BNE	40$		;;YES, ALWAYS AN UPARROW THEN
+	BIT	#TTUPAR,TTCHAR(R1) ;;NO, UPARROW MODE?
+	BEQ	CHROUT		;;NOT UPARROW MODE			
+40$:	MOV	R2,-(SP)	;;SAVE THE CHARACTER
+	MOV	#'^,R2		;;THIS IS THAT UPARROW WE TOLD YOU ABOUT
+	CALL	SNDCH2		;;SO SEND IT ALREADY			
+	BIS	#100,(SP)	;;MAKE CHARACTER PRINTING NOW
+	MOV	(SP)+,R2	;;Restore the character in R2		
+	BR	SNDCH2		;; and print it				
+
+LOWRKS:	TSTB	TTCHAR(R1)	;;ARE WE CONVERTING FOR HIM ?		
+	BMI	SNDCH2		;;NO, SO SEND LOWER CASE		
+.ASSUME	TTLCOU	EQ	200
+	BIC	#40,R2		;;YES, SO CONVERT LOWER TO UPPER
+SNDCH2:	DECB	DDHORZ(R1)	;;YES, WILL IT FIT?			
+	BNE	CHROUT		;;IF SO, THEN O.K.
+	INCB	DDHORZ(R1)	;;ELSE FUDGE POSITION BACK
+	INCB	DDHORZ(R1)	;; TO ALMOST AT RIGHT MARGIN
+	MOV	R2,-(SP)	;;SAVE CHARACTER
+	CALL	CKCRLF		;;TRY TO DO A CR/LF
+	MOV	(SP)+,R2	;;NOW RESTORE CHARACTER
+	BR	SNDCH2		;; AND TRY AGAIN			
+
+.DSABL  LSB     
+
+CHOBIN:	BIT	#TTDFIL,DDFLAG(R1) ;;FILL AFTER THIS CHARACTER?
+	BNE	SENDF1		;;YES, SO SEND IT AND FILL
+	BIC	#TTNBIN,DDFLAG(R1) ;;NO, SEND IT AS BINARY THIS TIME
+
+;+
+; CHROUT - OUTPUT CHARACTER AS IS (BINARY).
+;
+;	R0 = LINE NUMBER TIME 2
+;	R1 -> DDB
+;	R2 =  CHARACTER
+;-
+
+CHROUT::CALL	CHKDLF		;;CHECK FOR NEEDING A <LF>
+	ADD	#1,JSTATK+4	;;COUNT OUTGOING CHARACTERS
+	ADC	JSTATK+6	;; (DOUBLE PERCISION)
+	TST	TTMODE(R1)	;;One-shot no-output flag set?		
+	BMI	CHORTS		;;Yes, leave				
+.ASSUME	TTNOUT LT 0							
+10$:	BIT	#TTHPRT,TTINTF(R1) ;;DOES THE HARDWARE DO PARITY?
+	BNE	20$		;;YES, SO LET IT DO IT...
+	MOV	TTCHAR(R1),R3	;;NO, GET THE PARITY FLAGS
+	BIC	#^C<TTPRTY!TTPODD>,R3 ;; AND ISOLATE THEM
+	BEQ	20$		;;NO PARITY, PASS 8-BIT CHARACTER
+	BITB	#TT8BIT,TTFCNT(R1) ;;AN 8-BIT TERMINAL?			
+	BNE	20$		;;YES, WE CAN'T DO PARITY FOR IT...	
+	ASR	R3		;;SHIFT ODD-PARITY FLAG TO 200 IN LOW BYTE
+.ASSUME	TTPODD/2	EQ	200
+.ASSUME	TTPRTY/2&377	EQ	0
+	BIC	#^C<177>,R2	;;STRIP THE CHARACTER TO BE 7-BIT
+	BIS	R2,R3		;;MAKE THE CHARACTER HAVE THE SOUGHT PARITY
+	ASH	#-4,R3		;;SHIFT FOUR BITS DOWN
+	XOR	R2,R3		;; AND PUT FOUR BITS TOGETHER FOR TABLE INDEX
+	BIC	#^C<17>,R3	;;ISOLATE TABLE INDEX
+	BISB	PTABLE(R3),R2	;;TURN ON 200 BIT IF PARITY SAYS SO	;002
+20$:	MOV	CSR.KB(R0),R3	;;Get CSR pointer
+	MAPPRT	SAVE		;;Map the port driver			
+	JMP	@KP$OUT		;;And finish up in the output routine	
+
+CHORTS::RETURN			;;General return for no output		
+
+GLOBAL	<JSTATK,CSR.KB,PTABLE>						;002
+
+                               
+.SBTTL	CHECK FOR OUTPUT BUFFER AVAILABILITY
+
+;+
+; CHKFRE - CHECK FOR OUTPUT BUFFER AVAILABILITY.
+;
+;	CALL	CHKFRE
+;-      
+                
+CHKFRE::CALLX	FREBUF,R5,BFQ.KB ;;CHECK FOR BUFFER SPACE
+	BCS	10$		;;NONE, EXIT C=1
+	TST	DDFLAG(R1)	;;SOME, STALLED FOR PAGING?
+	BPL	10$		;;NOPE, EXIT C=0 (FROM 'TST')
+.ASSUME	TTSTOP	EQ	100000
+	TST	DDBUFC+BC(R1)	;;STALLED, UP TO QUOTA YET?
+	BGT	10$		;;EXIT C=0 (FROM 'TST') IF NOT AT QUOTA
+	SEC			;;SET C=1 IF AT OR OVER QUOTA
+10$:	RETURN			;;EXIT
+
+.SBTTL	FORM FEEDS AND VERTICAL TABS ON INPUT
+
+.ENABL	LSB
+
+;+
+; TO$FF - FORM FEED.
+;-
+
+TO$FF:	MOV	#9.,-(SP)	;;FILL FACTOR = 9.
+	BR	20$		;;NOW JOIN COMMON CODE
+
+10$:	MOV	#5.,-(SP)	;;FILL FACTOR = 5.
+20$:	BIT	#TTFORM,TTCHAR(R1) ;;HARDWARE ?
+	BNE	SENDFN		;;YES, SEND AND FILL
+	CALL	ASCOUT,R5,LINES4 ;;NO, SEND FOUR <LF>'S
+	BR	TTSTSP		;;THEN EXIT
+
+;+
+; TO$VT - VERTICAL TAB.
+;-
+
+TO$VT:	BITB	#TTSCOP,TTCHAR(R1) ;;SCOPE ?
+	BEQ	10$		;;NO, REAL <VT>
+	.BR	SENDF1		;;YES, CURSOR CONTROL
+
+.DSABL	LSB
+
+GLOBAL	<BFQ.KB>
+
+.SBTTL	FILL ROUTINES
+
+;+
+; SENDF1 - SEND FILL, FACTOR = 1.
+;
+;	R1 -> DDB
+;-
+
+SENDF1:	MOV	#1,-(SP)	;;SET FILL FACTOR = 1
+	BIC	#TTDFIL,DDFLAG(R1) ;; AND SAY FILLING DONE
+
+;+
+; SENDFN - SEND FILL.
+;
+;	R1 -> DDB
+;	(SP) = FILL FACTOR
+;-
+
+SENDFN:	CALL	CHROUT		;;IF FILLING SEND CHARACTER
+	MOVB	TTFCNT(R1),R2	;; AND GET THE FILL COUNT
+	BMI	FTIMER		;;PRETEND THE FACTOR IS ONE IF SERIAL LA30
+.ASSUME	TTLA30	EQ	200
+	BIC	#^C<TTFILL>,R2	;;CLEAR OFF THE EXTRA BITS
+	BEQ	TTSTSP		;;IF FILL=0 THEN EXIT NOW
+10$:	DEC	R2		;;COUNT DOWN
+	BEQ	FTIMER		;;DONE (COUNT IS ON STACK)
+	ASL	(SP)		;;INCREASE FILL COUNT
+	BR	10$		;; AND LOOP...
+
+FTIMER:	CLR	R2		;;FILL CHARACTER IS A NULL
+	CALL	CHROUT		;;SEND ONE
+	DEC	(SP)		;;MORE TO SEND?
+	BGT	FTIMER		;;YES, SO SEND THEM
+TTSTSP:	TST	(SP)+		;;DUMP THE STACK ITEM
+	RETURN			;; AND EXIT
+
+.SBTTL	TABS ON OUTPUT
+
+;+
+; TO$TAB - OUTPUT A TAB.
+;-
+
+.ENABL	LSB
+
+TO$TAB:	BIT	#TTTAB,TTCHAR(R1) ;;HARWARE TAB ?
+	BNE	20$		;;YES
+	MOV	#040,R2		;;NO, USE <SPACE>'S
+	CALLX	TABSET,R5,CHOUT	;;SET IT UP
+10$:	  RETURN		;;EXIT IF NOT NOW AT LINE'S END
+	BR	CKCRLF		;;RESTORE CARRIAGE IF AT LINE END
+
+20$:	CALLX	TABSET,R5,CORPOS ;;SET IT UP
+	  BR	SENDF1		;;SEND AND FILL (FACTOR=1)
+	BIT	#TTCRLF,TTMODE(R1) ;;ARE WE WATCHING LINE WIDTH TO DO CRLF?
+	BNE	SENDF1		;; IF NOT, OUTPUT THE TAB ANYWAY
+	.BR	CKCRLF		;;OTHERWISE  OUTPUT A CRLF.
+
+;+
+; CKCRLF - SEND A CR/LF IF ALLOWED.
+;-
+
+CKCRLF::BIT	#TTECTL!TTCRLF,TTMODE(R1) ;;CAN WE OUTPUT A CR/LF?
+	BNE	10$		;;NO, SO DON'T
+	.BR	GOCRLF		;;YES, SO DO
+
+.DSABL	LSB
+
+;+
+; GOCRLF - SEND A CR/LF.
+;-
+
+GOCRLF::CALL	ASCOUT,R5,CRLF.0 ;;OUTPUT <CR><LF>
+
+;+
+; CHKDLF - OUTPUT A LF IF NEEDED.
+;-
+
+CHKDLF::MOV	#TTRSX2!TTRSX1,-(SP) ;;STACK THE <LF> NEEDED RSX MODE
+	BIC	DDFLAG(R1),(SP)+ ;;DO WE NEED A <LF>?
+	BNE	10$		;;NO
+	BIC	#TTRSX1,DDFLAG(R1) ;;YES, BUT INDICATE THAT WE SENT A <LF>
+	CALL	RSXCHR,R5,012	;;GO OUTPUT THAT REQUESTED <LF>
+10$:	RETURN			;;EXIT
+
+.SBTTL	OUTPUT CARRIAGE RETURN
+
+;+
+; TO$CR - OUTPUT A CARRIAGE RETURN.
+;-
+
+.ENABL	LSB
+
+TO$CR:	TSTB	TTFCNT(R1)	;;IS THIS A LA30 SERIAL?
+	BPL	80$		;;NOPE
+.ASSUME	TTLA30	EQ	200
+10$:	MOVB	DDHORC(R1),R2	;;YES, GET LINE WIDTH
+	SUB	DDHORZ(R1),R2	;; AND FIND THE CURRENT POSITION
+	BIC	#^C<377>,R2	;;HIGH BYTE IS JUNK
+	MOV	#2.,-(SP)	;;GUESS AT WITHIN 1ST 11. COLUMNS
+	CMP	R2,#12.		;;GOOD GUESS?
+	BLO	40$		;;YES, FILL=2.+(POSITION/2.)
+	SUB	#37.,R2		;;NO, WITHIN 1ST 36. COLUMNS?
+	BLT	30$		;;IF SO, FILL=8. (=2.+(12./2.))
+	MOV	#9.,(SP)	;;IF NOT, FILL=9.+(POSITION/10.)
+
+20$:	SUB	#10.,R2		;;SO DIVIDE BY
+	BLE	50$		;; 10. AND COUNT
+	INC	(SP)		;;  NUMBER OF TIMES WE DID...
+	BR	20$		;;THIS SHOULD END SOON
+
+30$:	MOV	#8.-2.*2,R2	;;FUDGE FOR FILL=8.
+40$:	ASR	R2		;;FIND POSITION/2
+	ADD	R2,(SP)		;; AND ADD INTO TOTAL COUNT
+50$:	MOV	#015,R2		;;<CR> IS STILL CHARACTER TO PRINT
+	MOV	#FTIMER,-(SP)	;;SET A RETURN ADDRESS
+60$:	MOVB	DDHORC(R1),DDHORZ(R1) ;;RESET CURRENT POSITION
+70$:	CALLR	CHROUT		;; AND SEND THE CHARACTER AND EXIT
+
+80$:	BITB	#TTSCOP,TTCHAR(R1) ;;SCOPE TYPE TERMINAL?
+	BNE	60$		;;YES, SO NO FILL EVER
+90$:	MOVB	DDHORC(R1),DDHORZ(R1) ;;RESET CURRENT POSITION
+100$:	BR	SENDF1		;;NOPE, SEND THEN CHECK FOR FILL
+
+.SBTTL	LINE FEED ON OUTPUT
+
+;+
+; TO$LF - LINE FEED ON OUTPUT.
+;-
+
+TO$LF:	BITB	#TTSCOP,TTCHAR(R1) ;;SCOPE TYPE TERMINAL?
+	BNE	100$		;;IF SO, THEN SEND AND FILL FACTOR = 1
+TTKEEP:	JMP	CHROUT		;;ELSE JUST NORMALLY SEND THE CHARACTER	
+
+.DSABL	LSB
+
+.SBTTL	BACKSPACE ON OUTPUT
+
+;+
+; TO$BS - BACKSPACE ON OUTPUT.
+;-
+
+TO$BS:	CALL	TTCKBS		;;BACKUP IF POSSIBLE
+	BR	TTKEEP		;;BUT KEEP THE BACKSPACE
+
+.SBTTL	DOXOFF	Process XOFF from terminal
+
+;+
+; DOXOFF - Process XOFF from terminal
+;-
+
+DOXOFF::BIS	#TTSTOP,DDFLAG(R1) ;;First, set the no output flag	
+	MAPPRT	SAVE		;;Map the port driver			
+	MOV	CSR.KB(R0),R3	;;Get CSR pointer
+	JMP	@KP$SUO		;;And have port driver suspend output
+
+GLOBAL	<CSR.KB>
+
+.SBTTL	CHECK AND START UP A LINE ROUTINES
+
+;+
+; CHKLIN - CHECK AND START UP LINE.
+;
+;	R0 =  LINE NUMBER TIMES 2
+;	R1 -> DDB
+;
+;	CALL	CHKLIN
+;-
+
+CHKLIN::TST	DDFLAG(R1)	;;Did the terminal tell us to stop?
+.ASSUME	TTSTOP	EQ	100000
+	BPL	SRTLIN		;;No, go do the output
+	RETURN			;;Yes, nothing to do
+
+;+
+; DOXON - (RE-)ENABLE OUTPUT AND START UP A LINE.
+;
+;	R0 =  LINE NUMBER TIMES 2
+;	R1 -> DDB
+;
+;	CALL	DOXON
+;
+;	R3 -> CSR
+;-
+
+DOXON::	BIC	#TTSTOP,DDFLAG(R1) ;;SAY OUTPUT IS NOW ENABLED
+	.BR	SRTLIN		;;And start it up
+
+;+
+; SRTLIN - START UP A LINE.
+;
+;	R0 =  LINE NUMBER TIMES 2
+;	R1 -> DDB
+;
+;	CALL	SRTLIN
+;
+; On entry to port driver:
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;-
+
+SRTLIN::MAPPRT	SAVE		;;Map the port driver			
+	MOV	CSR.KB(R0),R3	;;Get the CSR pointer
+	CALLR	@KP$SRT		;;And start up the line			
+
+GLOBAL	<CSR.KB>
+
+;+									;007
+; DSBLLN - Disable a line.
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	Priority is PR5
+;
+;	CALL	DSBLLN
+;
+; On entry to port driver:
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;-									;007
+
+DSBLLN::MAPPRT	SAVE		;;Map the port driver			;007
+	MOV	CSR.KB(R0),R3	;;Get the CSR pointer			;007
+	CALLR	@KP$DSB		;;Now disable the line			;007
+
+GLOBAL	<CSR.KB>
+
+;+									;007
+; SETBRK - Set break on a line.
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	Priority is PR5
+;
+;	CALL	SETBRK
+;
+; On entry to port driver:
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;-									;007
+
+SETBRK::MAPPRT	SAVE		;;Map the port driver			;007
+	MOV	CSR.KB(R0),R3	;;Get the CSR pointer			;007
+	CALLR	@KP$SBK		;;Now set break on the line		;007
+
+GLOBAL	<CSR.KB>
+
+;+									;007
+; CLRBRK - Clear break on a line
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	Priority is PR5
+;
+;	CALL	CLRBRK
+;
+; On entry to port driver:
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;-									;007
+
+CLRBRK::MAPPRT	SAVE		;;Map the port driver			;007
+	MOV	CSR.KB(R0),R3	;;Get the CSR pointer			;007
+	CALLR	@KP$CBK		;;Clear break on the line		;007
+
+GLOBAL	<CSR.KB>
+
+;+									;007
+; LINSTS - Get line status.
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	Priority is PR5
+;
+;	CALL	LINSTS
+;
+; On entry to port driver:
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;-									;007
+
+LINSTS::MAPPRT	SAVE		;;Map the port driver			;007
+	MOV	CSR.KB(R0),R3	;;Get the CSR pointer			;007
+	CALLR	@KP$LST		;;Now get line status			;007
+
+GLOBAL	<CSR.KB>
+
+.SBTTL	INICON	Initiate a Connection
+
+;+									;013
+; INICON - Initiate a Connection
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;
+;	CALL	INICON
+;
+; On entry to port driver:
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR (Session Block if LAT)
+;-									;013
+
+INICON::MAPPRT	SAVE		;;Map the port driver			;013
+	MOV	CSR.KB(R0),R3	;;Get the CSR ->			;013
+	CALLR	@KP$CON		;;Go do the connection			;013
+
+GLOBAL	<CSR.KB>							;013
+
+.SBTTL	TRMCON	Terminate a Connection
+
+;+									;013
+; TRMCON - Terminate a Connection
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;
+;	CALL	TRMCON
+;
+; On entry to port driver:
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR (Session Block if LAT)
+;-									;013
+
+TRMCON::MAPPRT	SAVE		;;Map the port driver			;013
+	MOV	CSR.KB(R0),R3	;;Get the CSR ->			;013
+	CALLR	@KP$DSC		;;Go do the disconnect			;013
+
+GLOBAL	<CSR.KB>							;013
+
+;+									;007
+; SNDCCB - Start transmission for auxiliary driver
+;
+;	R1 -> DDB
+;	R4 -> CCB
+;
+;	CALL	SNDCCB
+;
+;	R5 -> Random
+;-									;007
+
+SNDCCB::CALLX	SETCCB		;Set up CC.SEC of CCB for transmit	;007
+	MOV	TTAUXB,R5	;Get offset to the aux. driver cells	;007
+	ADD	R1,R5		;Set up a pointer to the cells		;007
+	MOVB	DDUNT(R1),R0	;Pick up the unit number		;007
+	ASL	R0		; and make it * 2			;007
+	MOV	CSR.KB(R0),R3	;Get the CSR ->				;007
+	MOV	@#PS,-(SP)	;Save the current priority		;015
+	SPLC	5		;;Lock out interrupts			;007
+	MOV	R4,TTACCB(R5)	;;Set the CCB pointer in the DDB	;007
+	CALL	SRTLIN		;; and start the transmission		;007
+	MOV	(SP)+,@#PS	;Restore the previous priority		;015
+	RETURN			; and return to our caller		;007
+
+GLOBAL	<TTAUXB>							;007
+
+.SBTTL	ASCII STRING SENDER
+
+;+
+; OUTPUT AN ASCII STRING, TERMINATED BY A 0 BYTE.
+; (ALLOWS ONLY 7-BIT CHARACTERS)
+;
+; 	CALL	ASCOUT,R5	
+; 	+	STRING ADDRESS
+; 	...	RETURN
+;-
+
+.ENABL	LSB
+
+ASCLOG::MOV	R2,-(SP)	;;Save the current character		
+	BIT	#DDCONS,DDCNT(R1) ;;Is this terminal a console?		
+	BEQ	30$		;;No, so skip logging			
+	MOVB	DDJBNO(R1),R2	;;Get owning job number * 2		
+	MOV	JOBTBL(R2),R2	;; and JDB pointer			
+	TST	JDFLG3(R2)	;;Is log active?			
+	BPL	30$		;;No, skip				
+.ASSUME	J2LOG LT 0							
+	MOV	(R5),R2		;;GET STRING POINTER			
+	MOV	R5,-(SP)	;;SAVE RETURN ADDRESS			
+	MOV	R2,R5		;;NOW GET BYTE POINTER			
+10$:	MOVB	(R5)+,R2	;;NEXT CHARACTER			
+	BLE	20$		;;END OF STRING				
+	CALLMI	PUTLOG,EM2AP5	;;Log the character			
+	CALL	CHOUTE		;;OUTPUT A CHARACTER			
+	BR	10$		;;CONTINUE				
+
+20$:	BICB	#TTLFO!TTCRO,DDFLG2(R1) ;;We're at start of line now	
+	TSTB	R2		;;Check the terminator			
+	BR	50$		;; and go to common exit code		
+
+ASCOU1::MOV	R2,-(SP)	;;SAVE THE OLD CHAR ON THE STACK	;006
+	MOV	@(R5),R2	;;Get the pointer to the pointer	;006
+	BR	35$		;;and continue				;006
+
+ASCOUF::BIT	#TTECTL,TTMODE(R1) ;;TERMINAL OPEN FOR ECHO CONTROL ?
+	BNE	70$		;;YES, SO SKIP ARGUMENT AND EXIT
+ASCOUE::BIT	#TAPE!NOECHO,DDFLAG(R1) ;;SHOULD WE DO THIS?
+	BNE	70$		;;NOPE
+
+ASCOUT::MOV	R2,-(SP)	;;SAVE THE OLD CHAR ON THE STACK
+30$:	MOV	(R5),R2		;;GET STRING POINTER
+35$:	MOV	R5,-(SP)	;;SAVE RETURN ADDRESS
+	MOV	R2,R5		;;NOW GET BYTE POINTER
+40$:	MOVB	(R5)+,R2	;;NEXT CHARACTER
+	BLE	50$		;;END OF STRING
+	CALL	CHOUTE		;;OUTPUT A CHARACTER
+	BR	40$		;;CONTINUE
+
+50$:	BEQ	60$		;;NOT THE SPECIAL END
+	BIT	#TTRSX2!TTRSX1,DDFLAG(R1) ;;IN AN RSX MODE?
+	BEQ	60$		;;NOPE
+	BIS	#TTRSX2!TTRSX1,DDFLAG(R1) ;;YEP, GO INTO
+	BIC	#TTRSX1,DDFLAG(R1) ;; RSX EXTRA <LF> MODE
+60$:	MOV	(SP)+,R5	;;RESTORE RETURN ADDRESS
+	MOV	(SP)+,R2	;;RESTORE OLD CHAR
+70$:	TST	(R5)+		;;SKIP ARGUMENT
+	RETURN	R5		;; AND RETURN
+
+.DSABL	LSB
+
+GLOBAL	<JOBTBL>							
+
+.SBTTL	PRIVATE DELIMITER ROUTINES
+
+;+
+; CHKDLM - CHECK FOR PRIVATE DELIMITERS
+;
+;	R1 ->	DDB
+;	R2 =	CHAR
+;
+;	CALL	CHKDLM
+;
+;	C = 0	-> NOT A DELIMITER
+;	C = 1	-> DELIMITER
+;
+;	 R4 =  0  -> DELIMITER MATCHED THE BYTE (TTPDLM)
+;	 R4 <> 0  -> DELIMITER MATCHED THE MASK
+;-
+
+CHKDLM::MOV	R3,-(SP)	;;Get a work register			
+	CLR	R4		;;Presume no delimiter mask		
+	MOVB	TTPDLM(R1),R3	;;Is there a private delimiter byte?	
+	BEQ	10$		;;NO
+	CMPB	R2,R3		;;YES, IS THIS IT ?
+	BEQ	30$		;;YES, GO SET CARRY
+10$:	MOV	TTDLMM(R1),R4	;;IS THERE A DELIMITER MASK ?		
+	BEQ	20$		;;NO, GO CLEAR CARRY
+	CLR	R3		;;CLEAR BEFORE BIT SET
+	BISB	R2,R3		;;COPY CHARACTER (NO SIGN EXTEND)
+	ASH	#-3,R3		;;DIVIDE BY EIGHT (BYTE OFFSET)
+	ADD	R3,R4		;;POINT TO CORRECT BYTE IN MASK
+	MOVB	R2,R3		;;NOW FOR THE REMAINDER
+	BIC	#177770,R3	;;TRIM ALL BUT 1ST THREE BITS (BIT OFFSET)
+	BITB	BITBYT(R3),(R4)	;;IS IT A DELIMITER ?
+	BNE	30$		;;YES, GO SET CARRY
+20$:	TST	(PC)+		;;CLEAR CARRY (AND SKIP NEXT INSTRUCTION)
+30$:	SEC			;;SET CARRY
+	MOV	(SP)+,R3	;;Restore work register			
+	RETURN			;;EXIT
+
+GLOBAL	<BITBYT>
+
+;+
+; CORPOS - CORRECT HORIZONTAL POSITION FOR TABS.
+;-
+
+CORPOS::DECB	DDHORZ(R1)	;;CORRECT HORIZONTAL POSITION
+	RETURN			;; AND EXIT
+
+.SBTTL	XON terminal input
+
+;+
+;	R0 =  LINE NUMBER TIMES 2
+;	R1 -> DDB
+;	PRIORITY IS PR5
+;
+;	CALL	XONINP		TO ALWAYS ENABLE INPUT
+;	CALL	ASKINP		TO CONDITIONALLY ENABLE INPUT
+;
+;	R3 =  UNDEFINED
+;	R4 =  UNDEFINED
+;-
+
+ASKINP::BIT	#TTXOFF,DDFLAG(R1) ;;Have we stopped input already?	
+	BNE	XONINP		;;Yes, go start it up
+	RETURN			;;No, all done here
+
+XONINP::BIC	#TTXOFF,DDFLAG(R1) ;;Enable further input		
+	MOV	CSR.KB(R0),R3	;;Get CSR pointer
+	MAPPRT	SAVE		;;Map the port driver			
+	JMP	@KP$RSI		;;And tell it to resume input		
+
+GLOBAL	<CSR.KB>
+
+.SBTTL	RSX ORIENTED CHARACTER ROUTINES
+
+;+
+;	R0 =  LINE NUMBER TIMES 2
+;	R1 -> DDB
+;	PRIORITY IS PR5
+;
+;	CALL	RSXCR (or RSXLF)					
+;
+;	R4 =  UNDEFINED
+;-
+
+RSXLF::	MOV	#TTRSX2!TTRSX1,-(SP) ;;STACK THE <LF> NEEDED RSX MODE	
+	BIC	DDFLAG(R1),(SP)+ ;;DO WE NEED A <LF>?			
+	BNE	10$		;;NO					
+	BIC	#TTRSX1,DDFLAG(R1) ;;Indicate <LF> was sent		
+	CALL	RSXCHX,R3,<12>	;;Send a line feed			
+10$:	RETURN			;;Done					
+
+RSXCR::	CALL	RSXCHX,R3,<15>	;;Send a carriage return		
+	BIS	#TTRSX2!TTRSX1,DDFLAG(R1) ;;SAY A <LF> IS NOW NEEDED
+	RETURN			;;EXIT
+
+RSXCHX:	MOV	R2,-(SP)	;;Save current character		
+	MOV	(R3)+,R2	;;Get character to output		
+	MOV	R3,-(SP)	;; and save return address		
+	CALLMI	CHRLOG,KBDAP5	;;Output to log and terminal		
+	SPLC	5		;;Back to PR5				
+	CALL	CHKLIN		;;Start the line			
+	MOV	(SP)+,R3	;;Restore R3				
+	MOV	(SP)+,R2	;; and R2				
+	RETURN	R3		;;Then exit				
+
+;+
+;	R0 =  LINE NUMBER TIMES 2
+;	R1 -> DDB
+;	PRIORITY IS PR5
+;
+;	CALL	RSXCHR,R5,<CHARACTER>
+;
+;	R4 =  UNDEFINED
+;-
+
+RSXCHR:	MOV	R2,-(SP)	;;SAVE R2
+	MOV	R3,-(SP)	;; AND R3
+	MOV	(R5)+,R2	;;GET CHARACTER TO OUTPUT
+	CALL	CHOUT		;; AND GO OUTPUT IT
+	CALL	CHKLIN		;;  THEN TRY TO START LINE
+	MOV	(SP)+,R3	;;RESTORE R3
+	MOV	(SP)+,R2	;; AND R2
+	RETURN	R5		;;  THEN EXIT
+
+.SBTTL	SPECIAL MODE CHECKER
+;+
+; 	R1 -> DDB
+;	Priority can be PR5 or PR3, since only tests are done on bits
+;
+;	...
+;
+;	Z=0 (BNE) if in a special mode
+;	Z=1 (BEQ) if not in a special modle
+;
+; TTISGL (single character input mode) is used just to see if the terminal
+; is open in any special modes, either Teco or Binary mode, or DDT submode.
+; If it is, this routine will return with the Z bit clear.
+;
+; TTMODS (special mode) is used to see if the terminal is in any special mode,
+; again Teco, Binary, or DDT submode, and if it IS ONLY BINARY MODE, then 
+; is a private delimiter mask or byte present?  			;018
+;-
+.ENABL	LSB
+
+TTISGL::BIT	#TTDDT,DDFLAG(R1) ;DDT sub-mode?			;018
+	BNE	5$		;Yes, exit with Z=0			;018
+	BIT	#TTTECO!TTBIN,TTMODE(R1) ;Open in binary or TECO mode?	;018
+5$:	RETURN			;Exit with Z bit indicating status	;018
+
+TTMODS::BIT	#TTDDT,DDFLAG(R1) ;DDT sub-mode?			;016
+	BNE	20$		;Yes, indicate so (Z=0)			;017
+	BIT	#TTTECO,TTMODE(R1) ;Teco mode?				;018
+	BNE	20$		;Yes, so exit with Z=0			;018
+	BIT	#TTBIN,TTMODE(R1) ;Is terminal open in binary mode?	;016
+	BEQ	20$		;No, indicate so (Z=1)			;017
+	.BR	DLMMSK		;Yes, is there a delim mask? (returns Z);016
+
+.SBTTL	DLMMSK	Check to see if there is a delimiter mask or byte
+;+
+; DLMMSK - Check to see if there is a delimiter mask or byte
+;
+; 	R1 -> DDB
+;	Priority is PR3 or PR5.
+;	
+;	Z = 0 (BNE) if there IS NOT a delimiter mask or byte
+;	Z = 1 (BEQ) if there IS a delimiter mask or byte
+;-
+
+DLMMSK::TST	TTDLMM(R1)	;Is there a private delimiter mask?	;016
+	BNE	10$		;Yes, indicate so			;017
+	TSTB	TTPDLM(R1)	;Is there a private delimiter byte?	;016
+	BNE	10$		;Yes, indicate so			;017
+	TST	(PC)+		;No mask or byte, return Z=0		;017
+.ASSUME	SEZ	NE 0		;'SEZ' is non-zero, so Z is clear	;017
+10$:	 SEZ			;Mask or byte exists			;016
+20$:	RETURN			;With Z=1 if delimiter mask exists	;016
+
+.DSABL	LSB
+
+.SBTTL	ESCPRC	Escape sequence processing
+;+
+; Input:
+;	R1 -> DDB
+;
+; The implemented escape sequence grammar is:
+;
+;	1) <ESC> <Y> <TRAILER #1> <TRAILER #2>
+;	2) <ESC> <O> <TRAILER #1>
+;	3) <ESC> <?> <TRAILER #1>
+;	4) <ESC> <P>							
+;	5) <ESC> <[> N*<Codes 040 through 077> <Codes 100 through 176>
+;	6) <ESC> N*<Codes 040 through 057> <Codes 060 through 176>
+;
+; The trailer'd escape sequences are table driven from "ESCLST".
+;
+;	CALL	ESCPRC,R5,<ddb_offset>
+;	  1ST Exit continue processing
+;	  2ND Exit all done
+;-      
+.ENABL	LSB
+
+ESCPRC::MOV	(R5)+,-(SP)	;;Get offset in DDB (TTESCC or TTESCT)	;019
+	ADD	R1,(SP)		;;Make it a pointer 			;019
+	MOVB	@(SP),-(SP)	;;Get a copy of this cell to work with	;019
+	DECB	(SP)		;;Where are we in esc seq processing?	;019
+	BEQ	50$		;;All done, so finish up		;019
+	BGT	60$		;;Processing trailer(s), continue	;019
+	BVC	20$		;;Processing middle, check middle	;019
+	ASLB	(SP)		;;First time, set to 376 (200-1=>177; *2=>376)
+	CMPB	R2,#'[		;;Is it "CSI" (<ESC><[>)?		;019
+	BEQ	60$		;;Yes, leave as 376			;019
+	INCB	(SP)		;;No, set to 377			;019
+	CMPB	R2,#'0		;;An intermediate character (040 to 057)? ;019
+	BLO	60$		;;Yes, leave as 377			;019
+	MOV	#ESCLST,R3	;;No, a final, get list for trailer(s)	;019
+10$:	MOVB	(R3)+,(SP)	;;Set the trailer count			;019
+	BEQ	50$		;;End of list, call it quits		;019
+	CMPB	R2,(R3)+	;;Else check for a match		;019
+	BNE	10$		;;Not a match, continue checking	;019
+	CMPB	R2,#'P		;;Is this <ESC>P?			;019
+	BNE	60$		;;No, so exit with trailer count set	;019
+	BIT	#TTESEQ!TTFMS,TTMODE(R1) ;;Want a stand-alone <ESC>P ?	;019
+	BNE	40$		;;Yes, so finish up an quit		;019
+	BR	60$		;;Exit with trailer count set		;019
+
+20$:	MOV	#'@,R3		;;Guess at "CSI" (>=100 are finals)	;019
+	ASRB	(SP)		;;"CSI" (376-1=375) or other (377-1=376)? ;019
+	BCS	30$		;;It is "CSI" (375 becomes 376 w/ c=1)	;019
+	MOV	#'0,R3		;;it is other (376 becomes 377 w/ c=0)	;019
+30$:	CMPB	R2,R3		;;Is it the final character?		;019
+	BLO	60$		;;No, continue				;019
+40$:	CLRB	(SP)		;;Yes, clear the esc seq counter	;019
+50$:	ADD	#2,R5		;;We're finished take the second exit	;019
+60$:	MOVB	(SP)+,@(SP)+	;;Put the counter back where it belongs	;019
+	RETURN	R5		;;And finally out			;019
+
+.DSABL	LSB
+
+.SBTTL	CHKESC	Check for allowed incoming escape sequences
+;+
+; CHKESC - CHECK FOR ALLOWED INCOMING ESCAPE SEQUENCE.
+;
+; Inputs:
+;	R1 -> DDB
+;
+;	CALL	CHKESC
+;
+; 	First exit	Escape sequence is not allowed
+; 	Second exit	Escape sequence is allowed
+;-
+.ENABL	LSB
+
+CHKESC::BIT	#TTESEQ,TTMODE(R1) ;;Special request for esc seq's?	;019
+	BNE	10$		;;Yes					;019
+	BITB	#PRGLVL,TTRFLG(R1) ;;At program level? 			;019
+	BEQ	5$		;;No, no need to see if escapes allowed	;019
+	BIT	#TTESCI,TTCHAR(R1) ;;Are they normally allowed?		;019
+	BEQ	20$		;;No, first exit			;019
+5$:	BIT	#TTTECO,TTMODE(R1) ;;Yes, but is this TECO??		;019
+	BNE	20$		;;First exit if TECO...			;019
+10$:	TST	(R5)+		;;else allowed, take 2nd exit		;019
+20$:	RETURN	R5		;;Exit					;019
+
+.DSABL	LSB
+
+.SBTTL	MAPPRT	Map a port driver
+
+;+
+; MAPPRT - Map a port driver
+;
+;	R1 -> DDB
+;
+;	MAPPRT
+;
+;	R4 =  Undefined
+;
+; This routine is used to map a port driver without saving mapping.
+;-
+
+MAPPRT:	MOVB	TTINTF(R1),R4	;Get interface type			
+	MAP	PRTAP5(R4),APR=5,CODE,DATA ;And map the port driver	
+	RETURN			;And we're done				
+
+GLOBAL	<PRTAP5>
+
+.SBTTL	MAPPCR	Map a port driver, co-routine return to save/restore mapping
+
+;+
+; MAPPCR - Map a port driver, co-routine return to save/restore mapping
+;
+;	R1 -> DDB
+;
+;	MAPPRT	SAVE
+;
+;	R4 =  Undefined
+;
+; This routine is used to map a port driver while preserving and restoring
+; mapping. It is invoked by using the MAPPRT .MACRO with no parameters.
+;-
+
+MAPPCR:	MAP	PUSH,APR=5,CODE,DATA ;Save APR5 mapping			
+	MOVB	TTINTF(R1),R4	;Get interface type			
+	MAP	PRTAP5(R4),APR=5,CODE,DATA ;And map the port driver	
+	CALL	@4(SP)		;Call back our caller			
+	MAP	POP,APR=5,CODE,DATA ;Restore mapping			
+	INC	(SP)+		;Dump old return address, C untouched	;007
+	RETURN			;And exit				
+
+GLOBAL	<PRTAP5>
+
+.SBTTL	Escape Sequence Input Parsing Table
+
+ESCLST:	.BYTE	2,'Y		;<ESC>Y<Y-ADDR><X-ADDR>			;019
+	.BYTE	1,'O		;<ESC>O<CHAR>				;019
+	.BYTE	1,'?		;<ESC>?<CHAR>				;019
+	.BYTE	1,'P		;<ESC>P					;019
+..ESCP	==	.-2	;**PATCH** 1 (BYTE) TO DISABLE <ESC>P GRAMMER	;019
+	.BYTE	0							;019
+	.EVEN								;019
+
+.SBTTL	Standard Delimiter Table
+
+TTDLIM::.BYTE	233		;ESCAPE SEQUENCE
+	.BYTE	177		;RUBOUT
+	.BYTE	033		;ESCAPE
+	.BYTE	032		;CTRL/Z
+	.BYTE	025		;CTRL/U
+	.BYTE	014		;FORM FEED
+	.BYTE	012		;LINE FEED
+	.BYTE	004		;EOT
+	.BYTE	003		;CTRL/C
+	.BYTE	000		;END OF LIST
+
+	; Dispatch table used by the CHOUTx routines			
+
+	.WORD	C1TOC0		;RESERVED				;001
+	.WORD	C1TOC0		;RESERVED				;001
+	.WORD	C1TOC0		;RESERVED				;001
+	.WORD	C1TOC0		;RESERVED				;001
+	.WORD	C1TOC0		;IND
+	.WORD	C1TOC0		;NEL
+	.WORD	C1TOC0		;SSA
+	.WORD	C1TOC0		;ESA
+	.WORD	C1TOC0		;HTS
+	.WORD	C1TOC0		;HTJ
+	.WORD	C1TOC0		;VTS
+	.WORD	C1TOC0		;PLD
+	.WORD	C1TOC0		;PLU
+	.WORD	C1TOC0		;RI
+	.WORD	C1TOC0		;SS2
+	.WORD	C1TOC0		;SS3
+	.WORD	C1TOC0		;DCS
+	.WORD	C1TOC0		;PU1
+	.WORD	C1TOC0		;PU2
+	.WORD	C1TOC0		;STS
+	.WORD	C1TOC0		;CCH
+	.WORD	C1TOC0		;MW
+	.WORD	C1TOC0		;SPA
+	.WORD	C1TOC0		;EPA
+	.WORD	C1TOC0		;RESERVED
+	.WORD	C1TOC0		;RESERVED
+	.WORD	C1TOC0		;RESERVED
+	.WORD	C1TOC0		;CSI
+	.WORD	C1TOC0		;ST
+	.WORD	C1TOC0		;OSC
+	.WORD	C1TOC0		;PM
+	.WORD	C1TOC0		;APC
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;INVERTED EXCLAMATION
+	.WORD	SNDCH2		;CENT SIGN
+	.WORD	SNDCH2		;BRITISH POUND SIGN
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;YEN SIGN
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;SECTION SIGN
+	.WORD	SNDCH2		;GENERAL CURRENCY SIGN
+	.WORD	SNDCH2		;COPYRIGHT SIGN
+	.WORD	SNDCH2		;FEMININE ORDINAL INDICATOR
+	.WORD	SNDCH2		;LEFT ANGLE QUOTATION MARK
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;DEGREE SIGN
+	.WORD	SNDCH2		;PLUS/MINUS SIGN
+	.WORD	SNDCH2		;SUPERSCRIPT 2
+	.WORD	SNDCH2		;SUPERSCRIPT 3
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;MICRO SIGN
+	.WORD	SNDCH2		;PARAGRAPH SIGN
+	.WORD	SNDCH2		;MIDDLE DOT
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;SUPERSCRIPT 1
+	.WORD	SNDCH2		;MASCULINE ORDINAL INDICATOR
+	.WORD	SNDCH2		;RIGHT ANGLE QUOTATION MARK
+	.WORD	SNDCH2		;FRACTION ONE QUARTER
+	.WORD	SNDCH2		;FRACTION ONE HALF
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;INVERTED QUESTION MARK
+	.WORD	SNDCH2		;CAPITAL A WITH GRAVE ACCENT
+	.WORD	SNDCH2		;CAPITAL A WITH ACUTE ACCENT
+	.WORD	SNDCH2		;CAPITAL A WITH CIRCUMFLEX
+	.WORD	SNDCH2		;CAPITAL A WITH TILDE
+	.WORD	SNDCH2		;CAPITAL A WITH DIARESIS
+	.WORD	SNDCH2		;CAPITAL A WITH RING
+	.WORD	SNDCH2		;CAPITAL AE DIPTHONG
+	.WORD	SNDCH2		;CAPITAL C WITH CEDILLA
+	.WORD	SNDCH2		;CAPITAL E WITH GRAVE ACCENT
+	.WORD	SNDCH2		;CAPITAL E WITH ACUTE ACCENT
+	.WORD	SNDCH2		;CAPITAL E WITH CIRCUMFLEX
+	.WORD	SNDCH2		;CAPITAL E WITH DIARESIS
+	.WORD	SNDCH2		;CAPITAL I WITH GRAVE ACCENT
+	.WORD	SNDCH2		;CAPITAL I WITH ACUTE ACCENT
+	.WORD	SNDCH2		;CAPITAL I WITH CIRCUMFLEX
+	.WORD	SNDCH2		;CAPITAL I WITH DIARESIS
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;CAPITAL N WITH TILDE
+	.WORD	SNDCH2		;CAPITAL O WITH GRAVE ACCENT
+	.WORD	SNDCH2		;CAPITAL O WITH ACUTE ACCENT
+	.WORD	SNDCH2		;CAPITAL O WITH CIRCUMFLEX
+	.WORD	SNDCH2		;CAPITAL O WITH TILDE
+	.WORD	SNDCH2		;CAPITAL O WITH DIARESIS
+	.WORD	SNDCH2		;CAPITAL OE LIGATURE
+	.WORD	SNDCH2		;CAPITAL O WITH SLASH
+	.WORD	SNDCH2		;CAPITAL U WITH GRAVE ACCENT
+	.WORD	SNDCH2		;CAPITAL U WITH ACUTE ACCENT
+	.WORD	SNDCH2		;CAPITAL U WITH CIRCUMFLEX
+	.WORD	SNDCH2		;CAPITAL U WITH DIARESIS
+	.WORD	SNDCH2		;CAPITAL Y WITH DIARESIS
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;GERMAN SMALL SHARP S
+	.WORD	LOWRKS		;SMALL A WITH GRAVE ACCENT
+	.WORD	LOWRKS		;SMALL A WITH ACUTE ACCENT
+	.WORD	LOWRKS		;SMALL A WITH CIRCUMFLEX
+	.WORD	LOWRKS		;SMALL A WITH TILDE
+	.WORD	LOWRKS		;SMALL A WITH DIARESIS
+	.WORD	LOWRKS		;SMALL A WITH RING
+	.WORD	LOWRKS		;SMALL AE DIPTHONG
+	.WORD	LOWRKS		;SMALL C WITH CEDILLA
+	.WORD	LOWRKS		;SMALL E WITH GRAVE ACCENT
+	.WORD	LOWRKS		;SMALL E WITH ACUTE ACCENT
+	.WORD	LOWRKS		;SMALL E WITH CIRCUMFLEX
+	.WORD	LOWRKS		;SMALL E WITH DIARESIS
+	.WORD	LOWRKS		;SMALL I WITH GRAVE ACCENT
+	.WORD	LOWRKS		;SMALL I WITH ACUTE ACCENT
+	.WORD	LOWRKS		;SMALL I WITH CIRCUMFLEX
+	.WORD	LOWRKS		;SMALL I WITH DIARESIS
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	LOWRKS		;SMALL N WITH TILDE
+	.WORD	LOWRKS		;SMALL O WITH GRAVE ACCENT
+	.WORD	LOWRKS		;SMALL O WITH ACUTE ACCENT
+	.WORD	LOWRKS		;SMALL O WITH CIRCUMFLEX
+	.WORD	LOWRKS		;SMALL O WITH TILDE
+	.WORD	LOWRKS		;SMALL O WITH DIARESIS
+	.WORD	LOWRKS		;SMALL OE LIGATURE
+	.WORD	LOWRKS		;SMALL O WITH SLASH
+	.WORD	LOWRKS		;SMALL U WITH GRAVE ACCENT
+	.WORD	LOWRKS		;SMALL U WITH ACUTE ACCENT
+	.WORD	LOWRKS		;SMALL U WITH CIRCUMFLEX
+	.WORD	LOWRKS		;SMALL U WITH DIARESIS
+	.WORD	LOWRKS		;SMALL Y WITH DIARESIS
+	.WORD	SNDCH2		;RESERVED				
+	.WORD	SNDCH2		;RESERVED				
+TTODSP:	.WORD	CHROUT		;NULL
+	.WORD	SNDCHR		;CONTROL/A
+	.WORD	SNDCHR		;CONTROL/B
+	.WORD	SNDCHR		;CONTROL/C
+	.WORD	SNDCHR		;CONTROL/D
+	.WORD	SNDCHR		;CONTROL/E
+	.WORD	SNDCHR		;CONTROL/F
+	.WORD	CHROUT		;CONTROL/G
+	.WORD	TO$BS		;BACKSPACE
+	.WORD	TO$TAB		;TAB
+	.WORD	TO$LF		;LINE FEED
+	.WORD	TO$VT		;CONTROL/K
+	.WORD	TO$FF		;FORM FEED
+	.WORD	TO$CR		;CARRIAGE RETURN
+	.WORD	SNDCHR		;CONTROL/N
+	.WORD	SNDCHR		;CONTROL/O
+	.WORD	SNDCHR		;CONTROL/P
+	.WORD	SNDCHR		;XON
+	.WORD	SNDCHR		;CONTROL/R
+	.WORD	SNDCHR		;XOFF
+	.WORD	SNDCHR		;CONTROL/T
+	.WORD	SNDCHR		;CONTROL/U
+	.WORD	SNDCHR		;CONTROL/V
+	.WORD	SNDCHR		;CONTROL/W
+	.WORD	SNDCHR		;CONTROL/X
+	.WORD	SNDCHR		;CONTROL/Y
+	.WORD	SNDCHR		;CONTROL/Z
+	.WORD	PRCESC		;ESCAPE
+	.WORD	SNDCHR		;FS
+	.WORD	SNDCHR		;GS
+	.WORD	SNDCHR		;RS
+	.WORD	SNDCHR		;US
+	.WORD	SNDCH2		;SPACE
+	.WORD	SNDCH2		;EXCLAMATION MARK
+	.WORD	SNDCH2		;QUOTATION MARK
+	.WORD	SNDCH2		;NUMBER SIGN
+	.WORD	SNDCH2		;DOLLAR SIGN
+	.WORD	SNDCH2		;PERCENT SIGN
+	.WORD	SNDCH2		;AMPERSAND
+	.WORD	SNDCH2		;APOSTROPHE
+	.WORD	SNDCH2		;LEFT PARENTHESIS
+	.WORD	SNDCH2		;RIGHT PARENTESIS
+	.WORD	SNDCH2		;ASTERISK
+	.WORD	SNDCH2		;PLUS SIGN
+	.WORD	SNDCH2		;COMMA
+	.WORD	SNDCH2		;MINUS OR HYPHEN
+	.WORD	SNDCH2		;PERIOD OR DECIMAL POINT
+	.WORD	SNDCH2		;SLASH
+	.WORD	SNDCH2		;ZERO
+	.WORD	SNDCH2		;ONE
+	.WORD	SNDCH2		;TWO
+	.WORD	SNDCH2		;THREE
+	.WORD	SNDCH2		;FOUR
+	.WORD	SNDCH2		;FIVE
+	.WORD	SNDCH2		;SIX
+	.WORD	SNDCH2		;SEVEN
+	.WORD	SNDCH2		;EIGHT
+	.WORD	SNDCH2		;NINE
+	.WORD	SNDCH2		;COLON
+	.WORD	SNDCH2		;SEMICOLON
+	.WORD	SNDCH2		;LEFT ANGLE BRACKET
+	.WORD	SNDCH2		;EQUAL SIGN
+	.WORD	SNDCH2		;RIGHT ANGLE BRACKET
+	.WORD	SNDCH2		;QUESTION MARK
+	.WORD	SNDCH2		;AT SIGN
+	.WORD	SNDCH2		;UPPERCASE A
+	.WORD	SNDCH2		;UPPERCASE B
+	.WORD	SNDCH2		;UPPERCASE C
+	.WORD	SNDCH2		;UPPERCASE D
+	.WORD	SNDCH2		;UPPERCASE E
+	.WORD	SNDCH2		;UPPERCASE F
+	.WORD	SNDCH2		;UPPERCASE G
+	.WORD	SNDCH2		;UPPERCASE H
+	.WORD	SNDCH2		;UPPERCASE I
+	.WORD	SNDCH2		;UPPERCASE J
+	.WORD	SNDCH2		;UPPERCASE K
+	.WORD	SNDCH2		;UPPERCASE L
+	.WORD	SNDCH2		;UPPERCASE M
+	.WORD	SNDCH2		;UPPERCASE N
+	.WORD	SNDCH2		;UPPERCASE O
+	.WORD	SNDCH2		;UPPERCASE P
+	.WORD	SNDCH2		;UPPERCASE Q
+	.WORD	SNDCH2		;UPPERCASE R
+	.WORD	SNDCH2		;UPPERCASE S
+	.WORD	SNDCH2		;UPPERCASE T
+	.WORD	SNDCH2		;UPPERCASE U
+	.WORD	SNDCH2		;UPPERCASE V
+	.WORD	SNDCH2		;UPPERCASE W
+	.WORD	SNDCH2		;UPPERCASE X
+	.WORD	SNDCH2		;UPPERCASE Y
+	.WORD	SNDCH2		;UPPERCASE Z
+	.WORD	SNDCH2		;LEFT SQUARE BRACKET
+	.WORD	SNDCH2		;BACKSLASH
+	.WORD	SNDCH2		;RIGHT SQUARE BRACKET
+	.WORD	SNDCH2		;CIRCUMFLEX
+	.WORD	SNDCH2		;UNDERSCORE
+	.WORD	SNDCH2		;GRAVE ACCENT
+	.WORD	LOWRKS		;LOWERCASE A
+	.WORD	LOWRKS		;LOWERCASE B
+	.WORD	LOWRKS		;LOWERCASE C
+	.WORD	LOWRKS		;LOWERCASE D
+	.WORD	LOWRKS		;LOWERCASE E
+	.WORD	LOWRKS		;LOWERCASE F
+	.WORD	LOWRKS		;LOWERCASE G
+	.WORD	LOWRKS		;LOWERCASE H
+	.WORD	LOWRKS		;LOWERCASE I
+	.WORD	LOWRKS		;LOWERCASE J
+	.WORD	LOWRKS		;LOWERCASE K
+	.WORD	LOWRKS		;LOWERCASE L
+	.WORD	LOWRKS		;LOWERCASE M
+	.WORD	LOWRKS		;LOWERCASE N
+	.WORD	LOWRKS		;LOWERCASE O
+	.WORD	LOWRKS		;LOWERCASE P
+	.WORD	LOWRKS		;LOWERCASE Q
+	.WORD	LOWRKS		;LOWERCASE R
+	.WORD	LOWRKS		;LOWERCASE S
+	.WORD	LOWRKS		;LOWERCASE T
+	.WORD	LOWRKS		;LOWERCASE U
+	.WORD	LOWRKS		;LOWERCASE V
+	.WORD	LOWRKS		;LOWERCASE W
+	.WORD	LOWRKS		;LOWERCASE X
+	.WORD	LOWRKS		;LOWERCASE Y
+	.WORD	LOWRKS		;LOWERCASE Z
+	.WORD	SNDCH2		;LEFT BRACE
+	.WORD	SNDCH2		;VERTICLE LINE
+	.WORD	SNDCH2		;RIGHT BRACE
+	.WORD	SNDCH2		;TILDE
+	.WORD	CHROUT		;RUBOUT
+
+.SBTTL	SOME USEFUL ASCII STRINGS
+
+TTICCC::.ASCII	%^C%
+CRLF.0::.ASCII	<15><12><200>
+
+TTICZC::.ASCII	%^Z%<15><12><200> ;Control-Z announcement string
+
+LINES4::.ASCII	<12><12><12>
+LF::	.ASCIZ	<12>
+
+.EVEN
+
+.END

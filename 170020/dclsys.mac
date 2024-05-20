@@ -1,0 +1,618 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.LIBRARY	/DCL:DCLMAC.MLB/
+.NLIST
+.INCLUDE	/DCL:DCLPFX.MAC/
+.LIST
+TITLE	DCLSYS,<DCL System Operation Commands>,0D,09-AUG-91,CEK/JFM/BTB/DLS
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DCLSYS
+;+
+;  001	JFM  05-DEC-82	Created from DCLCMD.MAC
+;  002	JFM  08-FEB-83	ADDED /DEVICE_TYPE to SET TERMINAL
+;  003	JFM  09-MAR-83	Changed VK100 translation to VK100 in SET TERM
+;  004	JFM  29-MAR-83	No, I changed VK100 to VTK00 in SET TERM before.
+;  005	JFM  02-JUN-83	Removed /VK100, /VT05, and /VT55.  Added /EIGHT_BIT.
+;  006	JFM  23-NOV-83	Removed TTYSET parsing code.  TERMGR handles it now.
+;  007	JFM  11-DEC-83	New way for TERMGR line parsing, uses CMDPOS.
+;  008	JFM  11-MAR-84	Added UTLMGR dispatcher ... DCL doesn't do parsing
+;  009	JFM  12-MAR-84	Added ACTMGR dispatcher ... DCL doesn't do parsing
+;  010	JFM  08-MAY-84	Cleaned up ASSIGN and DEASSIGN commands
+;  011	JFM  08-JUL-84	DCL does even less parsing on UTLMGR-type commands
+;  012	JFM  08-AUG-84	Added SHOW commands, fixed them up
+;  013	JFM  20-DEC-84	SHOW USER and SHOW JOB /OUTPUT bug fixed
+;  014	JFM  29-Jan-85	Previous logical name replaced message doesn't get
+;			printed under SET NOECHO
+;  015  GMB  29-May-85	Moved UTLMGR, ACTMGR, and TERMGR commands to DCLDSP
+;
+;			[RSTS V9.5]
+;  016	JFM  01-Jul-87	Changed ASSIGN to use new "user logical" pattern.
+;			Got rid of unused "PPN" variable.
+;
+;			[RSTS V10.0]
+;  017	BTB  19-Dec-89	Changed ASSIGN to allow up to 15 chars; changed
+;			DEASSIGN/ALL to use .ULOG instead of zapping low core
+;  018	BTB  26-Apr-90	Add /REPLACE=QUERY to ASSIGN/USER, add /NOOUTPUT
+;			to SHOW commands
+;  019	BTB  30-Apr-90	Add /USER to ASSIGN and DEASSIGN; clean up ASSIGN
+;  020	BTB  30-May-90	SYSTAT /OUTPUT w/out filespec should go to KB:
+;
+;			[RSTS V10.1]
+;  021	DLS  02-Aug-91	Added SHOW DISK [DUO:/RESET[=ERROR_COUNTERS]]
+;-
+
+	.PSECT	DCLSYS,RO,REL,CON
+	DEFORG	DCLSYS
+
+	$CUI	TABLE			;Include macros for CUI tables
+
+.MCALL	PUTCCL,PUTSPA,PUTSTR,$MOVV,$DOCCL,PUTFIL			;021
+
+	TMPORG	TEXT
+QUERY:	.ASCII	"Logical name already assigned - replace it <NO>? "
+QUERSZ	=	.-QUERY
+	.EVEN
+	UNORG
+
+	TMPORG	IMPURE
+REPFLG:	.BLKB			;Byte to keep track of /[NO]REPLACE state ;018
+	.EVEN
+	UNORG
+
+.SBTTL	ASSIGN Command
+
+ASS.QL:	DEFQUAL	REP.Q,ARG=OPT,QF.NEG			;/[NO]REPLACE	;018
+	 DEFARG	QUER.K					;        =QUERY	;018
+	 ENDARG						;		;018
+	DEFQUAL	USER.Q					;/USER		;019
+	ENDQUAL								;018
+	
+ASS.CMD::$THR
+	$DEFCMD	QUAL=ASS.QL						;018
+	$PARM	PARM1,DEVPPN,PROMPT=DEV$P		; device:[(ppn)]
+	$PARM	PARM2,U$ULOG,FLAGS=PF.SEP,PROMPT=LOG$P	; user logical[:]
+	$ENDCMD
+10$:	$DO
+	CLRB	REPFLG			; Default action is /REPLACE	;018
+	$ENDDO
+	$FETCQ	REP.Q			;Was /[NO]REPLACE specified?	;018
+	$IF	PRESENT			;Yes				;018
+	$IF	YES			; If it wasn't negated		;018
+	$FETKA	QUER.K			;  Was =QUERY specified?	;018
+	$IF	PRESENT			;  If so			;019
+	$DO				;				;018
+	INCB	REPFLG			;    Set flag = 1		;019
+	$ENDDO				;				;018
+	$ENDIF				;  Endif (done with =QUERY)	;018
+	$ELSE				; Else it was negated		;018
+	$DO				;				;018
+	DECB	REPFLG			;  Set flag = -1		;019
+	$ENDDO				;				;018
+	$ENDIF				; Endif				;018
+	$ENDIF				;Endif				;018
+	$DO				;				;019
+16$:	CALBX	FET.P <#PARM1>		;Fetch device name (and ppn if any) ;018
+	CALBX	U$FSS <U.CMN+U.LEN,#U.CMN+U.STR>	; Scan device	;017
+	CALLX	U$CHKE			; No error should be possible	;017
+	CALBX	FET.P <#PARM2>		;Fetch logical name
+
+	MOV	U.CMN+U.POS,LX.ERP	;Anything wrong is going to be with
+					; the logical name (CUI checks device)
+	MOV	#U.CMN+U.STR,R1		;Point to start of logical name	;017
+	MOV	R1,R2			;Point to first available char	;017
+	ADD	U.CMN+U.LEN,R2		; after logical name		;017
+	CLRB	(R2)			;Terminate buffer w/space	;017
+	MOV	#FIRQB+FQNAM1,R4 	;Init pointer into FIRQB	;017
+
+20$:	CALL	RADWRD			;Convert up to 3 chars to RAD50	;017
+	MOV	R3,(R4)+		;Copy results to FIRQB		;017
+	CMP	R1,R2			;Are we at end of string?	;017
+	BNE	20$			;No - go do some more		;017
+
+	CLR	XRB+XRLEN		;Data passed to UU.ASS (.UUO)
+	CLR	XRB+XRBC		;
+	CLR	XRB+XRLOC		;
+	TSTB	REPFLG			;Replace if already there?	;018
+	BEQ	30$			;No - go enter it		;018
+	MOVB	#-1,FIRQB+FQSIZM	;Set "noreplace" flag		;018
+30$:	MOVB	#UU.ASS,FIRQB+FQFUN	;Enter the ...
+	.ULOG				;user logical.
+	MOVB	FIRQB,R0		;Get the error code, if any.	;017
+	BEQ	45$			;No error was found		;017
+	CMPB	R0,#FIEXST		;Was it not replaced?		;018
+	BNE	40$			;No - check next error		;018
+	TSTB	REPFLG			;Was it a /NOREPLACE?		;018
+	BPL	35$			;No - do the query		;018
+	CLR	R0			;Return success			;018
+	BR	50$			;All done			;018
+
+35$:	CLRB	REPFLG			;If they say yes, we'll replace	;018
+	.TTRST				;Cancel ^O			;018
+	CALBX	FWRITE <#QUERSZ,#QUERY>	;Write out prompt		;018
+	CALLX	CLRXRB			;Zero the XRB			;018
+	MOV	#SUBBUF,R5		;Store address of SUBBUF	;019
+	MOV	#SUB.BSIZ,XRB+XRLEN	;Buffer length			;018
+
+	MOV	R5,XRB+XRLOC		;Address of buffer		;018
+	MOV	#400,XRB+XRMOD		;Want "forced terminal read" 	;018
+
+	.READ				;Read response			;018
+
+	CMPB	FIRQB+0,#EOF		;Was error ?End of file on device ;018
+	BEQ	50$			;Yes - all done			;018
+	CALLX	U$CHKE			;Abort if other error		;018
+	TST	XRB+XRBC		;Is length of line = 0?		;018
+	BEQ	50$			;Yes - ^C typed - get out	;018
+	BICB	#40,(R5)		;Force first char to uppercase	;019
+	CMPB	(R5),#'Y		;Did they type "Y"?		;018
+	BEQ	16$			;Yes - redo call with REPLACE	;018
+	BR	50$			;Nope - all done		;018
+
+40$:	CMPB	R0,#INUSE		;Is logical table full?		;017
+	BNE	50$			;No - we're all done		;017
+	MOV	#LFUL.E,R0		;Yes - ?Too many logical names assigned. ;017
+	BR	50$			;All done			;017
+
+45$:	TSTB	FIRQB+FQFUN		;Are we replacing logical assignment? ;018
+	BPL	50$			;No				;017
+	CMESSAG	#LOGR.M			;Previous log. name assignment replaced ;017
+
+50$:	$ENDDO
+	$ENDTHR
+
+GLOBAL	<LOGR.M,LFUL.E,INUSE,U.ILOG,BADNAM,CMDPOS,LX.ERP>		;017
+GLOBAL	<SUBBUF,SUB.BSIZ,EOF,FIEXST>					;018
+
+.SBTTL DEASSIGN Command
+
+; Qualifier list
+
+DEAS.QL:DEFQUAL	ALL.Q			;	/ALL
+	DEFQUAL	USER.Q			;	/USER			;019
+	ENDQUAL
+
+DEAS.CMD::$THR
+	$DEFCMD QUAL=DEAS.QL
+	$FETCQ	ALL.Q			;Did he specify /ALL?
+	$IF	ABSENT			;If not then
+	$PARM	PARM1,U$LOGNAM,PROMPT=LOG$P; Prompt for and parse LOGNAM
+	$GOTO	10$			; Go to UTLMGR			;017
+	$ELSE				;Else
+	$PARM	PARM1,U$LOGNAM,FLAGS=PF.OPT; Parse optional LOGNAM
+	$FETP	PARM1			;Fetch it			;017
+	$IF	PRESENT			; If it's there			;017
+10$:	$DOCCL	...UTL			;  Ship it to UTLMGR		;017
+	$ENDIF				; Endif				;017
+	$ENDIF				;Endif
+	$ENDCMD				;
+	$DO				;He specified /ALL with no parameter
+
+	CALLX	CLRFQX			; Clear FIRQB and XRB.		;017
+	MOVB	#UU.DAL,FIRQB+FQFUN	; Deallocate function		;017
+	MOVB	#1,FIRQB+FQFIL		; Set "logicals only" flag	;017
+	.ULOG				; Deallocate all user logicals	;017
+	CALLX	U$CHKE			; No error expected		;017
+
+	$ENDDO
+	$ENDTHR
+
+GLOBAL	<LOG.W,...UTL,$DOCCL>
+
+.SBTTL	ASCII to RAD50 conversion routine
+
+;+
+; RADWRD - Scan and convert 3 characters of ASCII to 1 word of RADIX 50
+;
+;  Inputs:
+;	R1 -> String to scan
+;
+;  Format:
+;	CALL	RADWRD
+;
+;  Outputs:
+;	R1 -> First unscanned character
+;	R3 =  3 characters in RAD50
+;	R5 =  unknown
+;
+;	Scan stops at first non-RAD50 character or after 3 characters 
+;		have been scanned
+;	Only letters, digits, and _'s (translated to .'s) are allowed
+;-
+
+.ENABL	LSB
+
+RADWRD:	CLR	R3		;Clear return value
+	CALL	20$		;Get 1st character
+	CALL	20$		;Get 2nd character
+
+;+
+; Subroutine to input a single RAD50 character, and add it to
+; the word in R3.  After finding a non-RAD50 character, the
+; subroutine adds spaces when it is called.  This will execute a
+; third time without being called.
+;-
+
+20$:	MOVB	(R1)+,R5	;Get a character
+	CMP	#'_,R5		;Is it an underscore?
+	BNE	25$		;No
+	MOV	#28.,R5		;Insert a "."
+	BR	50$		;Go accumulate
+
+25$:	CALLX	UPCASE		;Convert to uppercase
+	SUB	#'0-30.,R5	;Reduce digits to range 0-9
+	CMP	R5,#39.		;Is this one?
+	BLOS	50$		;Go accumulate
+
+	SUB	#'A-1-<'0-30.>,R5 ;Reduce letters to range 1-26.
+	BLE	40$		;Zero is illegal
+	CMP	R5,#26.		;Is this a letter?
+	BLOS	50$		;YES -- go accumulate
+
+40$:	DEC	R1		;Leave R1 pointing at the bad character
+	CLR	R5		; and leave a space instead
+50$:	MUL	#50,R3		;'Shift Left' the old value
+	ADD	R5,R3		;and add in the new character
+	RETURN			;EXIT
+
+.DSABL	LSB
+
+.SBTTL	$QUAL - LOCAL macro subroutine 
+;+
+; $QUAL sets flag indicating qualifier is present
+; It is a LOCAL macro and should not be put in the MACO library
+;-
+
+.MACRO	$QUAL		;LOCAL to DCLSYS!
+	 .WORD $QUAL	
+	.ENDM	$QUAL
+
+	TMPORG IMPURE
+QUALFLAG:.BLKW
+	UNORG
+
+$QUAL:	CLR	QUALFLAG		;Qualifier is present
+	RETURN
+
+.SBTTL SHOW JOB Command
+
+JOB.QL:	DEFQUAL	ALL.Q,CONF=<TER.Q,DET.Q,ATT.Q,PARM1>	;/ALL
+	DEFQUAL	ATT.Q,CONF=<TER.Q,ALL.Q,PARM1>		;/ATTACHED
+	DEFQUAL	DET.Q,CONF=<TER.Q,ALL.Q,PARM1>		;/DETACHED
+	DEFQUAL	TER.Q,CONF=<ALL.Q,ATT.Q,DET.Q,PARM1>,ARG=REQ
+	 DEFARG	TYPE=U$DEV				;/TERMINAL=device
+	 ENDARG						;
+SYS.QL:	DEFQUAL	OUT.Q,ARG=OPT,QF.NEG			;/[NO]OUTPUT=file  ;020
+	 DEFARG	TYPE=LF.N				;
+	 ENDARG						;
+	ENDQUAL
+	
+SHJO.CMD::$THR
+	$DEFCMD QUAL=JOB.QL,U.CMDC=0
+	$PARM PARM1,U$U8,PF.OPT,CONF=<TER.Q,ALL.Q,ATT.Q,DET.Q>,MINVAL=1,MAXVAL=63
+	$ENDCMD
+	$GOTO	DOSYS		;Go do systat-type commands
+	$ENDTHR	
+
+.SBTTL SHOW USERS Command
+
+SHUS.CMD::$THR
+	$DEFCMD QUAL=JOB.QL,U.CMDC=1
+	$PARM PARM1,TYPE=U$ACC,CONF=<TER.Q,ALL.Q,ATT.Q,DET.Q>,FLAGS=PF.OPT
+
+	$FETCQ	DET.Q		;Fetch /DETACH
+	$IF	ABSENT		;If it's not there then
+	DFLTCQ	ATT.Q		;  Default to /ATTACH
+	$ENDIF			;Endif
+	$ENDCMD
+	
+DOSYS:	PUTCCL	...SYS		;"SYSTAT"
+	$CALL	DO.OUT		;Parse /OUTPUT
+
+	$DO			;
+	MOV	#-1,QUALFLAG	;Initially, we have no qualifiers present
+	$ENDDO			;
+
+	$FETCQ	DET.Q		;Is it /DET?
+	$IF	PRESENT		;If so then
+	$QUAL			;  A qualifier is present
+	PUTSTR	"/U"		;  "/U"
+	$ENDIF			;Endif
+
+	$FETCQ	ATT.Q		;Is it /ATTACHED?
+	$IF	PRESENT		;If so then
+	$QUAL			;  A qualifier is present
+	PUTSTR	"/A"		;  "/A"
+	$ENDIF			;Endif
+
+	$FETCQ	TER.Q		;Did he specify /TERMINAL=device?
+	$IF	PRESENT		;If so then
+	$QUAL			;  A qualifier is present
+	$FETA			;  Fetch the device
+	$IFDEV	TTY		;  If device is terminal then
+	PUTSTR	"/K"		;    "/K"
+	$DO			;
+	MOV	U.CMN+U.LOW,R1	;    Assume he specified a unit number
+	TST	U.CMN+U.HIGH	;    Did he specify a unit number?
+	IFEQ			;    If not then
+	CALLX	DOTERM		;      Get his terminal number	
+	ENDIF			;    Endif
+	CALBX	INSERT <#10$,R1>;    "xx"
+	 TMPORG	TEXT		;
+10$:	 .ASCIC	"!UW"		;    
+15$:	  .ASCIC <"*">		;
+18$:	  .ASCIC <",">		;
+	 UNORG			;
+	$ENDDO			;
+	$ELSE			;  Else
+	$DO			;  
+	MOV	U.CMN+U.POS,LX.ERP;  Point to device
+	MOV	#NODEVC,R0	;    ?Not a valid device (not a KB)
+	$ENDDO			;  
+	$ENDIF			;  Endif
+	$ENDIF			;Endif
+
+	$FETCQ	ALL.Q		;Is it /ALL
+	$IF	PRESENT		;If so then
+	$QUAL			;  A qualifier is present
+	PUTSTR	"/S"		;  "/S"
+	$ENDIF			;Endif
+
+	$DO			;I want to know if a qualifier is present
+	MOV	QUALFLAG,R0	;Move flag into R0 so we can test for
+	$ENDDO			; presence or absence
+
+	$IF	ABSENT		;If no qualifiers were present then
+	PUTSTR	"/"		;  "/"
+	$FETP	PARM1		;  Did he speicify a parameter?
+	$IF	ABSENT		;  If not then (must be SHOW JOB)
+	$DO			;
+	CALLX	U$USYS		;    Do a UU.SYS to find job number
+	CLR	R1		;    Get set up for job number
+	MOVB	FIRQB+FQJOB,R1	;    Get job number (*2)
+	ASR	R1		;    Divide by 2 to get job number
+	CALBX	INSERT <#10$,R1>;    Insert user's job number
+	$ENDDO			;
+	$ELSE			;  Else he specified a parameter
+	$DO			;  
+	MOV	U.CMN+U.LOW,R1	;    Clear spot to put users Project number
+	MOV	R1,R2		;    Clear spot to put Programmer number
+	CLRB	R1		;
+	SWAB	R1		;    R1 = Project number
+	BIC	#^C<377>,R2	;    R2 = Programmer number
+	TST	U.CMN+U.CMDC	;    Is this SHOW JOB or SHOW USER?
+	IFEQ			;    If SHOW JOB then
+	CALBX	INSERT <#10$,R2>;      Insert user's job number
+	ELSE			;    Else it's SHOW USER
+	CMP	#377,R1		;      Is there a wildcard project number?
+	IFEQ			;      If so then
+	CALBX	INSERT <#15$>	;        "*"
+	ELSE			;      Else
+	CALBX	INSERT <#10$,R1>;        "p"
+	ENDIF			;      Endif
+	CALBX	INSERT	<#18$>	;      "'"
+	CMP	#377,R2		;      Is there a wildcard programmer number?
+	IFEQ			;      If so then
+	CALBX	INSERT	<#15$>	;        "*"
+	ELSE			;      Else
+	CALBX	INSERT <#10$,R2>;        "pn"
+	ENDIF			;      Endif
+	ENDIF			;    Endif
+	$ENDDO			;	
+	$ENDIF			;  Endif
+	$ENDIF			;Endif	
+
+20$:	$ENDTHR			;
+
+GLOBAL	<...SYS,U.CMN,U.CMDC,NODEVC,LX.ERP>
+
+.SBTTL	SHOW DISK(s) Command
+
+SYD.QL:	DEFQUAL RSET.Q,FLAGS=QF.NEG,ARG=OPT	;/RESET[=ERROR_COUNTERS];021
+	 DEFARG ECNT.K							;021
+	 ENDARG								;021
+	DEFQUAL	OUT.Q,FLAGS=QF.NEG,ARG=OPT	;/[NO]OUTPUT=file  	;021
+	 DEFARG	TYPE=LF.N			;			;021
+	 ENDARG					;			;021
+	ENDQUAL
+
+SHDI.CMD::$THR
+	$DEFCMD QUAL=SYD.QL
+	$PARM PARM1,TYPE=U$DEV,FLAGS=PF.OPT				;021
+	$ENDCMD
+
+	PUTCCL	...SYS		;"SYSTAT"
+	$CALL	DO.OUT		;Process /OUTPUT = filespec
+	PUTSTR	"/D"		;"/D"
+
+	$CALL	DO.DEV		;Process device name parameter		;021
+
+DO.RSET:
+	$FETCQ	RSET.Q		;Did they specify /RESET[=ERROR_COUNTER]? ;021
+	$IF	PRESENT		;If so then				;021
+	$IF	YES		; If it was positive form		;021
+	PUTSTR	":Z"		;  ":Z"					;021
+	$ENDIF			;Endif					;021
+	$ENDIF			;Endif					;021
+	$ENDTHR	
+
+GLOBAL	<...SYS>
+
+.SBTTL	SHOW RUN_TIME_SYSTEM(s) Command
+
+SHRU.CMD::$THR
+	$DEFCMD QUAL=SYS.QL
+	$ENDCMD
+
+	PUTCCL	...SYS		;"SYSTAT"
+	$CALL	DO.OUT		;Process /OUTPUT = filespec
+	PUTSTR	"/R"		;"/R"
+	$ENDTHR	
+
+GLOBAL	<...SYS>
+
+.SBTTL	SHOW LIBRARY and LIBRARIES Command
+
+SHLI.CMD::$THR
+	$DEFCMD QUAL=SYS.QL
+	$ENDCMD
+
+	PUTCCL	...SYS		;"SYSTAT"
+	$CALL	DO.OUT		;Process /OUTPUT = filespec
+	PUTSTR	"/L"		;"/L"
+	$ENDTHR	
+
+GLOBAL	<...SYS>
+
+.SBTTL	SHOW RECEIVER(s) Command
+
+SHRE.CMD::$THR
+	$DEFCMD QUAL=SYS.QL
+	$ENDCMD
+
+	PUTCCL	...SYS		;"SYSTAT"
+	$CALL	DO.OUT		;Process /OUTPUT = filespec
+	PUTSTR	"/M"		;"/M"
+	$ENDTHR	
+
+GLOBAL	<...SYS>
+
+.SBTTL	SHOW MEMORY Command
+
+SHME.CMD::$THR
+	$DEFCMD QUAL=SYS.QL
+	$ENDCMD
+
+	PUTCCL	...SYS		;"SYSTAT"
+	$CALL	DO.OUT		;Process /OUTPUT = filespec
+	PUTSTR	"/C"		;"/C"
+	$ENDTHR	
+
+GLOBAL	<...SYS>
+
+.SBTTL	SHOW BUFFER(s) Command
+
+SHBU.CMD::$THR
+	$DEFCMD	QUAL=SYD.QL 
+	$ENDCMD
+
+	PUTCCL	...SYS		;"SYSTAT"
+	$CALL	DO.OUT		;Process /OUTPUT = filespec
+	PUTSTR	"/F"		;"/F"
+
+	$GOTO DO.RSET
+
+	$ENDTHR	
+
+GLOBAL	<...SYS>
+
+.SBTTL	SHOW DEVICES/ALLOCATED Command
+
+SHBS.CMD::$THR
+	$DEFCMD QUAL=SYS.QL
+	$ENDCMD
+
+	PUTCCL	...SYS		;"SYSTAT"
+	$CALL	DO.OUT		;Process /OUTPUT = filespec
+	PUTSTR	"/B"		;"/B"
+	$ENDTHR	
+
+GLOBAL	<...SYS>
+
+.SBTTL	SHOW FILES/OPEN Command
+
+SHJ.QL:	DEFQUAL	JOB.Q,ARG=OPT		;/JOB[=number]
+	 DEFARG TYPE=U$U8,MINVAL=1,MAXVAL=63
+	 ENDARG
+	DEFQUAL	OUT.Q,ARG=OPT,QF.NEG	;/[NO]OUTPUT=file		;020
+	 DEFARG	TYPE=LF.N		;
+	 ENDARG				;
+	ENDQUAL		
+
+SHOP.CMD::$THR
+	$DEFCMD QUAL=SHJ.QL
+	$PARM	PARM1,TYPE=U$DEVN,FLAGS=PF.OPT
+	$ENDCMD
+
+	PUTCCL	...SYS		;"SYSTAT"
+	$CALL	DO.OUT		;Process /OUTPUT = filespec
+	$FETCQ	JOB.Q		;Did he specify /JOB?
+	$IF	PRESENT		;If so then
+	PUTSTR	"/W"		;  "/W"
+	$CALL	DO.DEV		;  Process device name parameter	;021
+	$FETCQ	JOB.Q		;  Get JOB qualifier again
+	$FETA			;  Is there also a job number?
+	$IF	PRESENT		;  If so then
+	PUTSTR	":"		;    ":"
+	PUTSTR			;    job number
+	$ENDIF			;  Endif
+	$ELSE			;Else
+	PUTSTR	"/O"		;  "/O"
+	$CALL	DO.DEV		;  Process device name parameter	;021
+	$ENDIF			;Endif
+	$ENDTHR
+
+GLOBAL	<...SYS>							;021
+
+.SBTTL	Process disk devices
+
+DO.DEV:	$FETP	PARM1		;Did they specify a device?		;021
+	$IF	PRESENT		;If so then				;021
+	$IFDEV	DSK		;  If its a disk then			;021
+	PUTSTR	":"		;   ":"					;021
+	$DO			;   Put the ":" at end of dev (again)	;021
+	MOV	U.CMN+U.LEN,R1	;   Save the length			;021
+	MOVB	#':,<U.CMN+U.STR>(R1)	;   Add ";" at the end of string;021
+	INC	U.CMN+U.LEN	;   Inc the length			;021
+	$ENDDO			;   Back to threaded code		;021
+	PUTFIL			;   "dev"				;021
+	$DO			;   Now take the ":" of the end		;021
+	DEC	TRNLEN		;   Subtract one from the length	;021
+	DEC	TRNNEX		;   Previous last is now new next	;021
+	$ENDDO			;   Back to threaded code		;021
+	$ELSE			;  Else	
+	$DO			;   Load up the error			;021
+	MOV	U.CMN+U.POS,LX.ERP; Get error position			;021
+	MOV	#LDSK.E,R0	;   "?Device must be disk"		;021
+	$ENDDO			;   Back to threaded code		;021
+	$ENDIF			;  Endif
+	$ENDIF			;Endif
+	$RETURN
+
+GLOBAL	<LDSK.E,U.CMN,LX.ERP,TRNLEN,TRNNEX>				;021
+
+.SBTTL	Process /OUTPUT=filespec
+
+DO.OUT:	$THR
+	$FETCQ	OUT.Q		;Was /[NO]OUTPUT specified?		;020
+	$IF	PRESENT		;If so then
+	$IF	YES		; If /OUTPUT				;018
+	$FETA			;  Fetch the filespec
+	$IF	PRESENT		;  If one was specified			;020
+	PUTSPA			; " "
+	PUTSTR			;   "file"
+	$ENDIF			;  Endif				;020
+	$ELSE			; If /NOOUTPUT				;018
+	PUTSTR	""<SPACE>"NL:"	;  send to null device			;018
+	$ENDIF			; Endif
+	$ENDIF			;Endif
+	$ENDTHR
+.END

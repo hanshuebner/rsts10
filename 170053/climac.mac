@@ -1,0 +1,771 @@
+;
+;		COPYRIGHT (c) 1981 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD
+;	 MASSACHUSETTS.  ALL RIGHTS RESERVED.
+;
+; THIS  SOFTWARE  IS  FURNISHED  UNDER  A LICENSE AND MAY BE USED
+; AND  COPIED  ONLY IN  ACCORDANCE WITH THE TERMS OF SUCH LICENSE
+; AND WITH  THE INCLUSION  OF THE ABOVE  COPYRIGHT  NOTICE.  THIS
+; SOFTWARE  OR ANY OTHER  COPIES  THEREOF, MAY NOT BE PROVIDED OR
+; OTHERWISE MADE  AVAILABLE TO ANY OTHER PERSON.  NO TITLE TO AND
+; OWNERSHIP OF THE SOFTWARE IS HEREBY TRANSFERED.
+;
+; THE INFORMATION  IN THIS DOCUMENT IS SUBJECT  TO CHANGE WITHOUT
+; NOTICE AND SHOULD NOT BE CONSTRUED AS A COMMITMENT  BY  DIGITAL
+; EQUIPMENT CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR RELIABILITY OF
+; ITS SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.
+;
+;
+;
+; VERSION 01.01
+;
+; T. M. MARTIN  22-JAN-81
+;
+; MACRO DEFINITIONS TO SUPPORT THE RSX-11M/M-PLUS MULTI CLI
+; SUPPORT
+;
+; MODIFIED BY:
+;
+;	J. KAUFFMAN	2-AUG-83	01.01
+;		JRK280 -- ADD GC.CTC SUBFUNCTION CODE FOR ^C IN GCII$
+;
+;
+;
+; GET COMMAND FOR COMMAND INTERPRETER
+;
+;	This directive instructs the system to retrieve a command
+;	buffer for a CLI task, and copy it into a buffer in the task's
+;	address space.  Informations about the issueing terminal can also
+;	be returned.  Only CLI tasks can issue this directive.
+;									
+; This directive can only be issued by CLI tasks on systems that support
+; alternate CLIs (A$$CLI). It copies a command buffer from the pool into
+; the CLI task, and either deallocates it or leaves it queued for	
+; retrieval by a subsequent GCCI$ directive at the CLI's option.	
+; it can also fill in an information buffer in the CLI with data	
+; about the terminal and task from which the command originated.	
+;									
+;
+; Macro Call
+;
+;	GCCI$	CBUF,CBFL,IBUF,IBFL,ADDR,NCP
+;
+;	  CBUF	= Address of buffer to receive command string
+;	  CBFL	= Length of buffer ( Maximum buffer size is 84. for
+;		  RSX-11M and 259. for RSX-11M-PLUS )
+;	  IBUF	= Address of buffer to receive information on the
+;		  issuing terminal
+;	  IBFL	= Length of buffer to receive information
+;	  ADDR	= Address of command
+;		  ( This is the pool address of the command packet
+;		   in the $CLICQ list. This address is returned
+;		   in G.CCCA of the information buffer if GC.CND
+;		   is specified in the NCP argument. If this argument
+;		   is none zero then only the command with the address
+;		   specified by this argument is copied and/or dequeued.)
+;	  NCP	= Action to take if no command buffer present
+;		  (Note: GC.CND  can be supplied with one of the 
+;		   other options eg. GC.CND!GC.CEX)
+;
+; DPB format
+;
+;	+---------------+
+;	|   7.	|  127.	|
+;	+---------------+
+;	|   0	|  NCP	|	G.CCNC -- Action if no command queued
+;	+---------------+
+;	|     ADDR	|	G.CCAD -- Address of command to be returned
+;	+---------------+
+;	|     CBUF	|	G.CCBA -- Address of command buffer inside task
+;	+---------------+
+;	|     CBFL	|	G.CCBL -- Length of task's command buffer
+;	+---------------+
+;	|     IBUF	|	G.CCIA -- Address of optional info. buffer
+;	+---------------+
+;	|     IBFL	|	G.CCIL -- Length of optional info. buffer
+;	+---------------+
+;
+; G.CCNC ( action if no command queued ) bit definitions
+;
+;	GC.CCS (000) -- Return with carry set (default)
+;	GC.CEX (001) -- Force CLI to exit instead of returning
+;	GC.CST (002) -- Force CLI to stop instead of returning
+;	GC.CND (200) -- Copy command into buffer but do not dequeue it
+;			from the list
+;
+;
+; The format of the command buffer in the pool is shown below. the	
+; listhead is at $CLICQ.
+;									
+;	+---------------------------------------+			
+;	!	LINK				!
+;	+---------------------------------------+
+;	!	TCB ADDR OF CLI TO RECEIVE CMD	!			
+;	+---------------------------------------+			
+;	!	UCB ADDR OF ISSUING TERMINAL	!			
+;	+---------------------------------------+			
+;	!	SIZE OF THIS BUFFER IN POOL	!			
+;	+---------------------------------------+			
+;	!   		   !  TERMINATING CHAR  !
+;	+---------------------------------------+
+;	!					!			
+;	!	COMMAND TEXT IN ASCII		!			
+;	!					!			
+;	!					!			
+;	+---------------------------------------+			
+;									
+;									
+; The format of the command buffer set up in the CLI task
+; address space is:	
+;									
+;	+---------------------------------------+			
+;	!   ASCII DEVICE NAME OF ISSUING TTY	!	G.CCDV
+;	+---------------------------------------+			
+;	! NUM OF CHAR RETURNED ! OCTAL UNIT NUM.!	G.CCUN,G.CCCT
+;	+---------------------------------------+
+;	! NUMBER OF CHARACTERS IN COMMAND LINE	!	G.CCCL
+;	+---------------------------------------+
+;	!	FLAGS BYTE     ! TERMINATOR	!	G.CCTC,G.CCFL
+;	+---------------------------------------+
+;	!					!	G.CCBF	
+;	!	COMMAND TEXT IN ASCII		!			
+;	!					!			
+;	+---------------------------------------+			
+;									
+; The values returned in the FLAG byte G.CCFL are:
+;
+;	GC.CNL = 1	null command line
+;	GC.CTE = 2	prompt from a task exit
+;	GC.CTC = 100	notification packet for control-c 
+;
+; Note:
+;	The number of characters returned (G.CCCT) could be less than
+;	the number of characters in the command (G.CCCL) if the length
+;	of the command buffer in the task, as specified by CBFL argument,
+;	is smaller than the actual command line. If there is sufficient
+;	room, a carriage return is placed at the end of the command line
+;	returned at G.CCBF in the command buffer inside the task to ease
+;	parsing. This "extra" carriage return character is not reflected
+;	in the G.CCCT character count.
+;									
+; The format of the information buffer in the CLI
+; address task space is:	
+;									
+;	+---------------------------------------+			
+;	!	U.CW2 OF ISSUING TERMINAL	!	G.CCW2		
+;	+---------------------------------------+			
+;	!	NAME OF PARENT TASK (IF ANY)	!	G.CCPT		
+;	!		(2 WORDS)		!			
+;	+---------------------------------------+			
+;	!	ADDRESS OF OCB FROM PARENT	!	G.CCOA		
+;	+---------------------------------------+			
+;	!	LOGIN UIC OF ISSUING TERMINAL	!	G.CCPU		
+;	+---------------------------------------+			
+;	!	CURRENT UIC OF ISSUING TERMINAL	!	G.CCCU		
+;	+---------------------------------------+			
+;	!	ADDR OF CMD. IF NOT DEQUEUED	!	G.CCCA		
+;	+---------------------------------------+			
+;									
+; Extra fields can be added to the end off this buffer if required, because
+; the task supplies both the addr and length of its task buffer. Only
+; that much data is copied back to the task. The task buffer is filled	
+; from the front with the fields in the above order. If the buffer	
+; is not long enough to hold all of the data, the fields that would	
+; not fit are not supplied, but no indication of this data truncation	
+; is given to the task. Thus if more fields are added in a future release,
+; old tasks would still work since they will get exactly what they got	
+; before, they just would not get the new data.				
+;									
+
+	.MACRO	GCCI$	CBUF,CBFL,IBUF,IBFL,ADDR,NCP
+	.MCALL	OFF$
+	.IF	NDF $$$GLB
+	.BYTE	127.,7.
+	.BYTE	NCP
+	.BYTE	0
+	.WORD	ADDR
+	.WORD	CBUF
+	.WORD	CBFL
+	.WORD	IBUF
+	.WORD	IBFL
+	.ENDC
+;
+; DEFINE DPB OFFSETS
+;
+	.IF	NDF G.CCNC
+	.IRP	X,<,<G.CCNC,2>,<G.CCAD,2>,<G.CCBA,2>,<G.CCBL,2>,<G.CCIA,2>>
+	OFF$	X
+	.ENDM
+	OFF$	G.CCIL,2
+;
+; DEFINE INFORMATION BUFFER OFFSETS
+;
+; OFFSETS BEGIN AT ZERO
+$$$OST=0
+	.IRP	X,<<G.CCW2,2>,<G.CCPT,4>,<G.CCOA,2>,<G.CCPU,2>,<G.CCCU,2>,<G.CCCA,2>>
+	OFF$	X
+	.ENDM
+;
+; DEFINE COMMAND BUFFER OFFSETS
+;
+; OFFSETS BEGIN AT ZERO
+$$$OST=0
+	.IRP	X,<<G.CCDV,2>,<G.CCUN,1>,<G.CCCT,1>,<G.CCCL,2>,<G.CCTC,1>>
+	OFF$	X
+	.ENDM
+	.IRP	X,<<G.CCFL,1>,<G.CCBF,>>
+	OFF$	X
+	.ENDM
+
+;
+; DEFINE ACTION FLAG BYTE BIT DEFINITIONS
+;
+	.IF DF $$$GLB
+	.GLOBL	GC.CND,GC.CST,GC.CEX,GC.CCS
+	.ENDC
+
+GC.CND=200
+GC.CST=002
+GC.CEX=001
+GC.CCS=000	;DEFAULT
+
+	.ENDC
+	.ENDM	GCCI$
+;
+	.MACRO	GCCI$C	CBUF,CBFL,IBUF,IBFL,ADDR,NCP,CS,ERR
+	.MCALL	GCCI$,DIR$
+	.IF	NDF $$$GLB
+	.PSECT	$DPB$$
+$$$=.
+	.IFTF
+	GCCI$	CBUF,CBFL,IBUF,IBFL,ADDR,NCP
+	.IFT
+	.PSECT	CS
+	DIR$	#$$$,ERR
+	.ENDC
+	.ENDM
+;
+	.MACRO GCCI$S	CBUF,CBFL,IBUF,IBFL,ADDR,NCP,ERR
+	.MCALL	MOV$,MVB$,DIR$
+	MOV$	IBFL
+	MOV$	IBUF
+	MOV$	CBFL
+	MOV$	CBUF
+	MOV$	ADDR
+	MVB$	NCP,0
+	MOV	(PC)+,-(SP)
+	.BYTE	127.,7.
+	DIR$	,ERR
+	.ENDM
+;
+; REQUEST AND PASS OFFSPRING INFORMATION
+;
+;   This directive instructs the system to request the specified task
+;   and to chain to it by unlinking any or all OCBs from the issuing
+;   task.  Optionally, the directive can pass a command line to the
+;   requested task.  Only a privileged task or CLI may specify
+;   the UIC or TI: of the requested task.
+;
+;	
+; Macro Call
+;
+;	RPOI$ TNAME,PN,PR,UGC,UMC,PARENT,BUFADR,BUFLEN,SC,DNAM,UNIT,TASK,OCBAD
+;
+;	  TNAME	= Name of task to be chained to
+;	  PN	= ( Not used or supported ) partition name
+;	  PR	= ( Not used or supported ) request priority
+;	  UGC	= Group code for UIC of the requested task
+;	  UMC	= Member code for UIC of the requested task
+;	  PARENT= Name of issuing task's parent task whose OCB
+;		  is to be passed.  If not specified, all OCB's
+;		  are passed.
+;	  BUFADR= address of buffer to be given to the requested task
+;	  BUFLEN= length of buffer to be given to requested task
+;	  SC	= Flags byte ( Force exit, pass all OCBs )
+;	  DNAM	= ASCII device name for TI:
+;	  UNIT	= unit number of task TI:
+;	  TASK	= RAD50 name of task to be started
+;	  OCBAD	= address of OCB to pass ( CLIs only )
+;	  
+; DPB format
+;
+;	+---------------+
+;	|   16.	|  11.	|
+;	+---------------+
+;	|       	|	R.POTK -- RAD50 name of task to be chained to
+;	+-    TNAME    -+
+;	|		|
+;	+---------------+
+;	|		|	       -- RAD50 name of partition
+;	+-	       -+		  (not used or supported)
+;	|		|
+;	+---------------+
+;	|		|	       -- request priority (not supported)
+;	+---------------+
+;	|  UGC	|  UMC	|	R.POUM -- UIC member code
+;	+---------------+	R.POUG    (high byte) UIC group code
+;	|		|	R.POPT -- name of parent whose OCB should be
+;	+-   PARENT    -+		  passed
+;	|		|
+;	+---------------+
+;	|    OCBAD	|	R.POOA -- address of OCB to pass (CLIs only)
+;	+---------------+
+;	|    BUFADR	|	R.POBF -- address of command buffer
+;	+---------------+
+;	|    BUFLEN	|	R.POBL -- length of command
+;	+---------------+
+;	|  SC	|  UNIT |	R.POUN -- unit number of task TI:
+;	+---------------+	R.POSC	  Flags byte ( force exit,pass all OCBs)
+;	|     DNAM	|	R.PODV -- Ascii device name for TI:
+;	+---------------+
+;	|		|	R.POTN -- RAD50 name of task to be started
+;	+-    TASK     -+
+;	|		|
+;	+---------------+
+;
+;  R.POSC -- Flags byte bit definitions
+;
+;	RP.OEX -- (200) Force task to exit (task issuing directive)
+;	RP.OAL -- (1)   Pass all OCB's
+;
+	.MACRO RPOI$ TNAME,PN,PR,UGC,UMC,PARENT,BUFADR,BUFLEN,SC,DNAM,UNIT,TASK,OCBAD
+	.MCALL	R50$,OFF$
+	.IF	NDF $$$GLB
+	.BYTE	11.,16.
+	R50$	TNAME
+	.BLKW	3
+	.BYTE	UMC,UGC
+	R50$	PARENT
+	.WORD	OCBAD
+	.WORD	BUFADR
+	.WORD	BUFLEN
+	.BYTE	UNIT
+	.BYTE	SC
+	.IF	NB DNAM
+$$$T2=.
+	.ASCII	/DNAM/
+.=$$$T2+2
+	.IFF
+	.WORD
+	.ENDC
+	R50$	TASK
+	.ENDC
+	.IF	NDF R.POTK
+	.IRP	X,<,<R.POTK,12>,<R.POUM,1>,<R.POUG,1>,<R.POPT,4>,<R.POOA,2>>
+	OFF$	X
+	.ENDM
+	.IRP	X,<<R.POBF,2>,<R.POBL,2>,<R.POUN,1>,<R.POSC,1>,<R.PODV,2>>
+	OFF$	X
+	.ENDM
+	OFF$	R.POTN,2
+;
+; DEFINE FLAGS BYTE BIT DEFINITIONS
+;
+	.IF DF $$$GLB
+	.GLOBL	RP.OEX,RP.OAL,RP.ONX
+	.ENDC
+RP.OEX=200
+RP.OAL=001
+RP.ONX=002
+
+	.ENDC
+	.ENDM	RPOI$
+;
+	.MACRO	RPOI$C	TNAME,PN,PR,UGC,UMC,PARENT,BUFADR,BUFLEN,SC,DNAM,UNIT,TASK,OCBAD,CS,ERR
+	.MCALL	RPOI$,DIR$
+	.IF	NDF $$$GLB
+	.PSECT	$DPB$$
+$$$=.
+	.IFTF
+	RPOI$	TNAME,PN,PR,UGC,UMC,PARENT,BUFADR,BUFLEN,SC,DNAM,UNIT,TASK,OCBAD
+	.IFT
+	.PSECT	CS
+	DIR$	#$$$,ERR
+	.ENDC
+	.ENDM	RPOI$C
+;
+	.MACRO	RPOI$S TNAME,PN,PR,UGC,UMC,PARENT,BUFADR,BUFLEN,SC,DNAM,UNIT,TASK,OCBAD,ERR
+	.MCALL	MVB$,MOV$,RFA$,DIR$
+	RFA$	TASK
+	MOV$	DNAM
+	MVB$	UNIT,SC
+	MOV$	BUFLEN
+	MOV$	BUFADR
+	MOV$	OCBAD
+	RFA$	PARENT
+	MVB$	UMC,UGC
+	CLR	-(SP)
+	CLR	-(SP)
+	CLR	-(SP)
+	RFA$	TNAME
+	MOV	(PC)+,-(SP)
+	.BYTE	11.,16.
+	DIR$	,ERR
+	.ENDM	RPOI$S
+;
+; GET COMMAND INTERPRETER INFORMATION
+;
+;    This directive instructs the system to fill a buffer with information
+;    about a specified CLI or about the CLI associated with a given terminal.
+;    A task must be privileged or a CLI in order to issue this directive for
+;    any terminal other than its own TI: or about a CLI not its own.
+;
+;
+; This directive instructs the system to fill a buffer in the current
+; task space with information about his own or a specified CLI. The
+; issuing task must be privileged to get information about a CLI
+; which is not the CLI of its TI: terminal. If the buffer is not
+; long enough to contain all the data, it is filled from left
+; to right with as much data as will fit. No indication will
+; be given to the task that its buffer is too short. This allows
+; new data items to be returned by future versions of this directive,
+; since old tasks will continue to work. They just will not see
+; the new data.
+;
+; Macro Call
+;
+;	GCII$	BUF,BUFL,CLI,DEV,UNIT
+;
+;	  BUF	= address of information buffer
+;	  BUFL	= length of information buffer
+;	  CLI	= RAD50 name of CLI to return data on
+;	  DEV	= ASCII name of terminal whose CLI should be used
+;	  UNIT	= octal unit number terminal
+;
+; DPB format
+;
+;	+---------------+
+;	|  7.	|  173.	|
+;	+---------------+
+;	|     BUF	|	G.CIBF -- Address of buffer
+;	+---------------+
+;	|     BUFL	|	G.CIBL -- Length of buffer
+;	+---------------+
+;	|		|	G.CICN -- RAD50 name of CLI to return data
+;	+-    CLI      -+		  on
+;	|		|
+;	+---------------+
+;	|     DEV	|	G.CIDV -- Ascii name of terminal whose CLI
+;	+---------------+		  should be used
+;	|   0	|  UNIT	|	G.CIUN -- Octal unit number of terminal
+;	+---------------+
+;
+;
+;
+; The format of the information buffer in the task's address space is:
+;
+;	+---------------------------------------+
+;	!	NAME OF CLI			!	G.CICL
+;	!	(2 WORDS)			!
+;	+---------------------------------------+
+;	!	CLI STATUS WORD FROM CPB	!	G.CICS
+;	+---------------------------------------+
+;	!	NAME OF TASK SERVING AS CLI	!	G.CITK
+;	!	(2 WORDS)			!
+;	+---------------------------------------+
+;	!	TERMINAL'S U.CW2		!	G.CIW2
+;	+---------------------------------------+
+;	!	TERMINAL'S PROTECTION UIC	!	G.CIPU
+;	+---------------------------------------+
+;	!	TERMINAL'S CURRENT UIC		!	G.CICU
+;	+---------------------------------------+
+;	!	CLI DEFAULT PROMPT STRING	!	G.CIDP
+;	!	( 16. BYTE BLOCK, FIRST BYTE	!
+;	!	 IS LENGTH OF STRING )		!
+;	+---------------------------------------+
+;
+;
+;
+; G.CICS STATUS BIT DEFINITIONS
+;
+; CP.NUL=1			;PASS EMPTY COMMAND LINES TO CLI
+; CP.MSG=2			;CLI DESIRES SYSTEM MESSAGES
+; CP.LGO=4			;CLI WANTS COMMANDS FROM LOGGED OFF TTYS
+; CP.DSB=10			;CLI IS DISABLED
+; CP.PRV=20			;USER MUST BE PRIV TO SET TTY TO THIS CLI
+; CP.SGL=40			;DON'T HANDLE CONTINUATIONS (M-PLUS ONLY)
+; CP.NIO=100			;MCR..., HEL, BYE DO NO I/O TO TTY
+;				;HEL, BYE ALSO DO NOT SET CLI ETC.
+; CP.RST=200			;RESTRICTED ACCESS, ONLY THE CLI CAN
+;				;SET A TERMINAL TO IT
+;
+;
+;
+
+
+	.MACRO	GCII$	BUF,BUFL,CLI,DEV,UNIT
+	.MCALL	OFF$,R50$
+	.IF	NDF $$$GLB
+	.BYTE	173.,7.
+	.WORD	BUF
+	.WORD	BUFL
+	R50$	CLI
+$$$T2=.
+	.ASCII	/DEV/
+.=$$$T2+2
+	.BYTE	UNIT,0
+	.ENDC
+	.IF	NDF G.BUF
+;
+; DEFINE DPB OFFSETS
+;
+	.IRP	X,<,<G.CIBF,2>,<G.CIBL,2>,<G.CICN,4>,<G.CIDV,2>,<G.CIUN>>
+	OFF$	X
+	.ENDM
+;
+; DEFINE INFORMATION BUFFER OFFSETS
+;
+; OFFSETS BEGIN AT ZERO
+$$$OST=0
+	.IRP	X,<<G.CICL,4>,<G.CICS,2>,<G.CITK,4>,<G.CIW2,2>,<G.CIPU,2>>
+	OFF$	X
+	.ENDM
+	.IRP	X,<<G.CICU,2>,<G.CIDP,16.>>
+	OFF$	X
+	.ENDM
+	.ENDC
+	.ENDM	GCII$
+;
+	.MACRO	GCII$C	BUF,BUFL,CLI,DEV,UNIT,CS,ERR
+	.MCALL	GCII$,DIR$
+	.IF	NDF $$$GLB
+	.PSECT	$DPB$$
+	.IFTF
+$$$=.
+	GCII$	BUF,BUFL,CLI,DEV,UNIT
+	.IFT
+	.PSECT	CS
+	DIR$	#$$$,ERR
+	.ENDC
+	.ENDM
+;
+	.MACRO	GCII$S	BUF,BUFL,CLI,DEV,UNIT,ERR
+	.MCALL	MOV$,MVB$,DIR$,RFA$
+	MVB$	UNIT,0
+	MOV$	DEV
+	RFA$	CLI
+	MOV$	BUFL
+	MOV$	BUF
+	MOV	(PC)+,-(SP)
+	.BYTE	173.,7.
+	DIR$	,ERR
+	.ENDM	GCII$S
+;
+; SET COMMAND LINE INTERPRETER
+;
+;    This directive instructs the system to setup the specified CLI
+;    as the CLI for the indicated terminal. The issuing task must be
+;    privileged or a CLI.
+;
+; DPB format
+;
+;	+---------------+
+;	|   5.	|  173.	|
+;	+---------------+
+;	|      DEV	|	S.CIDV -- Ascii name of terminal whose CLI
+;	+---------------+		  is to be set
+;	|   0	|  UNIT	|	S.CIUN -- Octal unit number of terminal
+;	+---------------+
+;	|		|	S.CICN -- RAD50 name of CLI terminal is to be
+;	+-     CLI     -+		  set to
+;	|		|
+;	+---------------+
+;
+;
+	.MACRO	SCLI$	CLI,DEV,UNIT
+	.MCALL	R50$,OFF$
+	.IF	NDF $$$GLB
+	.BYTE	173.,5.
+$$$T2=.
+	.ASCII	/DEV/
+.=$$$T2+2
+	.BYTE	UNIT,0
+	R50$	CLI
+	.ENDC
+	.IF	NDF S.CIDV
+	.IRP	X,<,<S.CIDV,2>,<S.CIUN,2>,<S.CICN,4>>
+	OFF$	X
+	.ENDM
+	.ENDC
+	.ENDM	SCLI$
+;
+	.MACRO	SCLI$C	CLI,DEV,UNIT,CS,ERR
+	.MCALL	SCLI$,DIR$
+	.IF	NDF $$$GLB
+	.PSECT	$DPB$$
+$$$=.
+	.IFTF
+	SCLI$	CLI,DEV,UNIT
+	.IFT
+	.PSECT	CS
+	DIR$	#$$$,ERR
+	.ENDC
+	.ENDM	SCLI$C
+;
+	.MACRO	SCLI$S	CLI,DEV,UNIT,ERR
+	.MCALL	MOV$,RFA$,DIR$
+	RFA$	CLI
+	MVB$	UNIT,0
+	MOV$	DEV
+	MOV	(PC)+,-(SP)
+	.BYTE	173.,5.
+	DIR$	,ERR
+	.ENDM
+;
+; SPECIFY COMMAND ARRIVAL AST
+;
+;    This directive instructs the system to cause an AST to be
+;    effected when a command is queued.
+;
+; DPB format
+;
+;	+---------------+
+;	|   2.	|  173.	|
+;	+---------------+
+;	|      AST	|	S.CAAE  -- AST address
+;	+---------------+
+;
+	.MACRO	SCAA$	AST
+	.MCALL	OFF$
+	.IF	NDF $$$GLB
+	.BYTE	173.,2.
+	.WORD	AST
+	.ENDC
+	.IF	NDF S.CAAE
+	OFF$
+	OFF$	S.CAAE,2
+	.ENDC
+	.ENDM
+;
+	.MACRO	SCAA$C	AST,CS,ERR
+	.MCALL	SCAA$,DIR$
+	.IF	NDF $$$GLB
+	.PSECT	$DPB$$
+$$$=.
+	.IFTF
+	SCAA$	AST
+	.IFT
+	.PSECT	CS
+	DIR$	#$$$,ERR
+	.ENDC
+	.ENDM	SCAA$C
+;
+	.MACRO	SCAA$S	AST,ERR
+	.MCALL	MOV$,DIR$
+	MOV$	AST
+	MOV	(PC)+,-(SP)
+	.BYTE	173.,2.
+	DIR$	,ERR
+	.ENDM	SCAA$S
+;
+; Send Data Request and Pass OCB
+;
+;	This directive instructs the system to send a send data packet
+;	for the specified task, unlink all or a selected OCB from the
+;	current task, link the OCB(s) to the specified task, and request
+;	it if it is not already active.  
+;
+;	
+; Macro Call
+;
+;	SDRP$	TASK,BUFADR,BUFLEN,EFN,FLAG,PARENT,OCBAD
+;
+;	  TASK	= Name of task to be chained to
+;	  BUFADR= address of buffer to be given to the requested task
+;	  BUFLEN= length of buffer to be given to requested task
+;	  EFN	= event flag
+;	  FLAG	= Flags byte ( Force exit, pass all OCBs )
+;	  PARENT= Name of issuing task's parent task whose OCB
+;		  is to be passed.  If not specified, all OCB's
+;		  or no OCBs are passed depending on the flag byte.
+;	  OCBAD	= address of OCB to pass ( CLIs only )
+;	  
+; DPB format
+;
+;	+---------------+
+;	|   9..	|  141.	|
+;	+---------------+
+;	|   	  	|	S.DRTK -- RAD50 name of task to be chained to
+;	+-    TASK     -+
+;	|		|
+;	+---------------+
+;	|    BUFADR	|	S.DRAD -- send data buffer address
+;	+---------------+
+;	|  FLAG	|  EFN	|	S.DREF -- event flag
+;	+---------------+	S.DRFL    (high byte) flags byte
+;	|    BUFLEN	|	S.DRBL -- length of send data packet (only 13 wds.
+;	+---------------+		  for RSX-11M, up to 256 wds for M-PLUS)
+;	|		|	S.DRPT -- name of parent whoses OCB shoul be passed
+;	+-   PARENT    -+
+;	|		|
+;	+---------------+
+;	|    OCBAD	|	S.DROA -- address of OCB to pass (CLIs only)
+;	+---------------+
+;
+;  S.DRFL -- Flags byte bit definitions
+;
+;	SD.REX -- (200) Force task to exit (task issuing directive)
+;	SD.RAL -- (1)   Pass all OCB's
+;
+	.MACRO	SDRP$	TASK,BUFADR,BUFLEN,EFN,FLAG,PARENT,OCBAD
+	.MCALL	R50$,OFF$
+	.IF	NDF $$$GLB
+	.BYTE	141.,9.
+	R50$	TASK
+	.WORD	BUFADR
+	.BYTE	EFN,FLAG
+	.IF	NB BUFLEN
+	.WORD	BUFLEN
+	.IFF
+	.WORD	13.
+	.ENDC
+	R50$	PARENT
+	.WORD	OCBAD
+	.ENDC
+	.IF	NDF S.DRTK
+	.IRP	X,<,<S.DRTK,4>,<S.DRAD,2>,<S.DREF,1>,<S.DRFL,1>,<S.DRBL,2>>
+	OFF$	X
+	.ENDM
+	.IRP	X,<<S.DRPT,4>,<S.DROA,2>>
+	OFF$	X
+	.ENDM
+;
+; DEFINE FLAGS BYTE BIT DEFINITIONS
+;
+	.IF DF $$$GLB
+	.GLOBL	SD.REX,SD.RAL,SD.RNX
+	.ENDC
+SD.REX=200
+SD.RAL=001
+SD.RNX=002
+
+	.ENDC
+	.ENDM	SDRP$
+;
+	.MACRO	SDRP$C	TASK,BUFADR,BUFLEN,EFN,FLAG,PARENT,OCBAD,CS,ERR
+	.MCALL	SDRP$,DIR$
+	.IF	NDF $$$GLB
+	.PSECT	$DPB$$
+$$$=.
+	.IFTF
+	SDRP$	TASK,BUFADR,BUFLEN,EFN,FLAG,PARENT,OCBAD
+	.IFT
+	.PSECT	CS
+	DIR$	#$$$,ERR
+	.ENDC
+	.ENDM	SDRP$C
+;
+	.MACRO	SDRP$S	TASK,BUFADR,BUFLEN,EFN,FLAG,PARENT,OCBAD,ERR
+	.MCALL	MVB$,MOV$,RFA$,DIR$
+	MOV$	OCBAD
+	RFA$	PARENT
+	MOV$	BUFLEN
+	MVB$	EFN,FLAG
+	MOV$	BUFADR
+	RFA$	TASK
+	MOV	(PC)+,-(SP)
+	.BYTE	11.,16.
+	DIR$	,ERR
+	.ENDM	SDRP$S

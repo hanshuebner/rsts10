@@ -1,0 +1,204 @@
+	.TITLE	PCTRL
+	.IDENT	/03.02/
+;
+; COPYRIGHT (c)	1983 BY DIGITAL EQUIPMENT CORPORATION.
+; ALL RIGHTS RESERVED.
+;
+; THIS  SOFTWARE IS FURNISHED  UNDER A LICENSE AND MAY BE USED OR
+; COPIED ONLY IN ACCORDANCE WITH THE TERMS OF SUCH LICENSE.
+;
+;
+; D. N. CUTLER/C. MONIA	18-MAR-74
+;
+; MODIFIED BY:
+;
+;	C. B. PETROVIC	26-FEB-82	03.01
+;		CBP039		ADD CORRECT .PSECT DEFINITIONS TO
+;				ALLOW TKB TO BE LINKED AS AN I/D TASK.
+;
+;	C. B. PETROVIC	7-NOV-83	03.02
+;		CBP114		ADD TRACE OF SEGMENT DESCRIPTORS AND 
+;				WINDOW DESCRIPTORS.
+;
+;
+;
+; PHASE CONTROL ROUTINE
+;
+; LOCAL DATA
+;
+	IMPURE			; READ/WRITE D-SPACE
+
+$LVL::	.BLKW	1		; DISTANCE OF SEGMENT FROM ROOT
+
+	.IF DF D$PC0!D$PC1
+	.ENABL	LC
+;
+;
+	.PSECT	TRPT$D,RO,D
+$TRSPH::.WORD	-1		; Phase on which to dump the seg desc.
+$TRSCS:	.WORD	0		; Real memory address of current segment
+$TRSEG:				; Reference label...
+;
+TRC S$GSTS,^/%NSegment status in low byte........................S$GSTS - %P%N/	
+TRC S$GBLK,^/Disk block address of the I-space segment.........S$GBLK - %P%N/
+TRC S$GBRO,^/R-O disk block address of I-space segment.........S$GBRO - %P%N/
+;TRC S$GBWD,^/Disk block address of the D-space segment.........S$GBWD - %P%N/
+;TRC S$GBOD,^/R-O disk block address of D-space segment.........S$GBOD - %P%N/
+TRC S$GLDA,^/Task-virtual load address of I-space segment......S$GLDA - %P%N/
+TRC S$GLNG,^/Length of I-space segment in bytes................S$GLNG - %P%N/
+;TRC S$GDLD,^/Task-virtual load address of D-space segment......S$GDLD - %P%N/
+;TRC S$GDLN,^/Length of D-space segment in bytes................S$GDLN - %P%N/
+TRC S$GNME,^/RAD50 segment name................................S$GNME - %2R%N/
+TRC S$GWDP,^/Virtual address of I-space WDB....................S$GWDP - %P%N/
+;TRC S$GDWP,^/Virtual address of D-space WDB....................S$GDWP - %P%N/
+TRC S$GRW,^/Length of I-space R-W memory allocation in bytes..S$GRWI - %P%N/
+TRC S$GRO,^/Length of I-space R-O memory allocation in bytes..S$GROI - %P%N/
+;TRC S$GRWD,^/Length of D-space R-W memory allocation in bytes..S$GRWD - %P%N/
+;TRC S$GROD,^/Length of D-space R-O memory allocation in bytes..S$GROD - %P%N/
+TRC S$GVAD,^/Highest I-space virtual address in segment........S$GVAD - %P%N/
+;TRC S$GDVA,^/Highest D-space virtual address in segment........S$GDVA - %P%N/
+TRC S$GROB,^/Base virtual address of I-space R-O root..........S$GROB - %P%N/
+;TRC S$GODB,^/Base virtual address of D-Space R-O root..........S$GODB - %P%N/
+;
+;
+	.PSECT	TRPT$D,RO,D
+
+	.WORD	-1		; Flag the end of the list
+
+	.ENDC	; D$PC0!D$PC1
+
+	.IF DF D$PC2!D$PC3
+
+	.PSECT	TRPT$D,RO,D
+
+$TRWPH::.WORD	-1		; Phase on which to dump the window blk	
+$TRWCS:	.WORD	0		; Real memory address of current window	
+$TRWIN:				; Reference label...
+;
+	TRC	W.NID,^"%NWindow ID/Base APR   - %P - W.NID/W.NAPR%N"
+	TRC	W.NBAS,^/Base virtual address - %P - W.NBAS%N/
+	TRC	W.NSIZ,^/Window size (64b blks)-%P - W.NSIZ%N/
+	TRC	W.NRID,^/Region ID            - %P - W.NRID%N/
+	TRC	W.NOFF,^/Offset in partition  - %P - W.NOFF%N/
+	TRC	W.NLEN,^/Length to map        - %P - W.NLEN%N/
+	TRC	W.NSTS,^/Window status word   - %P - W.NSTS%N/
+	TRC	W.NLGH,^/Window flags word    - %P - W.NLGH%N/
+	TRC	W$NREG,^/Address of reg. desc - %P - W$NREG%N/
+;
+	.PSECT	TRPT$D,RO,D
+	.WORD	-1		; Flag the end of the list
+;
+	.ENDC	; D$PC2!D$PC3
+
+
+;+
+; **-$PCTRL-PHASE CONTROL
+;
+; THIS ROUTINE IS CALLED TO CONTROL THE PROCESSING OF ALL SEG-
+; MENTS IN ALL PHASES. AS EACH SEGMENT IS CONSIDERED, A PHASE
+; DEPENDENT ROUTINE IS CALLED.
+;
+; INPUTS:
+;
+;	R0=ADDRESS OF PHASE DEPENDENT ROUTINE.
+;
+; OUTPUTS:
+;
+;	$CRSEG=REAL ADDRESS OF CURRENT SEGMENT DESCRIPTOR
+;	$CRVSG=VIRTUAL ADDRESS OF SEGMENT DESCRIPTOR
+;	$LVL=DISTANCE OF SEGMENT FROM ROOT (0=ROOT LEVEL)
+;
+; THE PAGE CONTAINING THE DESCRIPTOR IS LOCKED IN MEMORY AND UNLOCKED
+; ON RETURN FROM THE CALLED ROUTINE.
+;
+;-
+	PURE.I			; READ-ONLY I-SPACE
+
+$PCTRL::SAVRG			; SAVE NON VOLATILE REGISTERS
+	MOV	R0,R5		; SAVE SUBROUTINE ADDRESS
+	MOV	#-1,$LVL	; INITIALIZE LEVEL COUNT
+	CLR	-(SP)		; SET ZERO SENTINEL WORD
+	MOV	$RTSEG,-(SP)	; PUSH VIRTUAL ADDRESS OF ROOT
+10$:				;
+	INC	$LVL		; INCREMENT LEVEL COUNT
+	MOV	(SP),-(SP)	; SET SENTINEL AT THIS LEVEL
+20$:				;
+	MOV	(SP),R1		; GET VIRTUAL ADDRESS OF CURRENT
+	CALL	$CVLOK		; CONVERT TO REAL ADDRESS, LOCK IN MEMORY
+	MOV	R0,$CRSEG	; SAVE REAL ADDRESS OF CURRENT
+	MOV	R1,$CRVSG	; SAVE VIRTUAL ADDRESS OF CURRENT
+
+	.IF DF D$PC0
+
+	CALL	SEGDMP		; DISPLAY THE STRUCTURE BEFORE PROCESSING
+
+	.ENDC	; D$PC0
+
+	CALL	(R5)		; CALL THE CALLER'S SUBROUTINE
+
+	.IF DF D$PC1
+
+	CALL	SEGDMP		; DISPLAY THE STRUCTURE AFTER PROCESSING
+
+	.ENDC	; D$PC1
+
+	MOV	(SP),R1		; GET VIRTUAL ADDRESS OF CURRENT
+	CALL	$CVRL		; CONVERT TO REAL ADDRESS
+	CALL	$UNLPG		; UNLOCK PAGE
+	MOV	S$GUP(R0),-(SP)	; PUSH LINK-UP
+	BNE	10$		; IF NE HAVE LINK UP
+	TST	(SP)+		; REMOVE ZERO WORD
+30$:				;
+	MOV	S$GNXT(R0),(SP) ; REPLACE TOS WITH LINK-NEXT
+	CMP	(SP),2(SP)	; CHECK TOS AGAINST SENTINEL
+	BNE	20$		; IN NE, VALID LINK-NEXT
+	CMP	(SP)+,(SP)+	; DONE ALL ENTRIES AT THIS LEVEL
+	DEC	$LVL		; DECREMENT LEVEL COUNT
+	MOV	(SP),R1		; GET VIRTUAL ADDRESS OF OLD CURRENT
+	BEQ	40$		; IF EQ DONE
+	CALL	$CVRL		; CONVERT TO REAL ADDRESS
+	BR	30$		; SCAN ENTRIES AT NEXT LOWEST LEVEL
+40$:				;
+	TST	(SP)+		; POP ZERO SENTINEL WORD
+	RETURN			;
+
+	.IF DF D$PCTR
+
+SEGDMP:
+	CALL	$SAVAL		; SAVE ALL REGISTERS
+
+	.IF DF D$PC0!D$PC1
+
+	MOV	$CRSEG,$TRSCS	; Set the current segment address
+	MOV	#$TRSEG,R0	; Point to the list
+	CALL	$TRACE		; and dump it to ti:
+
+	.IF DF D$PC2!D$PC3
+
+	MOV	$CRSEG,R5	; copy current segment address
+	MOV	S$GWDP(R5),R1	; get window block pointer
+	CALL	$CVRL		; convert to real
+	MOV	$PHASE,W.NID(R0); copy phase number to display
+	MOV	R0,$TRWCS	; set the current window block address
+	MOV	#$TRWIN,R0	; point to the list
+	CALL	$TRACE		; and dump it to ti:
+	BIT	#ID$ATA,$SWTCH	; building an i/d task
+	BEQ	NONID		; if eq, no
+	MOV	$CRSEG,R5	; copy current segment address
+	MOV	S$GDWP(R5),R1	; get window block pointer
+	CALL	$CVRL		; convert to real
+	MOV	$PHASE,W.NID(R0); copy phase number to display
+	MOV	R0,$TRWCS	; set the current window block address
+	MOV	#$TRWIN,R0	; point to the list
+	CALL	$TRACE		; and dump it to ti:
+NONID:
+
+	.ENDC	; D$PC2!D$PC3
+
+	RETURN
+
+	.ENDC	; D$PC0!D$PC1
+
+	.ENDC	; D$PCTR
+
+	.END

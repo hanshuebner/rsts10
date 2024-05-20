@@ -1,0 +1,406 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.INCLUDE	/CUI:CUIPFX.MAC/
+TITLE	CUILOK,<CUI File Lookup>,0A,10-MAY-91,CEK/SDL
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR CUILOK
+;+
+;
+;  001	CEK  25-MAY-82	Created from CUITHR.MAC
+;  002	CEK  10-AUG-82	Made LOOKUP FILE allow *.
+;  003	CEK  17-Nov-82	Use modified message facility.
+;  004	SDL  12-Oct-83	Change the general I/O channel # in GENCHN.
+;  005  JFM  05-Mar-84  Made FSSCMN routine global
+;  006	SDL  08-Mar-84	Changed the general I/O channel # in GENCHN again.
+;  007	SDL  29-Nov-84	Changed the general I/O channel # in GENCHN again.
+;
+;-
+
+;+
+; CUILOK.MAC
+;
+; This module contains action routines to look up disk files and directories.
+; These routines are aids in checking the user's command for correctness.
+;-
+
+	.PSECT	CUILOK,RO,REL,LCL,CON
+	DEFORG	CUILOK
+
+.SBTTL	Constants
+
+GENCHN	=:	1.		;General-purpose I/O channel.
+				; (DCLRTS sets up the I/O channels bit mask in
+				;  IOBCHN to always reserve this one; so if it
+				;  is changed here, then change the bit mask)
+
+.SBTTL	LOOKUP -- Look up a file or directory
+;+
+; LOOKUP -- Look up a file or directory.
+;
+; FORMAT:
+;	LOOKUP	FILE [,DEFTYP=filetype]
+;	LOOKUP	DIRECTORY
+;
+; DESCRIPTION:
+;	The "LOOKUP FILE" form looks up a disk file to make sure it exists.  
+;	Use LOOKUP after you fetch a parameter or argument.  If you want
+;	LOOKUP to assume a default filetype in case the user didn't specify
+;	one, then use the DEFTYP construct.  Use * to specify a wildcard
+;	filetype.  Otherwise, DEFTYP will assume the null filetype.
+;
+;	The "LOOKUP DIRECTORY" form looks up a disk directory to make sure
+;	it exists.  Use LOOKUP after you fetch a parameter or argument.
+;
+;	If the filespec is for a non-disk device, LOOKUP always
+;	returns success.
+;
+; ERRORS:
+;	?File does not exist
+;	?Directory does not exist
+;-
+
+.MACRO	LOOKUP	WHAT,DEFTYP=<>
+	.IF	IDN <WHAT>,<FILE>
+	 .WORD	U$LOKF
+	.GLOBL	U$LOKF
+	.IF	B <DEFTYP>
+	 .WORD	0
+	.IFF
+	.IF	IDN <DEFTYP>,<*>
+	 .WORD	-17947.
+	.IFF
+	 .RAD50	/DEFTYP/
+	.ENDC
+	.ENDC
+	.IFF
+	.IIF	DIF <WHAT>,<DIRECTORY>	.ERROR	;Illegal keyword -- WHAT.
+	 .WORD	U$LOKD
+	.GLOBL	U$LOKD
+	.ENDC	
+	.ENDM	LOOKUP
+
+.SBTTL	U$LOKF--Look up a file.
+;+
+; U$LOKF--Look up file, and fail if not found.  
+;
+; Only disk files are looked up.
+;
+; INPUTS:
+;	CUI common contains a valid filespec with an explicit filename.
+;	R4	->	CUI common
+;	R3	->	word following op code
+;
+; USAGE:
+;	LOOKUP	FILE [,DEFTYP=typ]
+;
+; BINARY:
+;	.WORD	U$LOKF
+;	.WORD	<RAD50 of default filetype for lookup>
+;
+; OUTPUTS:
+;	C=1 	if	error.
+;	R0	=	return status:
+;		0	if normal return
+;		U.FIEX	if file doesn't exist.
+;	LX.ERP =	position of filespec in command string IF file doesn't
+;			exist;unchanged if file exists.
+;	R3	->	next instruction
+;
+; SIDE EFFECTS:
+;	Other registers random.
+;	FIRQB clobbered.
+;
+; CAUTION:
+;	This routine is not careful to zero undefined fields of FIRQB.
+;-
+
+; INTERNAL VARIABLES:
+; R1	->	stack variable
+; R2	->	field of FIRQB
+; R5	=	wildcard PPN index of next directory to look up.
+
+.ENABL	LSB
+
+U$LOKF::CALL	FSSCMN		;FSS the filespec in CUI common.
+	CMPB	XRB+14,#DSKHND	;Is it a disk file?
+	IFEQ			;If so then
+
+; Look up a directory.
+
+	CLR	R5		;  Initialize PPN index.
+	MOV	FIRQB+FQPPN,R1	;  Save (possibly wild) PPN.
+10$:	MOV	#FIRQB+FQFUN,R2	;  Point at FQFUN field.
+	MOVB	#UU.PPN,(R2)+	;  Function is UU.PPN (wildcard PPN lookup).
+	MOV	R5,(R2)+	;  Move index to FIRQB+4.
+	.ASSUME	FQPPN EQ 4+2
+	MOV	R1,(R2)		;  Move PPN to FIRQB+FQPPN.
+	SYS	.UUO		;  Look up the directory.
+	CLR	R0		;  Package is monitor, code is zero.
+	BISB	FIRQB,R0	;  Get error code.
+	BNZ	30$		;  Error occurred. Go report it.
+	INC	R5		;  Increment PPN index.
+
+; Found a directory.  Look up the file.
+
+				;  Now R2 -> FQPPN field.
+	PUSH	(R2)		;  Save PPN that we looked up.
+	CALLX	FSSCMN		;  FSS the filespec in CUI common again.
+	POP	(R2)		;  But put in a real (non-wild) PPN.
+	BIT	#F2EXT,XRB+10	;  Is there an explicit extension?
+	IFZE			;  If not then
+	MOV	(R3),FIRQB+FQEXT;    Use default extension passed by caller.
+	ENDIF
+	;CLR	FIRQB+4		;  Look for first occurrence of file.
+	MOVB	#UU.LOK,FIRQB+FQFUN
+	SYS	.UUO		;
+	CLR	R0		;  Package is monitor, code is 0.
+	BISB	FIRQB,R0	;  Get error code.
+	BZE	40$		;  No error.  Exit with success.
+	CMP	R0,#NOSUCH	;  Was it ?Can't find file or account?
+	BNE	30$		;  No.  Report error to user.
+	BR	10$		;  Yes. Go try next directory.
+
+; Error occurred.  Set up to report it to user.
+
+30$:	CMP	R0,#NOSUCH	;  Was it ?Can't find file or account?
+	IFEQ			;  If so then
+	TST	R5		;    Did we get any matches on the 
+				;    (possibly wild) directory?
+	IFZE			;    If not then
+	MOV	#U.DIEX,R0	;      Make it ?Directory does not exist.
+	ELSE			;    Else
+	MOV	#U.FIEX,R0	;      Make it ?File does not exist.
+	ENDIF
+	ENDIF
+	MOV	U.POS(R4),LX.ERP;  Store position of filespec,
+				;  so we can report it to user.
+	ENDIF
+40$:	TST	(R3)+		;Skip over default extension.
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.FIEX,U.DIEX,NOSUCH,LX.ERP>
+
+.SBTTL	U$LOKD--Look up directory.
+;+
+; U$LOKD--Look up directory, and fail if not found.  
+;
+; We only look up disk directories, and always return success for any other
+; device.
+;
+; INPUTS:
+;	CUI common contains a valid filespec.
+;	R4	->	CUI common
+;	R3	->	word following op code
+;
+; USAGE:
+;	LOOKUP	DIRECTORY
+;
+; BINARY:
+;	.WORD	U$LOKD
+;
+; OUTPUTS:
+; C=0 if success.
+;	R0	=	0
+; C=1 	if	error.
+;	R0	=	U.DIEX (?Directory does not exist)
+;	LX.ERP =	position of filespec in command string IF directory
+;			doesn't exist;unchanged if directory exists.
+; R3	->	next instruction in either case
+;
+; SIDE EFFECTS:
+;	FIRQB clobbered.
+;	Other registers random.
+;-
+
+; INTERNAL VARIABLES:
+;	R1	=	0 => device is a member of public structure
+;		=	-1 => device is entire public structure, or is
+;			     a private disk
+
+.ENABL	LSB
+
+U$LOKD::CALL	FSSCMN		;FSS the filespec in CUI common.
+	CMPB	XRB+14,#DSKHND	;Is it a disk file?
+	IFEQ			;If so then
+	CLR	FIRQB+4		;  Index is 0: look up first occurrence.
+	MOVB	#UU.PPN,FIRQB+FQFUN
+				;  Function is UU.PPN (wildcard PPN lookup).
+	SYS	.UUO		;  Look up the directory.
+	CLR	R0		;  Package is monitor, code is 0.
+	BISB	FIRQB,R0	;  Get error code.
+	IFNZ			;  If error occurred then
+	CMP	R0,#NOSUCH	;    Was error ?Can't find file or account?
+	IFEQ			;    If so then
+	MOV	#U.DIEX,R0	;      Make it ?Directory does not exist.
+	ENDIF
+	MOV	U.POS(R4),LX.ERP;    Store position of filespec, so we can 
+				;    report it to user.
+	ENDIF
+	ENDIF
+10$:	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.DIEX,NOSUCH,LX.ERP>
+
+.SBTTL	CRETNT -- Create a file tentatively
+;+
+; CRETNT -- Create a file tentatively
+;
+; Format:
+;	CRETNT	DEFTYP=filetype
+;
+; DEFTYP=filetype
+;	Default file type for file to create.
+;	
+; Description:
+;	CRETNT is useful for verifying that an output file can be
+; 	created. Use CRETNT after you fetch an output file specification.
+;	If the file is on disk, and is not wild, CRETNT
+;	will create and then reset a tentative file just to 
+;	make sure that it is possible.
+;-
+
+.MACRO	CRETNT	DEFTYP
+	 .WORD	U$CRET
+	.IF	NB <DEFTYP>
+	 .RAD50	/DEFTYP/
+	.IFF
+	 .WORD	0
+	.ENDC
+	.GLOBL	U$CRET
+	.ENDM	CRETNT
+
+.SBTTL	U$CRET--Create a file tentatively
+;+
+; U$CRET--Create a file tentatively, and fail if not possible
+;
+; We only create disk files, and always return success for any otehr
+; device.  If the PPN is wild, we return success automatically.
+; If the PPN is non-wild but the filename or type is wild,
+; we create a temporary file, just to be sure
+; that we we have create access to the directory.
+;
+; If this routine is interrupted by a CTRL/C, then the CTRL/C handler
+; will reset the open channel.
+;
+; INPUTS:
+;	CUI common contains a valid filespec.
+;	R4	->	CUI common
+;	R3	->	word following op code
+;
+; BINARY:
+;	.WORD	U$CRET,filetype
+;
+; OUTPUTS:
+; C=0 if success.
+;	R0	=	0
+;
+; C=1 	if	error.
+;	R0	=	PRVIOL (?Protection violation)
+;	LX.ERP =	position of filespec in command string IF directory
+;			doesn't exist;unchanged if directory exists.
+; R3	->	next instruction in either case
+;
+; SIDE EFFECTS:
+;	FIRQB clobbered.
+;	Other registers random.
+;-
+
+.ENABL	LSB
+
+U$CRET::CALL	FSSCMN		;FSS the filespec in CUI common.
+	CMPB	XRB+14,#DSKHND	;Is it a disk file?
+	BNE	40$		;No. Return with success.
+	BIT	XRB+10,#F2PRJW!F2PRGW
+				;No. Is the PPN wild?
+	BNZ	40$		;Yes. Return with success.
+	BIT	XRB+10,#F2NAMS!F2NAMQ!F2EXTS!F2EXTQ
+				;No. Is the name or type wild?
+	IFNZ			;If so then
+
+; Create a temp file tentatively, and reset it.
+; //Not yet implemented.//
+
+	ELSE
+	
+; Create the file tentatively, and reset it.
+
+	BIT	XRB+10,#F2EXT	;Is there an explicit filetype?
+	IFZE			;If not then
+	MOV	(R3),FIRQB+FQEXT;  Use default file type.
+	ENDIF
+	MOVB	#CREFQ,FIRQB+FQFUN
+	MOVB	#GENCHN*2,FIRQB+FQFIL
+				;Use our general channel.
+	MOV	#100000!32.!1536.,FIRQB+FQMODE
+				;Tentative mode, beginning of directory.
+	SYS	CALFIP		;Do the create.
+	CLR	R0		;Package is monitor, code is 0.
+	BISB	FIRQB,R0	;Get the error code.
+	IFNZ			;If error occurred then
+	CMP	R0,#NOSUCH	;  Was error ?Can't find file or account?
+	IFEQ			;  If so then
+	MOV	#U.DIEX,R0	;    Make it ?Directory does not exist.
+	ENDIF
+	MOV	U.POS(R4),LX.ERP;  Store position of filespec, so we can 
+				;  report it to user.
+	BR	40$		;  Return.
+	ENDIF
+	CALLX	CLRFQB		;Clear the FIRQB.
+	MOVB	#RSTFQ,FIRQB+FQFUN
+	MOVB	#GENCHN*2,FIRQB+FQFIL
+	SYS	CALFIP		;Reset the channel.
+	CALLX	U$CHKE		;Abort if error. (Shouldn't happen.)
+	ENDIF
+40$:	TST	(R3)+		;Bump past inline argument.
+	RETURN
+
+.DSABL	LSB
+GLOBAL	<U.DIEX,NOSUCH,LX.ERP>
+
+.SBTTL	FSSCMN -- Filename String Scan the string in CUI Common
+;+
+; FSSCMN -- Filename String Scan the string in CUI Common
+;
+; INPUTS:
+;	R4	->	CUI common
+;	CUI common contains a legal filespec
+;
+; CALL FSSCMN
+;
+; OUTPUTS:
+;	FIRQB and XRB set up by .FSS.
+;-
+
+.ENABL	LSB
+
+FSSCMN::SAVREG			;Save registers.
+	ADD	#U.LEN,R4	;Point at U.LEN field of common area.
+	MOV	(R4)+,R2	;Get length of string.
+	.ASSUME	U.STR EQ U.LEN+2;R4 now points at string.
+	CALBX	U$FSS <R2,R4>	;FSS the filespec.
+	.ASSERT	R0 EQ #0	;No error is possible.
+	RETURN
+
+.DSABL	LSB
+.END

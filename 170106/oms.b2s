@@ -1,0 +1,297 @@
+1	EXTEND
+	!		PROGRAM		: OMS.TSK
+	!		PACKAGE		: OMS
+	!		MODULE		: OMS.B2S
+	!		VERSION		: V10.1
+	!		EDIT		: A
+	!		EDIT DATE	: 10-MAY-91
+	!		START DATE	: 28-MAR-89
+	!****************************************************************
+	!
+	!		  C O P Y R I G H T				 
+	!
+	!
+	!		      Copyright (C) 1983, 1991 by
+	!
+	! This software is furnished under a license and may be used and
+	! copied  only  in accordance with the terms of such license and
+	! with the  inclusion  of  the  above  copyright  notice.   This
+	! software  or  any  other copies thereof may not be provided or
+	! otherwise made available to any other person.  No title to and
+	! ownership of the software is hereby transferred.
+	!
+	! The information in this software is subject to change  without
+	! notice  and should not be construed as a commitment by Digital
+	! Equipment Corporation.
+	!
+	! DIGITAL assumes no responsibility for the use  or  reliability
+	! of its software on equipment that is not supplied by DIGITAL.
+	!
+	!****************************************************************
+
+
+
+	OPTION TYPE = EXPLICIT
+
+	 %INCLUDE "SYSTEM:CMNDEF.B2S"
+	 %INCLUDE "SYSTEM:OMSCMN.B2S"
+
+	DECLARE STRING CONSTANT						&
+		UU.TB1 = "6"C + "253"C,					&
+		MES.AGE = "6"C + "22"C,					&
+		UU.SYS = "6"C + "26"C
+
+	DECLARE STRING							&
+									&
+		ERR.MSG,						&
+		STOP.MSG,						&
+		SAVKEY2,						&
+		TEMP
+
+	DECLARE	WORD	I,		! General use, Index used in FOR loops &
+		WORD	J,		! Index used in FOR loops &
+		WORD	REC.STS,	! Record status on request command &
+		WORD	KEEP.IT		! Request command "Keep record" flag
+
+
+    %IF NOT(%DEBUG)
+    %THEN 
+	ERR.MSG = "?Please use START/OPERATOR_SERVICES command"
+	GOTO CLEAN_UP
+    %END %IF
+
+ START:
+
+	ON ERROR GOTO CTRL_CTRAP		! Set-up standard error trap
+	CALL OMSINI(ERR.MSG,I)			! Initialize things
+	IF LEN(ERR.MSG) THEN			! If got an error message then
+	  IF I THEN				!  If got an error then
+	    GOTO BUG_CHECK			!   Tell them all about it
+	  ELSE					!  Else
+	    GOTO CLEAN_UP			!   Tell a little about it
+	  END IF				!  End initialize error check
+	END IF					! End init error message check
+
+
+ GET_PACKET:
+
+	ON ERROR GOTO CTRL_CTRAP		! Standard error trap location
+	WHILE SWAP%(PEEK(PMC.LOC)) AND 255%	! While incomming messages
+	  CALL RECV BY REF (FQB, PACKET, 0%)	!  Receive the message
+	  CALL ORPARS BY REF			!  Parse and validate packet
+    %IF %DEBUG %THEN
+	JUNK = DBG("Facility name is	" + REQ.FAC, 0%)
+	JUNK = DBG("Context number is	" + NUM1$(REQ.NUM), 0%)
+	JUNK = DBG("Sequence number is	" + NUM1$(REQ.NUM), 0%)
+	JUNK = DBG("Request type is	" + NUM1$(REQ.TYP), 0%)
+	JUNK = DBG("Request status is	" + NUM1$(REQ.STS), 0%)
+	JUNK = DBG("Request's job # is	" + NUM1$(REQ.JOB), 0%)
+	JUNK = DBG("Request's Kb # is	" + NUM1$(REQ.KB), 0%)
+	JUNK = DBG("Request's PPN is	" + NUM1$(REQ.PPN), 0%)
+	JUNK = DBG("Text length is 	" + NUM1$(REQ.LEN), 0%)
+	JUNK = DBG("Request text =	" + REQ.TXT, 0%)
+    %END %IF
+	  IF (CFM.ERR=0%)			! If there weren't any errors
+	  THEN					! Then
+	    ON (OMS.CMD+1%) GOSUB NOP_CMD,	!  (0) NOP &
+				REPLY_CMD,	!  (1) REPLY &
+				REQUEST_CMD,	!  (2) REQUEST &
+				SET_OPER_CMD,	!  (3) SET OPERATOR_SERVICES &
+				STOP_CMD	!  (4) STOP THE OMS PACKAGE &
+	  ELSE					! Else CFM.ERR <> 0%
+	    GOSUB REPLY_CMD			!  Reply command special case &
+			IF (CFM.ERR = 10%) AND	!   if replier not OPER prived &
+			   (OMS.CMD = OC.REP)	!   (maybe it was the requester)
+	  END IF
+	  ON ERROR GOTO CTRL_CTRAP		! Standard error trap location
+    %IF %DEBUG %THEN
+	JUNK = DBG("Confirmation Error is	" + NUM1$(CFM.ERR), 0%)
+	JUNK = DBG("Confirmation Code is	" + NUM1$(CFM.FLD), 0%)
+    %END %IF
+	  IF ASCII(REQ.RTN)			! Confirmation requested?
+	  THEN
+	    CALL SNDCFM				! Yes, send confirmation
+	  END IF
+	NEXT					! Look for another message
+
+	IF NOT(STOP.OMS) 
+	THEN
+	  CALL SLEEPR				! Sleep if we need to
+	  GOTO GET_PACKET			! Get packet if we're not done
+	END IF
+	ON ERROR GOTO STOP_ERR			! Get messages that snuck in
+	FQB = SYS(MES.AGE + "0"C + "128"C)	! Conditionally remove receiver 
+	GOTO CLEAN_UP				! All done so let's exit
+
+
+19000	! Error handlers
+
+ CTRL_CTRAP:
+
+	I = CTRLC				! Re-enable ^C trapping
+	RESUME CLEAN_UP IF ERR = 28%		! Now exit program quietly
+	RESUME BUG_CHECK			! Now we can quit
+
+
+ STOP_ERR:
+
+	RESUME GET_PACKET IF ERR = 3%		! Still have pending messages
+	GOTO CTRL_CTRAP
+
+
+22000 NOP_CMD:
+
+	RETURN
+
+
+ REPLY_CMD:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("REPLY text =	" + REQ.TXT, 0%)
+	JUNK = DBG("Text length is 	" + NUM1$(REQ.LEN), 0%)
+	JUNK = DBG("Request status is	" + NUM1$(REQ.STS), 0%)
+	JUNK = DBG("Sequence number is	" + NUM1$(REQ.NUM), 0%)
+    %END %IF
+
+	CALL GETSYS BY REF (SLOT.NUM, OMSREQ)	! Find original request
+	IF (REP.JOB = REQ.JOB)			! Reply job = Request job? &
+	AND (REP.PPN = REQ.PPN)			! And [p,pn]'s match?
+	THEN
+	  CFM.ERR = 0%				! Yes, clear possible error
+	ELSE
+	  REP.FLG = REP.FLG OR FLG.OPR		! No, Operator made reply
+	END IF
+	IF CFM.ERR = 0%				! Everything going well?
+	THEN
+	  CALL REPLY (TRUE)			! Yes, process/broadcast reply
+	END IF
+	REP.LEN, REP.STS, REP.JOB, REP.PPN = 0%	! Set up for REPLY confirm
+	RETURN					! All done
+
+ REQUEST_CMD:
+
+	! Parser returns SLOT.NUM set if REQUEST/REPLY record
+
+	GOTO REQ_CONT UNLESS SLOT.NUM		! Skip unless REQUEST/REPLY cmd
+	CALL PUTSYS BY REF (SLOT.NUM, OMSREQ)	! Save the request in work file
+	PNDREQ(SLOT.NUM) = REQ.NUM		! Mark slot in use
+	UPD.ACT = TRUE				! Need to reset event time
+
+ REQ_CONT:
+
+	CALL PUTREQ BY REF (OMSREQ) IF (OMS.STS AND REQ.TYP)
+	CALL BRDCST				! Load REP.KB for confirmation
+	REP.STS = REQ.STS			! Set status for confirmation
+	CFM.FLD = REQ.NUM			! Load seq # for confirmation
+	RETURN
+			
+
+ SET_OPER_CMD:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("Keep level is 	" + NUM1$(OMS.STS), 0%)
+    %END %IF
+
+	CALL PUTSYS BY REF (0%, OMSINT)		! Update work file header record
+	!
+	! Make a REQUEST here to say that OMS.STS was changed
+	!
+	KEEP.MSG = ((OMS.STS AND ML.MSG)=ML.MSG)! Update "keeping messages" flag
+	KEEP.REQ = ((OMS.STS AND ML.REQ)=ML.REQ)! Update "keeping requests" flag
+	RETURN
+
+ STOP_CMD:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("Abort qualifier is 	" + NUM1$(STOP.OMS), 0%)
+    %END %IF
+
+	TEMP = OMSREQ				! Save original command buffer
+	PND.REQ.CNT = 0%			! Initialize pending req count
+	STOP.MSG = LEFT$(OMS.TXT, OMS.LEN) + " shutting down" + CR.LF
+	FOR SLOT.NUM = 1% TO PND.MAX		! Check out pending requests
+	IF PNDREQ(SLOT.NUM)			! Is there a request here?
+	THEN
+	  PND.REQ.CNT = PND.REQ.CNT + 1%	! Yes, inc pending req count
+	  CALL GETSYS BY REF (SLOT.NUM, OMSREQ)	!   Get request in OMSREQ
+	  OMSREP = OMSINT			!   Set up reply template
+	  REP.FLG = FLG.OMS			!   Tell-em OMS did it
+	  REP.NUM = REQ.NUM			!   Copy the request seq #
+	  REP.TYP = ML.REQ OR ML.REP		!   Type is REPLY
+	  IF STOP.OMS				!   STOP/ABORT?
+	  THEN
+	    REP.STS = STS.ABO			!   Yes, so REPLY/ABORT
+	  ELSE
+	    REP.STS = STS.PEN			!   No, so REPLY/PENDING
+	  END IF
+	  CALL GETDAT BY REF			!   Get current date/time     &
+		(REP.DTM BY DESC, TRUE)		!    RSTS normal format
+	  REP.LEN = LEN(STOP.MSG)		!   Load text length
+	  REP.TXT = STOP.MSG			!   Load text field
+	  CALL REPLY(FALSE)			!   Send reply w/o BRDCST
+	END IF
+
+	NEXT SLOT.NUM				! Check out next slot
+
+	IF PND.REQ.CNT THEN			! If there were pending requests
+	  STOP.MSG = STOP.MSG +			!  Tell them how many &
+			NUM1$(PND.REQ.CNT) +	!   requests &
+			" request"		!
+	  STOP.MSG = STOP.MSG + "s" 		!  Make it plural &
+			IF (PND.REQ.CNT <> 1%)	!    if not one
+	  IF STOP.OMS THEN			!  If it's a STOP/ABORT
+	    STOP.MSG = STOP.MSG + " aborted"	!   Tell'em we aborted requests
+	  ELSE					!  Else
+	    STOP.MSG = STOP.MSG	+ " pending"	!   Tell'em requests are pending
+	  END IF
+	END IF					! End request count check
+
+	OMSREQ = TEMP				! Get original command buffer
+	CALL GETDAT BY REF			! Get current date/time	      &
+		(REQ.DTM BY DESC, TRUE)		!  RSTS normal format
+	REQ.TYP = ML.MSG			! Let's make it a message
+	REQ.STS = 0%				! Message have no status either
+	REQ.FLG = FLG.BEL OR FLG.OPR		! Better put a bell on this one
+	REQ.LEN = LEN(STOP.MSG)			! Load stop message text length
+	REQ.TXT = STOP.MSG			! Load stop message text
+
+	CALL ASNSEQ BY REF			! Assign a seq # for request
+	CALL PUTREQ BY REF (OMSREQ) IF KEEP.MSG	! Store message if appropriate
+	CALL BRDCST				! Tell operators we're stopping
+	CFM.FLD = PND.REQ.CNT			! Return pending requests count
+	REP.STS, REP.JOB, REP.LEN, REP.PPN = 0%	! Set up confirmation fields
+	STOP.OMS = (PND.REQ.CNT=0%) OR STOP.OMS	! Set flag for /NOABORT case
+	RETURN
+
+
+	!Spawned entry point for OMSMGR
+31100	GOTO START	! OMSMGR V10.0 only
+
+ BUG_CHECK:
+
+	TEMP = "?Program failure in "+ P.NAM	! Uh-oh this shouldn't happen
+	IF ERR.MSG <> ""			! If program specified err msg
+	THEN
+	  TEMP = TEMP + CR.LF + ERR.MSG		!   Add in our error message
+	END IF
+	IF ERR					! If real error occured
+	THEN
+	  TEMP = TEMP + CR.LF + ERT$(ERR) +	!   Add in what happened &
+			" in " + ERN$		!     And where it happened
+	END IF
+	ERR.MSG = TEMP				! New error message
+
+ CLEAN_UP:
+
+	CLOSE SYS.CHNL				! Close up the work file
+	FQB = SYS(MES.AGE)			! Remove receiver
+	PRINT ERR.MSG IF LEN(ERR.MSG)		! Print any error message
+	FQB = SYS("6"C + "8"C + STRING$(25%,0%)	! Kill our job if &
+		+ "255"C) IF STOP.OMS		!  they said stop &
+    %IF %DEBUG %THEN &
+			AND DBG("",0%)		!  and we're detached
+    %END %IF
+
+ OMS_END:
+
+	END

@@ -1,0 +1,594 @@
+.INCLUDE /CMN:COMMON/							;007
+.INCLUDE /CMN:KERNEL/							;007
+.INCLUDE /INIT:INIPFX/							;007
+.INCLUDE /INIT:FLC/							;007
+TITLE	INILDR,<RSTS/E INIT - LOADER>,0A,10-MAY-91,WJS/FEK/KPH/VAM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+
+.SBTTL	Edit history for INILDR
+
+;+
+;
+;				[RSTS V9.0]
+;  000	WJS  22-Aug-83	CREATION
+;  001	FEK  29-NOV-83	ADD SUPPORT FOR MORE THAN 15 PHASES
+;  002	KPH  28-Aug-84	Set up DPDR5 R/W on I&D systems              
+;
+;				[RSTS V9.1]
+;  003	KPH  12-Mar-85	Set up KISDR5 R/W on I-only systems
+;  004	KPH  29-May-85	Conditional phases
+;
+;				[RSTS V9.3]
+;  005  VAM  09-May-86	Remove references to S.??? globals.          
+;
+;				[RSTS V9.4]
+;  006	GPK  10-Oct-86	Cancel pending interrupts on GPK when load done
+;
+;				[RSTS V9.6]
+;  007  KPH  13-Oct-87	Add .INCLUDEs
+;			Remove lowcore setup from jam list processing
+;			Change jam list processing for jam list > 4KW
+;
+;-
+
+
+.SBTTL	Macros for the loader
+
+.MACRO	I.MESS                                           
+	TMPORG	LDRTXT
+.NLIST	BEX
+.ENDM	I.MESS
+
+.SBTTL	Order the CSECT's
+
+	DEFORG	LDR		; Loader code
+	DEFORG	LDRTXT		; Loader text
+	ORG	LDR
+
+
+.SBTTL	Loader main driver
+
+
+INILDR::NOP				; For ODT-enabling patch
+
+	CALL	GETFLC			; Retrieve communications data
+
+	CALL	BLDLOD			; Build the loader
+
+	CALLX	WRITEC			; Force out FIBUF if it needs it
+
+	CALL	LODODT			; Read ODT into memory if necessary
+        
+	CALL	SPARITY			; Start up the parity
+
+	CALL	SETMMU			; Set up MMU (most of the way)
+
+	JMP	RELOC2			; Relocate part 2 and finish starting
+
+
+.SBTTL	GETFLC - Retrieve final loader communications data
+
+GETFLC:	MOV	#FLC.LN,R0	; R0 = comm area's length in words
+	MOV	#FLCGBL,R1	; Point R1 -> root's comm area
+	MOV	#FLCLCL,R2	; Point R2 -> comm area IN THE LOADER
+10$:	MOV	(R1)+,(R2)+	; Move each word
+	SOB	R0,10$		;  ..till whole area has been moved
+	;MOV	#LOWCOR,R2	; Point to set up lowcore		;007
+.ASSUME	<FLCLCL+<FLC.LN*2>> EQ LOWCOR
+	MOV	#MONLOW,R1	; Point to lowcore copy in SATBUF	;007
+	MOV	#1000/2,R0	; Length is 1000 bytes (400 words)	;007
+20$:	MOV	(R1)+,(R2)+	; Move each word			;007
+	SOB	R0,20$		; Until we're done			;007
+	RETURN			; Now all set
+
+GLOBAL	<FLCGBL,MONLOW>							;007
+
+                                                                        
+.SBTTL	BLDLOD - Build (bootstrap) loader for Monitor
+
+.ENABL	LSB
+        
+BLDLOD:	MOV	LDRMMU,R4	; Retrieve saved loader address
+	MOV	#B.BOOT,R0	; Point to the INIT loader
+	MOV	#SATBUF,R1	; R1 -> buffer to build 2nd boot        
+	MOV	#256.,R2	; Move the entire loader
+10$:	MOV	(R0)+,(R1)+	; Move the boot root into the output buffer
+	SOB	R2,10$
+	CMP	B.NAME,#"DU	; UDA bootstrap?
+	BNE	20$		; No
+	MOV	LDRMMU,B.MMU+SATBUF-B.BOOT ; Yes, pass it its MMU address
+	.BR	20$		; And go build the load list		;007
+
+GLOBAL	<LDRMMU>
+
+.SBTTL	BLDLOD - Build load list for Monitor
+
+20$:	MOV	#FQSIL+FQFCB,R1	; R1 -> FCB for Monitor SIL		;001
+	MOV	#D.LB+LBSEGS,R0	;Point to segment table			;004
+	MOV	#SATBUF+1000,R5	; We build block map here		;004
+	MOV	DCS,-(SP)	; Get system disk DCS			;004
+	DEC	(SP)		; We'll use DCS-1 to convert FBN to LBN	;004
+30$:	CMP	R0,#D.LB+LBSEGE	;Are we done with the segment table?	;004
+	BEQ	80$		;Yes, all set				;004
+	MOV	(R0)+,FCNVB(R1)	;Set up block number from segment table	;004
+	MOV	(R0)+,(R5)	;Pick up segment load address		;004
+	MOV	(R0)+,R2	;Get the size in MMU slivers		;004
+	BEQ	30$		;Not to be loaded, skip it		;004
+	ADD	#7,R2		; Convert size to blocks
+	ASH	#-3,R2		;   rounding upward
+	MOV	R2,MONBLK	; Save segment load size in blocks
+	ADD	FCNVB(R1),MONBLK ;Calculate end block + 1		;004
+	DEC	MONBLK		;   except the 1-st			;001
+	CLR	R4		; No chunk so far
+	TST	(R5)+		; Skip past the segment load address	;004
+	MOV	#77777,2(R5)	; Fake an impossible FBN
+	MOV	2(R5),4(R5)
+40$:	CMP	FCNVB(R1),MONBLK ; Gone far enough?
+	BHI	70$		; Yes, stop looking
+	MOV	R5,-(SP)	; VBNFBN sometimes mungs R5             
+	MOV	R0,-(SP)	; But it always destroys R0		;004
+	CALLX	VBNFBN		; Convert VBN to FBN
+	MOV	(SP)+,R0	; Restore R0				;004
+	MOV	(SP)+,R5	; Restore R5
+	INC	FCNVB(R1)	; Advance VBN
+	ADD	(SP),R2		; Add (DCS-1) to FBN
+	ADC	R3		;  to get LBN
+	SUB	R4,R2		; Bias to start of chunk
+	SBC	R3		;  double precision
+	CMP	R2,2(R5)	; Does it match current chunk?
+	BNE	50$		; No
+	CMP	R3,4(R5)	; Really match?
+	BNE	50$		; No
+	INC	R4		; Yes, add another block to this chunk
+	CMP	R4,#128.	; Getting too large?
+	BLO	40$		; Not yet, check out next VBN
+	DEC	R4		; Yes, don't count this block as part of chunk
+50$:	ADD	R4,R2		; Adjust LBN back to what it was
+	ADC	R3		;  both words
+	SWAB	R4		; Convert block count to word count
+	MOV	R4,(R5)		; Store it
+	BEQ	60$		; No words (first time through), skip
+	ADD	#6,R5		; Advance over this chunk
+60$:	MOV	R2,2(R5)	; Set starting LBN of next chunk
+	MOV	R3,4(R5)	;  both words
+	MOV	#1,R4		; We have one block so far
+	BR	40$		; Go for another
+
+70$:	SWAB	R4		; Convert block count to word count
+	MOV	R4,(R5)		; Store it
+	ADD	#6,R5		; Advance over this chunk		;004
+	CLR	(R5)+		; Insert the segment terminator		;004
+	BR	30$		; And loop for more segments		;004
+
+80$:	MOV	#-1,(R5)	; Insert the list terminator		;004
+	TST	(SP)+		; Get rid of the DCS-1			;007
+
+GLOBAL	<D.LB,MONBLK,DCS,FQSIL>						;004
+
+                 
+.SBTTL	BLDLOD - Move final code to SATBUF
+
+	MOV	.$SROM,..SROM	; Set up mapping data for final code
+	MOV	RSTSIZ,..RSIZ	;  i.e. start of ROM and total size
+	MOV	.$STAK,..SP	; Pass RSTS initial SP value to final code
+	MOV	FLGGPK,...GPK	; Pass "this is a GPK" flag		;006
+	MOV	#FINAL,R0	; Point to final code to execute
+	MOV	#SATBUF+10000,R1 ;  and where it goes
+	MOV	#<FINEND-FINAL>/2,R2 ; Word count
+.ASSUME	10000+FINEND-FINAL LE 20000 ;  Must fit in SATBUF
+90$:	MOV	(R0)+,(R1)+	; Move it
+	SOB	R2,90$
+	MOV	#SATBUF/100,R0	; "from" MMU address
+	MOV	LDRMMU,R1	; Get buffer address
+	CALLRX	RELC4K		; Move this stuff to the loader buffer
+
+.DSABL	LSB
+
+GLOBAL	<SATBUF,.$SROM,RSTSIZ,.$STAK,LDRMMU,FLGGPK,KTUSR3>		;007
+
+
+.SBTTL	LODODT - Load ODT into memory if requested
+
+LODODT:	MOV	D.ODT,R1	; Get address of ODT			;005
+	BEQ	20$		; None, so get out
+	CLR	R0		; Clear for shift
+	ASHC	#11.,R0		; Compute absolute address
+	MOVB	R0,FILDSQ+DSQMAM ; Set up high order memory address
+	MOV	R1,10$		; Set low order address in call
+	MOV	#FCODT,R1	; R1 -> FCB for read
+	MOV	#1,FCNVB(R1)	; Data starts in second block of ODT.SYS
+	MOV	ODTSIZ,R0	; R0 = ODT size in bytes
+	ASR	R0		; Convert to word count
+	CALLX	READ.X,R5	; Read ODT
+10$:	 .WORD	0		; Low order address
+20$:	RETURN
+
+GLOBAL	<D.ODT,FILDSQ,FCODT,ODTSIZ>					;005
+
+
+.SBTTL	SPARITY - Start the parity control
+
+SPARITY:TSTB	CACHE		; Is there a cache?
+	BMI	10$		; No
+	;CLC			; C=0 from 'TST' above
+	ADC	@#CHEERR	; Write to clear all bits to enable tracking
+	MOV	CCTVAL,@#CHECTL	; Set up cache as we decided it should be
+10$:	MOV	#PARLOC,R0	; Point to the parity CSR's
+	MOV	#16.,R1		; 16 of them
+20$:	MOV	(R0)+,R2	; R2 -> parity CSR
+	CMP	R2,.$PZER	; Any there?
+	BEQ	30$		; No
+	MOV	#1,(R2)		; Yes, turn on parity
+30$:	SOB	R1,20$		; Loop
+
+; Patch here to enable WCS
+
+	TST	MEDINS		; Does 'MED' instruction work?
+	BMI	40$		; No -- skip
+	BR	40$		; Yes -- skip anyway
+..WCSE	==	.-2	;**PATCH** for enabling WCS
+	.WORD	076600,22	; Read WHAMI
+	BIT	R0,#140		; Does this machine have WCS?
+	BEQ	40$		; No -- skip
+	BIS	#200,R0		; Yes -- enable WCS
+	.WORD	076600,222	; Rewrite WHAMI
+40$:	TSTB	CP.ERW		; Can we write CPU error register?
+	BMI	50$		; No -- skip
+	CLR	@#CPUERR	; Yes -- clear it
+50$:	RETURN
+
+GLOBAL	<CACHE,CCTVAL,PARLOC,.$PZER,MEDINS,CP.ERW>
+
+
+.SBTTL	SETMMU - Set up MMU most of the way
+
+SETMMU:	CLR	@#MMUSR0	; Turn off the MMU for now
+	MOV	#UISDR0,R0	; Set user registers to abort
+	MOV	#8.,R2
+20$:	CLR	UISAR0-UISDR0(R0) ; Address is 0
+	CLR	(R0)+		; And set to abort
+	SOB	R2,20$
+	CALLRX	KPARSU		; Set up the Kernel address regs
+
+
+.SBTTL	RELOC2 - Map the final load code and go to it
+
+RELOC2:	MOV	LDRMMU,..LDR	; Set up loader's address
+	MOV	#20$,R0		; Move the code below
+	MOV	#SATBUF,R1	;  to here
+10$:	MOV	(R0)+,(R1)+	; Move it
+	CMP	R0,#30$		; Done?
+	BLO	10$		; No
+	JMP	@#SATBUF	; Yes, go execute it
+
+20$:	MOV	#0,@#KISAR5	; Set up mapping for the loader
+..LDR	=	.-4
+	MOV	#1,@#MMUSR0	; Turn on the MMU
+	JMP	@#120000+10000	; Go execute the final load code
+30$:
+
+GLOBAL	<SATBUF,FLG22,LDRMMU,KTUSR3>
+
+
+.SBTTL	Layout of final start code
+
+;+
+; The final startup code needs to be in some place out of the way of
+; the RSTS monitor about to be loaded, so it is placed (by BLDLOD) in
+; an 4 KW buffer in the first available 4K segment of memory. Note that
+; the MSCP bootstrap driver must exist in physical memory <=124K in order
+; for the controller to find its ring area. This detail is taken care
+; of by the routine which sets up the loader placement.
+;
+; The layout is as follows: (addresses shown are virtual as set by RELOC2)
+;
+;	---------------------------------------------------------
+;	|							|  120000
+;	|	Bootstrap (copy of RSTS secondary boot)		|
+;	|							|
+;	---------------------------------------------------------
+;	|							|  121000
+;	|	Segment map. Contains the load address for      |
+;	|	each segment (in MMU slivers), followed by	|
+;	|	the load map for that segment. The segment	|
+;	|	map is terminated by a negative value.		|
+;	|	Each load map is comprised of (word count,	|
+;	|	LBN for each chunk), and terminated by a	|
+;	|	zero. Read by the load code.			|
+;	|							|
+;	---------------------------------------------------------
+;	|							|  130000
+;	|	Final load and setup code.  Contains loader,	|
+;	|	jammer, XBUF setup, final MMU setup,		|
+;	|	FLC data area, and monitor lowcore data.	|
+;	|	Exits to RSTS monitor startup by RTI		|
+;	|							|
+;	---------------------------------------------------------  137776
+;
+; APR6 is used for the processing of the jam list. The mapping of the
+; jam list is independant of the loader code, and the jam list may
+; occupy either free memory or XBUF (as it is processed before XBUF
+; setup). During the processing of the jam list, APR6 is remapped
+; as needed, since the jam list is larger than 4K words.         
+;
+; The final start process goes as follows:
+;
+;	1. RELOC2 moves a small routine into Init's SATBUF.  This
+;	   routine maps the final code via APR5 and jumps to it.
+;	   Other APRs and the descriptor registers were already set
+;	   up by SETMMU.
+;
+;	2. Using the boot loader and data set up by BLDLOD, RSTS is
+;	   loaded into memory.
+;
+;	3. Monitor lowcore is set up to reflect the current system
+;	   configuration.
+;
+;	4. The jam list is mapped through APR6, and is then processed
+;	   to make all needed modifications to the loaded monitor.
+;	   Once this is done, APR6 need no longer remain mapped to
+;	   the jam list.
+;
+;	5. The buffer pools (low memory and XBUF) and the cache tags
+;	   are initialized.  This uses APR6.
+;
+;	6. The I-space descriptor registers are set up by SMMU.
+;
+;	7. RSTS's initial SP value is loaded.
+;
+;	8. Descriptor registers 5 and 6 are set up. Note that the
+;	   address registers are unchanged, as they are still being
+;	   used to map the loader code. When RSTS is started, the
+;	   APRs will still point at this code. This can sometimes
+;	   be useful for debugging.
+;
+;	9. If D-space is to be enabled, the I-space address and descriptor
+;	   registers are copied to the D-space versions, D-space is enabled,
+;	   and the I-space registers are marked read-only.
+;
+;      10. RSTS is started with an RTI instruction.
+;-
+
+
+.SBTTL	Final startup -- load the Monitor
+
+; This code must be PIC, since it is relocated before execution
+
+O	=	120000-B.BOOT	;Offset to boot symbols
+
+.ENABL	LSB
+                         
+FINAL:	MOV	PC,SP		; Set up a temporary stack
+	CALL	@#B.RSET+O	; Reset the bootstrap driver
+	MOV	#120000+1000,R0	; Point to segment map
+10$:	MOV	(R0)+,R3	; Get MMU address to begin load at	;004
+	BMI	40$		; All done, RSTS is loaded now!		;004
+	CLR	R2		; Clear MSB of MMU address		;004
+	ASHC	#6,R2		; Now we have physical address		;004
+	MOV	R3,@#B.MEML+O	; Set load address LSB			;004
+	MOV	R2,@#B.MEMH+O	; Set load address MSB			;004
+20$:	MOV	(R0)+,@#B.TWC+O	; Set word count for next chunk
+	BEQ	10$		; Done with this segment, try next	;004
+	MOV	(R0)+,@#B.BLKL+O ;Set low order LBN
+	MOV	(R0)+,@#B.BLKH+O ; and high order
+	MOV	R0,-(SP)	; Save map pointer
+	CALL	@#B.READ+O	; Do the transfer
+	BCC	30$		; Ok
+	HALT			; Ouch, die
+	BR	.-2		; Yes, I mean DIE
+
+30$:	MOV	(SP)+,R0	; Restore pointer
+	ASL	@#B.TWC+O	; Convert word count to byte count
+	ADD	@#B.TWC+O,@#B.MEML+O ; Update load pointer
+	ADC	@#B.MEMH+O	;       in double precision
+	BR	20$		; Do another chunk
+
+40$:	CMP	@#B.NAME+O,#"DU	; Loading from a UDA?			;008
+	BNE	50$		; No, that's easier			;008
+	MOV	@#B.CSR+O,R0	; Get pointer to its CSR		;008
+	CLR	(R0)		; Tell it to not bother us any more	;008
+	.BR	50$							;007
+
+.SBTTL	Final startup -- set up monitor lowcore
+
+50$:	MOVPIC	#LOWCOR,R0	; R0 -> lowcore prototype		;007
+	CLR	R1		; Set the start address			;007
+60$:	MOV	(R0)+,(R1)+	; Copy a word				;007
+	CMP	R1,#1000	; Done yet?				;007
+	BNE	60$		; No, loop				;007
+	.BR	70$		; Yes, process the jam list now		;007
+
+.SBTTL	Final startup -- Jam
+
+70$:	MOV	JAMMMU,@#KISAR6 ; Map the jam list			;007
+	MOV	#140000,R0	; And point to it virtually		;007
+80$:	CMP	R0,#140000+<1*100> ; Should we re-map the buffer?	;007
+	BLO	90$		; No, not this time			;007
+	INC	@#KISAR6	; Yes, update the mapping by one sliver	;007
+	SUB	#1*100,R0	; Update the pointer			;007
+	BR	80$		; And try again				;007
+
+90$:	MOV	(R0)+,R1	; Get a count word			;007
+	BMI	110$		;  <0 means jam pairs
+	BEQ	130$		;   0 means done                            
+	MOV	(R0)+,R2	;  >0 means jam a table
+100$:	MOV	(R0)+,(R2)+	; Move a table word to table location
+	SOB	R1,100$
+	BR	80$		; Done                                      
+
+110$:	NEG	R1		; Make count positive
+120$:	MOV	(R0)+,@(R0)+	; Jam a pair                                
+	SOB	R1,120$
+	BR	80$
+
+
+.SBTTL	Final startup -- initialize buffer pools                            
+
+130$:	MOV	PC,R2		; Point to XBUFX table (PIC)
+	ADD	#CACHON-.,R2	; Point the the tag table
+	MOV	PC,R1		; Point to small buffer table (PIC)
+	ADD	#SMPOOL-.,R1	; Jam the buffers
+140$:	MOV	(R1)+,R0	; Get address of a pool
+	MOV	(R1)+,2(R0)	;  & buffer pool+2 <- length                
+	MOV	(R1),(R0)	;  & buffer pool <- pointer to next or zero
+	BNE	140$		; There is a next, continue
+	MOV	(R2)+,R5	; R5 = flag for extended data caching
+	MOV	(R2)+,R1	; R1 = size of cache tag
+	MOV	(R2)+,R4	; R4 = address in monitor of cache params
+	MOV	(R2)+,R0	; R0 = number of tags
+	BEQ	160$		; Easy if none                              
+	MOV	(R2),@#KISAR6	; Map APR6 to tag area
+	MOV	#140004,R3	; R3 -> window to tag area
+	MOV	(R2),(R4)+	;  & $$CACH+0 <- MMU address to map tags
+	MOV	R3,(R4)+	;  & $$CACH+2 <- 140004 = address of 1st tag
+	CMP	R0,#32.		; Fewer than 32 buffers out there?
+	SXT	(R4)+		;  & $$CACH+4 <- -1 if fewer than 32 tags, else 0
+	TST	R5		; Extended data caching?                    
+	BEQ	150$		; No
+	CLR	-2(R4)		; Yes, never use "MONPOL"
+150$:	MOV	R3,(R3)		; Link a tag to itself
+	ADD	R1,(R3)		;  + tag size = next tag address
+	ADD	R1,R3		; R3 -> next tag
+	SOB	R0,150$		; Link all tags
+	SUB	R1,R3		; R3 -> last tag in list                    
+	CLR	(R3)		; Link = 0 for end of tag list
+	TST	R5		; See if we are doing extented data caching
+	BEQ	160$		; No, just continue as normal
+	CLR	R5		; Remove the extended data caching flag
+	ADD	R1,R3		; Point to next tag field
+	MOV	R3,(R4)+	; Start new link list, root = $$CACH+6
+	MOV	#20.,R0		; This link list has 20. elements           
+	BR	150$		; And link up second link list 
+
+160$:	MOV	(R2)+,R0	; Get MMU address of extended pool
+	BEQ	180$		; Done
+	MOV	R0,@#KISAR6	; Map APR6 to it
+	MOV	#140002,R1	; Point to APR6 address
+	CLR	(R1)		; Length of XBUF list head = 0              
+	MOV	(R2)+,R3	; R3 = total (MMU) size of this pool
+	MOV	R0,-(R1)	; Link at start of pool = self
+	ADD	(R2),(R1)	;  plus length of prefix area
+	SUB	(R2)+,R3	; R3 = length of usable pool
+	BEQ	170$		; If = 0, delink list (empty pool)
+	MOV	(R1),@#KISAR6	;  else r1 -> first real buffer
+170$:	CLR	(R1)+		; Link = 0 for end of list                  
+	MOV	R3,(R1)		; MMU size of buffer pool
+	BR	160$		; Do another pool
+
+
+.SBTTL	Final startup -- re-map and go
+
+; Once we call SMMU, the mapping for APRs 0 through 4 has been changed      
+; for the running RSTS monitor.  Not all of it is necessarily mapped
+; anymore.
+
+
+180$:	CALL	SMMU		; Do final MMU setup
+	TSTB	(PC)+		; Is this a GPK?			;006
+...GPK:	 .WORD	0		;  Copy of FLGGPK			;006
+	BPL	190$		; No					;006
+	MOV	#CLAIRR,@#I0CSR	; Yes, cancel any pending interrupts	;006
+	MOV	#CLAIRR,@#I1CSR	;  in all 3 interrupt controllers	;006
+	MOV	#CLAIRR,@#I2CSR						;006
+190$:									;006
+
+                                                                            
+; The next thing we'll do is switch stacks and change the descriptor
+; registers for APRs 5 and 6.  To keep things clean and safe, avoid
+; putting any more code below than you strictly have to!  Note that
+; everything from this point on is straight-line Code to avoid using
+; up RSTS's stack space.
+
+                                                               
+	MOV	..SP,SP		; Set up the stack for RSTS
+	MOV	#128.-1.*256.+6,@#KISDR0+<5*2> ; APR 5 is set to 4K R/W	;003
+	MOV	#127.-1.*256.+6,@#KISDR0+<6*2> ; APR 6 is set to 4K-32W R/W
+	TSTB	STUSR3		; Is there an MMUSR3 ?
+	BMI	230$		; No, don't write into it
+	BIT	#4,FLAG22	; Enabling I/D space?
+	BEQ	210$		; No                                     
+	MOV	#KISDR0,R0	; Point to I-space descriptors
+	MOV	#8.,R2
+200$:	MOV	KISAR0-KISDR0(R0),KDSAR0-KISDR0(R0) ; Copy I address to D
+	MOV	(R0)+,KDSDR0-KISDR0-2(R0) ; Copy I descriptor to D
+	SOB	R2,200$
+210$:	MOV	FLAG22,R0	; Get D-space, 22-bit, and UMR flags from setup
+	MOV	R0,@#MMUSR3	; Set MMUSR3 as desired                     
+	BIT	#4,R0		; Did we enable D-space?
+	BEQ	230$		; No, so we're DONE!
+	MOV	#KISDR0,R0	; Now we can make I-space read-only
+	MOV	#8.,R2
+220$:	BIC	#4,(R0)+	; Change this descriptor to read-only
+	SOB	R2,220$
+230$:	RTI			; Go baby, GO!!!                            
+                                                                        
+.DSABL	LSB
+
+
+.SBTTL	FLC - Final loader's communication area
+
+	FLC	LCL
+
+LOWCOR:	.BLKB	1000		; Monitor's lowcore			;007
+
+                                                                           
+
+.SBTTL	Final MMU setup
+
+SMMU:	MOV	..SROM,R0	; R0 = start of read only memory
+	ADD	#17777,R0	; Round it up to a 4K boundary
+	BIC	#17777,R0	; R0 = address of first R/O or NXM APR
+	MOV	..RSIZ,R3	; Get size of Monitor in words              
+	ADD	#77,R3		; Round it up to a 32 word boundary
+	BIC	#77,R3		; R3 = address of top of mapped memory
+	CMP	R3,R0		; Is end of Monitor < start of ROM?
+	BLOS	20$		; Yes, everything is R/W
+	ASH	#-12.,R0	; Compute the APR at which ROM starts
+	BIC	#^C<16>,R0	;  as a word offset
+	ADD	#KISDR0,R0	; Point to the descriptor for ROM           
+10$:	CMP	R0,#KISDR0+<5*2> ; Are we up to the mapped parts yet?
+	BHIS	20$		; Yes, go set up end of all memory
+	MOV	#128.-1*256.+2,(R0)+ ; Set up 4K read only
+	BR	10$		; We are setting $$SROM-APR4 (inclusive) R/O
+
+20$:	MOV	R3,R0		; Copy the top of the Monitor
+	ASH	#-12.,R0	; compute APR with short length             
+	BIC	#^C<16>,R0	;  as a word offset
+	ADD	#KISDR0,R0	; Point to descriptor with top of RSTS
+	BIC	#^C<17777>,R3	; Compute length of last segment
+	ASH	#8.-6.,R3	; Shift it to 32W block count in high byte
+	SUB	#1*400,R3	;  and subtract one for the MMU
+	BMI	40$		; A perfect fit, the APR should be ABORT
+	BISB	(R0),R3		; Use R/O or R/W indication as needed
+30$:	CMP	R0,#KISDR0+<5*2> ; Done?
+	BHIS	50$		;  Yes
+	MOV	R3,(R0)+	; Set up the descriptor
+40$:	CLR	R3		; The next one is set to ABORT
+	BR	30$
+
+50$:	RETURN			; Done
+
+FINEND:				; End of final load code moved to load buffer
+
+ENDOVL	<LDR,LDRTXT>,200
+
+	.END

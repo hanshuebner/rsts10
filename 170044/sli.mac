@@ -1,0 +1,618 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:FLDEF/
+.INCLUDE /CMN:KBDEF/
+TITLE	SLI,<SPAWN LOGGED IN>,0H,20-DEC-91,AWL/GPK/MNB/KPH/DWF/DRP/WRM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR SLI
+
+;+
+;
+;                                [RSTS V8.0]
+;  000	AWL  10-Nov-82	CREATION - Spawn logged out copied from uuo.mac
+;  001  AWL  15-Nov-82  Added Spawn logged in
+;  002  AWL  15-Dec-82  Changed name of LOGSPW to LOGSPI
+;  003  AWL  17-Dec-82  Corrected error in clearing bit15 of FQNENT
+;  004  AWL  05-Jan-83  Restored clearing bit15 from FQNENT to FQNENT-2
+;  005  AWL  15-Feb-83  Remove ASR R0 from SPAWNI to pass KB*2 to CRESPN
+;  006  AWL  24-Feb-83  Remove DDSTS offset when using DDPRVO
+;
+;				[RSTS V9.0]
+;  007	GPK  28-Mar-83	Multiple privileges
+;  008	GPK  22-Sep-83	Multi-privilege enhancement
+;  009	GPK  19-Nov-83	Fix handling of privs for created job
+;  010	GPK  29-Dec-83	Split ACNT into GACNT/WACNT
+;  011  MNB  13-Dec-83  Fix changes in M.CTRL byte (LCK,SWP)
+;  012	GPK  13-Mar-84	Add "don't pass logicals" option bit
+;  013  KPH  17-Apr-84	Restrict PK: priority to controller job priority
+;  014	GPK  19-Apr-84	Privilege name changes
+;  015	MNB  28-Mar-84	Fix FIP residency quantum bug
+;  016	GPK  10-May-84	Update error handling; entry for UU.DET
+;  017	DRP  01-Oct-84	Clear the exceed jobmax flag if user does not
+;			have JOBCTL privileges
+;  018	KPH  16-Oct-84	Improve ICFP detach processing
+;			Fix 017 to include spawn logged out
+;  019	GPK  30-Oct-84	Fix GACNT privilege checks; create logged-out
+;			spawned jobs with privs = caller's
+;  020	KPH  11-Jan-85	Don't pass group privileges on spawn-logged-out
+;  021	KPH  01-Mar-85	Pass user logicals and core common on ICFP detach
+;  022	GPK  27-Feb-85	Change CHKACC call
+;
+;			[RSTS V9.1]
+;  023  KPH  27-Aug-85	Restrict setting of sign bit in FQNENT
+;
+;			[RSTS V9.2]
+;  024  KPH  25-Jul-85	Add job control region
+;  025  KPH  06-Jan-86	Fix passing of new job number in spawn logged out
+;
+;			[RSTS V9.3]
+;  026  KPH  20-May-86	Preserve private default RTS across ICFP detach
+;
+;			[RSTS V9.4]
+;  027	DWF  19-Feb-87	Add PK system job support
+;
+;			[RSTS V9.6]
+;  028  KPH  13-Oct-87	Change KB0: DDB references to use DEV.KB
+;			Change PK DDB references to use CSR.KB
+;  029  KPH  17-Dec-87	Always use KB0: DDB for created jobs
+;
+;			[RSTS V9.7]
+;  030	DRP  14-Sep-88	Allow jobs to be spawned logged in if the device
+;			is a PK owned by the caller (article 3.5.14 M).
+;  031	DRP  20-Oct-88	Modify checks for FNDJOB failures.
+;
+;			[RSTS V10.0]
+;  032  WRM  24-Oct-89	Fix to "copy" jobhdr using swap manager
+;  033  WRM  09-Feb-90	Adjust UU.JOB memsize value for header size
+;  034	WRM  25-May-90	spawned job should be in DEF KBM
+;
+;			[RSTS V10.1]
+;  035	FEK  8-Feb-91	Only swap what is needed (so nothing random is left)
+;			Source clear of V10.0 #3.7.4
+;  036	FEK  01-Oct-91	Add NOBUF on swap check and noinit header on copy
+;  037	DRP  09-Nov-91	Source clear patch 3.7.7 (Set flag to not include
+;			the size of the job header if the user does not
+;			have TUNE priv).
+;-
+
+.SBTTL	JOB CREATION
+
+;+
+; UU.JOB - JOB CREATION.
+;
+;	R0 =  JOB NUMBER * 2 OF CALLING JOB
+;	R1 -> JDB
+;	R2 -> JDB2
+;	R3 -> PPN OF CALLING JOB
+;	R4 -> FIRQB
+;		FQFIL  =  BIT FLAGS--
+;			200 - SPAWN REGARDLESS
+;			100 - SPAWN LOGGED IN
+;			 40 - SPAWN INTO DIFFERENT ACCOUNT (PRIV)
+;			 20 - GO TO KEYBOARD MONITOR RATHER THAN RUN FILE
+;			 10 - Reduce new job's authorized privs		;009
+;			  4 - Don't turn on new job's current privs	;009
+;			  2 - Don't pass user logicals			;012
+;			  1 - UNUSED
+;		FQSIZM =  IF <> 0 THEN KB # (SIGN BIT CAN BE SET, e.g. for KB #0)
+;		FQPPN  =  PPN OF FILE TO RUN
+;		FQNAM1 =  NAME OF FILE TO RUN OR NAME OF KEYBOARD MONITOR
+;		FQEXT  =  EXTENSION OF FILE TO RUN
+;		+16    =  10. BYTES OF INFORMATION OR PPN TO LOG INTO
+;		+20    =  PRIORITY OR 0 INDICATOR TO USE CALLER'S PRIORITY
+;		+21    =  RUN BURST OR 0 INDICATOR TO USE CALLER'S BURST
+;		+22    =  MEMORY MAXIMUM OR 0 INDICATOR TO USE CALLER'S MAXIMUM
+;		FQDEV,FQDEVN = DEVICE/UNIT OF FILE TO RUN
+;		FQNENT-2 =  RUN PARAMETER WORD
+;
+;	IN FIRQB ON RETURN IF SPAWNED LOGGED OUT OR LOGGED IN
+;		+4     =  JOB NUMBER TIMES 2 OF CREATED JOB
+;
+;-
+
+; Bit definitions for byte 3 of FIRQB in call
+
+	.BSECT	,NOCRF
+
+	.BLKB	.		;Reserved
+JOBNLG:	.BLKB	.		;No user logicals, core common only	;012
+JOBCPR::.BLKB	.		;Don't turn on current privs		;009
+JOBAPR::.BLKB	.		;Reduce authorized privs to <= caller's	;009
+JOBKBM::.BLKB	.		;This call wants a particular KBM	;009
+JOBPPN:	.BLKB	.		;This call includes a PPN for the login
+JOBNQT::			;Internal flag to LOGSPW: no quota check ;014
+JOBSLI:	.BLKB	.		;This call is to spawn logged in
+JOBDIS:	.BLKB	.		;this call is to spawn even if logins disabled
+
+.ASSUME JOBDIS EQ 200
+
+
+; Set up dispatch entry
+
+.ENABL	LSB								;021
+
+FQFSRT SLI
+
+	UUOENT	JOB,,,LOGABL,,LOCK	;JOB CREATION
+
+	MOV	SP,R0		;Save stack pointer away		;023
+
+; The sequence below builds a privilege mask that a temporarily privileged
+; program would get on the stack.
+
+$$$$$$	=	PRIVSZ/2						;023
+.REPT	PRIVSZ/2							;023
+$$$$$$	=	$$$$$$-1						;023
+.IRP	NUM,<\$$$$$$>							;023
+	MOV	#..PRW'NUM,-(SP)					;023
+.ENDR									;023
+.ENDR									;023
+	CLRPRV	SYSMOD,(SP)	;Build (ALL,NOSYSMOD) mask on the stack	;023
+	CLRPRV	TMPPRV,(SP)	;Now we have (ALL,NOSYSMOD,NOTMPPRV)	;023
+
+	MOV	#FIPRVM,R2	;Point to caller's privilege mask	;023
+3$:	CMP	R0,SP		;Are we done yet?			;023
+	BEQ	5$		;Yes, caller has all privileges		;023
+	BIC	(R2)+,(SP)+	;Does caller have all privileges?	;023
+	BEQ	3$		;Yes, off to check next word		;023
+	BIC	#100000,FQNENT-2(R4) ;No, don't allow this bit		;023
+	MOV	R0,SP		;And fix up the stack			;023
+5$:	BITB	#JOBSLI,FQFIL(R4) ;Should spawn logged in?		;023
+	BNE	90$		;Yes
+
+;
+; Perform spawn logged out
+;
+
+	CALL	80$		;Unlock the job first			;016
+	TSTPRV	WACNT,@#FIPRVM	;Privileged to do this			;010
+	BEQ	40$		;No, error				;007
+	MOV	R4,-(SP)	;SAVE FIRQB POINTER
+	MOV	#100001,R0	;SET THE FAKE KB NUMBER
+	MOV	@#DEV.KB,R1	;SET KB0: DDB AS THE DDB POINTER	;028
+	CLR	R3		;set to NOT swap job this time		;035
+	FCALL	CRESPN		;Create the spawned job			;032
+	BCS	20$		;Did job get created? (No, error)
+	MOV	#JS.KB,JBSTAT(R3)	;Allow new job to be runable
+	MOV	JOBTBL(R3),R1	;GET JOB DATA POINTER OF NEW JOB
+	MOV	JDWORK(R1),R1	;NOW GET NEW JOB'S WORK BLOCK
+	ADD	#FQPPN,R1	;And point to FQPPN (to set program name) ;025
+	MOV	(SP)+,R4	;RESTORE CALLER'S FIRQB POINTER
+	CMP	(R4)+,(R4)+	;TO +4 IN CALLER'S FIRQB
+	MOV	R3,(R4)+	;PUT NEW JOB # *2 INTO CALLER'S FIRQB
+	MOV	#FQNENT-FQPPN/2,R0 ;GET COUNTER TO MOVE
+10$:	MOV	(R4)+,(R1)+	;MOVE FROM CALLER INTO NEW JOB
+	SOB	R0,10$		; FOR ALL OF THE NEEDED ITEMS
+	MOV	-(R4),(R1)	;NOW REPLICATE THE 'RUN PARAMETER'	;025
+	MOVB	@#FIJOB,-(R1)	;And pass the creator's job number * 2	;025
+	MOV	R3,R0		;Copy new job number times two		;024
+	CALLX	MAPJCR		;Map the new job's JCR entry		;024
+	ADD	#JCPRIV,R1	; and now to privs			;024
+	MOV	#3,R0		;Count of masks to fill in		;019
+.ASSUME	JCSPRV EQ JCPRIV+PRIVSZ
+.ASSUME	JCAPRV EQ JCSPRV+PRIVSZ
+15$:	MOV	#FIPRVM,R2	;Point to caller's mask			;019
+.REPT	PRIVSZ/2							;019
+	MOV	(R2)+,(R1)+						;019
+.ENDR									;019
+	CLRPRV	<GACNT,GREAD,GWRITE>,-PRIVSZ(R1) ;Take out the group privs ;020
+	SOB	R0,15$		;Walk through the masks			;019
+	MAP	FIP,DATA,PIC	;Map FIP for next overlay		;036
+	RETURN			; and exit				;016
+
+20$:	ERROR	NOROOM		;No room for user on device 
+
+30$:	CALL	80$		;Unlock the job				;016
+40$:	ERROR	PRVIOL		;Protection violation
+
+50$:	CALL	80$		;Unlock the job				;016
+	ERROR	BADFUO		;Illegal SYS() usage
+
+60$:	ADD	#<MC.LCK*400>,JDMCTL+M.SIZE(R2) ;Re-adjust the lock count ;031
+	CALL	80$		;Unlock the job				;016
+	MOV	(SP)+,R4	;Get contorted address of XBUF
+	BUFFER	RETURN		;  and return XBUF
+	ERROR	ABORT		;Fatal system I/O failure		;014
+
+70$:	CALL	80$		;Unlock the job				;016
+	ERROR	NOBUFS		;No buffer space available
+
+80$:	MOVB	@#FIJOB,R0	;Get job number to unlock		;016
+	CALLRX	UNLOCK		; and do it				;016
+
+85$:	CRASH			;Job is not memory resident		;031
+				;  or lock count is messed up.
+
+GLOBAL	<DEV.KB,JOBTBL,FIPRVM,JBSTAT>					;028
+
+;
+; Perform spawn logged in
+;
+
+; Test non-priv restrictions
+
+90$:	BITB	#JOBPPN,FQFIL(R4)	;Want to specify PPN?		;022
+	BEQ	95$			;No, so use ours		;022
+	MOV	FQSIZ(R4),R0		;Use supplied PPN		;014
+	BNE	100$			;Not defaulted, check it	;022
+95$:	MOV	R3,R0			;Use caller's if defaulted	;022
+	MOV	R0,FQSIZ(R4)		;Make sure it's set in FIRQB	;022
+100$:	CALLX	CHKACC			;Check access rights		;019
+	BIT	#DDAUXA,R0		;Accounting rights or same PPN?	;022
+	BEQ	30$			;No, error			;019
+
+GLOBAL	<JOBTBL,FIPRVM,FQCLUS>
+
+
+;
+; Process functions common to privileged and non-privileged calls
+;
+
+; Test for spawn to KBM
+
+120$:	BITB	#JOBKBM,FQFIL(R4)	;Is particular KBM wanted?
+	BEQ	SPWDET			;No				;021
+	TSTB	FQSIZM(R4)		;Is KB to be attached?
+	BEQ	50$			;No, error
+
+; Allocate XBUF and save caller's job #, core common, user logicals,
+; and work block. Then unlock the calling job. This is the entry for
+; ICFP detach.
+
+SPWDET::MOV	#2+<NSTORG-CORCMN>+BUFHDR,R1 ;Set up size of XBUF needed ;021
+	MOV	#-1,R2
+	MOV	R4,-(SP)		;Save pointer to FIRQB
+	CALLX	BUFFER,R5,LRGPOL	;Allocate XBUF
+	BCS	70$			;Did error occur? (Yes)
+	MOV	R4,R0			;Temp save contorted address
+	MOV	(SP),R4			;Restore pointer to FIRQB
+	MOV	R0,-(SP)		;Save contorted address of buffer
+
+; Note:	stack contains:
+;	sp   -> contorted address
+;	sp+2 -> FIRQB pointer
+
+	MOVB	@#FIJOB,R0		;Get job*2
+	MOV	@#FIJBDA,R2		;Get JDB pointer
+	SUB	#<MC.LCK*400>,JDMCTL+M.SIZE(R2) ;One less lock, FNDJOB	;031
+					; will up the lock count by one ;031
+	BCS	85$			;Die on underflow		;031
+	CLR	R3			;No level-3 bits
+	CLR	R5			;Begin job area at virtual 0
+	CALLX	FNDJOB			;Find job area mapped into APR6
+	 BR	60$			;Load error
+	BEQ	85$			;Job itself was not resident	;031
+					; this should never happen!	;031
+	MAP	PUSH,DATA,PIC,APR=6	;Get MMU address of user area
+	MOV	(SP)+,R0		;  into R0 for use by MOVMEM
+	MOV	(SP),R4			;Get contorted address of XBUF
+	CALLX	MAPBUF			;Map XBUF via APR6 count
+	;MOV	#140000,R3		;Get virtual address of XBUF	
+	ADD	#BUFHDR+2+<NSTORG-CORCMN>,R3 ;Point to end		;012
+	MOV	#<2+NSTORG-CORCMN>/2,R2 ;Set word count			;012
+140$:	CLR	-(R3)			;Zero the buffer		;012
+	SOB	R2,140$			; and loop			;012
+	MOVB	@#FIJOB,(R3)+		;Save job #
+	INC	R3			;Keep word aligned for reading dumps
+	MOV	#<NSTORG-CORCMN>,R2	;Get byte count
+	MOV	2(SP),R1		;Get FIRQB pointer		;012
+	BITB	#JOBNLG,FQFIL(R1)	;Core common only -- no logs?	;012
+	BEQ	150$			;No, copy it all		;012
+	MOV	#200,R2			;Yes, so change byte count	;012
+150$:	MOV	#120000+CORCMN,R1	;Get virtual address of core common & logicals
+	CALLX	MOVMEM			;Move core common & logicals
+	MOVB	@#FIJOB,R0		;Get job #
+	MAP	FIP,DATA,PIC		;Map FIP for next overlay
+	FJMP	SPAWNI			;Continue spawn
+		
+GLOBAL	<LRGPOL,FIJOB,FIJBDA,FNDJOB,MAPBUF,MOVMEM,UNLOCK>
+
+.DSABL	LSB								;021
+
+FQFEND
+
+FQFSRT
+
+.ENABL	LSB								;016
+
+;+									;030
+; This is the processing for spawn logged in.
+;									;030
+;	R0 = Caller's job # * 2						;030
+;	SP+2 -> FIRQB pointer						;030
+;	SP   -> Contorted buffer address				;030
+;-									;030
+									;032
+SPAWNI:	MOV	2(SP),R4		;Get pointer to FIRQB		;021
+	MOVB	FQSIZM(R4),R3		;Get KB #.  Is a KB to be attached?
+	BNE	10$			;Yes
+	MOV	#100001,R0		;Set the fake KB number to flag detached
+	MOV	@#DEV.KB,R1		;Assume KB0			;028
+	BR	70$			;Go create the job detached
+
+10$:	BIC	#^C<177>,R3		;Remove sign bit from KB number
+	CMP	R3,#CNT.KB		;Is KB in range?
+	BHIS	50$			;No, error
+	ASL	R3			;Get KB * 2
+	MOV	DEV.KB(R3),R1		;Get pointer to DDB
+	MOVB	DDJBNO(R1),R5		;Get job number.  Is device free?
+	BEQ	60$			;Yes
+	CMP	R0,R5			;Is the caller the owner?
+	BNE	40$			;No, error
+	TSTB	DDCNT(R1)		;Is terminal open?
+	BNE	40$			;Yes, error
+	CALLX	RETDEV			;Release terminal from caller
+	BR	SPAWN2
+
+15$:	MOVB	@#FIJOB,R0		;get job # to unlock		;032
+	CALLRX	UNLOCK			;and unlock caller now		;032
+
+20$:	CALL	15$			;unlock before leaveing		;032
+	MOV	(SP)+,R4		;Get contorted address of XBUF	;030
+	BUFFER	RETURN			;  and return XBUF
+	ERROR	NOROOM			;No room for user on device
+
+40$:	CALL	15$			;unlock before leaveing		;032
+	MOV	(SP)+,R4		;Get contorted address
+	BUFFER	RETURN			;  and return XBUF
+	ERROR	NOTAVL			;Device not available
+
+50$:	CALL	15$			;unlock before leaveing		;032
+	MOV	(SP)+,R4		;Get contorted address
+	BUFFER	RETURN			;  and return XBUF
+	ERROR	NODEVC			;Not a valid device
+
+60$:	TSTPRV	DEVICE,@#FIPRVM		;Can get restricted devices?	;014
+	BNE	SPAWN2			;Yes				;007
+	CMPB	TTINTF(R1),#TTPK11	;Is this a PK?			;030
+	BNE	65$			;No				;030
+	MOV	CSR.KB(R3),R5		;Yes, get the PK DDB ->		;030
+	CMPB	DDJBNO(R5),R0		;Controlled by caller?		;030
+	BEQ	SPAWN2			;Yes				;030
+65$:	BIT	#DDPRVO,(R1)		;Is terminal restricted?
+	BNE	40$			;Yes, error
+.ASSUME	DDSTS	EQ	1
+SPAWN2:	MOV	R3,R0			;Get KB # * 2
+	CLRB	FQSIZM(R4)		;Guess at not a PK		;013
+	CMPB	TTINTF(R1),#TTPK11	;Is this a PK creation?		;013
+	BNE	70$			;No, not this time		;013
+	MOV	CSR.KB(R3),R3		;Yes, get PK DDB pointer	;028
+	MOVB	DDJBNO(R3),FQSIZM(R4)	;Now save controller's job #	;013
+
+70$:	CLR	R3			;clear swap out flag for create	;035
+	BIT	#JOBNLG,FQFIL(R4)	;should they get logicals	;035
+	BNE	75$			; NO, don't copy the header	;035
+	DEC	R3			; YES, set the swap out flag	;035
+75$:	FCALL	CRESPN			;Create the new job attached	;032
+	BCS	20$			;Job did not get created	;032
+	CALL	15$			;and unlock caller now		;035
+	MOV	@#FIJBDA,R1		;get ^JDB			;032
+	CALLX	CLRRSQ			;Un-runable so make swapable	;032
+
+GLOBAL	<CNT.KB,DEV.KB,FIPRVM,RETDEV,FIJBDA,CSR.KB>			;028
+
+; Set up parameters/values in new job
+
+	MOV	@#FIPJCR,R4	;Get JCR entry for old job		;024
+	MAP	@#FIPJC6,APR=6,DATA,PIC,R=0 ;Map old job's JCR entry	;024
+	MOV	2(SP),R0	;Get pointer to old FIRQB		;024
+	ADD	#JCPRI,R4	;Advance to JCPRI in old job's JCR	;024
+
+; R0 -> Spawner's work block
+; R3 = New job # * 2
+; R4 -> Spawner's JCR entry @ JCPRI
+;
+; Caller's JCR entry is mapped
+
+	CLR	R5		;Assume caller specified a memory max	;037
+	TSTPRV	TUNE,@#FIPRVM	;Allowed to specify priority		;014
+	BNE	80$		;Yes					;007
+	MOVB	(R4),FQBUFL(R0)	;No, save priority for SCH		;016
+	BICB	#7,FQBUFL(R0)	;Insure it is a clean value
+	MOVB	(R4)+,-(SP)	;Save priority for new job		;024
+	MOVB	(R4)+,-(SP)	;Save runburst for new job		;024
+.ASSUME	JCBRST	EQ	JCPRI+1
+	MOVB	(R4)+,-(SP)	;Save memory max			;024
+.ASSUME JCSIZM EQ JCBRST+1
+	INC	R5		; and indicate we're using callers size	;037
+	BR	160$		;Now join up				;024
+
+80$:	MOVB	FQBUFL(R0),-(SP) ;Get priority from caller
+	BNE	90$		;Skip if priority specified
+	MOVB	(R4),FQBUFL(R0)	;Use caller's, save it for SCH		;016
+	BICB	#7,FQBUFL(R0)	;Insure it is a clean value
+90$:	BPL	100$		;Is it real? (Yes)
+	CLRB	(SP)		;No, assume it should be 0
+100$:	CMPB	(SP),(R4)	;Is priority greater than caller's?
+	BGE	120$		;Yes, use it
+110$:	MOVB	(R4),(SP)	;No, replace it with caller's value
+120$:	INC	R4		;Point past JCPRI			;016
+.ASSUME	JCBRST EQ JCPRI+1						;016
+	MOVB	FQBUFL+1(R0),-(SP) ;Get run burst from caller
+	BGT	130$		;Is it real? (Yes)
+	MOVB	(R4),(SP)	;No, use caller's value			;016
+130$:	INC	R4		;Point past JCBRST			;016
+.ASSUME	JCSIZM EQ JCBRST+1						;016
+	MOVB	FQMODE(R0),-(SP) ;Get memory max from caller
+	BNE	160$		;Got one, we'll use that		;037
+	MOVB	(R4),(SP)	;None specified, use the callers	;037
+	INC	R5		; and set flag				;037
+; R0 -> Spawner's work block
+; R3 = New job # * 2
+; R5 = Flag 0 =  Using the callers specified memory max value
+;	    0 <> Caller didn't specify one so we'll use his
+; SP -> new memory max, new runburst, new priority, spawn buffer, spawn WB, ...
+
+160$:	MOV	R5,-(SP)	;put flag on stack for future		;033
+	MOVB	FQSIZM(R0),R5	;R5 = PK controller job # * 2		;013
+	BEQ	170$		;Not on a PK, nothing to do		;013
+	BIT	#1,R5		;Controlling job a system job?		;027
+	BNE	170$		;Yes, skip priority checks.		;027
+	MOV	R0,-(SP)	;Save work block pointer		;024
+	MOV	R5,R0		;Copy job # * 2				;024
+	CALLX	MAPJCR		;Map PK controller's JCR entry		;024
+	MOV	(SP)+,R0	;Restore work block pointer		;024
+	MOVB	JCPRI(R1),R5	;R5 = Controller's job priority		;013
+	BICB	#7,R5		;Make it a clean value			;013
+	CMPB	FQBUFL(R0),R5	;New job's priority too high?		;013
+	BLE	170$		;No, not this time			;013
+	MOVB	R5,FQBUFL(R0)	;Yes, so lower it			;013
+170$:	MOVB	R3,R0		;Copy new job # * 2			;024
+	CALLX	MAPJCR		;Map the JCR entry for new job		;024
+	TST	(SP)+		;Using the callers memory size?		;037
+	BNE	175$		;Yes, no need to include the header size ;037
+	MOVB	JCHDRS(R1),R0	;Get the new job's header size		;037
+	ADD	R0,(SP)		;Add that to what user gave us for size	;037
+	CMPB	(SP),@#SWPMAX	;Is the value within limit?		;037
+	BLOS	175$		;Yes, use it				;037
+	MOVB	@#SWPMAX,(SP)	;No, then use swap max			;037
+175$:	ADD	#JCSIZM,R1	;And point to memory max		;033
+	MOVB	(SP)+,(R1)	;Set the new memory max			;024
+	MOVB	(SP)+,-(R1)	;Set the new run burst			;024
+.ASSUME	JCBRST	EQ	JCSIZM-1
+	MOVB	(SP)+,-(R1)	;Set the new priority			;024
+.ASSUME	JCPRI	EQ	JCBRST-1
+	MOV	(SP)+,JCSPWN-JCPRI(R1) ;Set the spawn buffer		;024
+	MOV	(SP)+,R0	;Get back old job's work block		;024
+	MOV	JOBTBL(R3),R2	;Get new job's JDB pointer		;024
+	MOV	JDWORK(R2),R4	;Get new job work block pointer		;024
+	BIS	#J2FSPW,JDFLG3(R2) ;Set spawn flag in JDB		;024
+	MOVB	#DSPFQ,FQFUN(R4) ;Transfer special dispatch function
+	MOVB	FQFIL(R0),FQFIL(R4) ;         spawn flags
+	BICB	#^C<JOBKBM!JOBAPR!JOBCPR>,FQFIL(R4) ;Leave only a few	;009
+	TSTPRV	EXQTA,@#FIPRVM	;Need to do quota check?		;014
+	BEQ	180$		;Yes if no privs			;014
+	BISB	#JOBNQT,FQFIL(R4) ;No, pass the word to Login code 	;014
+180$:	MOVB	@#FIJOB,FQSIZM(R4) ;Transfer job # * 2 of old job
+	BITB	#JOBSLI,FQFIL(R0) ;Is this ICFP detach?			;021
+	BNE	190$		;No, not this time			;018
+	CLRB	FQFIL(R0)	;Yes, tell SCH about it			;021
+	BR	200$		;And join up				;021
+
+190$:	MOVB	R3,FQFIL(R0)	;Return new job # to caller		;021
+200$:	MOV	#LOGSPI,FQADDR(R4) ;Set up special dispatch address 	;021
+	MOVB	R3,FQJOB(R4)	;and new job number times two
+	MOV	FQSIZ(R0),FQPPN(R4) ;Set PPN to use			;014
+	MOV	#JSFIP,JBWAIT(R3) ;Put new job in FIP wait
+	MOV	#FIQUE,R0	;Go to FIP
+	CALLX	QUEUE0,R5	;  for new job to log itself in
+	MAP	FIP,DATA,PIC	;Map FIP again for exit
+	JMPX	FIEXIX		;and exit
+
+.DSABL	LSB								;016
+
+GLOBAL	<JOBTBL,FIPRVM,QUEUE0,LOGSPI,JBWAIT,FIQUE,FIUSER,SWPMAX>	;007
+GLOBAL	<FIPJCR,FIPJC6>							;024
+
+FQFEND
+
+FQFSRT									;032
+
+.ENABL	LSB								;016
+;+
+; Subroutine to create the spawned job
+; Routine changes the priority level to 5 during the creation
+; Call as follows:
+;   R0 = KEYBOARD NUMBER * 2 OR 100001
+;   R1 -> DDB of terminal if attached; DDB of KB0: if detached
+;   R3 = -1 to swap out the caller as the new job, <>-1 for no swap	;032
+;   R4 -> FIRQB
+;   FCALL CRESPN
+;   C=1 IF FAILED OR C=0 IF SUCCESSFUL
+;   R3=NEW JOB # X 2
+;-
+
+CRESPN:	NOP				;make debugging easier		;036
+	MOV	R4,-(SP)		;CREJOB destroys R4
+	MOV	R3,-(SP)		;save the spec case flag	;032
+	SPLC	5			;;To level 5 for safety
+	MOVB	@#MAXJOB,-(SP)		;;Save current login max
+	TSTB	FQFIL(R4)		;;Should spawn even if no logins?
+	BPL	10$			;;No
+.ASSUME JOBDIS EQ 200
+	TSTPRV	JOBCTL,@#FIPRVM		;;Yes, but is he allowed to?	;018
+	BEQ	10$			;;No, so forget it		;018
+	MOVB	@#MAXCNT,@#MAXJOB	;;Allow many jobs for now
+10$:	CALLMI	CREJOB,KBDAP5		;;Call for the job creation
+	MOVB	(SP)+,@#MAXJOB		;;Restore current login max
+	BCS	30$			;;Did job get created? (No)
+	CLR	JBSTAT(R3)		;;Yes, prevent it from being runnable
+	SPLC	3			; drop down for others		;035
+	INC	(SP)			;test the spec case flag on sp	;032
+	BNE	30$			;if it was not -1 skip it	;032
+	MOV	JOBTBL(R3),R4		;get ^JDB			;032
+	ADD	#JDMCTL,R4		;point to MCSB in JDB now	;032
+	REGSAV				;save the regs because of doswap ;032
+	MOV	JDRTS-JDMCTL(R4),R0	;get new RTS pointer of new job	;032+
+	INCB	R.CNT+1(R0)		;up the resdnt count so REMJOB	;034
+		;can DECB it on out swap completion even if RTS is non-res ;034
+	MAP	@#FIPJC6,APR=6,DATA,PIC,R=0 ;Map the old jobs JCR entry	;035
+	MOV	@#FIPJCR,R1		;and point to it		;035
+	MOVB	JCHDRS(R1),R5		;Now, get old jobs header size	;036
+	MOV	R5,-(SP)		;Save for later			;036
+	MOVB	R.MSIZ(R0),R2		; get the RTS minimum size	;036
+	ADD	R2,R5			; new jobs minimum size		;036
+	MOV	R3,R0			;new job # * 2 for MAPJCR	;036
+	CALLX	MAPJCR			; now map it			;036
+	MOVB	R5,JCSIZN(R1)		; and set next residency size	;036
+	MOV	(SP)+,R0		;Get back header size to swap	;036
+	MOVB	R0,JCHDRSZ(R1)		; the jobs header size		;036
+	BEQ	20$			;NONE - that was easy		;036
+	MOV	@#FIJBDA,R3		;get the old job's JDB		;032
+	ADD	#JDMCTL,R3		;old pointer now at MCSB also	;032
+	MOV	(R3),(R4)		;move the old prev link to new	;032
+.ASSUME	M.PPRV	EQ	0
+	MOV	R4,@M.PPRV(R3)		;make new the prev to the old	;032
+	MOV	R4,(R3)			;make new the prev to the old	;032
+.ASSUME	M.PPRV	EQ	0
+	ADD	#M.PNXT,(R3)		;make prev point to m.NXT in new ;032
+.ASSUME	M.PPRV	EQ	0
+	MOV	R3,M.PNXT(R4)		;make old the next after new	;032
+	CLR	M.TSIZ(R4)		;total segment size of new =0	;032
+		;prev line is a sligth of hand to make REMJOB work	;032
+	MOVB	#<SWP!OUT!MC.LCK!REQ>,M.CTRL(R4) ;set put out&get back	;032+
+	MOVB	R0,M.SIZE(R4)		;and size for new area		;035
+	MOV	M.PHYA(R3),M.PHYA(R4)	;copy actual address (MMU)	;032
+	BIC	#J2IHDR,JDFLG3-JDMCTL(R4) ;Don't init new jobs header	;036
+					;  we're copying into it	;036
+	MOV	R4,R1			;get MCSB pointer for DOSWAP	;032
+	INC	@#SWOCNT		;count this swap out		;032+
+	CALLM	DOSWAP,GENAP5		;go start swap out		;032
+	CLC				;clear C to signal success	;036
+	BVC	20$			; no error continue		;036
+	BISB	#JFKILL,JDFLG2-JDMCTL(R1) ;Kill the bad job		;036
+	BIS	#J2KIL2,JDFLG3-JDMCTL(R1) ; for real			;036
+	MOVB	JDJBNO-JDMCTL(R1),R2	;get the job number		;036
+	MOV	JBWAIT(R2),JBSTAT(R2)	; and wake it up		;036
+	SEC				; Signal failure to our caller	;036
+20$:	MAP	FIP,DATA,PIC		;Map FIP for next overlay	;036
+	REGRES				;undue the reg save		;032
+30$:	SPL	3			;;Go back to level 3 again with C-bit indicator
+	INC	(SP)+			; clean off the stack		;032
+	MOV	(SP)+,R4
+	RETURN
+
+FQFEND
+
+GLOBAL	<SWOCNT,MAXJOB,MAXCNT,CREJOB,KBDAP5,JBSTAT,FIPJC6,FIPJCR>
+
+.END

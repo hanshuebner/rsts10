@@ -1,0 +1,331 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	BCKDTA,<Backup common data>,0C,19-JUL-91,KPH/BSB/FRL/BGN
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BCKDTA
+
+;+
+;  000	KPH  01-Dec-83	Creation for Version 9.0 RSTS/E
+;  001	KPH  06-Mar-85	Add /PLACED_POSITION
+;
+;			[RSTS/E V9.3]
+;  002  KPH  20-Jan-86	Add CRC-32 calculation
+;  003  FRL  28-Apr-86  Add installation related code
+;
+;			[RSTS/E V9.5]
+;  004	BGN  10-Jul-87	Backup/Directory support
+;
+;			[RSTS/E V9.7]
+;  005  BGN  14-Oct-87	Add EXIT STATUS word
+;  006  BGN  28-Sep-88  Add storage for BACKUP/DIRECTORY header information
+;
+;			[RSTS/E V10.0]
+;  007  BGN  26-Oct-89	Add support for BACKUP image mode
+;  008  BGN  10-Nov-89	Add cells for image listing functions
+;  010	REG  30-Nov-89	merge /INIT code from GPK
+;  011	REG  20-Dec-89	Add default /IMAGE disk label storage area
+;  012	REG  30-Dec-89	Cleanup
+;  013	REG  13-Jan-90	Add OMS
+;  014	REG  01-Feb-90	Move buffers in from BCKSUB to make more room
+;  015  REG  03-Apr-90	Add big blocks
+;  016  REG  03-Apr-90	Exit with status
+;  017	REG  01-May-90	Fix size of PARBUF
+;
+;			[RSTS V10.1]
+;  018  REG  07-Jan-91	Free up one APR
+;  019  REG  20-Jan-91	Improve per-file messages
+;-
+
+.SBTTL	Call macros
+
+.MCALL	.ASCIC
+
+.SBTTL	Define root data sections
+
+	.PSECT	BCKDTA,RW,D,GBL,REL,CON,SAV
+
+ZEROST				;Start of zero area
+$SELEC::.BLKW			;Link to first select entry
+$INCLU::.BLKW			;Link to first include entry
+$EXCLU::.BLKW			;Link to first exclude entry
+$VERIF::.BLKW			;Link to first "don't verify" entry
+$BIAS::	.BLKW			;Volume number bias			;003
+CURVOL::.BLKW			;Volume number currently mounted
+GENFLG::.BLKW			;General flags
+RESSUB::.BLKW			;Restore subfunction flags		;004
+IMGSUB::.BLKW			;/IMAGE subfunction flags		;012
+C$FLAG::.BLKW			;Command flags
+C$FLG2::.BLKW			;Secondary command flags
+RSTFLG::.BLKW                   ;Flags about this restore/verify	;007
+$DEFLB::.BLKB	6.		;Default /IMAGE disk label storage	;012
+$SAVLB::.BLKB	6.		;Saveset volume Label
+$DSKLB::.BLKB	13.		;RSTS volume label (or VMS if using /DIR);006
+EXERCT::.BLKB			;Pattern count for /INITIALIZE		;018
+	.EVEN								;018
+BUFCNT::.BLKW			;Number of large buffers in pool (free or not);018
+BUFUSE::.BLKW			;Number of large buffers in use		;018
+INICLU::.BLKW			;Clustersize to use for /INITIALIZE	;010
+ZEROEN				;End of zero area
+
+NOVTAL::.BLKW			;Tail of don't verify list
+$DATTB::.BLKB	D$SIZE		;Define date table
+$OLDFI::.BLKB	12.		;Copy of source file PPN and name	;019
+$CURFI::.BLKB	C$SIZE		;Define current file cells
+$IMGFI::.BLKB	C$SIZE		;Define cells for image use of bcklis	;008
+CRCTBL::.BLKW	400		;Table for CRC-16 calculation
+CRC32T::.BLKW	1000		;Table for CRC-32 calculation		;002
+CMDSLN::.BLKW			;Length of saved command line
+CMDSAV::.BLKW			;Pointer to saved command line
+STATS::	.WORD	2		;Exit Status word			;016
+SAVSZL::.BLKW			;Save set size in blocks (LSB)
+SAVSZM::.BLKW			;Save set size in blocks (MSB)
+
+; In order to handle blocksizes that span more than 1 APR, we have to	;015
+; be able to remap the blocks to get access to all the data in them.	;015
+; But the code touches the data block in several different places	;015
+; during the process of building a block to write, so we need to be	;015
+; able to access the start of the current block,			;015
+; start of the current record, and end of the current record.		;015
+; Any or all of those may be in different 8Kb areas, so we have to	;015
+; remap to get at them.							;015
+
+; Restructure to allow only 2 mapping APR's instead of 3:		;018
+;									;018
+; BCKRMS up to QWRITE needs its own mapping variables because it can	;018
+; be "interrupted" by CHKACT, WRTCMP, and REDCMP, which map blocks.	;018
+;									;018
+; CHKACT needs its own mapping variables because it can be interrupted	;018
+; by WRTCMP and REDCMP.							;018
+;									;018
+; The names of the block ID's and the virtual addresses have meanings	;018
+; as follows:	Block ID: xyzBID	Address: xyBVA			;018
+; x=(section of code), y=(data, xor, scratch), z=(#)			;018
+;									;018
+;			DATA	DATA	XOR	XOR			;018
+; CODE SECTION		ID	ADR	ID	ADR			;018
+; -------------------------------------------------------------------	;018
+;		      |     APR 6     |     APR 7    |			;018
+; -------------------------------------------------------------------	;018
+; BCKRMS: Up to QWRITE	GD1BID	GDBVA	GX1BID	GXBVA			;018
+;			GD2BID						;018
+;									;018
+; BCKRMS: QWRITE	QD1BID	QDBVA	QX1BID	QXBVA			;018
+;			QD2BID		QX2BID				;018
+;									;018
+; BCKRMS: WRTCMP	CS1BID	CSBVA					;018
+;									;018
+; BCKRMS: CHKACT	AD1BID	ADBVA	GX1BID	GXBVA			;018
+;									;018
+; BCKFIL: REDCMP	CS1BID	CSBVA					;018
+;									;018
+; BCKFIL: Except REDCMP	GD1BID	GDBVA					;018
+;			GD2BID						;018
+;									;018
+; ---------------------------------------------------------------------	;018
+; RSTRMS: Except REDCMP	QD1BID	QDBVA	QX1BID	QXBVA			;018
+;			QD2BID		QX2BID				;018
+;									;018
+; RSTRMS: REDCMP	CS1BID	CSBVA					;018
+;									;018
+; RSTFIL: Except WRTCMP	QD1BID	QDBVA					;018
+;									;018
+; RSTFIL: WRTCMP	CS1BID	CSBVA					;018
+; ---------------------------------------------------------------------	;018
+;									;018
+; IMGFIL: 		GD1BID	GDBVA					;018
+; ---------------------------------------------------------------------	;018
+
+;NOTE:  These next items are grouped					;018
+
+INIBID::			; These get init'ed to -1		;018
+BLCKID=.								;018
+
+AD1BID::.BLKW			; Data ID for CHKACT			;018
+CS1BID::.BLKW			; Scratch ID for ???CMP			;018
+GD1BID::.BLKW			; Data ID for main line			;018
+GD2BID::.BLKW			; Data ID for main line			;018
+GX1BID::.BLKW			; XOR ID for main line			;018
+QD1BID::.BLKW			; Data ID for QWRITE			;018
+QD2BID::.BLKW			; Data ID for QWRITE			;018
+QX1BID::.BLKW			; XOR ID for QWRITE			;018
+QX2BID::.BLKW			; XOR ID for QWRITE			;018
+
+BIDSIZ::.WORD	<.-BLCKID>/2						;018
+
+INIBVA::			; These get init'ed to 0		;018
+BLKBVA=.								;018
+
+SAVDTA::.BLKW			; Last data map ID			;018
+SAVXOR::.BLKW			; Last XOR map ID			;018
+
+ADBVA::.BLKW			; Data virtual address for CHKACT	;018
+CSBVA::.BLKW			; Scratch address for ???CMP & QWRITE	;018
+GDBVA::.BLKW			; Data virtual address for the rest	;018
+GXBVA::.BLKW			; XOR virtual address for the rest	;018
+QDBVA::.BLKW			; Data virtual address for QWRITE	;018
+QXBVA::.BLKW			; XOR virtual address for QWRITE	;018
+
+RECPTR::.BLKW			; Record pointer			;018
+CURREC::.BLKW			; Record pointer			;018
+
+BVASIZ::.WORD	<.-BLKBVA>/2						;018
+
+; The following two cells are grouped
+
+BCKDAT::.BLKW			;Date associated with backup set
+BCKTIM::.BLKW			;Time associated with backup set
+
+;Common data - moved here on behalf of image mode			;007
+IMGCHN::.BLKW			;Output channel # to use
+IOCHAN::.BLKW			;Available channel pool			;007
+ACRTAL::.BLKW          		;Link to last action routine (or ACRQUE)
+
+;BACKUP/HEADER SUPPORT DATA						;006
+BCKUNM::.BLKB	33.		;Name associated with backup set
+	.EVEN
+BCKPPN::.BLKB	4		;PPN associated with backup set
+BCKCOM::.BLKB	512.		;Command associated with backup set
+BCKOSI::.BLKB	2		;Operating system ID associated with backup set
+BCKOSV::.BLKB	5		;Operating system version assoc. w/ backup set
+BCKNOD::.BLKB	13.		;Nodename of system associated with backup set
+	.EVEN
+BCKDEV::.BLKB	17.		;Device saveset was/is written to
+	.EVEN
+BCKVER::.BLKB	33.		;BACKUP version associated with backup set
+	.EVEN
+BCKPCK::.BLKB	4.		;Pack size associated with backup set
+
+$DEN::	.BLKW			; Density for tape			
+$GRPSZ::.BLKW			; Groupsize for XOR redundancy		
+$MYPPN::.BLKW			; The PPN of the user			
+$OCCUR::.BLKW			; Occurance number			
+$LISSZ::.BLKW			; Reccommended Record size for logfile	
+$LISFL::.BLKW			; Logfile device dependent flags	
+$LISPT::.BLKW			; Next free address in output buffer	
+$LISBF::.BLKW			; Address of output buffer		
+$RESMSK::.BLKB	12.		; Filename mask for restores		
+$DSKDEV::.BLKW			; RSTS target disk specification 	
+$DSKUNT::.BLKW			;  "     "      " 's unit number/flag	
+
+.ASSUME $DSKDEV+2 EQ $DSKUNT	; BCKLIS depends on this
+
+$SAVNAM::.BLKB	12.		; Saveset container file name (in ASCII)
+$SAVDEV::.BLKW			; Saveset device name (in ASCII)	
+$SAVUNT::.BLKW			; Unit number and unit number flag	
+
+.ASSUME $SAVDEV+2 EQ $SAVUNT	; BCKLIS depends on this
+
+$SAVFLG::.BLKW			; Device flags				
+BLKSIZ::.BLKW			; Blocksize to use for disk/tape	;015
+TBKSIZ::.BLKW			; Default blocksize for tape
+HBKSIZ::.BLKW			; Highest legal blocksize for disk/tape	;015
+FRELST::.BLKW	2		; Free memory list header
+$BUFSZ::.BLKW			; Size of a "large" I/O buffer
+LIBID::	.BLKW			; Library ID of our dynamic region
+PLADCN::.BLKW			;Placed file DCN to use			;001
+
+	;Note:  Keep the next two fields together in this order		;013
+	;	Together OMSBUF and TTYBUF make up OMSBUF		;013
+	;	OMSBUF is the send buffer				;013
+	;	TTYBUF is used for the receiver buffer			;013
+
+OMSLOC=.
+
+OMSBUF::.BYTE	3		; Reply field ID			;013
+	.BYTE	1		; Reply=yes				;013
+	.BYTE	4		; Facility field ID			;013
+	.ASCIC	<"BACKUP">	; Facility name				;013
+	.BYTE	1		; Text field ID				;013
+	.BYTE			; For the text length (plug in later)	;013
+
+TTYLOC=.
+
+TTYBUF::								;014
+DB::									;014
+DSIBUF::.BLKB	512.		;DSKINT and HOOK work buffer		;014
+	; By overlapping TTYBUF with DSIBUF we save some room.		;014
+CURSIZ::.BLKB			; Current size of program in K
+RGNSIZ::.BLKB			; Requested size of dynamic region
+
+.EVEN	;In the future, things go past
+
+.SBTTL	OMS Interface data structures					;013+
+
+CMDDSC::.WORD	OMSLOC
+	.BLKW
+RSPDSC::.WORD	TTYLOC
+	.WORD	TTYLEN
+PARBUF::.WORD	2
+	.ASCII	/BACK/
+	.BLKW	9.							;017
+JOBNO::	.BLKB
+
+.EVEN									;013-
+
+.SBTTL	Allocate the block header
+
+; The data below is written to each block header on the tape. The order of
+; cells much follow the definition in BCKPFX.MAC.
+
+BBHDAT::
+	.WORD	BBHSIZ		; Size of header			
+	.WORD	4		; Operating system ID			
+	.WORD	1		; Subsystem ID				
+	.WORD	1		; Application ID			
+ZEROST
+	.BLKW0	2		; Sequence number of block		
+ZEROEN
+	.BLKB0	24		; Reserved for future use		
+	.WORD	STRLVL		; Structure level of tape		
+	.WORD	1		; Sequence number of tape		
+	.BLKW0	2		; Block CRC				
+	.BLKW0	2		; Block size				
+ZEROST									;002
+	.WORD	0		; Block flags LSB			;002
+	.WORD	0		; Block flags MSB			
+ZEROEN									;002
+	.BLKB0	40		; Save set name				
+	.BLKB0	6		; Unused				
+	.BLKB0	6		; Unused				
+ZEROST
+	.BLKB0	200		; File name				
+	.BYTE	0		; Record type				
+	.BYTE	0		; Record attributes			
+	.WORD	0		; Record size				
+	.BYTE	0		; Bucket size				
+	.BYTE	0		; VFC area length			
+	.WORD	0		; Maximum record size			
+	.BLKW0	2		; Allocated file size			
+ZEROEN
+	.BLKB0	26		; Unused				
+	.WORD	0		; Checksum				
+
+.ASSUME	<.-BBHDAT> EQ BBHSIZ
+
+.SBTTL	Define our read-only data
+
+	.PSECT	BCKTBL,RO,D,GBL,REL,CON,SAV
+
+XORAVL::.BYTE	XORAPR		; APR to use for XOR buffers		;015
+DTAAVL::.BYTE	DTAAPR		; APR to use for data buffers		;015
+
+.EVEN
+.END

@@ -1,0 +1,470 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element PROPC.MAC
+;  *4    25-JUN-1987 17:50:23 STEVENS "Flag XOR instructions which do not behave the same on all processors with 'Z' error"
+;  *3    18-AUG-1986 11:25:32 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:39:05 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:42:52 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element PROPC.MAC
+	.NLIST							;Edit Level 01
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	PROPC	- Process opcode/directive module
+	.SBTTL	PROPC	- Process opcode/directive module
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Too many people to list here
+;
+;   Created:	From the dust and dirt
+;
+;  Abstract:	PROPC	- Process opcode/directive module
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;	001	Jrw	12-Apr-83	Correct handling of floating point lits
+;--
+
+
+	PURE	PUREI,I
+
+.SBTTL	PROPC	- Main entry from STMNT.MAC
+
+;+
+; PROPC
+; This is the driver for decoding a instruction opcode, or
+; for dispatching a directive reference to the proper
+; routine.
+;
+;	MODE,VALUE	Setup via a OSRCH on the input line
+;
+;	CALLR	PROPC	; Called from STMNT.MAC
+;-
+
+PROPC::	MOV	#MODE,R4	;R4 -> Mode value from PST entry (PST.MAC)
+	MOV	@R4,R1		;R1 = Mode value
+	CLR	(R4)+		;Clear it out.
+	MOV	#CLCLOC,R2	;R2 -> Current location counter
+	BIT	#100000+DFLGEV,R1 ;Is this an OP code or an EVEN directive?
+	BEQ	10$		;Branch if not
+	BIT	#1,@R2		;Else, is current "." even?
+	BEQ	10$		;Branch if so.
+	INC	@R2		;Else round it to an even value
+	ERROR	B		; and flag a boundry error.
+
+10$:	BIT	#DFLGBM,R1	;Byte mode directive?
+	BEQ	20$		;Branch if not.
+	INC	BYTMOD		;Else set byte mode flag.
+20$:	TST	R1		;Op code?
+	BMI	30$		;Branch if so, OK.
+	MOV	@R4,-(SP)	;Else it must be a directive, save SUBR addr.
+	CLR	@R4		;Zap VALUE word.
+	CLR	R3		;Start with R3=0
+	CLRB	CRFDFL		;Zap CREF destructive reference flag.
+	CALLR	@(SP)+		;Call proper directive handler.
+
+30$:	MOV	#077776,PCRCNT	;List location of first word only
+	CALL	STCODE		;Stuff basic value
+	MOV	VALUE,-(SP)	;Save basic opcode value
+	MOV	@SP,$OPCOD	; and make a working copy of it
+	MOVB	R1,CRFDFL	;Setup CREF destructive reference flag
+	SWAB	R1
+	BIC	#177600,R1	;Clear high order bits
+	MOV	R1,OPCLAS	;Save opcode class
+	ASL	R1		;Setup R1 for pointer into OPJTBL
+	ASL	R1		;Four bytes per table entry
+	CLR	-(SP)		;Set a stopper
+	MOV	OPJTBL+2(R1),-(SP) ;Stack second arg (If any)
+	BNE	40$		;Branch if two arguments present.
+	TST	(SP)+		;Else only one arg, prune terminator
+40$:	MOV	OPJTBL(R1),R1	;R1 = First argument
+	BEQ	70$		;Branch if none.
+50$:	MOV	R1,-(SP)	;Save a copy of first argument
+	SWAB	@SP		;Shift count to right half
+	BIC	#177400,R1	;Isolate low byte
+	CALL	TSTARG		;Comma test
+	CLR	R0		;Clear function register
+	CALL	OPJBAS(R1)	;Call proper routine
+	ROLB	CRFDFL		;Shift CREF destructive reference flag
+
+60$:	ASL	R0		;Shift result
+	DECB	@SP		;Count in SP, RH
+	BGE	60$		;Loop till done.
+	ROR	R0		;Account for one too many shifts
+	BIS	R0,$OPCOD	;Set address mode bits into opcode
+	TST	(SP)+		;Prune work entry
+	CALL	ZAPCPX		;Clear CPXROL of first args
+70$:	MOV	(SP)+,R1	;R1 = Next argument
+	BNE	50$		;Branch if not terminator
+	CMP	$OPCOD,(SP)+	;Has basic opcode been modified?
+	BEQ	80$		;Branch if not.
+	MOV	BASCOD,R1	;Else get virt locn of start of list
+	CALL	$CVRL		;Convert to REAL address in R0
+	MOV	$OPCOD,<VALUE-SYMBOL+2>(R0)  ;Update opcode value
+	CALL	$WRMPG		;Mark the page dirty
+
+;	Look for incompatable PDP-11 instructions.
+
+80$:	TST	PASS		;On the first pass?
+	BEQ	110$		;Branch if so, no error message output.
+	MOV	$OPCOD,R0	;R0 -> Instruction value
+	MOV	R0,R1		;Copy for working
+	BIC	#000007,R1
+	CMP	#000120,R1	;Check for	JMP (R)+
+	BEQ	100$		;Branch if so, error.
+	BIC	#000700,R1
+	CMP	#004020,R1	;Check for	JSR  X,(R1)+
+	BEQ	100$		;Branch if so, error.
+	MOV	R0,R1		;Get another working copy.
+	BIC	#000777,R1	;Clear first REG, second arg mode/type	[+GTS]
+	CMP	#074000,R1	;XOR instruction?			[+GTS]
+	BEQ	85$		;Branch if YES				[+GTS]
+	BIT	#007000,R1	;First arg type zero?
+	BNE	110$		;Branch if not, done.
+	BIC	#100777,R1	;Clear BYTE, first REG, second arg mode/type
+	BEQ	110$		;Branch if nothing left, done.
+	CMP	#070000,R1	;Double address type?
+	BEQ	110$		;Branch if not, done.
+85$:				;					[+GTS]
+	MOV	R0,R1		;R1 = Working copy of instruction.
+;	BIC	#170017,R1	;					[-GTS]
+	BIC	#177017,R1	;					[+GTS]
+	CMP	#000760,R1	;Check for	MOV PC,[@]X(R)
+	BEQ	100$		;Branch if so, error.
+	BIC	#177717,R1
+	CMP	#000020,R1	;Check for	MOV PC,(R)+
+	BEQ	90$		;Branch if so, check for PC relative
+	CMP	#000040,R1	;Check for	MOV PC,-(R)
+	BNE	110$		;Branch if not, done.
+90$:	MOV	R0,R1		;R1 = Working copy
+	ROL	R1
+	ROL	R1
+	SWAB	R1
+	SUB	R0,R1
+	BIT	#000007,R1	;  R1=R2
+	BNE	110$		;Branch if not PC relative.
+100$:	ERROR	Z		;Flag "Z" error.
+110$:	RETURN			;Return to caller.
+
+
+;+
+; Opcode jump table
+;-
+
+.MACRO	GENOPJ	NUMBER,SUBR1,SC1,SUBR2,SC2
+OPCL'NUMBER==	<.-OPJTBL>/4+.OPCL.
+.IF	NB,<SUBR1>
+.IIF IDN <SUBR1>,<AEXP>,	.BYTE	AEXPI-OPJBAS
+.IIF DIF <SUBR1>,<AEXP>,	.BYTE	SUBR1-OPJBAS
+.IFF;	NB,<SUBR1>
+	.BYTE	0
+.ENDC;	NB,<SUBR1>
+	.BYTE	SC1+0
+.IF	NB,<SUBR2>
+.IIF IDN <SUBR2>,<AEXP>,	.BYTE	AEXPI-OPJBAS
+.IIF DIF <SUBR2>,<AEXP>,	.BYTE	SUBR2-OPJBAS
+.IFF;	NB,<SUBR2>
+	.BYTE	0
+.ENDC;	NB,<SUBR2>
+	.BYTE	SC2+0
+.ENDM	GENOPJ
+
+.IF	DF,RT11			;If RT-11
+	.PSECT	.OPCL.,ABS,D,GBL,OVR
+.OPCL.:
+.IFF;	DF,RT11			;If RT-11
+.OPCL.=0
+.ENDC;	DF,RT11			;If RT-11
+
+	PURE	DPURE,D
+OPJTBL:				;OP code jump table
+GENOPJ	00			;[1 word]	No operands	   (HALT)
+GENOPJ	01,AEXP			;[1 word]	NN	<5:0>	   (TST x)
+GENOPJ	02,AEXP  ,6,AEXP	;[1,2,3 words]	SS,DD	<11:6><5:0>(CMP x,y)
+GENOPJ	03,REGEXP		;[1 word]	R	<2:0>	   (FADD Rn)
+GENOPJ	04,BROP			;[1 word]	XXX	<7:0>	   (BRanchs)
+GENOPJ	05,REGEXP,6,AEXP	;[1,2 word]	R,DD	<8:6><5:0> (XORs)
+GENOPJ	06,TRAPOP		;[1 word]	NNN	<7:0>	   (TRAP n)
+GENOPJ	07,AEXP  ,0,REGEXP,6	;[1,2 words]	R,SS	<8:6><5:0> (DIV Rn,x)
+GENOPJ	08,REGEXP,6,SOBOP	;[1 word]	R,XX	<8:6><5:0> (SOB Rn,x)
+GENOPJ	09,AEXP  ,0,REGEXP,6  ;?;[1,2 words]	R,SS	<8:6><5:0> (ASH Rn,x)
+GENOPJ	10,MARKOP		;[1 word]	NN	<5:0>	   (MARK n)
+GENOPJ	11,AEXP  ,0,DRGEXP,6	;[1,2 words]	FSRC,AC	<7:6><5:0> (LDF x,AC)
+GENOPJ	12,DRGEXP,6,AEXP  ,0	;[1,2 words]	AC,FDST	<7:6><5:0> (STF AC,x)
+GENOPJ	13,SPLOP		;[1 word]	N	<2:0>	   (SPL n)
+GENOPJ	14,AEXP  ,0,DRGEXP,6	;[1,2 word]	SRC,AC	<7:6><5:0> (LDCIF x,AC)
+
+
+	PURE	PUREI,I
+OPJBAS:	RETURN			;Index base for following routines
+REGEXP:	CALL	ABSEXP		;Evalute absolute value
+	BIT	#<^C7>,R0	;Any overflow?
+	BEQ	10$		;Branch if not, OK.
+	ERROR	R		;Else flag register usage error.
+	BIC	#<^C7>,R0	;Clear overflow
+10$:	RETURN			;Return to caller
+
+.ENABL	LSB
+BROP:				;Branch displacement type
+	CALL	RELEXP		;Get a relative expression
+	CMPB	SECTOR,CLCSEC	;In this sector?
+	BNE	BRERR		;Branch if not, error.
+	SUB	CLCLOC,R0	;See if displacement too far
+	ASR	R0
+	BCS	BRERR		;Branch if too far forward.
+	DEC	R0
+	MOVB	R0,R3		;Extend sign
+	CMP	R0,R3		;Too far back?
+	BEQ	20$		;Branch if not, ok.
+
+BRERR:	ERROR	A		;Give general assembly error.
+	MOV	#377,R0		;Setup MAX byte value
+20$:	BIC	#177400,R0	;Insure high bits are clear
+	RETURN			;Return to the caller.
+.DSABL	LSB
+
+
+TRAPOP:				;TRAP/EMT type
+	CALL	SETXPR		;Set expression registers
+	MOV	@R4,-(SP)	;Save the value
+	CALL	EXPR		;Evaluate the expression (null ok)
+	INC	BYTMOD		;Treat as byte
+	CALL	SETIMM		;Setup abs value.
+	CMPB	@R2,#200	;Absolute?
+	BNE	10$		;Branch if not.
+	TST	(SP)+		;Else prune the stack
+	MOV	@R4,R0		;R0 = value to merge
+	RETURN			;
+
+10$:	ZAP	CODLST		;Empty generated code list
+	CALL	STCODE		;Store address
+	MOV	#100000,@R3	;Set for absolute byte
+	SWAB	@SP
+	MOV	(SP)+,@R4	;Set original value
+	CALL	STCODE		;Store it away.
+	CLR	R0		;Flag value=0
+	RETURN			;
+
+
+.ENABL LSB
+
+DRGEXP:				;Double register expression
+	CALL	REGEXP		;EVALUATE NORMAL
+	MOV	#177774,R3	;Test for overflow
+	BR	98$		;Merge (3-BIT mask)
+
+SOBOP:				;Sob operator
+	CALL	BROP		;Free-load off branch operator
+10$:	MOVB	R0,R0		;Extend sign
+	NEG	R0		;Positive for backwards
+	BGT	97$		;If bkwds branch, mask to six bits
+	CALL	BRERR		;Else, treat as error
+	BR	10$		;Process default branch addr
+
+SPLOP:				;SPL type
+	CALL	ABSEXP		;Get an ABS expression
+	MOV	#177770,R3	;Only three bits allowed
+	BR	98$		;Merge (3-BIT mask)
+
+MARKOP:				;Mark operator
+	CALL	ABSEXP		;Get an ABS expression
+97$:	MOV	#177700,R3	;Set to mask high order
+98$:	BIT	R3,R0		;Any overflow?
+	BEQ	99$		;Branch if not, OK.
+	ERROR	T		;Else flag truncation error
+	BIC	R3,R0		;Clear excess bits
+99$:	RETURN			;
+.DSABL LSB
+
+
+AEXP::	CALL	SAVREG		;Save registers
+AEXPI:				;Internal call entry point
+	CALL	SETXPR		;Setup expression registers
+	INC	EXPFLG		;?
+	CLR	-(SP)		;Accumulate on top of stack
+AEXP02:	CHSCAN	AEXTBL		;Test for operator
+	BEQ	AEXP22		;Branch if none
+	CALLR	@R0		;Else call operator routine
+
+	PURE	DPURE,D
+
+AEXTBL:				;Address expression table
+	GCHTBL	CH.IND,	AEXP03	;  "@"
+	GCHTBL	CH.HSH,	AEXP06	;  "#"
+	GCHTBL	CH.SUB,	AEXP10	;  "-"
+	GCHTBL	CH.LP,	AEXP12	;  "("
+	.WORD	0		;Terminator
+
+	PURE	PUREI,I
+
+AEXP03:	TST	@SP		;"@", Second time around?
+	BEQ	10$		;Branch if not, OK.
+	ERROR	Q		;Else "Q" error.
+
+10$:	BIS	#AM.DEF,@SP	;Flag it.
+
+
+.IF	NDF,RT11		;If not RT-11
+	CMPB	R5,#'#		;Is this absolute mode (@#DST)?
+	BEQ	20$		;Branch if so.
+	BICB	#200,CRFDFL	;Else flag destruct ref on simple indirect
+20$:				;
+.ENDC;	NDF,RT11		;If not RT-11
+	BR	AEXP02		;Merge
+
+
+AEXP06:				;Literal (#)
+	BIT	#AM.DEF,@SP	;Did we see a '@' before the '#'?
+				; IE: Is this '#lit' or '@#addr'?
+	BNE	10$		;Branch if '@#addr' - don't treat as a flt num.
+	CMP	#OPCL11,OPCLAS	;Class 11 (Floating point stuff)
+	BNE	10$		;Branch if not.
+	CALL	FLTG1W		;Else, try for one-word floating
+	BNE	20$		;Branch if we got it.
+10$:	GLBEXP			;Evaluate expression
+20$:	BIS	#AM.IMM,@SP	;Set bits
+	BR	AEXP32		;Use common exit
+
+
+AEXP10:				;Auto-decrement (-)
+	CMP	R5,#CH.LP	;Followed by "("?
+	BNE	AEXP20		;Branch if not, not auto-decrement.
+
+.IF	NDF,RT11		;If not RT-11
+	BISB	#200,CRFDFL	;Destruct ref on auto-decrement
+.ENDC;	NDF,RT11		;If not RT-11
+
+	CALL	AEXPLP		;Process parens "()"
+	BIS	#AM.DEC,@SP	;Flag auto-decrement.
+	BR	AEXP36		;Merge.
+
+
+AEXP12:				;Handle "("
+
+.IF	NDF,RT11		;If not RT-11
+	TST	PASS		;First pass?
+	BEQ	20$		;Branch if so, NO CREF output.
+	TSTB	CRFFIL		;Is there a CREF output file?
+	BEQ	20$		;Branch if not, ignore.
+	BICB	#200,CRFDFL	;Assume simple indirect (NON-DESTRUCT)
+	CALL	GETSYM		;Get the register symbol
+	CALL	GETNB		;Skip the right paren
+	CMP	R5,#'+		;Is the next character a '+'?
+	BNE	10$		;Branch if not.
+	BISB	#200,CRFDFL	;Else flag destruct ref on auto-increment
+10$:	CALL	SETSYM		;Restore line scan before symbol
+20$:
+.ENDC;	NDF,RT11		;If not RT-11
+
+	CALL	AEXPL1		;Evaluate register
+	CMP	R5,#CH.ADD	;Auto-increment (+)?
+	BNE	30$		;Branch if not.
+	CALL	GETNB		;Else polish it off
+	BIS	#AM.INC,@SP	;Set auto-increment bit.
+	BR	AEXP36		;Merge.
+
+30$:	BIT	#AM.DEF,@SP	;Indirect seen?
+	BNE	40$		;Branch if so.
+	BIS	#AM.DEF,@SP	;Else flag it
+	BR	AEXP36		;Merge.
+
+40$:	CLR	@R3		;Clear MODE
+	CLR	@R4		;  and VALUE
+	BIS	R0,@SP		;Set the register value
+	BIS	#AM.NDX,@SP	;Set indexed address mode
+	BR	AEXP32		;Merge to store code.
+
+AEXP20:	CALL	SETSYM		;Auto-dec failure, point to last symbol.
+AEXP22:	CALL	GLBEXP		;Get an expression
+	CMP	R5,#CH.LP	;Indexed, followed by "(" ?
+	BEQ	40$		;Branch if so.
+	BIT	#REGFLG,@R3	;Register found
+	BNE	AEXP36		;Branch if so, OK.
+
+.IF	NDF,XEDPIC!XEDAMA
+	TST	@SP		;Any bits set?
+	BNE	30$		;Branch if so
+.IF	NDF,XEDPIC
+	BIT	#ED.PIC,EDMASK	;.DSABL PIC set?	(??)
+	BNE	10$		;Branch if not
+	BIT	#GLBFLG,@R3	;Global expression?
+	BNE	20$		;Branch if so
+	CMPB	@R2,CLCSEC	;Same sector?
+	BEQ	30$		;Branch if so
+	BR	20$
+10$:
+.ENDC;	NDF,XEDPIC
+
+.IF	NDF,XEDAMA
+	BIT	#ED.AMA,EDMASK	;Absolute mode requested?
+	BNE	30$		;Branch if not.
+.ENDC;	NDF,XEDAMA
+
+20$:	BIS	#AM.IMM!AM.DEF,@SP ;Set abs mode
+	BR	AEXP32		;Merge to store code.
+.ENDC;	NDF,XEDPIC!XEDAMA
+
+30$:	BIS	#AM.REL,@SP	;Flag reletive reference
+	CALL	SETDSP		;Set displacement
+	BR	AEXP34		;Merge.
+
+40$:	BIT	#REGFLG,@R3	;Register found?
+	BEQ	50$		;Branch if not, OK.
+	ERROR	R		;Else flag "R" error.
+
+	BIC	#REGFLG,@R3	;Clear register flag
+50$:	CALL	SETIMM		;Set immediate mode
+	CALL	STCODE		;Store in code roll
+	BICB	#200,CRFDFL	;No destruct ref on indexed reg
+	CALL	AEXPLP		;Process index
+	BIS	R0,@SP		;Set the register value
+	BIS	#AM.NDX,@SP
+	BR	AEXP35		;Skip the code store
+
+AEXP32:	CALL	SETIMM		;Set immediate mode
+AEXP34:	CALL	STCODE		;Store the code away.
+AEXP35:	CLR	R0		;Zap value
+AEXP36:	BIS	(SP)+,R0	;Merge mode bits into value.
+	RETURN
+
+
+AEXPLP:				;AEXP Paren processor
+	CALL	GETNB		;Bypass paren
+AEXPL1:	CALL	REGEXP		;Get a register expression
+	CMP	R5,#CH.RP	;Happy ending ")"?
+	BNE	10$		;Branch if not, error.
+	CALLR	GETNB		;Yes, bypass and exit
+
+10$:	ERROR	Q		;Flag "Q" error.
+	RETURN			;
+
+
+	.END

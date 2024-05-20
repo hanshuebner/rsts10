@@ -1,0 +1,320 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.LIBRARY /CMN:NETDEF.SML/
+TITLE	BUFSUB,<Buffer handling subroutines>,0A,10-MAY-91,KPH/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BUFSUB
+
+;+
+;			[RSTS/E V9.3]
+;  000  KPH  09-Jul-86	Creation - copy from CAL, RTI, and BSTALL
+;
+;			[RSTS/E V9.6]
+;  001  JFM  07-Jun-88	Check count of idle comm buffers before returning them
+;-
+
+.SBTTL	Call all required MACROs
+
+.ENABL	MCL
+
+	$CCB			; Get communications control block definitions
+
+.DSABL	MCL
+
+.SBTTL	Monitor pool & NPR/non-NPR pool buffer returner
+
+	DEFORG	BUFSUB
+
+.ENABL	LSB
+
+10$:	MOV	2(R4),BAKSML	;;; De-queue this buffer from the list
+	SPLC	3		;;; Interruptable again
+	CALL	RETMON		; Now return monitor space		
+
+	L3QENT	QBUFRT,,GENAP5	; Return buffers from lists
+
+20$:	MAP	FIPPOL		; Map to include FIP pool returns
+	SPLC	7		;;; Lockout interrupts
+	MOV	BAKSML,R4	;;; Get top of to-be-returned list
+	BNE	10$		;;; Another, so do it
+	SPLC	3		;;; No more, back to interruptable
+	TST	FREES		; Do we need to awaken anyone?
+	BEQ	40$		; Nope
+	CLR	FREES		; Yep, but only awaken once
+	MOV	#JBSTAT+2,R4	; Get job status table pointer
+	MOV	#JOBMAX,R3	; Get maximum number of jobs
+30$:	BIS	#JSBUF,(R4)+	; Awaken any buffer stalled job
+	SOB	R3,30$		;  for all possible jobs
+40$:	MOV	DPAR6,R3	; Get PAR6 mapping register pointer
+50$:	SPLC	7		;;; Lockout interrupts
+	MOV	BAKLRG,R5	;;; Get top of to-be-returned list
+	BNE	60$		;;; Something there, go return it
+	JMPX	RTI3		;;; Else exit
+
+60$:	MOV	R5,(R3)		;;;Map the buffer
+	MOV	BF.LNK+140000,BAKLRG ;;;De-queue this buffer from the list
+	SPLC	3		;;;Back to interruptable again
+	CALL	RETEXT		;Return the space
+	BR	50$		;And loop
+
+.DSABL	LSB
+
+GLOBAL	<BAKSML,FREES,EMTAP5,JBSTAT,JOBMAX,BAKLRG,DPAR6>
+
+.SBTTL	Release NPR/non-NPR buffer
+
+;+
+; RETEXT - Release NPR/non-NPR buffer.
+;
+;	R3 ->  DPAR6
+;	(R3) = MMU address of buffer to return
+;		Size in MMU units must be stored in first word
+;
+;	CALLMI	RETEXT,GENAP5
+;
+;	R0   = Undefined
+;	R1   = Undefined
+;	R2   = Undefined
+;	R4   = Undefined
+;	R5   = Undefined
+;
+; This routine is used to merge a buffer back into an extended pool
+; (either EXTPOL or LRGPOL). This routine is called at PR3 if part
+; of the normal buffer return process. Additionally, this routine
+; can be called at any other priority if a cache giveback is in
+; progress. This happens if the buffer allocater is called to allocate
+; a buffer, none are available, and a cacher was able to make a contribution.
+;
+; To protect from interrupts while in this routine, we use "restarts".
+; To restart a routine, we save the address that the saved PC will
+; end up getting stored at if an interrupt occurs (it will be saved
+; at the current SP - 4). Since we save SP, it is not possible to
+; change the SP value while in restartable code.
+;
+; When we are entered, we will restart the buffer allocater (since
+; it may have been interrupted by us), and restart any other
+; instance of this routine running at a lower priority. Note that
+; the restart pointers will point at "JUNK" if the routine is not in use.
+; Once we save our SP value in RETERS, we can be restarted.
+;
+; We can also be restarted by the buffer allocater successfully
+; allocating a buffer.
+;-
+
+	TMPORG	GENDSP,10
+	 .WORD	RETEXT
+	 .WORD	RETERP
+	UNORG
+
+RETEXT:	MOV	@#PS,-(SP)	;Save calling priority
+	MOV	#TRYERP,@TRYERS	;Restart TRYEXT if necessary
+	MOV	#RETERP,@RETERS	;And restart RETEXT (that's us)
+	MOV	#140000,R4	;Get pointer through PAR6
+	MOV	(R3),R5		; and get MMU address of buffer to return
+	MOV	EXTPOL+2,R1	;Get root of NPR pool (the higher)
+	CMP	R5,R1		;Is it the correct pool?
+	BHIS	10$		;Yes
+	MOV	LRGPOL+2,R1	;No, use the non-NPR pool
+10$:	MOV	SP,R0		;Get our current SP value
+	CMP	-(R0),-(R0)	;Now get our SP value - 4
+RETERP:	MOV	R0,RETERS	;And set our restart value
+	MOV	R1,R2		;Set up the root address
+10$:	MOV	R2,(R3)		;Load MMU for this item and
+	MOV	(R4),R2		; get the next in the list
+	BEQ	20$		;The end, stop searching
+	CMP	R5,R2		; else is returning address higher?
+	BHIS	10$		;Loop if not high enough yet...
+
+GLOBAL	<TRYERS,TRYERP,RETERS,EXTPOL,LRGPOL>
+
+20$:	SPLC	7		;;; Lockout interrupts now
+	MOV	#JUNK,RETERS	;;; And disable restarts
+	MOV	(R3),R1		;;; Save the MMU address of previous
+	MOV	R5,(R3)		;;; Load PAR6 for returned buffer
+	MOV	(R4),R0		;;; Grab size from returned buffer
+	MOV	R2,(R4)		;;; Link next to returned
+	MOV	R5,-(SP)	;;; Find the MMU address of
+	ADD	R0,(SP)		;;;  just beyond returned buffer
+	CMP	R2,(SP)+	;;; Should we merge with tail part?
+	BNE	30$		;;; Nope
+	MOV	R2,(R3)		;;; Yep, load MMU for tail part
+	MOV	(R4)+,R2	;;; Save further link information
+	ADD	(R4),R0		;;;  and update returned size
+	MOV	R5,(R3)		;;; Now reload MMU for real returned buffer
+	MOV	R2,-(R4)	;;;  and complete the merge
+30$:	MOV	R1,(R3)		;;; Load MMU for the previous item
+	MOV	R5,(R4)+	;;; Now link returned into main chain
+	MOV	R1,-(SP)	;;; Save MMU address of previous and
+	ADD	(R4),(SP)	;;;  find just beyond it
+	CMP	R5,(SP)+	;;; Merge with previous part of chain?
+	BNE	40$		;;; Nope
+	ADD	(R4),R0		;;; Yep, update returned size and
+	MOV	R2,-2(R4)	;;;  link it up for the merge
+	BR	50$		;;;   and continue (MMU already set up)
+
+40$:	MOV	R5,(R3)		;;;Load MMU back to returned buffer
+50$:	MOV	R0,(R4)		;;;Finally set final size
+	MOV	(SP)+,@#PS	;;;Restore interrupted priority
+	RETURN			; Exit
+
+GLOBAL	<RETERS,EXTPOL,JUNK>
+
+;+
+; RETMON - RETURN MONITOR POOL OR FIP POOL BUFFER SPACE.
+;
+;	R4 -> Buffer being returned
+;		Size in bytes must be stored in first word
+;
+;	CALL	RETMON
+;
+;	All registers are undefined
+;
+;	Priority could be anything
+;
+; This routine is used to merge a buffer back into the monitor's
+; general buffer pool or the FIP buffer pool. This routine is called
+; at PR3 if part of the normal buffer return process.
+; Additionally, this routine can be called at any other priority if
+; a cache giveback is in progress. This happens if the buffer allocater
+; is called to allocate a buffer, none are available, and a cacher
+; was able to make a contribution.
+;
+; To protect from interrupts while in this routine, we use "restarts".
+; To restart a routine, we save the address that the saved PC will
+; end up getting stored at if an interrupt occurs (it will be saved
+; at the current SP - 4). Since we save SP, it is not possible to
+; change the SP value while in restartable code.
+;
+; When we are entered, we will restart the buffer allocater (since
+; it may have been interrupted by us), and restart any other
+; instance of this routine running at a lower priority. Note that
+; the restart pointers will point at "JUNK" if the routine is not in use.
+; Once we save our SP value in RETMRS, we can be restarted.
+;
+; We can also be restarted by the buffer allocater successfully
+; allocating a buffer.
+;-
+
+	TMPORG	GENDSP,4
+	 .WORD	RETMON
+	 .WORD	RETMRP
+	UNORG
+
+RETMON:	MOV	(R4),R0		;Pick up size of buffer
+	MOV	R0,R3		;Copy the size being returned		
+	ASH	#-5,R3		;and convert it to small buffer units	
+	MOV	@#PS,-(SP)	;Save current priority
+	MOV	#TRYMRP,@TRYMRS ;Set up to restart TRYMON
+	MOV	#RETMRP,@RETMRS	;Set up to restart RETMON (that's us)
+RETMRP:	MOV	SP,R1		;Get our SP value for restarting
+	CMP	-(R1),-(R1)	;Now get our SP value - 4
+	MOV	R1,RETMRS	;And set up our restart SP value
+	MOV	#ROOT,R1	;Guess at monitor pool's root		
+	MOV	#FREES+2,R5	; and free count locations		
+	CMP	R4,#121000	;Good guess?				
+	BLO	10$		;Yes, monitor pool it is		
+	MOV	#FIPROO,R1	;No, so get the FIP pool's root		
+	MOV	#FIPFRE,R5	; and free count locations		
+10$:	MOV	R1,R2		;Keep previous copy of list pointer	
+	MOV	(R2),R1		; then go to the next in the list	
+	BEQ	20$		;The end, done searching		
+	CMP	R4,R1		;Else is the return buffer lower in address? 
+	BHIS	10$		;Not lower yet, continue		
+20$:	SPLC	7		;;;Lockout interrupts now		
+	MOV	#JUNK,RETMRS	;;;Disable any further restarts
+	ADD	R3,(R5)		;;;Update the appropriate free count	
+	MOV	R1,(R4)		;;;Link remaining list to returned buffer 
+	MOV	R4,R3		;;;Build the address just beyond	
+	ADD	R0,R3		;;; the returned buffer			
+	CMP	R3,R1		;;;Should we merge with rest of chain?	
+	BNE	30$		;;;Nope					
+	MOV	(R1)+,(R4)	;;;Yep, collapse next into returned buffer 
+	ADD	(R1),R0		;;; and collect updated return size	
+30$:	MOV	R2,R3		;;;Save address of previous buffer	
+	MOV	R4,(R2)+	;;;Link returned buffer to previous chain 
+	ADD	(R2),R3		;;;Find address just beyond previous	
+	CMP	R3,R4		;;;Should we merge with the previous?	
+	BNE	40$		;;;Nope					
+	ADD	(R2),R0		;;;Yep, update the returned size	
+	MOV	(R4),-(R2)	;;; and link into previous part		
+	MOV	R2,R4		;;;This is the "returned" buffer now	
+40$:	MOV	R0,2(R4)	;;;Set correct size of returned piece	
+	MOV	(SP)+,@#PS	;;;Restore previous priority
+	RETURN			;Now exit
+
+GLOBAL	<TRYMRS,TRYMRP,RETMRS,JUNK,FREES,ROOT,FIPROO,FIPFRE>
+
+.SBTTL	COMGIV - Give back an idle comm buffer to RSTS
+
+;+
+; COMGIV - Give back an idle comm buffer to RSTS
+;
+;	R3 -> DPAR6
+;	R4 -> Desired pool
+;	R5 =  140000
+;
+;	C = 0 if no space available; C = 1 if space available
+;
+; This routine is used to give an idle communications buffer back to
+; the system. It is called if there are no buffers left in the
+; requested pool which are large enough to satisfy a request.
+;
+; This is the only way that communications buffers will ever be
+; returned to the monitor.
+;-
+
+	TMPORG	CHETBL,CO$CBF
+	 .WORD	GENAP5
+	 .WORD	COMGIV
+	UNORG
+
+COMGIV:	CMP	R4,#EXTPOL	;Desire an EXTPOL buffer?
+	BEQ	10$		;Yes, we can help with that
+	CMP	R4,#MONPOL	;No, how about MONPOL?
+	BNE	30$		;No, we can't supply anything
+10$:	CMP	ICBFCT,ICBFMN	;Are we at minimum count?		;001
+	BLOS	30$		;Don't give this one back if we are	;001
+	MOV	@#PS,-(SP)	;Save calling priority	
+	SPLC	7		;And stop all interrupts
+	MOV	IDLCBF,R2	;;;Pick up an idle comm buffer
+	BEQ	20$		;;;None, we can't help here
+	MOV	(R2),IDLCBF	;;;Got one, de-queue it
+	MOV	(SP)+,@#PS	;;;And enable interrupts
+	DEC	ICBFCT		;Indicate we took buffer off queue	;001
+	MOV	R2,-(SP)	;Save small buffer address
+	MOV	CC.BUF+BF.MMU(R2),(R3) ;Map the buffer
+	MOV	#CBFSIZ/100,(R5) ;And set the size in slivers
+	CALL	RETEXT		;And return the space
+	MOV	(SP)+,R4	;Get the small buffer address
+	MOV	#40,(R4)	;And set the size in bytes
+	CALL	RETMON		;And return that space
+	SEC			;Indicate we returned a buffer
+	BR	40$		;And get out
+
+20$:	MOV	(SP)+,@#PS	;;;Failure, restore calling PS
+30$:	CLC			;Indicate we didn't return anything
+40$:	RETURN			;And we're done
+
+GLOBAL	<GENAP5,IDLCBF,EXTPOL,MONPOL,ICBFCT,ICBFMN>
+
+.END
+

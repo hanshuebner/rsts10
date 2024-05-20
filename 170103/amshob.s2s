@@ -1,0 +1,1402 @@
+1!.pn AMSHOB - Account Management, SHOW ACCOUNT/BRIEF + SHOW ACCOUNT/ACCOUNTING Processor &
+!.pg ID	&
+!.t Standard Documentation Header &
+	sub	AMSHOB () &
+!			========================================================================== &
+!			||									|| &
+!			||		  RSTS/E Account Management Package			|| &
+!			||									|| &
+!			||======================================================================|| &
+!			||									|| &
+!			||		   C o m p o n e n t     T i t l e			|| &
+!			||		   -------------------------------			|| &
+!			||									|| &
+!			||			  Component : AMSHOB.B2S			|| &
+!			||			    Version : V10.0 				|| &
+!			||			       Edit : I					|| &
+!			||		          Edit Date : 08-Feb-90				|| &
+!			||		          Author(s) : WJS,JJT,SEL			|| &
+!			||									|| &
+!			||======================================================================|| &
+!			||									|| &
+!			||			   C O P Y R I G H T				|| &
+!			||			   -----------------				|| &
+!			||									|| &
+!			||									|| &
+!		        ||		      Copyright (C) 1990, 1991 by &
+!			||	      Digital Equipment Corporation, Maynard, Mass.		|| &
+!			||									|| &
+!			||									|| &
+!			||    This software is furnished under a license and may be used and	|| &
+!			||    copied  only  in accordance with the terms of such license and	|| &
+!			||    with the  inclusion  of  the  above  copyright  notice.   This	|| &
+!			||    software  or  any  other copies thereof may not be provided or	|| &
+!			||    otherwise made available to any other person.   No title to or	|| &
+!			||    ownership of the software is hereby transferred.			|| &
+!			||									|| &
+!			||    The information in this software is subject to change  without	|| &
+!			||    notice  and should not be construed as a commitment by Digital	|| &
+!			||    Equipment Corporation.						|| &
+!			||									|| &
+!			||    DIGITAL assumes no responsibility for the use  or  reliability	|| &
+!			||    of its software on equipment that is not supplied by DIGITAL.	|| &
+!			||									|| &
+!			========================================================================== &
+!	&
+!				    M o d i f i c a t i o n   H i s t o r y   L o g &
+!	&
+!	&
+	! VER/ED	EDIT DATE	REASON &
+!	&
+!		10.0-E	SEL 	10-Oct-89	Add standard error handling for /[NO]OUTPUT. &
+!		10.0-I	SEL 	08-Feb-90	Set width=80 if /OUTPUT = file. &
+!		10.0-I1	SEL 	27-Feb-90	Really set width=80 if /OUTPUT = file. &
+!	&
+
+
+70!.t Component Documentation &
+!.pg	&
+!			========================================================================== &
+!			||									|| &
+!			||	        C o m p o n e n t    D e s c r i p t i o n		|| &
+!			||									|| &
+!			||   AMSHOB.B2S is the command processor for the			|| &
+!			||   SHOW ACCOUNT/BRIEF and SHOW ACCOUNT/ACCOUNTING commands.		|| &
+!			||									|| &
+!			==========================================================================
+80!+Variable naming conventions &
+!Non-EXTEND mode names (local variables) &
+!		Names which would be acceptable to non-EXTEND mode &
+!		(e.g., A$ or C0%) indicate local variables.  No such &
+!		variable is guaranteed to survive any subroutine or &
+!		function call, nor is such a variable expected to &
+!		have any particular value after any GOTO other than &
+!		a local one. &
+!EXTEND-mode names (global variables) &
+!		Variables which are expected to communicate information &
+!		from one part of the program to another are given fully- &
+!		mnemonic, EXTEND mode, names.  These variables are &
+!		capitalized according to pseudo-English usage:  e.g., &
+!		Probe.String$, Parameter.Something.Wild%, Returned.Error%. &
+!Xxxxxxx.Low%, Xxxxxxx.High% names (integers) &
+!		Names ending in .Low% or .High% are integers "gotten" from &
+!		CUI.  The .Low% variable is sufficient for integers of up &
+!		to 16 bits;  the .High% variable helps out for integers &
+!		which require additional bits. &
+!KKK.k% names (CUI .GBL's) &
+!		Variables of the form SEA.k% (multiple capital letters, &
+!		six characters maximum) are .GBL's used for communication &
+!		with CUI. &
+!Xxxxxxx.cvt$ &
+!		String variables which are passed in a COMMON must be of &
+!		fixed size;  they come back padded with spaces.  Generally, &
+!		we want to do without the padding.  "Xxxxxx.cvt$" is &
+!		the trimmed version of "Xxxxxx$". &
+!+COMMON's &
+!ACTCMN.B2S &
+!		ACTCMN.B2S defines the COMMON area which the Account Manager &
+!		uses to communicate across overlays. &
+!	&
+!			Primitive code.  Used as input to PARMS.TEC, &
+!			which creates hybrid "parameter write" and &
+!			"parameter read" modules. &
+!CUICMN.B2S &
+!		CUICMN.B2S defines the COMMON area for control of, &
+!		and communication with, CUI. &
+!	&
+!			Primitive code.  Provided by the CUI package. &
+!ACTKEY.B2S &
+!		ACTKEY.B2S defines the COMMON area by which CUI's keyword &
+!		values are made available to this BP2 code. &
+!	&
+!			Derived code.  Built from ACTKEY.MAC by KEYKEY.TEC. &
+!	&
+!.doc
+700!.pg DD &
+!.t Data Description &
+!.hl1 MAPs and COMMONs &
+	external word CCFLAG !CCTRAP's pollable control-C flag word &
+
+710	%include "CUI:CUICMN.B2S" !Include CUI data section
+720	%include "SYSTEM:ACTKEY.B2S" !Include our key codes
+730	%include "SYSTEM:ACTPRM.B2S" !Include our parameter common
+740	%include "SYSTEM:ACTCMN.B2S" !Include our general common &
+
+750	EXTERNAL WORD CONSTANT		! Define RSTS error codes: &
+					! (LB:ERR.STB) &
+					! &
+			CTRLCE,		!   ?programmable ^C trap &
+			EOF,		!   ?End of file &
+			NODEVC,		!   ?Invalid device &
+			PRVIOL		!   ?Protection violation &
+
+3000!.pg Loop &
+!.t	&
+!.hl1 Major Loop &
+	gosub 13020
+3100!.pg &
+!Trim COMMON strings &
+	First.PPN.cvt$ = cvt$$(First.PPN$, 152%) &
+\	Last.PPN.cvt$ = cvt$$(Last.PPN$, 152%) &
+\	Name.cvt$ = cvt$$(Name.$, 152%) &
+\	Now.cvt$ = cvt$$(Now$, 152%) &
+\	Parameter.Device.cvt$ = cvt$$(Parameter.Device$, 152%) &
+\	Parameter.Device.PPN.cvt$ = cvt$$(Parameter.Device.PPN$, 152%) &
+\	Parameter.PPN.cvt$ = cvt$$(Parameter.PPN$, 152%) &
+\	This.System.cvt$ = cvt$$(This.System$, 152%) &
+\	Today.cvt$ = cvt$$(Today$, 152%) &
+\	Today.Now.cvt$ = cvt$$(Today.Now$, 152%) &
+\	ACTUAL.DEVICE.PPN.CVT$ = CVT$$(ACTUAL.DEVICE.PPN$,156%) &
+!Calculate page-format parameters &
+\	Page.Capacity% = Form.Low% if Form.Qualifier% &
+\	One.Liners.Per.Page% = Page.Capacity% - One.Liner.Overhead% !Easy enough &
+\	Account.Blocks.Per.Page% = Page.Capacity% !A little tougher... &
+		/ (Lines.Per.Account.Block% + Lines.Between.Account.Blocks%) &
+			! We reserve "between" lines at the bottom, too
+3200!+Command Dispatch &
+	select U.Cmdc% !Dispatch based upon CUI's returned command code &
+\	  case SHD.k%                    \ gosub 7500 !SHOW DIRECTORY command &
+\	  case SHA.k%                    \ gosub 7600 !SHOW ACCOUNT/BRIEF or /ACCOUNTING command &
+\	  case else                      \ print '?SHOW Dispatch error' &
+\	end select &
+	&
+\	goto 32767 !Return to caller
+7000!.pg CPC &
+!.hl1 Command processing control routines
+7500!.pg &
+!.sb2 SHOW DIRECTORY processing &
+    if Debug% then &
+	print 'Got to the processing routine for SHOW DIRECTORY' &
+\	print '  Directory% ='; Directory% &
+\	print '  Account% ='; Account% &
+\	print '  Brief% ='; Brief% &
+\	print '  Full% ='; Full% &
+\	print '  Output.Qualifier% = '; Output.Qualifier%; &
+\	print '    Output$ = "'; cvt$$(Output$, 128%); '"'; if Output.Qualifier% &
+\	print &
+
+7501	gosub 13000 &
+\	return if Returned.Error% !Quit if OPEN failed &
+\	Directory.Wanted% = Directory% !Communicate directory/account &
+\	Account.Wanted% = Account% !##wanted to lookup routine (12000) &
+	&
+\	until Exhausted% &
+\	  gosub 12000 &
+\	  goto 7510 if Returned.Error% !Quit if something blew up &
+\	  if not Exhausted% then &
+	    Disk.Allocation.Wanted% = -1% !Disk usage needed &
+\	    Date.Time.Flag.Wanted% = -1% !Date/time/flag blockette needed &
+\	    Read.Plus.Reset% = Reset% !Request "reset" if we saw the qualifier &
+\	    gosub 12100 &
+\	    goto 7510 if Returned.Error% &
+\	      gosub 13100 if Brief% &
+\	      gosub 13200 if Full% &
+\	      gosub 16000
+7510	next &
+\	Disk.Allocation.Wanted% = Full% !Tell total routine if we want usage data &
+\	gosub 13900 &
+	&
+\	return
+7600!.pg &
+!.sb2 SHOW ACCOUNT processing &
+    if Debug% then &
+	print 'Got to the processing routine for SHOW ACCOUNT' &
+\	print '  Accounting% ='; Accounting% &
+\	print '  Directory% ='; Directory% &
+\	print '  Brief% ='; Brief% &
+\	print '  Full% ='; Full% &
+\	print '  Output.Qualifier% = '; Output.Qualifier%; &
+\	print '    Output$ = "'; cvt$$(Output$, 128%); '"'; if Output.Qualifier% &
+\	print &
+
+7601	gosub 13000 &
+\	return if Returned.Error% !Quit if OPEN failed &
+\	Directory.Wanted%, Directory% = -1% if Dir.or.ACC% = 0% or Dir.or.ACC% = 1% !Communicate directory/account &
+\	Account.Wanted%, Account% = -1% if Dir.or.ACC% = 0% or Dir.or.ACC% = -1% !##wanted to lookup routine (12000) &
+	&
+\	until Exhausted% &
+\	  gosub 12000 &
+\	  goto 7610 if Returned.Error% !Quit if something blew up &
+\	  goto 7610 if Exhausted% !Quit if we're done &
+\	    Disk.Allocation.Wanted% = -1% !Disk usage needed &
+\	    Non.Disk.Quotas.Wanted% = Full% !job-related quotas needed if /FULL &
+\	    Date.Time.Flag.Wanted% = -1% !Date/time/flag blockette needed &
+\	    Read.Plus.Reset% = Reset% !Request "reset" if we saw the qualifier &
+\	    gosub 12100 &
+\	    return if Returned.Error% &
+\	      if Full% then !If /FULL, then &
+	        Attribute.Type.Code% = 2% !##say we need `authorized privileges' &
+\	        gosub 12120 &
+\	        Authorized.Privileges$ = mid(Account.Attribute$, 2%, 8%) !##extract privs
+7606	      gosub 13200 if Accounting% &
+\	      gosub 13400 if Not(Accounting%) &
+\	      gosub 16000
+7610	next &
+\	Disk.Allocation.Wanted% = Brief% !Tell total routine if we want usage data &
+\	gosub 13900 &
+	&
+\	return
+12000!.pg Dir &
+!.t System-Directive subroutines &
+!.hl1 Lookup routines &
+!.sb2 Look up wildcard PPN &
+	&
+			!Passed:	Parameter.First.Project%,  Parameter.Last.Project%, &
+			!		Parameter.First.Programmer%, Parameter.Last.Programmer% &
+			!		Directory.Wanted%	- set if Directory PPN's wanted &
+			!		Account.Wanted%		- set if Account PPN's wanted &
+			!		Index.25%		(-1% flags first entry to this routine; set @ 3008) &
+			!		Firqb.25%()		- as used for previous lookup &
+			! &
+			!Returned:	Exhausted%		- true when no more wildcard matches &
+			!		PPN.25%			- next match (when not Exhausted%) &
+			!		  Project.25% &
+			!		  Programmer.25% &
+			!		  PPN.25$ &
+			!		PPN.Has.Password%	0% if no password blockette (PPN is a directory) &
+			!					-1% if a password blockette (PPN is an account) &
+			! &
+			!		Firqb.25%()		- as set up for the PPN lookup call just executed &
+			!		Index.25%		- incremented for next lookup &
+			! &
+			!		Set.Firqb.56$		- SET sys() call skeleta, pre-loaded &
+			!		Set.Firqb.78$		  with chr$(6%), PPN, and device coding &
+	&
+	goto 12020 unless Index.25% = -1% !Continuation for subsequent entries &
+!First entry:  set things up &
+\	  Firqb.25%(0%) = 30% &
+\	  Firqb.25%(1%) = 6% !Set FIP sys() call code &
+\	  Firqb.25%(2%) = 25% !##Wildcard PPN lookup subfunction &
+\	  Firqb.25%(5%) = Parameter.First.Programmer% !##Now, the initial &
+\	  Firqb.25%(6%) = Parameter.First.Project% !####PPN specification &
+\	  Firqb.25%(5%) = 255% if Parameter.Programmer.Wild% !Take care of &
+\	  Firqb.25%(6%) = 255% if Parameter.Project.Wild% !##wildcard cases &
+\	  Firqb.25%(23%) = Parameter.Device.23% !##And plug &
+\	  Firqb.25%(24%) = Parameter.Device.24% !####in the &
+\	  Firqb.25%(25%) = Parameter.Device.25% !####device code &
+\	  Firqb.25%(26%) = Parameter.Device.26% !####bytes
+12020!.pg &
+!+Look for next PPN &
+	Error.Text$ = 'PPN lookup' !In case of fire... &
+\	Index.25% = Index.25% + 1% &
+\	Firqb.25%(3%) = Index.25% !Load our probe index &
+\	Firqb.25%(4%) = swap%(Index.25%) !##into sys() call array &
+\	change Firqb.25% to Firqb.25$ !Make array into string &
+\	D$ = mid(fnsys$(Firqb.25$), 5%, 2%) !Do wildcard PPN lookup &
+\	if Returned.Error% then !Got an error: &
+	  Exhausted% = -1% !##say "no more matches" &
+\	  goto 19930 unless Returned.Error% = 5% &
+\	  Returned.Error% = 0% !NOSUCH is "expected" eventually &
+\	  Error.Text$ = '' !Clear "in case" error text string &
+\	  return &
+
+12060!Wildcard PPN lookup has found another PPN &
+	Set.Firqb.56$ = chr$(6%) + string$(3%, 0%) + D$ + right(Firqb.25$, 7%) !Create SET sys() &
+\	Set.Firqb.78$ = chr$(6%) + string$(5%, 0%) + D$ + right(Firqb.25$, 9%) !##call skeleta &
+\	PPN.25% = swap%(cvt$%(D$)) !Make integer form of PPN &
+\	Project.25% = swap%(PPN.25%) and 255% !Extract PPN's &
+\	Programmer.25% = PPN.25% and 255%!##component subfields &
+\	PPN.25$ = '[' + num1$(Project.25%) &
+		+ ',' + num1$(Programmer.25%) + ']' !Generate string form, too &
+\	goto 12020 !Re-enter loop if PPN out of /FIRST/LAST range &
+	  if Project.25% < Parameter.First.Project% &
+	  or Project.25% > Parameter.Last.Project% &
+	  or Programmer.25% < Parameter.First.Programmer% &
+	  or Programmer.25% > Parameter.Last.Programmer% &
+\	Error.Text$ = '' !Clear "in case" error text string &
+\	PPN.Has.Password% = -1% !Presumption &
+\	Attribute.Type.Code% = 3% !We want to look at password blockette &
+\	V$ = FNSYS$(CHR$(6%)+CHR$(-21%)+CHR$(0%)) !REGAIN TEMP PRIVS &
+\	gosub 12120 &
+\	V$ = FNSYS$(CHR$(6%)+CHR$(-21%)+CHR$(255%)) !DROP TEMP PRIVS &
+\	PPN.Has.Password% = 0%	if (len(Account.Attribute$) = 0%) !Presumption was false &
+				or (Project.25% = 0%) !PPN [0,*] is always a directory &
+!See if we have the kind of PPN wanted &
+\	return if PPN.Has.Password% if Account.Wanted% !Account gotten and wanted &
+\	return if PPN.Has.Password% = 0% if Directory.Wanted% !Directory gotten and wanted &
+\	goto 12020 !We didn't want it.  Look for another. &
+
+	&
+
+12100!.pg &
+!.sb2 Read/Reset accounting data &
+	&
+			!Passed:	PPN.25%				probe PPN, from 12000 &
+			!		Firqb.25%()			device coding information &
+			!		Read.Plus.Reset%		set if read+reset operation is desired &
+			!		Disk.Allocation.Wanted%		set if disk usage desired &
+			!		Date.Time.Flag.Wanted%		set if Date.Time$ and Account.Flag% are desired &
+			!		Non.Disk.Quotas.Wanted%		set if job-related "quotas" are desired &
+			!		PPN.Has.Password%		true/false &
+			! &
+			!Returned:	Firqb.14A%()			data looked up by basic read/reset directive &
+			!		Firqb.14B%()			data looked up by extended-quota read directive &
+			!							("faked" if Pre.V9.0%) &
+			!		Returned.Error%			set if basic read/reset directive failed &
+			!		PPN.Read$			[p,pn]just looked up &
+			! &
+			!		Current.In.Quota		Current &
+			!		Current.Out.Quota		  quota &
+			!		Current.Reserve.Quota		  fields &
+			!		Current.Allocation		Current (allocated) disk usage &
+			!		Current.Name$			Account name &
+			!		Current.New.Files.First%	set true/false (or to -2% for n/a, pre RDS1.2) &
+			!		Total.Current.Allocation	Incremented &
+			!		Date.Time$			Account's date-time blockette, if requested &
+			!		Account.Flag%			    and its flag byte too, similarly &
+			!		Current.Creation.Date%		PPN's date of creation &
+			!		Current.Expiration.Date%	PPN's date of expiration &
+			! &
+			!		Read.Plus.Reset%		cleared (it's a one-time switch) &
+			!		Disk.Allocation.Wanted%		cleared (another one-time switch) &
+			!		Date.Time.Flag.Wanted%		cleared (another one-time switch) &
+			! &
+			!		Current.CPU.Time, Current.KCTs, Current.Device.Time, Current.Connect.Time &
+	&
+	Firqb%(0%) = 30% &
+\	Firqb%(1%) = 6% !FIP call &
+\	Firqb%(2%) = 14% !Read/reset &
+\	Firqb%(3%), Firqb%(4%) = 0% !##by PPN &
+\	Firqb%(5%) = Read.Plus.Reset% &
+\	Firqb%(6%) = swap%(Read.Plus.Reset%) !Reset if asked to do so &
+\	  Read.Plus.Reset% = 0% !It's a one-time switch &
+\	Firqb%(7%) = PPN.25% !Now the PPN &
+\	Firqb%(8%) = swap%(PPN.25%) !##we want &
+\	Firqb%(9%) = 1% !Basic read, no disk usage, real PPN &
+\	Firqb%(9%) = 0% if Disk.Allocation.Wanted% !Get disk usage, if wanted &
+\	  Disk.Allocation.Wanted% = 0% !It's a one-time switch &
+\	Firqb%(I%) = 0% for I% = 10% to 30% !Pre-clear rest of Firqb &
+\	Firqb%(I%) = Firqb.25%(I%) for I% = 23% to 26% !Load device data &
+!.pg	&
+\	change Firqb% to Firqb$ !Build sys() string &
+\	A$ = fnsys$(Firqb$) !Read[/reset] accounting data &
+\	change A$ to Firqb.14A% !##and decode it &
+\	Firqb.14A%(I%) = 0% for I% = 9% to 12% !Clear out any returned password &
+\	PPN.Read$ = '' !##and any stale PPN name &
+\	goto 19420 if Returned.Error% &
+	&
+\	PPN.Read$ = '[' + num1$(Firqb.14A%(8%)) + ',' &
+		+ num1$(Firqb.14A%(7%)) + ']' !Extract [p,pn] &
+\	Firqb%(9%) = Firqb%(9%) + 4% !Now, do extended-quotas read &
+\	change Firqb% to Firqb$ &
+\	B$ = fnsys$(Firqb$) !Read quota data &
+\	change B$ to Firqb.14B% !##and decode that &
+!Fill in for a V9.0 call not understood &
+\	if Returned.Error% !If the V9.0 directive failed &
+	or A$ = B$ then !or it yielded old-style data.. &
+	  Firqb.14B%(I%) = 0% for I%=0% to 30% !Clear the "returned Firqb" &
+\	  Firqb.14B%(I%) = Firqb.14A%(I%-14%) for I% = 19% to 20% !##Fake allocation &
+\	  Firqb.14B%(I%) = 255% for I% = 11% to 13% !##Fake logged-in quota &
+\	  if cvt$%(mid(A$, 27%, 2%)) then !If old-format quota is "real" &
+	    Firqb.14B%(I%) = Firqb.14A%(I% + 18%) for I% = 9% to 10% !##then use it &
+	  else !otherwise &
+	    Firqb.14B%(9%), Firqb.14B%(10%), Firqb.14B%(14%) = 255% !##translate "unlimited"
+12104	Current.Allocation = 256.*(256.*Firqb.14B%(16%) + Firqb.14B%(20%)) + Firqb.14B%(19%) &
+\	Total.Current.Allocation = Total.Current.Allocation + Current.Allocation !Keep running total &
+\	Current.In.Quota = 256.*(256.*Firqb.14B%(13%) + Firqb.14B%(12%)) + Firqb.14B%(11%)		! Extract &
+\	Current.Out.Quota = 256.*(256.*Firqb.14B%(14%) + Firqb.14B%(10%)) + Firqb.14B%(9%)		! current &
+\	Current.Reserve.Quota = 256.*(256.*Firqb.14B%(15%) + Firqb.14B%(18%)) + Firqb.14B%(17%)		!  quotas &
+	&
+\	Current.CPU.Time = 16384. * (Firqb.14A%(22%) and 252%) !Extract usage times... &
+			 +   256. *  Firqb.14A%(14%) &
+			 +	     Firqb.14A%(13%) &
+	&
+\	Current.KCTs = 65536. * (Firqb.14A%(21%) + 256. * (Firqb.14A%(22%) and 3%)) &
+		     +   256. *  Firqb.14A%(18%) &
+		     +		 Firqb.14A%(17%) &
+	&
+\	Current.Device.Time = 256. * Firqb.14A%(20%) &
+			    +	     Firqb.14A%(19%) &
+	&
+\	Current.Connect.Time = 256. * Firqb.14A%(16%) &
+			     +	      Firqb.14A%(15%) &
+	&
+\	Current.New.Files.First% = -2% !** Not implemented in V9.0 &
+!.pg	&
+!Figure out what to say for "Name" &
+\	Current.Name$ = '' !Presumption &
+\	Attribute.Type.Code% = 5% !##set up for name attribute blockette &
+\	gosub 12120 &
+\	Current.Name$ = cvt$$(Account.Attribute$, 140%) !##extract name
+12106!Get date/time blockette, if requested &
+	Date.Time$ = '' !Presumption &
+\	if Date.Time.Flag.Wanted% then &
+	  Date.Time.Flag.Wanted% = 0% !Clear the one-time switch &
+\	  Attribute.Type.Code% = 4% !Say we need date/time blockette &
+\	  gosub 12120 &
+\	  Date.Time$ = Account.Attribute$ !Stash date/time blockette away
+12108	Account.Flag% = ascii(mid(Date.Time$, 9%, 1%)) !Extract blockette's flag byte &
+\	Current.Creation.Date% = swap%(cvt$%(mid(Date.Time$, 10%, 2%))) !Extract PPN's creation date &
+\	Current.Expiration.Date% = swap%(cvt$%(mid(Date.Time$, 12%, 2%))) !##and expiration date &
+\	Current.Creation.Date% = 999% unless Current.Creation.Date% !Don't use &
+\	Current.Expiration.Date% = 999% unless Current.Expiration.Date% !##"today" ever &
+	&
+!Get job-related "quotas", if requested &
+\	Current.Detached.Job.Quota%, !Presumptions: &
+	Current.Attached.Job.Quota%, !##zero them initially &
+	Current.RIB.Quota%, &
+	Current.Message.Quota		= 0% &
+	&
+\	if Non.Disk.Quotas.Wanted% = -1% then &
+	  Non.Disk.Related.Quotas% = 0% !Clear the one-time switch &
+\	  Attribute.Type.Code% = 1% !Say we need "quotas" blockette &
+\	  gosub 12120 &
+\	  Current.Detached.Job.Quota% = ascii(Account.Attribute$) !Extract the needed byte &
+\	  Attribute.Type.Code% = 6% !Now we need the "quotas II" blockette &
+\	  gosub 12120 &
+\	  Current.Attached.Job.Quota% = ascii(Account.Attribute$) !Extract the &
+\	  Current.RIB.Quota% = swap%(cvt$%(mid(Account.Attribute$, 2%, 2%))) !##needed fields &
+\	  Current.Message.Quota = 256. * ascii(mid(Account.Attribute$, 5%, 1%)) &
+				       + ascii(mid(Account.Attribute$, 4%, 1%))
+12118	return
+12120!.pg &
+!.sb2 Look up Account.Attribute$ from xxxx.25% &
+	&
+			!Passed:	PPN.25%				probe PPN, from 12000 &
+			!		Firqb.25%()			device coding information &
+			!		Attribute.Type.Code% &
+			! &
+			!Returned:	Account.Attribute$		(null if no such attribute blockette) &
+			!		Firqb$				- as returned by Read Attributes call &
+			! &
+			!Mashed:	Firqb%() &
+	&
+	Firqb%(5%) = PPN.25% !Now the PPN &
+\	Firqb%(6%) = swap%(PPN.25%) !##we want &
+\	Firqb%(I%) = 0% for I% = 7% to 30% !Pre-clear rest of Firqb &
+\	Firqb%(I%) = Firqb.25%(I%) for I% = 23% to 26% !Load device data &
+\	goto 12127 !Go join common code &
+
+12125!.sb2 Look up Account.Attribute$ from Firqb.56$ &
+	&
+			!Passed:	Set.Firqb.56$ &
+			!		Attribute.Type.Code% &
+			! &
+			!Returned:	Account.Attribute$		(null if no such attribute blockette) &
+			!		Firqb$				- as returned by Read Attributes call &
+			! &
+			!Mashed:	Firqb%() &
+	&
+	change Set.Firqb.56$ to Firqb% !Retrieve PPN and device coding information &
+!!!	.goto 12127           (join common code) &
+
+12127!.pg &
+!+Look up Account.Attribute$ --common code &
+	Firqb%(0%) = 30% &
+\	Firqb%(1%) = 6% !FIP call &
+\	Firqb%(2%) = -25% !UU.ATR function &
+\	Firqb%(3%) = -1% !Read-Account-Attributes subfunction &
+\	Firqb%(4%) = Attribute.Type.Code% !Specify the requested attribute type &
+	&
+\	Account.Attribute$ = '' !Presumption, in case of failure &
+\	change Firqb% to Firqb$ !Build sys() string &
+\	Firqb$ = fnsys$(Firqb$) !Issue the UU.ATR &
+\	Account.Attribute$ = mid(Firqb$, 8%, 13%) unless Returned.Error% !Extract attribute data (if any) &
+\	Returned.Error% = 0% !We don't "return an error" from here, however &
+\	return
+12600!.pg &
+!.hl1 Privilege Mask Translations &
+!	    The following group of four subroutines are responsible for &
+!	handling translations between privilege names and privilege internal &
+!	representations.  Privilege names are stored in a "cache", Privilege$(). &
+!	Once a given name correspondence has been fetched from the Monitor, it &
+!	remains available from the cache without repeated use of UU.CHK. &
+!	&
+!	    Schematically, &
+!	&
+!	&
+!              "cache"                                  "index"                                "mask" &
+!	&
+!            Privilege$()                              Privilege%                          Privilege.Mask%() &
+!	&
+!               ------     - - -> - 12620 - - -> -               - - -> - 12660 - - -> -                    string form &
+!               ------   /                          \          /                         \       _+           Xxx.xxx$ &
+!               WACNT   /                            \   nn%  /                           \      _+ &
+!               ------  \                            /   ---  \                           /      _+   <- - CHANGE - &
+!               ------   \                          /          \                         /       _+                | &
+!               WREAD      - <- - - 12640 - <- - -               - <- - - 12680 - <- - -         _+                | &
+!               ------                                                                           _+                v &
+!                 .                                                                              _+             ++++++++ &
+!                 .                                                                              _+ &
+!                 . &
+!                 . &
+!                                                      integer,                                eight             8-byte &
+!           [64% entries]                              1% - 64%                               integers           string &
+!	&
+!	&
+!	    For each of the possible bits in a privilege mask (64 of them), our cache &
+!	has an allocated slot.  We invent an "index" (Privilege%), which takes a value &
+!	between 1. and 64. for each corresponding mask bit/name slot. &
+!	&
+!	    Privilege masks themselves can exist in string form (as they appear while being passed or &
+!	returned in the directives) or in array form.  Translation between string and array forms of &
+!	a privilege mask is via the CHANGE statement. &
+!	&
+!	    There are four subroutines: &
+!	&
+!			12620 takes Privilege$ (a single ASCII name), and maps it to Privilege% (the index). &
+!	&
+!			12640 does the reverse, mapping Privilege% to Privilege$. &
+!	&
+!			12660 takes Privilege% (the index), and turns on the corresponding bit in Privilege.Mask%(). &
+!	&
+!			12680 does the reverse, extracting one ("the next") bit from Privilege.Mask%(), &
+!				clearing it there, and returning Privilege% (the index).
+12620!.pg &
+!.sb2 Translate a privilege name to mask bit index &
+	&
+			!Passed:	Privilege$		- the privilege name, upper case and trimmed &
+			! &
+			!Returned:	Privilege%		- 0% if no such privilege, or null string &
+			!					- 1%-64% for the associated mask bit, if priv exists &
+			! &
+			!		Returned.Error%		- as returned by UU.CHK, if cache miss &
+			!		Firqb%			- as returned by UU.CHK, if cache miss &
+			! &
+			!Maintained:	Privilege$()		- Privilege-name cache &
+	&
+!+See if privilege name is already in cache &
+	return if Privilege$ = Privilege$(Privilege%) for Privilege% = 64% to 0% step -1%
+12625!.sb3 Do UU.CHK on Privilege$ (real, no cache) &
+	Privilege% = 0% !Presumption (failure) &
+\	change fnsys$(chr$(6%) + chr$(32%) + chr$(1%) !Change name to mask bit &
+		+ string$(3%, 0%) &
+		+ Privilege$ &
+		+ string$(30% - 6% - len(Privilege$), 0%) ) &
+			to Firqb% &
+\	Firqb%(3%) = 0% if Returned.Error% !** Temporary ** &
+\	Firqb%(3%) = -1% !** Temporary ** &
+		if 3072% and swap%(cvt$%(mid(sys(chr$(6%) + chr$(26%) + chr$(0%) + chr$(1%)), 5%, 2%))) &
+		if Returned.Error% = 18% !Get privs from JBFLAG if pre V9.0 &
+\	return if Returned.Error% !Exit with presumption (Privilege% = 0%) if an error &
+!Success.  We have a bit in Firqb%(7% + ...) &
+\	Privilege.Mask%(I%) = Firqb%(I% + 6%) for I% = 1% to 8% !Retrieve the returned mask &
+\	gosub 12680 &
+\	Privilege$(Privilege%) = Privilege$ !Cache this privilege's name &
+\	return &
+
+12640!.pg &
+!.sb2 Translate mask bit index to a privilege name &
+	&
+			!Passed:	Privilege%		- mask bit index, 0% to 64% &
+			! &
+			!Returned:	Privilege$		- the associated privilege name &
+			! &
+			!Maintained:	Privilege$()		- Privilege-name cache &
+			! &
+			!Mashed:	Firqb%, Firqb$, Privilege.Mask$ &
+	&
+!+See if privilege name is already in cache &
+	Privilege$ = cvt$$(Privilege$(Privilege%), 6%) !Have a look at our cache &
+\	return if len(Privilege$) !Exit with a cache hit &
+\	return unless Privilege% !##or with null string for null index &
+!This privilege not in cache.  Get it from Monitor &
+\	change Privilege.Mask% to D$ !Save any existing array &
+\	Privilege.Mask%(I%) = 0% for I% = 1% to 8% !Pre-clear our working mask area &
+\	gosub 12660 &
+\	Privilege.Mask%(0%) = 8% !Set byte count for "change" &
+\	change Privilege.Mask% to Privilege.Mask$ !Put it into string form &
+\	change D$ to Privilege.Mask% !Restore any (pre)existing array &
+\	Privilege$ = cvt$$(mid(fnsys$(chr$(6%) + chr$(32%) + chr$(2%) !Change mask bit to name &
+		+ string$(3%, 0%) &
+		+ Privilege.Mask$ &
+		+ string$(16%, 0%) ), 15%, 8%), 4%) &
+\	Privilege$ = '' if Returned.Error% !Null string if call failed &
+\	Privilege$(Privilege%) = Privilege$ !Cache this privilege's name &
+\	return
+12660!.pg &
+!.sb2 Bit index `Privilege%' ==> Privilege.Mask%() &
+	&
+			!Passed:	Privilege%		- mask bit index, 0% to 64% &
+			!		Privilege.Mask()% &
+			! &
+			!Returned:	Privilege.Mask%()	- with the indicated bit now set &
+			! &
+			!Preserved:	D$ &
+	&
+	return unless Privilege% !Do nothing for null index &
+\	J% = Privilege% - 1% !Make our index zero-based:  0% to 63% &
+\	I% = J% / 8% !Get byte offset:  0% to 7% &
+\	J% = J% - I% * 8% !##and bit within byte:  0% to 7% &
+\	P% = 1% !Create a "bit 0" &
+\	P% = P% * 2% for K% = 1% to J% !Shift it to appropriate bit in byte &
+\	I% = I% + 1% !Change byte offset into byte number &
+\	Privilege.Mask%(I%) = Privilege.Mask%(I%) or P% !Set the requested bit &
+\	return &
+
+12680!.pg &
+!.sb2 Privilege.Mask%() ==> bit index `Privilege%' &
+			!Passed:	Privilege.Mask%() &
+			! &
+			!Returned:	Privilege%		- 0% if no bit set &
+			!					- 1% to 64% for least significant bit found set &
+			!		Privilege.Mask%()	- that least significant bit now cleared &
+	&
+	Privilege% = 1% !Presumption for our 1-based index &
+\	for I% = 1% to 8% !Scan through bytes in mask &
+\	  goto 12684 if Privilege.Mask%(I%) !Go process first byte with a bit set &
+\	  Privilege% = Privilege% + 8% !Otherwise, increment our index one byte's worth &
+\	next I% !##and go try again &
+!Scan found no bits set &
+\	Privilege% = 0% !Return the null index &
+\	return &
+
+12684!Non-zero mask byte found, at byte I% &
+	P% = 1% !Generate a "bit 0" as a probe bit &
+\	for J% = 0% to 7% !Scan through the byte's bits &
+\	  goto 12688 if Privilege.Mask%(I%) and P% !Go process the bit when we find it &
+\	  Privilege% = Privilege% + 1% !Otherwise, increment our index &
+\	  P% = P% * 2% !##shift our probe one bit left &
+\	next J% !##and go inspect next bit &
+\	stop !There has to be a bit
+12688!Got the proper bit &
+	Privilege.Mask%(I%) = Privilege.Mask%(I%) and not(P%) !Clear the extracted bit &
+\	return &
+	&
+
+	&
+
+13000!.pg &
+!.t Report Writer Routines &
+!.hl1 I/O Subroutines &
+!.sb2 Open /OUTPUT file &
+			!Passed:	Output.Qualifier%  (true if /OUTPUT found) &
+			!		Output$            (output file specification) &
+			! &
+			!Returned:	Out%               (output channel number) &
+			!		output file opened on channel 2% if Output.Qualifier% &
+			!		                   on channel 0% otherwise &
+			! &
+			!		Returned.Error%    (nonzero if an error occurred) &
+	&
+	Returned.Error%, Out% = 0% !Presumptions &
+\	if Output.Qualifier% = 0% then !If there was no /OUTPUT qualfier, &
+	  print if ccpos(0%) !##clean up &
+\	  print !##the carriage, &
+       !!!Out% = 0%		(Channel is set to 0% above) &
+\	  return &
+
+13002	on error goto 13007 			!Set up local error trap &
+\	open Output$ for output as file 2% 	!Attempt the OPEN &
+\	goto 13005 if Output$ = "_NL:" 		!Skip test if /NOOUTPUT &
+\	CAUSE ERROR NODEVC			! Don't use it if... &
+		IF STATUS AND 256%              !     device is NFS... &
+		UNLESS STATUS AND 2048%		!     unless CCPOS() is valid &
+\	CAUSE ERROR PRVIOL			! Don't use it if... &
+		IF STATUS AND 1024%             !       we don't have access &
+
+13005   on error goto 19000 			!Restore default error trap &
+\	Out% = 2% 				!Indicate channel 2 for output &
+\	Width% = 80% 				!Rpt Width = 80 if output is to a file &
+\	return					!Go back, return to caller &
+
+13007	PRINT ERT$(ERR) 			! Print error &
+\	Returned.Error% = -1% 			! Set error flag &
+\	resume 13005 &
+
+13020!.sb2 Close output file &
+	return unless Out% !Nothing to do if output was to KB: &
+\	print #Out%, chr$(13%); chr$(12%); !Feed out the last page &
+\	close #Out% !Close output file &
+\	Out% = 0% !Clear output-channel indicator &
+\	return
+13050!.pg &
+!.sb2 Start a fresh page &
+	&
+			!Passed:	Out% &
+			!		Directory%,		Accounting% &
+			!		Brief%,			Full% &
+			!		This.System$,		Today$,		Now$ &
+			!           	Parameter.Device$	Output.Qualifier% &
+	&
+	Account.Blocks.Remaining% = Account.Blocks.Per.Page% !##in whichever format &
+\	One.Liners.Remaining% = One.Liners.Per.Page% !Indicate fresh page &
+\	Interblock.White.Space.Needed% = 0% !We're above the first block &
+\	RETURN UNLESS OUTPUT.QUALIFIER%	!EXIT UNLESS GOING TO AN OUTPUT FILE &
+\	print #Out%, chr$(13%); chr$(12%);  !Carriage return;  form feed &
+\	print #Out%, ACTUAL.Device.PPN.cvt$; '  '; !Start off with device name AND PPN &
+	&
+\	if (U.Cmdc% = SHD.k%) then !If SHOW DIRECTORY, &
+	  print #Out%, 'Directory'; !##call it a "directory" listing &
+\	  print #Out%, '/Account'; if Account% !##with accounts, if that's so
+13060	if (U.Cmdc% = SHA.k%) then !If SHOW ACCOUNT, &
+	  print #Out%, 'Account'; !##call it an "account" listing &
+\	  print #Out%, "ing"; IF ACCOUNTING% !MAKE IT 'ACCOUNTING' IF TRUE
+13070	print #Out%, ' Display    '; tab(Width% - len(This.System.cvt$)); This.System.cvt$ !The rest of our "title" &
+\	Page% = Page% + 1% !Increment page counter &
+\	D$ = Today.Now.cvt$ !Date/time stamp &
+\	D$ = D$ + '   Page ' + num1$(Page%) if Form.Qualifier% and Parameter.Something.Wild% &
+\	print #Out%, tab(Width% - len(D$)); D$ !Date/time stamp, and page number if appropriate &
+\	print #Out% !White space &
+\	return
+13100!.pg RW &
+!.hl1 SHOW command subprocessors &
+!.sb2 Print a SHOW DIRECTORY/BRIEF line &
+			!Passed:	Firqb.14A%(), Firqb.14B%()	(accounting data) &
+	&
+	if One.Liners.Remaining% < 1% then !Page header... &
+	  gosub 13050 &
+!\	  print #Out%, 'D - Dir,    Logged Out Logged In   Reserve' &
+!\	  print #Out%, 'A - Acct         Quota     Quota     Quota' &
+\	  print #Out%, 'D - Dir,    Logged Out Logged In   Current' &
+\	  print #Out%, 'A - Acct         Quota     Quota     Alloc' &
+\	  print #Out% &
+
+13150!+Do each SHOW DIRECTORY/BRIEF field &
+	gosub 14000 &
+\	gosub 14020 &
+\	gosub 14080 &
+\	gosub 14100 &
+!\	gosub 14120 &
+\	GOSUB 14140 &
+\	gosub 14180 &
+\	goto 13490
+13200!.pg &
+!.sb2 Print a SHOW ACCOUNT/ACCOUNTING line &
+			!Passed:	Firqb.14A%(), Firqb.14B%()	(accounting data) &
+	&
+	if One.Liners.Remaining% < 1% then !Page header... &
+	  gosub 13050 &
+\	  PRINT #OUT%, "Account   Name          Allocation          KCT     CPU-Time  Connect   Device" &
+\	  print #Out% &
+
+13250!+Do each SHOW ACCOUNT/ACCOUNTING field &
+	gosub 14020 &
+\	gosub 14040 &
+\	gosub 14140 &
+\	IF PPN.HAS.PASSWORD% THEN &
+		GOSUB 14244 &
+\		GOSUB 14224 &
+\		GOSUB 14264 &
+\		GOSUB 14284 &
+\	END IF &
+\	goto 13490
+13300!.pg &
+!.sb2 Print a SHOW PASSWORD line &
+			!Passed:	Date.Time$            from date/time &
+			!		Account.Flag%           attribute blockette &
+	&
+	goto 13350 unless One.Liners.Remaining% < 1% !Page header... &
+\	  gosub 13050 &
+\	  goto 13310 if System.Qualifier% !Check for /SYSTEM &
+\	    print #Out%, 'D - Dir,    Creation    Expiration            Password' &
+\	    print #Out%, 'A - Acct      Date         Date      Lookup    Prompt ' &
+\	    print #Out% &
+\	    goto 13350 !Rejoin common code
+13310	  print #Out%, 'System        Expiration     Password      User' &
+\	  print #Out%, 'Password         Date         Prompt       Classes' &
+\	  print #Out% &
+!!!	  .goto 13350 &
+
+13350!+Do each SHOW PASSWORD field &
+	goto 13370 if System.Qualifier% &
+\	gosub 14000 &
+\	gosub 14020 &
+\	gosub 14060 &
+\	gosub 14380 &
+\	gosub 14430 &
+\	gosub 14450 &
+\	goto 13490 &
+
+13370!+Do each SHOW PASSWORD/SYSTEM field &
+	print #Out%, '              '; &
+\	gosub 14380 &
+\	gosub 14450 &
+\	gosub 14470 &
+\	goto 13490
+13400!.pg &
+!.sb2 Print a SHOW ACCOUNT/BRIEF line &
+			!Passed:	Firqb.14A%(), Firqb.14B%()	(accounting data) &
+	&
+	if One.Liners.Remaining% < 1% then !Page header... &
+	  gosub 13050 &
+\	  print #Out%, 'Account   Name          Allocation   IDNCLP Last Login                Expires' &
+\	  print #Out% &
+
+13450!.sb3 Do each SHOW ACCOUNT/BRIEF field &
+	gosub 14020 &
+\	gosub 14040 &
+\	gosub 14140 &
+\	IF PPN.HAS.PASSWORD% THEN &
+		gosub 14400 &
+\		gosub 14300 &
+\		gosub 14380 &
+\	END IF &
+\	goto 13490
+13490!.pg &
+!.sb2 Finish off a one-liner &
+!+Common exit for each of the SHOW line subprocessors &
+	&
+	print #Out% !Return the carriage &
+\	One.Liners.Remaining% = One.Liners.Remaining% - 1% if Form.Qualifier% !Count lines, if requested &
+\	return
+13900!.pg &
+!.sb2 Print summary of directories/accounts SHOWn &
+	&
+			!Passed:	Matches.Found% &
+			!		Form.Qualifier% &
+			!		Disk.Allocation.Wanted% &
+			!		Parameter.Maskdown.Done% &
+			! &
+			!Returned:	Disk.Allocation.Wanted%		- cleared  (it's a one-time switch) &
+	&
+	goto 13920 unless Matches.Found% !Make sure we found matches &
+\	return unless Parameter.Something.Wild% !No summary for single match &
+\	  A$ = 'No accounts' !##text pieces &
+\	  A$ = '1 account' if Account.Matches.Found% = 1% &
+\	  A$ = num1$(Account.Matches.Found%) + ' accounts' if Account.Matches.Found% > 1% &
+\	  T$ = A$ !##proper text &
+\	  gosub 13975 &
+\	  print #Out% !White space above summary lines &
+\	  print #Out%, T$ &
+\	  print #Out%, 'Total allocation:  '; &
+		fnPrint.Using$(Total.Current.Allocation, Dont.Flag.Exceeded.Quota%, Dont.Allow.unlim%) &
+			!Disk allocation summary &
+\	  Disk.Allocation.Wanted% = 0% !Insure one-time flag is clear &
+\	  return
+13920!.sb3 No matches found &
+	GOSUB 13970 &
+\	D$ = ' is a non-user account' !Build total-line &
+\	A$ = ' is a user account' !##text pieces &
+\	T$ = T$ + D$ if (Account%) AND NOT (DIRECTORY%) !Select proper &
+\	T$ = T$ + A$ if (Directory%) AND NOT (ACCOUNT%) !##warning text &
+\	T$ = T$ + ' does not exist' if Directory% and Account% &
+\	print #Out%, T$ !Display warning in output file &
+\	print T$ if Out% !##and on KB:, too, if output file is real &
+\	RETURN &
+
+13970!.sb3 Build first part of summary lines &
+	T$ = '?' + ACTUAL.DEVICE.PPN.CVT$ &
+\	return &
+
+13975!.sb3 Build last part of summary lines &
+	T$ = T$ + ' matching ' + ACTUAL.DEVICE.PPN.CVT$ &
+\	T$ = T$ + ' with current privileges' if Parameter.Maskdown.Done% &
+\	return
+14000!.pg &
+!.hl1 Field-display routines &
+!		Each of the following routines is responsible for displaying &
+!		one field to be output by a SHOW DIRECTORY or SHOW ACCOUNT/BRIEF &
+!		command. &
+	&
+	&
+!.sb2 "Directory" or "Account" one-line display &
+	D$ = 'D ' &
+\	D$ = 'A ' if PPN.Has.Password% &
+\	print #Out%, D$; &
+\	return
+14020!.sb2 "[p,pn]" one-line display &
+	print #Out%, PPN.Read$; &
+\	return
+14040!.sb2 Account Name one-line display &
+	print #Out%, TAB(10%); Current.Name$; &
+\	return
+14060!.sb2 Creation Date one-line display &
+	D$ = date$(Current.Creation.Date%) !Convert creation date to string &
+\	print #Out%, D$; space$(10% - len(D$)); &
+\	return
+14080!.sb2 Logged-Out Quota one-line display &
+	print #Out%, ' '; fnPrint.Using$(Current.Out.Quota, Do.Flag.Exceeded.Quota%, Do.Allow.unlim%); &
+\	return
+14100!.sb2 Logged-In Quota one-line display &
+	print #Out%, fnPrint.Using$(Current.In.Quota, Do.Flag.Exceeded.Quota%, Do.Allow.unlim%); &
+\	return
+14120!.sb2 Reserve Quota one-line display &
+	print #Out%, fnPrint.Using$(Current.Reserve.Quota, Dont.Flag.Exceeded.Quota%, Dont.Allow.unlim%); &
+\	return
+14140!.sb2 Current Allocation one-line display &
+	D$ = fnPrint.Using$(Current.Allocation, Dont.Flag.Exceeded.Quota%, Dont.Allow.unlim%) &
+\	D$ = EDIT$(D$,128%)			!DISCARD TRAILING SPACES &
+\	IF (CURRENT.ALLOCATION > CURRENT.OUT.QUOTA) OR	!IF OUT_QUOTA EXCEEDED OR &
+	   (CURRENT.ALLOCATION > CURRENT.IN.QUOTA) THEN	! IN_QUOTA EXCEEDED &
+		D$ = D$ + "*"			!  FLAG QUOTA EXCEEDED &
+	ELSE					!IF OKAY &
+		D$ = D$ + " "			!  JUST ADD A SPACE &
+\	END IF &
+\	print #Out%, TAB(25%); D$; &
+\	return
+14180!.sb2 New Files First one-line display &
+	return !** Not implemented for V9.0
+14200!.sb2 UFD Cluster Size one-line display &
+!	This routine presumes that it will be the last one on (a rather full) line. &
+!	It does not include the usual trailing spaces for separation;  they would cause &
+!	a wrap on a full-to-capacity line. &
+	&
+	D$ = num1$(Firqb.14A%(29%) + swap%(Firqb.14A%(30%))) &
+\	print #Out%, space$(5% - len(D$));  D$; &
+\	return
+14224!.sb2 CPU time block display &
+	Unformatted.Number = Current.CPU.Time !Pick up CPU time &
+\	gosub 14810 &
+\	T$ = EDIT$(FORMATTED.NUMBER$,128%) &
+\	T$ = RIGHT(T$,LEN(T$)-12%) !SKIP OVER THE FIRST FEW SPACES &
+\	PRINT #OUT%, TAB(47%); T$; &
+\	RETURN
+14244!.sb2 KCT block display &
+	Unformatted.Number = Current.KCTs !Pick up kilo-core ticks &
+\	gosub 14870 &
+\	T$ = EDIT$(FORMATTED.NUMBER$,128%) &
+\	T$ = RIGHT(T$,LEN(T$)-10%) !SKIP OVER THE FIRST FEW SPACES &
+\	PRINT #OUT%, TAB(36%); T$; &
+\	RETURN
+14264!.sb2 Connect Time block display &
+	Unformatted.Number = Current.Connect.Time !Pick up connect time &
+\	gosub 14820 &
+\	PRINT #OUT%, TAB(61%); FORMATTED.NUMBER$; &
+\	RETURN
+14284!.sb2 Device Time block display &
+	Unformatted.Number = Current.Device.Time !Pick up device time &
+\	gosub 14820 &
+\	PRINT #OUT%, TAB(70%); FORMATTED.NUMBER$; &
+\	RETURN
+14300!.sb2 Date/Time/KB of last login one-line display &
+	D$ = '' !Presumption &
+\	D% = swap%(cvt$%(mid(Date.Time$, 2%, 2%))) !Extract last-login date &
+\	goto 14310 unless D% !Use presumption if no date &
+\	K% = ascii(Date.Time$) !Pick up last-login KB number &
+\	D$ = 'Det    ' !Nother presumption &
+\	D$ = 'KB' + num1$(K%) + ':' if K% <> 255% !Presumption overridden &
+\	D$ = D$ + SPACE$(7%-LEN(D$)) IF K% <> 255% !PAD IT OUT THE SAME AS 'DETACHED' &
+\	D1% = swap%(cvt$%(mid(Date.Time$, 4%, 2%))) AND 2047% !GET JUST THE TIME &
+\	D$ = D$ + date$(D%) + ' ' + time$(D1%)
+14310	print #Out%, TAB(44%); D$; &
+\	return
+14380!.sb2 Expiration Date one-line display &
+	D$ = date$(Current.Expiration.Date%) !Convert expiration date to string &
+\	D$ = '' if Current.Expiration.Date% = -1% !Handle &
+\	D$ = 'EXPIRED' if Current.Expiration.Date% = 1000% !##special values &
+\	print #Out%, TAB(70%); D$; &
+\	return
+14400!.sb2 Attribute Flags display &
+	D$ = "I"		!INTERACTIVE &
+\	D$ = " " IF ACCOUNT.FLAG% AND 64%	!NO INTERACTIVE &
+\	D1$ = "D"		!DIALUP &
+\	D1$ = " " IF ACCOUNT.FLAG% AND 16%	!NO DIALUP &
+\	D$ = D$ + D1$		!ADD IT TO THE REST &
+\	D1$ = "N"		!NETWORK &
+\	D1$ = " " IF ACCOUNT.FLAG% AND 32%	!NO NETWORK &
+\	D$ = D$ + D1$		!ADD IT TO THE REST &
+\	D1$ = " "		!NO CAPTIVE &
+\	D1$ = "C" IF ACCOUNT.FLAG% AND 128%	!CAPTIVE &
+\	D$ = D$ + D1$		!ADD IT TO THE REST &
+\	D1$ = "L"		!LOOKUP &
+\	D1$ = " " IF ACCOUNT.FLAG% AND 8%	!NO LOOKUP &
+\	D$ = D$ + D1$		!ADD IT TO THE REST &
+\	D1$ = "P"		!PASSWORD PROMPT &
+\	D1% = SWAP%(CVT$%(MID(DATE.TIME$,4%,2%))) AND 2048% !GET THE FLAG &
+\	D1$ = " " IF D1%	!NO PASSWORD PROMPT &
+\	D$ = D$ + D1$		!ADD IT TO THE REST &
+\	D$ = SPACE$(6%) UNLESS PPN.HAS.PASSWORD% !SET IT TO ALL SPACES IF DIRECTORY &
+\	PRINT #OUT%, TAB(37%); D$; !PRINT IT OUT &
+\	RETURN
+14430!.sb2 /[NO]LOOKUP one-line display &
+	D$ = '   Yes    ' !Presumption &
+\	D$ = '   No     ' if Account.Flag% and 8% !Presumption overridden &
+\	goto 14490
+14450!.sb2 Password_Prompt one-line display &
+	D$ = '   Yes    ' !Presumption &
+\	D$ = '   No     ' if Account.Flag% and 0% ! ** TBD ** &
+\	D$ = '   TBD    ' ! ** Temporary &
+\	goto 14490
+14470!.sb2 User classes one-line display (for system password) &
+	D$ = 'All' !First presumption &
+\	goto 14490 if Account.Flag% and 64% !Presumption correct => use it &
+\	D% = Account.Flag% and 48% !Isolate user-class tags &
+\	D$ = 'None' !Next presumption &
+\	goto 14490 unless D% !Use it unless bit(s) set &
+\	D$ = 'Remote' !Decide which &
+\	goto 14490 if D% = 16% !##permutation &
+\	D$ = 'Network' !##to use... &
+\	goto 14490 if D% = 32% &
+\	D$ = 'Remote, network' &
+!!!	.goto 14490
+14490!.sb3 Print D$ and return &
+	print D$ !There -- print the field &
+\	return
+14800!.pg &
+!.hl1 Field-display support subroutines &
+			!Passed:	Unformatted.Number	- the time value to be displayed &
+			!Returned:	Formatted.Number$	- ready for printing &
+			! &
+			!Local:		T%			- tenths of seconds &
+			!		X%			- a modulo-60. subfield (minutes or seconds) &
+			! &
+			!Scratch:	D &
+			!		F% &
+			! &
+			!Destroyed:	Unformatted.Number &
+			! &
+			!Notes:		Unformatted.Number will be no larger than 22 significant bits.  This &
+			!		guarantees that Unformatted.Number/36000. fits in a word. &
+
+14810!.sb2 Format tenths of seconds as h,hhh:mm:ss.t &
+	Formatted.Number$ = '' !Initialize string to be returned &
+\	Z% = 1% !FAKE SECOND PASS &
+\	D = Unformatted.Number &
+\	Unformatted.Number = int(Unformatted.Number / 10.) &
+\	T% = D - (10. * Unformatted.Number) &
+\	X% = Unformatted.Number / 3600. &
+\	if X% then &
+	  Unformatted.Number = Unformatted.Number - (3600. * X%) &
+\	  Z% = 0% IF X% > 99%	!DON'T CHOP OFF HUNDREDS IF IT'S VALID
+14814	gosub 14850 &
+\	Formatted.Number$ = Formatted.Number$ + ':' &
+\	gosub 14830 &
+\	Formatted.Number$ = space$(11% - len(Formatted.Number$)) &
+			+ Formatted.Number$ &
+			+ '.' + chr$(T% + 48%) + ' ' &
+\	return &
+
+14820!.sb2 Format minutes as h,hhh:mm &
+	Formatted.Number$ = '' !Initialize string to be returned &
+\	Z% = 0% !FIRST TIME FLAG &
+\	Z% = 1% IF UNFORMATTED.NUMBER < 600. !FAKE SECOND PASS IF A SMALL NUMBER &
+\	GOSUB 14830 &
+\	FORMATTED.NUMBER$ = SPACE$(8% - LEN(FORMATTED.NUMBER$)) &
+			  + FORMATTED.NUMBER$ &
+\	RETURN &
+
+14830!.sb3 Generate xx:xx, modulo 60 &
+	X% = Unformatted.Number/60. &
+\	Unformatted.Number = Unformatted.Number - (60. * X%) &
+\	gosub 14850 &
+\	Formatted.Number$ = Formatted.Number$ + ':' &
+\	X% = Unformatted.Number &
+\	goto 14850
+14850!.pg &
+!.sb3 Do one field, modulo 60. &
+	T$ = num$(X% + (Z% * 100%)) &
+\	Formatted.Number$ = Formatted.Number$ &
+			+ mid(T$, 2% + Z%, len(T$) - 2% - Z%) &
+\	F% = len(Formatted.Number$) &
+\	Z% = 1% !SECOND TIME THROUGH &
+\	Formatted.Number$ = left(Formatted.Number$, F% - 3%) !Poor man's PRINT USING  :-) &
+			+ '' !##..insert a comma if appropriate GET RID OF THE COMMA FOR NOW &
+			+ right(Formatted.Number$, F% - 2%) if F% > 3%	!####(if > 3 digits) &
+							  unless Z%	 !######(but only in first subfield) &
+\	return
+14870!.sb2 Format a number as 9,999,999,999 &
+	F% = Unformatted.Number / 100000. &
+\	Unformatted.Number = Unformatted.Number - 100000. * F% &
+\	Formatted.Number$ = num1$(Unformatted.Number) &
+\	Formatted.Number$ = num1$(F%) + mid(num$(Unformatted.Number + 100000.), 3%, 5%) if F% &
+\	Formatted.Number$ = left(Formatted.Number$, F%) &
+			+ ''	!GET RID OF THE COMMA FOR NOW &
+			+ right(Formatted.Number$, F% + 1%) &
+		for F% = len(Formatted.Number$) - 3% to 1% step -3% &
+\	Formatted.Number$ = space$(13% - len(Formatted.Number$)) + Formatted.Number$ !Space-fill &
+\	return &
+
+	&
+
+15000!.pg Fn &
+!.t Function Definitions &
+!.hl1 General Functions &
+!.fn2 fnsys$ - do a sys() call &
+	&
+			!Argument:	a sys() call argument string &
+			! &
+			!Value:		Firqb (string) returned by sys() call &
+			! &
+			!Returned:	Returned.Error% &
+			!		Returned.Status% &
+			!		..other data valid only if Returned.Error% = 0% &
+	&
+	def* fnsys$(S$) &
+\	  Returned.Error%, Returned.Status% = 0% !Presume no error;  clear status cell &
+	&
+\	   if Debug% then &
+		print 'fnsys$(S$):  len(S$) ='; len(S$) &
+\		print &
+\		print	Q%;	   ascii(right(S$, Q%)), &
+			Q% + 10%;  ascii(right(S$, Q% + 10%)), &
+			Q% + 20%;  ascii(right(S$, Q% + 20%))    for Q%=1% to 10% &
+\		print &
+
+15005	  on error goto 15007 !Set up local error trap &
+\	  Work$ = sys(S$) !Issue the sys() call &
+\	  Returned.Status% = status !Retrieve "status" information &
+\	  goto 15008 !##and exit, without error
+15007!Error on a sys() call &
+	  Returned.Error% = err !Pass back the error code &
+\	  Work$ = '' !Nothing to return if sys() errored &
+\	  resume 15008 !##and continue
+15008	  fnsys$ = Work$ !Pass back our returned value &
+\	  on error goto 19000 !Restore default error trap &
+\	  if Debug% then &
+		print 'Returned.Error% ='; Returned.Error%,, 'Returned.Status% ='; Returned.Status% &
+\		print &
+\		print	Q%;	   ascii(right(Work$, Q%)), &
+			Q% + 10%;  ascii(right(Work$, Q% + 10%)), &
+			Q% + 20%;  ascii(right(Work$, Q% + 20%))    for Q%=1% to 10% &
+\		print
+15009	fnend
+15500!.pg &
+!.hl1 Parsing-Support Functions &
+!.fn2 fnDevice.PPN$ - check syntax of dev:[p,pn] &
+	&
+			!Arguments:	a "dev:[p,pn]" probe string; wildcards-ok, mask-down-wildcards indicators &
+			! &
+			!Value:		probe string normalized, and with logicals translated &
+			! &
+			!Returned:	Returned.Error% &
+			!			= 0% for valid syntax &
+			!				(other "returned" data are valid only if Returned.Error% = 0%) &
+			!		   	= 6% for "not a valid device" &
+			!			= 30% for "device not a disk" &
+			!			= 2% ("Illegal file name"), etc. for .FSS errors &
+			! &
+			!			= -1% for general errors ("Invalid directory or account specification" &
+			!			= -2% for wildcard(s) found when not permitted &
+			! &
+			!			= -3% for specific errors (in this case, error text &
+			!				has already been printed, and Parse.Error% is set) &
+			! &
+			!		Firqb$, Firqb%() containing .FSS data &
+			!		S0%, Firqb bytes 27-28 &
+			!		S1%, Firqb bytes 29-30 &
+			!		Something.Wild% &
+			!		Device$      ("_SY0:" if none specified) &
+			!		Device.23%     Device &
+			!		Device.24%     coding &
+			!		Device.25%     bytes &
+			!		Device.26%     from .FSS &
+			!		PPN$         (ours if none specified) &
+			!		Project%     (255% if wild) &
+			!		Project$     ("*" if wild) &
+			!		Programmer%  (255% if wild) &
+			!		Programmer$  ("*" if wild) &
+			!		Maskdown.Done% &
+			! &
+			!Notes:		If our privileges don't allow access to a wildcard PPN, &
+			!		action here depends on the function's third parameter. &
+			!		If it's -1%, the wildcard is masked down to the current &
+			!		account's values, as appropriate to available privilege. &
+			!		If it's zero, the wildcard causes error -2% &
+!.pg	&
+	def* fnDevice.PPN$(PS$, WOK%, MDW%) &
+	&
+\	  Probe.String$ = PS$ !Give our argument a real variable name &
+\	  fnDevice.PPN$ = Probe.String$ !Return the unchanged argument if error &
+\	  D%, Maskdown.Done%  = 0% !Presume DSK driver index, no maskdown &
+\	  Firqb$ = fnsys$(chr$(6%) + chr$(-10%) + Probe.String$) !Do the .FSS &
+\	  goto 15509 if Returned.Error% !We're done if there was an error &
+\	  S0% = swap%(cvt$%(mid(Firqb$, 27%, 2%))) !Retrieve &
+\	  S1% = swap%(cvt$%(mid(Firqb$, 29%, 2%))) !##flag words &
+\	  D% = (Returned.Status% and 255%) if S1% and 4096% !Extract possible driver index &
+\	  Returned.Error% = 30% !Presume "not a disk" failure &
+\	  goto 15509 if D% !Exit with that if not DSK &
+\	  Returned.Error% = 6% !Presume "not a valid device" failure &
+\	  goto 15509 if S1% < 0% !Reject untranslated logical &
+\	  Returned.Error% = -1% !Presume some other form of failure &
+\	  goto 15509 if (S0% and 2831%) or (S1% and 1151%) !Reject disallowed flags &
+			! 2831% = 1% + 2% + 4% + 8% + 256% + 512% + 2048% &
+			! 1151% = 1% + 2% + 4% + 8% + 16% + 32% + 64% + 1024% &
+\	  Something.Wild% = ((S1% and 768%) <> 0%) &
+			! 768% = 256% + 512% &
+\	  Returned.Error% = -2% !Presume the "no wildcards allowed" error &
+\	  goto 15509 if Something.Wild% and not WOK% !Trap such errors &
+!Plug in any necessary defaults &
+\	  Firqb$ = left(Firqb$, 4%) + chr$(Our.Programmer%) + chr$(Our.Project%) + right(Firqb$, 7%) &
+			UNLESS S1% AND 128% !Default [p,pn] to ours &
+\	  Firqb$ = left(Firqb$, 22%) + 'SY' + chr$(0%) + chr$(255%) + right(Firqb$, 27%) &
+			unless S1% and 4096% !Make a defaulted device an explicit "SY0:" &
+	&
+\	  change Firqb$ to Firqb% !Generate array form of Firqb data &
+!.pg	&
+!Check any wildcards for legality &
+\	  goto 15504 unless Firqb%(6%) = 255% !Continue unless project wild &
+\	  goto 15504 if We.Have.WACNT% !##Even then, continue with proper privileges &
+\	    if MDW% then !####if mask-down-wildcards requested, &
+	      Firqb%(6%) = Our.Project% !######mask down project number &
+\	      Maskdown.Done% = -1% !######and remember we did so &
+\	      goto 15504
+15502!!!    else (not MDW%) &
+	      gosub 19180 &
+\	      goto 15509
+15504	goto 15506 unless Firqb%(5%) = 255% !Continue unless programmer wild &
+\	  goto 15506 if We.Have.WACNT% or We.Have.GACNT% !##Privileges make it OK, too &
+\	    if MDW% then !####if mask-down-wildcards requested, &
+	      Firqb%(5%) = Our.Programmer% !######mask down programmer number &
+\	      Maskdown.Done% = -1% !######and remember we did so &
+\	      goto 15506
+15505!!!    else (not MDW%) &
+	      gosub 19184 &
+\	      goto 15509
+15506	  change Firqb% to Firqb$ !Keep array and string forms in step &
+!+Now, do extractions &
+\	  Device$ = '_' + mid(Firqb$, 23%, 2%) !Extract possible device name &
+\	  Device.23% = Firqb%(23%) !Extract &
+\	  Device.24% = Firqb%(24%) !##device &
+\	  Device.25% = Firqb%(25%) !##coding &
+\	  Device.26% = Firqb%(26%) !##bytes &
+\	  Device$ = Device$ + num1$(Device.25%) if Device.26% &
+\	  Device$ = Device$ + ':' &
+\	  Project% = Firqb%(6%) !Extract &
+\	  Project$ = num1$(Project%) &
+\	  Project$ = "*" if (S1% and 256%) &
+\	  Programmer% = Firqb%(5%) !#[p,pn] &
+\	  Programmer$ = num1$(Programmer%) &
+\	  Programmer$ = "*" if (S1% and 512%) &
+\	  PPN$ = '[' + Project$ + ',' + Programmer$ + ']' &
+\	  fnDevice.PPN$ = Device$ + PPN$ !Normalize probe string &
+\	  Returned.Error% = 0% !Finally, say "good syntax"
+15509	fnend
+15510!.pg &
+!.fn2 fnDevice.PPN.Doesnt.Exist% - check existence of dev:[p,pn] &
+	&
+			!Argument:	a "dev:[p,pn]" string (already validated for syntax) &
+			! &
+			!Value:		0% for "dev:[p,pn] exists" (or at least one wildcard match exists) &
+			!		-1% for "dev:[p,pn] does not exist" &
+			!		-2% for "?Insufficient privilege" &
+			!		any other value is an error from UU.RAD &
+			! &
+			!Returned:	Firqb$, Firqb%() containing UU.RAD data &
+			!		Pack.Status.Call.Error%		IOSTS returned from pack-status lookup &
+			!		RDS.Level%			binary word (0 if we are pre-V9.0) &
+			!		Pack.Clustersize%			    (0 if we are pre-V9.0) &
+	&
+	def* fnDevice.PPN.Doesnt.Exist%(Probe.String$) &
+\	  Firqb$ = sys(chr$(6%) + chr$(-10%) + Probe.String$) !FSS our argument &
+\	  D0$ = mid(Firqb$, 5%, 2%) !Hold on to [p,pn] &
+\	  D0% = swap%(cvt$%(D0$)) !##..integer form, too &
+\	  I% = 0% !Presume no index (for no wildcards) &
+\	  N0% = 1% !Indicate no disk usage data wanted &
+\	  D% = swap%(cvt$%(mid(Firqb$, 29%, 2%))) !Extract "S0" flag word &
+\	  if D% and 768% then !If something wild (256% + 512%) &
+	    I% = 1% !Set index to 1 &
+\	    N0% = N0% + 2% !Indicate wildcards present
+15514!Obtain RDS level, pack clustersize on target disk &
+	  RDS.Level%, Pack.Clustersize% = 0% !Presumption:  we are pre-V9.0 &
+\	  V$ = fnsys$(chr$(6%) + chr$(-25%) !UU.ATR.. &
+			+ chr$(-4%) !Disk pack status subfunction &
+			+ string$(19%, 0%) &
+			+ mid(Firqb$, 23%, 4%) !##Device coding &
+			+ string$(4%, 0%)) &
+\	  Pack.Status.Call.Error% = Returned.Error% !Pick up any returned error code &
+\	  goto 15516 unless Pack.Status.Call.Error% !Let presumptions stand if error &
+\	    RDS.Level% = swap%(cvt$%(mid(V$, 9%, 2%))) !If none, extract RDS level &
+\	    Pack.Clustersize% = swap%(cvt$%(mid(V$, 11%, 2%))) !##and pack clustersize &
+
+15516!Do accounting lookup on target PPN &
+	  Firqb$ = fnsys$(chr$(6%) + chr$(14%) !UU.RAD.. &
+			+ cvt%$(swap%(I%)) !Zero, or index for wildcards &
+			+ cvt%$(0%) &
+			+ D0$ !##PPN &
+			+ chr$(N0%) !##Don't return disk usage, [no]wildness &
+			+ string$(13%, 0%) &
+			+ mid(Firqb$, 23%, 4%) !##Device coding &
+			+ string$(4%, 0%)) &
+\	  fnDevice.PPN.Doesnt.Exist% = -1% !Presume dev:[p,pn] doesn't exist &
+\	  goto 15519 if Returned.Error% = 5% !Correct:  exit with 5% &
+\	  fnDevice.PPN.Doesnt.Exist% = Returned.Error% !Presume returned error &
+\	  goto 15519 if Returned.Error% !We're done if there was one &
+\	  D1% = swap%(cvt$%(mid(Firqb$, 7%, 2%))) !Get returned PPN &
+\	  fnDevice.PPN.Doesnt.Exist% = -2% !Presume insufficient privilege &
+\	  M% = 255% !Set up to check programmer number &
+\	  goto 15519 if (D0% and M%) <> (D1% and M%) !Exit with the -2% if mismatch &
+		unless (D0% and M%) = M% !##(but mismatch OK for wildcard) &
+\	  M% = swap%(255%) !Set up to check project number &
+\	  goto 15519 if (D0% and M%) <> (D1% and M%) !Exit with the -2% if mismatch &
+		unless (D0% and M%) = M% !##(but mismatch OK for wildcard) &
+!No checks failed &
+\	  fnDevice.PPN.Doesnt.Exist% = 0% !Indicate that dev:[p,pn] does exist
+15519	fnend
+15800!.pg &
+!.hl1 Display Functions &
+!.fn2 fnPrint.Using$ - format a quota (or general numeric) field &
+	def* fnPrint.Using$(Q, Flag.Exceeded.Quota%, Allow.unlim%) &
+\	  D$ = '*' !Presume an exceeded quota &
+\	  D$ = ' ' unless Current.Allocation > Q and Flag.Exceeded.Quota% !Undo the flag if appropriate &
+\	  D$ = num1$(Q) + D$ !Make argument into a string &
+\	  D$ = left(D$, F%) + '' + right(D$, F%+1%) for F% = len(D$)-4% to 1% step -3% !GET RID OF THE COMMA FOR NOW &
+\	  D$ = 'unlimited ' if Q = 16777215. if Allow.unlim% !"Unlimited" is a special case &
+\	  fnPrint.Using$ = space$(10% - len(D$)) + D$ !Space-pad it out &
+\	fnend
+16000!.pg Misc &
+!.hl1 Miscellaneous subroutines &
+!.sb2 Increment "match" counters &
+			!Passed:	PPN.Has.Password% &
+			! &
+			!Returned:	Matches.Found%			- incremented &
+			!		Account.Matches.Found%		- incremented &
+	&
+	Matches.Found% = Matches.Found% + 1% !Increment the "blanket" match counter &
+\	Account.Matches.Found% = Account.Matches.Found% + 1%
+16007	return
+19000!.pg E &
+!.t Error Handling &
+!.hl1 Default error handler &
+	Returned.Error% = err !Retrieve error code &
+\	Error.Line% = erl !##and the error line &
+\	resume 19010 !##and continuw with printing them
+19010	print right(sys(chr$(6%) + chr$(9%) + chr$(Returned.Error%)), 3%); &
+		' at line'; Error.Line% !Display unexpected error &
+\	goto 32767 !Go exit
+19100!.hl1 Error Handling Subroutines &
+!	Error-display subroutines are grouped together here. &
+!	&
+!	These subroutines may be called by GOSUB.  They may also be &
+!	entered via GOTO if another subroutine determines that it &
+!	wishes to print an error message and then RETURN. &
+
+19140!.sb3 ?Working.Device.PPN$ does not exist &
+	Error.Text$ = '?Account ' + Working.Device.PPN$ + ' does not exist' &
+\	goto 19900
+19180!.pg &
+!.sb3 ?Need WACNT to access Probe.String$ &
+	Error.Text$ = '?Need WACNT privilege to access ' + Probe.String$ &
+\	goto 19900
+19184!.sb3 ?Need GACNT to access Probe.String$ &
+	Error.Text$ = '?Need GACNT privilege to access ' + Probe.String$ &
+\	goto 19900
+19250!.sb3 ?No such privilege name &
+	Error.Text$ = '?No such privilege name as ' + Privilege$ &
+\	goto 19900 &
+
+19400!.sb3 ?Error opening Output$ &
+	Error.Number% = err &
+\	Error.Text$ = ' opening ' + Output$ &
+\	goto 19940 &
+
+19420!.sb3 ?Error reading accounting data &
+	Error.Text$ = ' looking up accounting data for [' &
+		+ num1$(swap%(PPN.25% and 255%)) + ',' + num1$(PPN.25% and 255%) + ']' &
+\	goto 19930
+19900!.pg &
+!.sb2 Common error exit routine - set Parse.Error% &
+			!Passed:	Error.Text$ &
+			!Returned:	Parse.Error%= -1% &
+	&
+	Parse.Error% = -1%
+19910!.sb2 Common error exit routine &
+			!Passed:	Error.Text$ &
+	&
+	Error.Text$ = cvt$$(Error.Text$, 152%) !Squish any extra spaces out of the string &
+\	goto 19950 !Continue with common error-text display routine &
+
+19930!.sb2 Common append-Returned.Error%-text error display routine &
+			!Passed:	Error.Text$ &
+			!		Returned.Error% &
+	Error.Number% = Returned.Error% !Forward returned error to display routine &
+!!!	.goto 19940 !!Fall through &
+
+19940!.sb2 Common append-RSTS-text error display routine &
+			!Passed:	Error.Text$ &
+			!		Error.Number% &
+			! &
+			!Returned:	Exhausted% set &
+	&
+	Error.Text$ = cvt$$(right(sys(chr$(6%) + chr$(9%) + chr$(Error.Number%)), 3%), 5%) &
+			+ ' - ' + cvt$$(Error.Text$, 152%) &
+\	Exhausted% = -1% !Say "stop wildcard processing" &
+!!!	.goto 19950 !!Fall through &
+
+19950!.sb2 Common error-text display routine &
+			!Passed:	Error.Text$ &
+	&
+	print Error.Text$ !Temporary, until we have CUI paint &
+\	stop if Debug% ! ** Debugging ** &
+\	return
+32767	subend

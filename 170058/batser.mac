@@ -1,0 +1,3670 @@
+.INCLUDE	%CMN:COMMON%
+TITLE	BATSER,<BATCH Processor Sub-Job>,0A,10-MAY-91,BSB/KCG/PRL/DBM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BATSER
+
+;+
+;Edit   By   Date	Reason
+;
+;  000	BSB  20-Jan-84	Creation for Version 9.0
+;  001	PRL  22-Feb-84	Use modes 2+8. opening PK
+;  002	KCG  13-Apr-84	Set new word for new XMIT
+;  003	KCG  25-Apr-84	Add routines for opening and creating .TMP file
+;  004	PRL  13-May-84	Use MRCV, DCLR, REMV, MOVBYT macros
+;			Use LOT macro to define batch LOT
+;  005	PRL  21-May-84	Remove CHKOPR routine
+;  006	PRL  22-May-84	Invoke PBSCON macro to define constants
+;  007	PRL  28-May-84	Update GETMSG to check for sender privs
+;  			Add code to use rcvr name 'BA$nnu'
+;  008	KCG  30-May-84	Fix Spawn to spawn com file directly
+;  009	KCG  30-May-84	Blank out $ in RECVID when defining temp comfile name
+;  010	KCG  04-Jun-84	Add code for /DEL file qualifier
+;  011	KCG  06-Jun-84	Added support for START/NEXT_JOB
+;  012	KCG  08-Jun-84	Add code in PKKILL to use UU.CHU
+;  013	PRL  03-Aug-84	Fix F$SEVERITY -> $SEVERITY
+;  014	KCG  01-Oct-84	Allocate KB if /USER is set ( for restricted KBs )
+;  015	KCG  23-Oct-84	Add new log file format for Header and exit sts
+;  016	KCG  23-Oct-84	Add exit status for exceeded CPU and TIME limits
+;  017	KCG  24-Oct-84	Include CPU and TIME useage in log file
+;  018	KCG  26-Oct-84	Add call to ENTRCV to add receiver to RIBLIST
+;  019	KCG  30-Oct-84	Add calls for SETROK and CLRROK  ( Run OK )
+;  020	KCG  31-Oct-84	Move the disable broadcast code from DEFJOB to SPAWN
+;  021	KCG  30-Jan-85	Remove active support of /USER
+;  022	KCG  31-Jan-85	Add support for send "$_LOGOUT/BRIEF" to PK
+;  023	PRL  28-Feb-85	Remove default priority code in UU.PRI call
+;  024	KCG  14-Mar-85	Implement new device assignment protocol
+;
+;	KCG		Creation of 9.1 from 9.0   06-Jun-85
+;  025	KCG  06-Jun-85	Add new CPU and Elapsed time monitors in CHECKJOB:
+;  026	KCG  11-Jun-85	Fixed WRIDIG to correctly compose the number 10.
+;  027	KCG  27-Aug-85	Changed JMP to CALL for returning messages.
+;
+;	KCG		Creation of 9.2 from 9.1   12-Sep-85
+;  028	KCG  12-Sep-85	Fix possible Deadlock when 0% free on sys disk
+;  029	DBM  13-Nov-86	Fix flag handling for errors in DEFJOB
+;  030	DBM  23-Aug-87	Fix "010" seconds output in job-end time-stamps
+;
+;			[RSTS/E V9.6]
+;  031	DBM  20-Feb-88	Add dynamic PK support
+;
+;			[RSTS/E V10.0]
+;  032	DBM  29-Jun-89	Add OMS and /NOTIFY support
+;  033	DBM  13-Nov-89	Add explicit $_EXIT status
+;  034	DBM  02-Apr-90	Fix long parameter handling
+;-
+
+.SBTTL	Outside macro Calls
+
+	.LIBRARY	%SYSTEM:PBSMAC%
+	.LIBRARY	%LB:RMSMAC%
+
+	.MCALL	PSECTS,SPLSTART,SPLFUN,SPLEND,CRASH,CHKFRE,GETBUF,SUBRIB
+	.MCALL	SETFUN,STALL,SAVREG,MOVSTR,GETLUN,GETBUF,PUSH,POP,SHUTUP
+	.MCALL	XMITM,RETLUN,RETBUF,BITDEF,QUEDEF,XMTBLK,SPLCMD,CR$LF,$RMSTAT
+	.MCALL	TITLE,SETPRV,CLRFUN,CLRBUF
+	.MCALL	RECV,DCLR,REMV,MOVBYT,LOT,PBSCON
+	.MCALL	MUTEXC,SETPRV,CHKPRV
+	.MCALL	.ASCIC
+
+	PSECTS
+	BITDEF
+	PBSCON
+	QUEDEF
+	XMTBLK
+	SPLCMD
+	CR$LF
+	LOT
+
+	$RMSTAT	DFIN$L
+
+.SBTTL	DEFINE ASSEMBLY TYPE
+
+	.IF	DF	$$TEST
+
+		LO.QMN	=	LO.QMN+4 ;set lots for test version
+		LO.SRV	=	LO.SRV+4
+		LO.URP	=	LO.URP+4
+
+	.ENDC
+
+.SBTTL	Useful .MACRO(s)
+
+;+
+; THREAD - Access a thread
+;
+; The THREAD macro is used to access a threaded routine. It does a .EVEN
+; to be sure the thread address is on an even boundry, then does a .WORD
+; of the routine entry point.
+;-
+
+
+.MACRO	THREAD	NAME
+.EVEN
+	.WORD	NAME
+.ENDM	THREAD
+
+.MACRO	ENDTHR
+.EVEN
+	.WORD	RTS$PC
+.ENDM	ENDTHR
+
+.SBTTL	DEFINE	- Impure Area offset definitions
+
+	.PSECT	IMPURE
+	.DSECT	,CREF
+
+SIZE:	.BLKW			; Impure area buffer length
+STACK:	.BLKW			; Initial Stack pointer for cleanups
+DSPBIT:	.BLKB	8.		; Number of dispatch bytes (Max value)
+.ASSUME .-DSPBIT GE $DSBYT	; Make sure there is enough space for them
+	.EVEN
+L3QJOB:	.BLKW			; SUBFUN number of last function to run
+JOBSTA:	.BLKW			; Current subjob status
+SP.CTX:	.BLKW			; Server's context word
+SAVSTA:	.BLKW			; Saved message state table for re-do
+SP.STA:	.BLKW			; Current state table
+SP.OST:	.BLKW			; Previous (old) message state table
+EOJSTS:	.BLKW			; End of job STS ( ABO, KIL, FAI, SUC )
+SUBPPN:	.BLKW			; Submitter's PPN
+RUNPPN:	.BLKW			; PPN to run job under
+KBTBL:	.BLKW			; Pointer to system KB table
+KBDDB:	.BLKW			; Pointer to PK:'s KB:'s DDB
+KBNUM:	.BLKB			; PK:'s actual KB number 
+	.BLKB			; Reserved
+FLAGS:	.BLKW			; BATCH internal flags
+RECVID:	.BLKW	3		; Receiver ID in ASCII
+QRIB:	.BLKW			; Our Sub-Rib number
+SP.SID:	.BLKW			; Sender's CID
+SP.RID:	.BLKW			; Receiver's (Our) CID
+MSGPTR:	.BLKW			; -> to the current message block
+MSGLEN:	.BLKW			; Length of the current message
+MSGEND:	.BLKW			; end addr of message
+PPN:	.BLKW			; sender's PPN		** keep     **
+JBNO:	.BLKB			; sender's job no.	** these    **
+KBNO:	.BLKB			; sender's KB no.	** fields   **
+PRIV:	.BLKW	PRVSIZ		; sender's priv mask	** in order **
+QMJBNO:	.BLKW			; Qman's job number			;024
+JOBPTR:	.BLKW			; -> to Job definition message for active job
+JOBLEN:	.BLKW			; Length of message in SAVMSG
+PKCHNL:	.BLKB			; Pseudo-Keyboard's channel number
+	.BLKB			; Reserved
+PKMODE:	.BLKW			; Mode for PK open (Dynamic vs real)	;031
+CURFIL:	.BLKW			; Current file offset ( offset from job pkt )
+ONXLUN:	.BLKW			; Lun for "Open Next"
+ONXFQB:	.BLKB	FQBSIZ		; FIRQB for "Open Next" 
+PPNIDX:	.BLKW			; PPN index (for wildcard PPN)
+PPNCUR:	.BLKW			; PPN currently working on (for wildcard PPN)
+COMFIL:	.BLKW	2		; RAD50 name of the com file
+COMEXT:	.BLKW			; RAD50 name of the com file's extension
+	.ASSUME COMFIL+4 EQ COMEXT
+LOGFIL:	.BLKB	FQBSIZ		; Ascii representation of the logfile
+LOGLEN:	.BLKW			; Length of log file spec
+MAXTIM:	.BLKW			; Elapsed time limit in minutes
+MAXCPU:	.BLKW	2		; CPU limit in 1/10ths of seconds
+RUNTIM:	.BLKW			; Our job's Elapsed time
+RUNCPU:	.BLKW	2		; Our job's CPU time in .1 seconds
+LASTIM:	.BLKW			; Our job's last recorded elapsed time
+LASCPU:	.BLKW	2		; Our job's last recorded CPU time in .1 seconds
+FREE:	.BLKW			; Free list pointer
+OBUFP:	.BLKW			; Output buffer pointer (current location)
+OBUFF:	.BLKW			; Output buffer pointer
+OBUFL:	.BLKW			; Output buffer length
+OUTLUN:	.BLKW			; Lun for COM file
+
+IMPSIZ	= .			; Size of the Impure block
+
+.SBTTL	DEFINE	- flag definitions for FLAGS
+
+;
+;	Bit definitions for FLAGS:
+;
+
+	.BSECT	
+
+BA$LOG:	.BLKB	.		; /LOGFILE= specfied
+BA$DEF:	.BLKB	.		; Job definition in progress
+BA$NOT:	.BLKB	.		; No time limit specified
+BA$NOC:	.BLKB	.		; No CPU limit specified
+BA$FEX:	.BLKB	.		; File spec(s) exist in temp com file
+BA$DEL:	.BLKB	.		; Write delete command for all files in spec
+BA$SPN:	.BLKB	.		; Job has been spawned
+BA$IOE:	.BLKB	.		; I/O Error has occured during file write
+
+BA$ACK:	.BLKB	.		; Job request has been acknowledged
+BA$BYE:	.BLKB	.		; Logout message has been sent to PK
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+
+
+.SBTTL	DEFINE	- Bit definitions for JOBSTA
+
+;
+;	Job Status Bit definitions ( JOBSTA )
+;
+
+	.BSECT	,CREF
+
+J.ONL:	.BLKB	.		; Job is online to Qman
+J.FRM:	.BLKB	.		; (NA) Form has been defined
+J.JOB:	.BLKB	.		; Job is currently in progress
+J.DEV:	.BLKB	.		; Output device is open
+J.OPN:	.BLKB	.		; (NA) Input file is Open
+J.ABRT:	.BLKB	.		; Abort requested by User or Spooler
+J.HNG:	.BLKB	.		; (NA)Output device is hung
+
+.SBTTL	DEFINE	- COM FILE STRING CONSTANTS
+
+;+
+;
+; String constants are put in the PURE area.  These strings are used to
+; print information at the beginning of every log file.  The WORK$ is a
+; R/W string whose information is only good while we are using it.
+;
+;-
+
+	.SAVE
+	.PSECT	PURE
+	.EVEN
+	.NLIST	BEX
+
+UNKTXT:	.ASCIC	<Unknown>
+BATSRV:	.ASCIC	<* Batch server >
+SPLAT$:	.ASCIC	<**************************************************>
+INI$:	.ASCIC	<$_@[0,1]LOGIN.COM>
+WRT0$:	.ASCIC	<$_WRITE 0 ">
+NOTXT$:	.ASCIC	<NO>
+NLTXT$:	.BYTE	2,15,12			; .ASCIC for <newline>
+QT.NL$:	.BYTE	3,'",15,12		; .ASCIC for <quote><newline>
+
+STAR$:	.ASCII	%Stardate%
+	L.STAR$	= <.-STAR$>
+
+BYE$:	.ASCII	%$_LOGOUT/BRIEF%<CR$CR>
+	L.BYE$	= <.-BYE$>
+
+	.EVEN
+
+	.PSECT	IMPURE			;WARNING: work must be complete in
+					; the following work blocks in the
+					; current runburst ( no STALLs ).
+	.ODD								;032
+WORK$L: .BYTE	40.			;Make WORK$ an .ASCIC string	;032
+WORK$:	.BLKB	40.
+	L.WORK$	= <.-WORK$>
+
+	.ODD								;032
+STMP$L:	.BYTE	35.			;Make STAMP$ an .ASCIC string	;032
+STAMP$:	.BLKB	35.			;Timestamp block
+
+	.EVEN
+	.LIST	BEX
+	.RESTORE
+
+.SBTTL	CMNMSG	- DEFINE COMMON MESSAGE BLOCK
+
+;+
+;
+; NOTE:	THIS COMMON MESSAGE AREA IS USED BY THE ROUTINE SNDCMN.
+;	IT MAY BE USED TO SEND THE FOLLOWING COMMAND MESSAGES:
+;
+;		*	STATUS REQUEST
+;			STATUS RESPONSE
+;			STATUS UPDATE
+;			ACKNOWLEDGE
+;			NEG-ACKNOWLEDGE
+;		*	PAUSE
+;		*	CONTINUE
+;		*	KILL JOB
+;			END-OF-JOB
+;			ON-LINE
+;		*	ON-LINE CONFIRM
+;			OFF-LINE
+;		*	INITIALIZE DEVICE
+;		*	DELETE DEVICE
+;
+; * THESE COULD BE USED BUT ARE NOT IN THIS MODULE.
+;
+;-
+
+	.SAVE
+	.PSECT	IMPURE
+	.EVEN
+
+CMNMSG:	
+10$:	.WORD	0			;LINK TO NEXT
+20$:	.WORD	XM.LEN+HD.LEN+ON.LEN	;LENGTH OF TOTAL MESSAGE
+30$:	.BYTE	1			;ONE TARGET
+40$:	.BYTE	0			;RETRY COUNT
+	.WORD	0			;Reserved for broadcast target
+50$:
+
+;
+;	ASSURE XMIT'S FIELDS ARE WHAT WE ARE SENDING
+;
+
+	.ASSUME	10$-CMNMSG EQ XMITNX
+	.ASSUME	20$-CMNMSG EQ XMITLN
+	.ASSUME	30$-CMNMSG EQ XMITCT
+	.ASSUME	40$-CMNMSG EQ XMITRT
+	.ASSUME	50$-CMNMSG EQ XMITFX
+	.ASSUME XM.LEN EQ XMITFX+XMITTL
+
+CMNTG:	
+10$:	.BYTE	1			; Send by LOT
+	.BYTE	<BIT7!LO.SRV>		; Send to PBS Server LOT
+	.ASCII	/QM/			;  reserved
+	.ASCII	/$S/			;   reserved
+	.ASCII	/RV/			;    reserved
+20$:
+
+;
+;	ASSURE THAT THE RID FIELD IS RIGHT
+;
+
+	.ASSUME	20$-10$ EQ XMITTL
+
+CMNHD:	
+10$:	.BYTE	0			;RESERVED FLAG
+20$:	.BYTE	P.VER			;PROTOCAL VERSION
+30$:	.WORD	0			;CID TO RETURN
+40$:	.BYTE	0			;RTQ FIELD
+50$:	.BYTE	0			;CMD FIELD
+60$:	.BLKW0	3			;RETURN ADDR
+70$:	.WORD	0			;CTX FIELD
+80$:
+
+;
+;	ASSURE THAT THE HEADER IS DEFINED CORRECTLY
+;
+
+	.ASSUME	10$-CMNHD EQ HD.FLG
+	.ASSUME	20$-CMNHD EQ HD.VER
+	.ASSUME	30$-CMNHD EQ HD.CID
+	.ASSUME	40$-CMNHD EQ HD.RTQ
+	.ASSUME	50$-CMNHD EQ HD.CMD
+	.ASSUME	60$-CMNHD EQ HD.RTN
+	.ASSUME	70$-CMNHD EQ HD.CTX
+	.ASSUME	80$-CMNHD EQ HD.LEN
+
+;
+;	ASSURE THAT WE'RE WORKING WITH THE RIGHT VERSION OF PBSMAC
+;
+
+	.ASSUME P.VER	EQ 7.
+
+CMNDAT:
+ 10$:	.WORD			; ??.SEQ
+ 20$:	.BYTE	QT$BAT		; ??.QUE
+ 30$:	.BYTE			; ??.IPR
+ 40$:	.WORD			; ??.EDA
+ 50$:	.WORD			; ??.ETI
+ 60$:	.WORD			; ??.AFT
+ 70$:	.WORD			; ??.AFD
+ 80$:	.WORD			; ??.STS
+ 90$:	.WORD			; ??.FLG
+100$:
+	.BLKB0	64.		; ADDED BUFFER SPACE FOR LARGER MESSAGES.
+110$:
+;
+;	ASSURE THAT THE COMMON PACKET FIELDS MATCH UP
+;
+
+	.ASSUME 20$-CMNDAT EQ JB.QUE
+	.ASSUME	30$-CMNDAT EQ JB.IPR
+	.ASSUME	40$-CMNDAT EQ JB.EDA
+	.ASSUME	50$-CMNDAT EQ JB.ETI
+	.ASSUME	60$-CMNDAT EQ JB.AFT
+	.ASSUME	70$-CMNDAT EQ JB.AFD
+	.ASSUME	80$-CMNDAT EQ JB.STS
+	.ASSUME	90$-CMNDAT EQ JB.FLG
+
+;
+;	ensure that the common packet length will hold all of the fields
+;	for the messages that use it:
+;
+
+	.ASSUME	100$-CMNDAT GE NP.LEN	; CMD #0
+	.ASSUME	100$-CMNDAT GE BP.LEN	; CMD #1
+;	.ASSUME	100$-CMNDAT GE ST.LEN	; CMD #2  (* NOT DEFINED *)
+;	.ASSUME	100$-CMNDAT GE SR.LEN	; CMD #3  (* NOT DEFINED *)
+	.ASSUME	110$-CMNDAT GE SU.LEN	; CMD #4  (* LARGE MESSAGE *)	;032
+	.ASSUME	110$-CMNDAT GE AK.LN2	; CMD #5  (* LARGE MESSAGE *)	;032
+	.ASSUME	100$-CMNDAT GE NK.LEN	; CMD #6
+;	.ASSUME	100$-CMNDAT GE PD.LEN	; CMD #7  (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE CD.LEN	; CMD #10 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE JB.LEN	; CMD #11 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE MD.LEN	; CMD #12 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE KL.LEN	; CMD #13 (* NOT DEFINED *)
+	.ASSUME	110$-CMNDAT GE EJ.LEN	; CMD #14 (* LARGE MESSAGE *)	;032
+;	.ASSUME	100$-CMNDAT GE FT.LEN	; CMD #15 (* NOT ALLOWED *)
+	.ASSUME	110$-CMNDAT GE ON.LEN	; CMD #16 (* LARGE MESSAGE *)	;032
+;	.ASSUME	100$-CMNDAT GE OC.LEN	; CMD #17 (* NOT DEFINED *)	;032
+	.ASSUME	100$-CMNDAT GE OF.LEN	; CMD #20
+;	.ASSUME	100$-CMNDAT GE SY.LEN	; CMD #21 (* NOT DEFINED *)
+;	.ASSUME	100$-CMNDAT GE ID.LEN	; CMD #22 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE MS.LEN	; CMD #23 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE DD.LEN	; CMD #24 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE IQ.LEN	; CMD #25 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE MS.LEN	; CMD #26 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE DQ.LEN	; CMD #27 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE PQ.LEN	; CMD #30 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE CQ.LEN	; CMD #31 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE AS.LEN	; CMD #32 (* NOT ALLOWED *)
+;	.ASSUME	100$-CMNDAT GE DS.LEN	; CMD #33 (* NOT ALLOWED *)
+	.RESTORE
+
+
+.SBTTL	STATE	- Subfunction definition lists
+
+SPLSTART			; Let's get this mess started...
+
+;  General Control functions for Batch
+	SPLFUN	B.DECL,DECLAR,SET	;0 Declare us as a receiver
+	SPLFUN	B.ONL, ONLIN,SET	;1 Send On-Line Message to QMAN
+	SPLFUN	B.NAMCOM,NAMCOM,SET	;2 Name our temporary com file
+	SPLFUN	B.REDO,REDO		;3 Redo the last function
+	SPLFUN	B.MSG,QMMSG		;4 Get a message from QMAN
+	SPLFUN	B.HOLD,HOLD		;5 Put this server on hold (Pause)
+
+; Job definition functions
+	SPLFUN	B.DEFJOB,DEFJOB		;0 Restart the job definition sequence
+
+; File operation functions done to prep for job
+	SPLFUN	B.OPNCOM,OPNCOM		;0 Open the temporary com file
+	SPLFUN	B.MAKCOM,MAKCOM		;1 Make the temporary com file
+	SPLFUN	B.PROFIL,PROFIL		;2 Process files
+	SPLFUN	B.PROPPN,PROPPN		;3 Process PPNs
+	SPLFUN	B.PROSPC,PROSPC		;4 Process file specs
+	SPLFUN	B.CLSCOM,CLSCOM		;5 Close the com file
+
+; Active job functions for BATCH
+	SPLFUN	B.SPAWN,SPAWN		;0 Start up a job
+	SPLFUN	B.DELCOM,DELCOM		;1 Delete the com file (so user can't)
+	SPLFUN	B.END,ENDJOB		;2 Cleanup after the job has finished
+	SPLFUN	B.KILL,ABORTJOB		;3 Kill the currently active job
+	SPLFUN	B.CHECK,CHECKJOB	;4 Check on the active job
+
+; General Sub-job functions
+	SPLFUN	$NOP30,$NOP		;0 Reserved
+	SPLFUN	$NOP31,$NOP		;1 Reserved
+	SPLFUN	$NOP32,$NOP		;2 Reserved
+	SPLFUN	$NOP33,$NOP		;3 Reserved
+	SPLFUN	$NOP34,$NOP		;4 Reserved
+	SPLFUN	B.WAIT,WAIT		;5 Set sleep & wait for job completion
+	SPLFUN	B.DIE,DIE		;6 Offline completion
+	SPLFUN	B.NULL,NULLJOB,SET	;7 Run the null job (Always At End)
+
+SPLEND
+
+.SBTTL	LENTBL	- TABLE OF MINIMUM MESSAGE LENGTHS
+
+; TABLE OF MINIMUM MESSAGE LENGTH OF ALL DEFINED MESSAGES.
+; NOTE THAT ALL MAY NOT NECESSARILY BE LEGAL IN THIS PROGRAM
+
+	.SAVE
+	.PSECT	PURE
+
+	.EVEN
+LENTBL:	.WORD	NP.LEN+HD.LEN		; CMD #0 IS NOP
+	.WORD	BP.LEN+HD.LEN		; CMD #1 IS BREAKPOINT TRAP
+	.WORD	ST.LEN+HD.LEN		; CMD #2 IS STATUS REQUEST
+	.WORD	SR.LEN+HD.LEN		; CMD #3 IS STATUS RESPONCE
+	.WORD	SU.LEN+HD.LEN		; CMD #4 IS STATUS UPDATE
+	.WORD	AK.LEN+HD.LEN		; CMD #5 IS ACK
+	.WORD	NK.LEN+HD.LEN		; CMD #6 IS NACK
+	.WORD	PD.LEN+HD.LEN		; CMD #7 IS PAUSE SERVER
+	.WORD	CD.LEN+HD.LEN		; CMD #10 IS CONTINUE SERVER
+	.WORD	JB.LEN+HD.LEN		; CMD #11 IS DEFINE A JOB
+	.WORD	MD.LEN+HD.LEN		; CMD #12 IS MODIFY A JOB
+	.WORD	KL.LEN+HD.LEN		; CMD #13 IS KILL A JOB
+	.WORD	EJ.LEN+HD.LEN		; CMD #14 IS END OF JOB
+	.WORD	FT.LEN+HD.LEN		; CMD #15 IS FONT
+	.WORD	ON.LEN+HD.LEN		; CMD #16 IS ON LINE AND GOTO SPLIDL
+	.WORD	OC.LEN+HD.LEN		; CMD #17 IS ON LINE CONFIRM
+	.WORD	OF.LEN+HD.LEN		; CMD #20 IS OFFLINE
+	.WORD	SY.LEN+HD.LEN		; CMD #21 IS SYNC
+	.WORD	ID.LEN+HD.LEN		; CMD #22 IS INITIALIZE SERVER
+	.WORD	MS.LEN+HD.LEN		; CMD #23 IS MODIFY SERVER
+	.WORD	DD.LEN+HD.LEN		; CMD #24 IS DELETE SERVER
+	.WORD	IQ.LEN+HD.LEN		; CMD #25 IS INITIALIZE QUEUE
+	.WORD	MQ.LEN+HD.LEN		; CMD #26 IS MODIFY QUEUE
+	.WORD	DQ.LEN+HD.LEN		; CMD #27 IS DELETE QUEUE
+	.WORD	PQ.LEN+HD.LEN		; CMD #30 IS PAUSE QUEUE
+	.WORD	CQ.LEN+HD.LEN		; CMD #31 IS CONTINUE QUEUE
+	.WORD	AS.LEN+HD.LEN		; CMD #32 IS ASSIGN QUEUE
+	.WORD	DS.LEN+HD.LEN		; CMD #33 IS DEASSIGN QUEUE
+
+.SBTTL	BATSTR	- Initial Start-Up State Table for Batch
+
+;+
+;
+;	Initial start-up state for any BATCH processor.
+;
+;	
+;	  Next State    Action
+;	     Table       Routine
+;
+;-
+
+BATSTR:	.WORD	0,	$NOP		; CMD #0  NOP
+	.WORD	0,	.BPT		; CMD #1  DEBUG
+	.WORD	0,	0		; CMD #2  Status Request
+	.WORD	0,	0		; CMD #3  Status Response
+	.WORD	0,	0		; CMD #4  Status Update
+	.WORD	0,	0		; CMD #5  ACK
+	.WORD	0,	0		; CMD #6  NACK
+	.WORD	0,	0		; CMD #7  Pause subjob
+	.WORD	0,	0		; CMD #10 Continue Subjob
+	.WORD	0,	0		; CMD #11 QUE a job
+	.WORD	0,	0		; CMD #12 Modify a job
+	.WORD	0,	0		; CMD #13 Kill a job
+	.WORD	0,	0		; CMD #14 End of Job
+	.WORD	0,	0		; CMD #15 (NA) Form 
+	.WORD	0,	0		; CMD #16 On-Line
+	.WORD	BATIDL,	ONLCFM		; CMD #17 On-Line Confirm
+	.WORD	0,	OFFLIN		; CMD #20 Off-Line
+	.WORD	0,	0		; CMD #21 SYNC Error detected
+	.WORD	0,	0		; CMD #22 (NA)Initialize a SERVER
+	.WORD	0,	0		; CMD #23 (NA)Modify a SERVER
+	.WORD	0,	0		; CMD #24 (NA)Delete a SERVER
+	.WORD	0,	0		; CMD #25 (NA)Initialize a QUEUE
+	.WORD	0,	0		; CMD #26 (NA)Modify a QUEUE
+	.WORD	0,	0		; CMD #27 (NA)Delete a QUEUE
+	.WORD	0,	0		; CMD #30 (NA)Pause a QUEUE
+	.WORD	0,	0		; CMD #31 (NA)Continue a QUEUE
+	.WORD	0,	0		; CMD #32 (NA)ASSIGN a QUEUE
+	.WORD	0,	0		; CMD #33 (NA)DEASSIGN a QUEUE
+
+.SBTTL	BATCH	- Idle State table
+
+
+;+
+;	BATCH State table for when the is no processing 
+;	currently going on and we are waiting for a command.
+;
+;	
+;	  Next State    Action
+;	     Table       Routine
+;
+;-
+
+BATIDL:	.WORD	0,	$NOP		; CMD #0  NOP
+	.WORD	0,	.BPT		; CMD #1  DEBUG
+	.WORD	0,	STATRQ		; CMD #2  Status Request
+	.WORD	0,	0		; CMD #3  Status Response
+	.WORD	0,	0		; CMD #4  Status Update
+	.WORD	0,	0		; CMD #5  ACK
+	.WORD	0,	0		; CMD #6  NACK
+	.WORD	0,	0		; CMD #7  Pause subjob
+	.WORD	0,	0		; CMD #10 Continue Subjob
+	.WORD	BATRUN,	DEFJOB		; CMD #11 QUE a job
+	.WORD	0,	0		; CMD #12 Modify a job
+	.WORD	0,	0		; CMD #13 Kill a job
+	.WORD	0,	0		; CMD #14 End of Job
+	.WORD	0,	0		; CMD #15 (NA)Form 
+	.WORD	0,	0		; CMD #16 On-Line
+	.WORD	0,	0		; CMD #17 On-Line Confirm
+	.WORD	0,	OFFLIN		; CMD #20 Off-Line
+	.WORD	0,	0		; CMD #21 SYNC Error detected
+	.WORD	0,	0		; CMD #22 (NA)Initialize a SERVER
+	.WORD	0,	0		; CMD #23 (NA)Modify a SERVER
+	.WORD	0,	0		; CMD #24 (NA)Delete a SERVER
+	.WORD	0,	0		; CMD #25 (NA)Initialize a QUEUE
+	.WORD	0,	0		; CMD #26 (NA)Modify a QUEUE
+	.WORD	0,	0		; CMD #27 (NA)Delete a QUEUE
+	.WORD	0,	0		; CMD #30 (NA)Pause a QUEUE
+	.WORD	0,	0		; CMD #31 (NA)Continue a QUEUE
+	.WORD	0,	0		; CMD #32 (NA)ASSIGN a QUEUE 
+	.WORD	0,	0		; CMD #33 (NA)DEASSIGN a QUEUE
+
+.SBTTL	BATRUN	- Subjob is running
+
+;+
+;
+;	BATCH is processing an entry and is waiting for Completion/ABORT or
+;	pause/continue.
+;
+;	
+;	  Next State    Action
+;	     Table       Routine
+;
+;-
+
+BATRUN:	.WORD	0,	$NOP		; CMD #0  NOP
+	.WORD	0,	.BPT		; CMD #1  DEBUG
+	.WORD	0,	STATRQ		; CMD #2  Status Request
+	.WORD	0,	0		; CMD #3  Status Response
+	.WORD	0,	0		; CMD #4  Status Update
+	.WORD	0,	0		; CMD #5  ACK
+	.WORD	0,	0		; CMD #6  NACK
+	.WORD	0,	PAUJOB		; CMD #7  Pause job and server
+	.WORD	0,	CONJOB		; CMD #10 Continue job and server
+	.WORD	0,	0		; CMD #11 QUE a job
+	.WORD	0,	MODIFY		; CMD #12 Modify a job
+	.WORD	0,	KILJOB		; CMD #13 Kill a job
+	.WORD	0,	0		; CMD #14 End of Job
+	.WORD	0,	0		; CMD #15 (NA)Form 
+	.WORD	0,	0		; CMD #16 On-Line
+	.WORD	0,	0		; CMD #17 On-Line Confirm
+	.WORD	0,	OFFLIN		; CMD #20 Off-Line
+	.WORD	0,	0		; CMD #21 SYNC Error detected
+	.WORD	0,	0		; CMD #22 (NA)Initialize a SERVER
+	.WORD	0,	0		; CMD #23 (NA)Modify a SERVER
+	.WORD	0,	0		; CMD #24 (NA)Delete a SERVER
+	.WORD	0,	0		; CMD #25 (NA)Initialize a QUEUE
+	.WORD	0,	0		; CMD #26 (NA)Modify a QUEUE
+	.WORD	0,	0		; CMD #27 (NA)Delete a QUEUE
+	.WORD	0,	0		; CMD #30 (NA)Pause a QUEUE
+	.WORD	0,	0		; CMD #31 (NA)Continue a QUEUE
+	.WORD	0,	0		; CMD #32 (NA)ASSIGN a QUEUE 
+	.WORD	0,	0		; CMD #33 (NA)DEASSIGN a QUEUE
+
+	.RESTORE
+
+.SBTTL	BATSER	- THE ROOT OF THE BATCH SERVER
+
+;+
+;
+; BATSER:
+;
+;	Mainline Bit table dispatching routine.
+;
+; INPUT:
+;
+;	(UCNTXT)->Subjob's context area.
+;		0 = First time through
+;
+; CALL:
+;
+;	JSR	PC,BATCH
+;
+; BACK:
+;
+;	Registers are not in known state.
+;
+;-
+
+	.PSECT	BATSER,RO,I,LCL,REL,CON
+
+	.ENABL	LSB
+
+BATSER::NOP			; Debugging Break point...
+	MOV	@UCNTXT,R5	; Get the ->to the Context Block
+	BNE	10$		; Not the first time through, go on
+	CALL	BAINIT		; First time we were called, go do Setups
+			; Returns only after success!
+	MOV	SP,STACK(R5)	; Set up our -> for clean stack
+10$:	CLR	R1		; Clear the bit index counter
+	MOV	@UCNTXT,R5	; Ensure R5-> context area...
+	MOV	STACK(R5),SP	;  and that the stack is clean
+	MOV	R5,R2		; Get a copy of Impure ->...
+	ADD	#DSPBIT,R2	;  then make it -> the dispatch bits...
+	MOV	R2,R0		;    and save that from harms way
+20$:	TSTB	(R2)		; Does this byte have any bits set?
+	BNE	30$		; Yep, go find the bit(s) 
+	ADD	#8.,R1		; None here, so increment bit index by one byte
+	INC	R2		; Now -> to the next dispatch byte
+	BR	20$		;  and see if there is something to do there
+
+30$:	MOV	#1,R3		; Preset for the first bit
+40$:	BITB	R3,(R2)		; Is it this Bit???
+	BNE	50$		; Yep, go perform the routine
+	INC	R1		; Nope, kick the index up by one
+	ASLB	R3		; Step over to the next bit
+	BCC	40$		; Keep looking as long as there are bits
+	INC	R2		; No more bits in that byte, try next
+	BR	20$		;  byte for another function
+
+50$:	CMP	#$DSMAX,R1	; Is the requested function in range?
+	BHIS	60$		; Yep, go do it then
+	CRASH			; IT ISN'T! God only knows what you want then.
+				; ...... So go ask him!
+60$:	BICB	R3,(R2)		; Clear the bit to say we dispatched it
+	ASL	R1		; Make the index count x2
+	MOV	R1,L3QJOB(R5)	; Save the function we are about to do
+;+
+;	Standard Register set-up for dispatch
+;
+; R0-> The beginning of the dispatch bits
+; R5-> Beginning of the Impure area
+;
+;-
+	CALL	@$DSPAT(R1)	;  and away we go....
+	BR	10$		; Go start the insanity all over again
+
+	GLOBAL	<UCNTXT>
+
+	.DSABL	LSB
+
+.SBTTL	BAINIT	- Sub-job Initialization code.....
+
+;+
+;
+;	CALL	BAINIT
+;
+;	Returns:
+;
+;	R5->Beginning of Impure
+;
+;	If buffer allocation fails, routines CRASHes.
+;
+;	
+;	Perform the common setup code:
+;
+;	Impure Area allocation
+;-
+
+	.ENABL	LSB
+
+BAINIT:	MOV	#IMPSIZ,R1	; Get the size of the buffer needed
+	GETBUF	R0,R1,CLEAR	;  and go get the Impure area buffer
+				;  with R0 returned -> buffer space
+	BCC	10$		; Got one...
+5$:	CRASH			;  opps.... error out
+
+10$:	MOV	R0,R5		; Set standard ->Impure area in R5
+	MOV	R0,@UCNTXT	;  and stuff it in the SKED cell too
+	MOV	R1,(R5)		; Setup its length
+.ASSUME SIZE EQ 0	; Impure size cell must be first in area
+	MOV	#$DSBIT,R0	; Get the -> to the dispatch bits
+	MOV	#$DSBYT,R1	;   and the number of func-bits in bytes
+	MOV	R5,R2		;     and where they belong in the Impure area
+	ADD	#DSPBIT,R2	;      exactly ( the offset that is )
+20$:	MOVB	(R0)+,(R2)+	; copy function bit bytes to the Impure area
+	SOB	R1,20$		;  all of them
+	MOV	#RIBNAM,R0	;get ptr to template rib name		;007
+	MOV	R5,R1		;get base of impure area		;007
+	ADD	#RECVID,R1	;R1 -> saved rcvr name			;007
+	MOVSTR	R0,R1,#6	;copy name into impure area		;007
+	PUSH	R5		;save base of impure area		;007
+	MOV	R1,R5		;get pointer to saved rcvr name		;007
+	ADD	#RIBJOB,R5	;R5 -> job number chars in name		;007
+	MOV	JOBNUM,R3	;R3 =  RSTS job number			;007
+	CMP	R3,#10.		;2-digit job no.?			;007
+	BHIS	30$		;yes, so continue			;007
+	INC	R5		;no, so skip over tens digit		;007
+30$:	CALLX	BIN2D		;convert job number to ASCII		;007
+	POP	R5		;restore base of impure area		;007
+	MOV	R5,R2		; Get the -> to the Impure area again
+	SUBRIB	QRIB(R2)	; Go get our sub-rib number
+	MOV	#BATSTR,SP.STA(R5); Say our current "STATE" is "Starting..."
+	MOVB	#-1,PKCHNL(R5)	; Flag no PK: channel allocated yet
+	MOV	#-1,MAXTIM(R5)	;  and no wall clock limit
+	MOV	#-1,MAXCPU(R5)	;    and no CPU time limit
+	MOV	#512.,OBUFL(R5)	; Set length of output buffer
+	GETBUF	OBUFF(R5),OBUFL(R5),CLEAR ; Get output buffer
+	BCC	40$		;if all went OK
+	CRASH			; Crash this subjob if no memory
+
+40$:	MOV	OBUFF(R5),OBUFP(R5) ; Initialize current output pointer
+	MOV	OBUFL(R5),FREE(R5)  ; Show many bytes available
+	MOVB	#UU.TB2,@#FIRQB+FQFUN	; FIND SYSTEM'S
+	.UUO				;    MONITOR TABLES II
+	MOV	@#FIRQB+12,R3		; SAVE DEVOKB
+	MOVB	#UU.TB1,@#FIRQB+FQFUN	; FIND SYSTEM'S
+	.UUO				;    MONITOR TABLES I
+	ADD	@#FIRQB+FQNAM1,R3	; R3 = POINTER TO POINTER OF KB TABLE
+	MOV	R3,@#XRB+XRLEN		; MOV THE PTR OF PTR IN XRB
+	.PEEK				; AND FIND THE KBTABLE'S ADDRESS
+	MOV	@#XRB+XRLEN,KBTBL(R5)	; SAVE ADDRESS OF KB TABLE (DDB PTRS)
+	RETURN			; Now see if we can FLY!
+
+	GLOBAL	<JOBNUM,UCNTXT>
+
+	.DSABL	LSB
+
+.SBTTL	RIBNAM	- DEFINE RECEIVER NAME FORMAT FOR PRTSER
+
+	.SAVE
+	.PSECT	IMPURE
+
+	.EVEN
+RIBNAM:	.ASCII	"BA$"		;fixed part of receiver name		;026
+RIBJOB	= .-RIBNAM		;offset to job number chars in name	;026
+	.ASCII	"00"		;job number in ASCII (2 digits)		;026
+RIBIDX	= .-RIBNAM		;offset to index char in name		;026
+	.ASCII	"A"		;server index in ASCII (A-Z)		;026
+
+	.EVEN
+	.RESTORE
+
+.SBTTL	DECLAR	- Remove any receiver's for our sub-rib and declare us
+
+;+
+;
+; DECLAR:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCION BITS TABLE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,DECLAR
+;
+;
+; BACK:
+;
+;		OUR RECEIVER ID DECLARED OR
+;		WE STALL AND RETRY OR
+;		WE CRASH IF WE GET AN UNEXPECTED ERROR
+;
+;-
+
+	.ENABL	LSB
+
+DECLAR:	PUSH	R0			;SAVE FUNCTION TABLE POINTER
+	MOV	R5,R1			;GET ADDR OF BASE OF IMPURE AREA
+	ADD	#RECVID,R1		;PUT POINTER TO NAME IN R1
+	MOV	QRIB(R5),R3		;GET OUR SUBRIB NUMBER
+	REMV	R3			;remove our subrib		;004
+10$:	DCLR	R1,R3,#LO.BAT,#BIT0!BIT1,#5 ;declare our receiver:	;004
+					;  R1 -> receiver name		;004
+					;  R3 =  RIB			;004
+					;  local obj type LO.BAT	;004
+					;  local, priv'd senders	;004
+					;  max 5 messages		;004
+	MOVBYT	@#FIRQB,R0		;R0 = error status		;004
+	BEQ	60$			;no errors, so exit		;004
+	CMP	R0,#FIEXST		;RIB NAME ALREADY EXIST?
+	BEQ	20$			;yes, so try another name	;007
+	CMP	R0,#NOROOM		;FAIL DUE TO NO BUFFERS?
+	BNE	50$			;NO, IS UNKNOWN ERROR SO CRASH
+	POP	R0			;RESTORE POINTER TO FUNCTION BITS
+	SETFUN	B.DECL,R0		;WE WANT TO RUN AGAIN
+	STALL	#10.			;TRY AGAIN IN 10 SECONDS
+
+20$:	MOV	R1,R0			;get pointer to receiver name	;007
+	ADD	#RIBIDX,R0		;R0 -> rcvr index char (A-Z)	;007
+	CMPB	(R0),#'Z		;is index char at max (Z)	;007
+	BHIS	50$			;yes, so crash			;007
+	INCB	(R0)			;no, incr digit to next		;007
+	BR	10$			;AND GO TRY DECLARE AGAIN
+
+50$:	CRASH				;UNEXPECTED ERROR - CRASH
+
+60$:	CALLX	ENTRCV			;Enter the receiver into the RIB list
+	TST	(SP)+			;TRASH SAVED R0 VALUE
+	RETURN				;AND BACK WE GO
+
+	GLOBAL	<FIEXST,NOROOM>
+
+.DSABL	LSB
+
+.SBTTL	ONLIN	- Send "ON-LINE" message to QMAN
+
+;+
+;
+; ONLIN:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCION BITS TABLE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,ONLIN
+;
+;
+; BACK:
+;
+;		ONLINE PACKET QUEUED FOR SEND TO QMAN
+;
+;
+;-
+
+	.ENABL	LSB
+
+ONLIN:	SAVREG
+	.DATE				;GO GET A SEMI RANDOM NUMBER
+	MOV	@#XRB+4,SP.RID(R5)	;RANDOM ENOUGH, SAVE IT
+	MOV	#CMNDAT,R1		;GET POINTER TO DATA PORTION OF MSG
+	ADD	#ON.RCL,R1		;ADD OFFSET TO NAME FIELD
+	MOVB	#6.,(R1)+		;MOVE LENGTH OF 6 TO LENGTH FIELD
+	MOV	R5,R0			;GET POINT TO IMPURE AREA
+	ADD	#RECVID,R0		;AND POINT TO OUR RECVID
+	MOVSTR	R0,R1,#6		;COPY RECVID
+	MOV	TOS.R0(SP),R0		;RESTORE FUNCTION BITS PTR
+	MOV	#SQ.ONL,R1		;COMMAND IS ONLINE
+	MOV	SP.RID(R5),R2		;STS IS OUR ID
+	CALL	SNDCMN
+	CLC
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	ONLCFM	- Handle the "ON-LINE" confirm message from QMAN
+
+.ENABL	LSB
+
+;+
+;
+; ONLCFM:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCION BITS TABLE
+;		R1 -> MESSAGE PAST HEADER
+;		R2  = LENGTH OF MESSAGE (MINUS HEADER)
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,ONLCFM
+;
+;		SID SAVED 
+;
+; BACK:
+;
+;		C=0 SUCCESS
+;		C=1 FAILURE
+;		ERROR IN R1
+;		 ALL OTHER REGS PRESERVED
+;
+;-
+
+ONLCFM:	MOV	OC.STS(R1),SP.SID(R5)	;SAVE QMANS QID
+	BIS	#J.ONL,JOBSTA(R5)	;SHOW US ONLINE TO QMAN
+	CLC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	NAMCOM	- SET THE NAME OF OUR TEMPORARY .COM FILE
+
+;+
+;
+; NAMCOM:
+;
+;	SET'S NAME OF OUR COM FILE (IN RAD50) IN OUR IMPURE AREA.
+;	DONE AS PART OF THE INITIALIZATION OF THE SERVER.
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,NAMCOM
+;
+; BACK:
+;
+;	FILE NAME OF OUR TEMORARY COM FILE IS SET UP.
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+NAMCOM::PUSH	R1
+	CALL	CLRXRB			;CLEAR OUT MR. XRB
+	MOV	R5,R1			;GET COPY OF IMPURE AREA PTR
+	MOVB	#'0,RECVID+2(R5)	;Temporarily change $ to 0     ;009
+	ADD	#RECVID,R1		;R1 -> RECVR ID ( IN ASCII )
+	MOV	R1,@#XRB+XRLOC		;SET ADDR OF STRING
+	MOV	#6,@#XRB+XRLEN		;RCVR ID'S ARE 6 BYTES LONG
+	MOV	#6,@#XRB+XRBC		;  DITTO
+	.FSS				;CONVERT INTO RAD 50
+	MOV	R5,R1			;GET ANOTHER COPY OF IMPURE AREA PTR
+	ADD	#COMFIL,R1		;R1 -> COM FILE NAME PLACE
+	MOVSTR	#FIRQB+FQNAM1,R1,#4	;ONLY COPY THE FILE NAME
+	MOV	#^RTMP,COMEXT(R5)	;THE EXTENSION IS 'TMP'
+	MOVB	#'$,RECVID+2(R5)	;Restore the $                 ;009
+	POP	R1
+	CLC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	GETMSG	- GET MESSAGE AND DISPATCH ON IT
+
+;+
+;
+; GETMSG:
+;
+;
+; INPUTS:
+;		R0 -> FUNCTION BITS TABLE
+;		R1 =  RIB NAME TO RECEIVE MSG
+;		R4 =  PRIVED SENDER ONLY FLAG
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,GETMSG
+;
+; BACK:
+;
+;		C=0 message received and set up
+;			MSGPTR(R5) -> message buffer
+;			MSGLEN(R5) =  message length
+;		C=1 none or bad message
+;		All regs preserved
+;
+;-
+
+	.ENABL	LSB
+
+GETMSG:	PUSH	<R0,R1>			;save some work regs
+	TST	MSGPTR(R5)		;do we already have a message?
+	BNE	80$			;yes so can't get another
+10$:	RECV	R1			;receive message without data
+	MOVBYT	FIRQB+0,R0		;R0 = error status
+	BEQ	30$			;no error, so continue
+	CMP	#NOSUCH,R0		;error of no message?
+	BEQ	80$			;yes, so exit with error
+	CMP	#BADFUO,R0		;no, rib not there?
+	BEQ	80$			;yes, so exit with error
+20$:	CRASH				;unexpected error, so crash
+
+30$:	MOV	@#FIRQB+12,R1		;get length of pending message
+	BEQ	80$			;nothing there, so exit with error
+	MOV	R1,-(SP)		;save pending message length
+	GETBUF	R0,R1,CLEAR		;get a cleared buffer
+	BCS	20$			;failed, so crash
+	MOV	R0,MSGPTR(R5)		;save pointer to message buffer
+	MOV	R1,MSGLEN(R5)		;  and it's length
+	ADD	R0,(SP)			;compute byte past message
+	DEC	(SP)			;point to last byte in message
+	MOV	(SP)+,MSGEND(R5)	;save message end addr
+	MOV	(SP),R1			;restore RIB number
+	RECV	R1,MSGPTR(R5),MSGLEN(R5),#BIT1 ;receive message data
+	MOVBYT	FIRQB+0,R0		;R0 = error status
+	BEQ	60$			;no error, so continue
+40$:	RETBUF	MSGPTR(R5),MSGLEN(R5)	;return the wasted effort
+	CLR	MSGPTR(R5)		;show no message buffer
+	CLR	MSGLEN(R5)		;  and no buffer length
+50$:	BR	80$			;exit with error
+
+60$:	CMPB	#-11.,@#FIRQB+FQFIL	;was it a send with privs?
+	BNE	40$			;no, so go return buffer & fail
+	MOV	R5,R1			;get copy of impure area pointer
+	ADD	#PPN,R1			;R1 -> saved PPN in impure area
+	MOV	FIRQB+FQPPN,(R1)+	;save sender's PPN
+	MOVB	FIRQB+FQSIZM,(R1)+	;save sender's job no. times 2
+.ASSUME	PPN+2	EQ	JBNO		;ensure JBNO follows PPN field
+	MOVB	FIRQB+FQNAM1,(R1)+	;save sender's KB no.
+.ASSUME	JBNO+1	EQ	KBNO		;ensure KBNO follows JBNO field
+	MOVSTR	#FIRQB+FQEXT,R1,#<PRVSIZ*2.> ;store the sender's priv mask
+.ASSUME	KBNO+1	EQ	PRIV		;ensure PRIV follows KBNO field
+	TST	R4			;are sender privs required?
+	BEQ	70$			;no, so exit
+	MOV	#PBSPRV,R1		;yes, get required privs mask
+	MUTEXC	R1,#FIRQB+FQEXT,#<PRVSIZ*2.> ;is sender prived enough?
+	BCS	40$			;no, so trash it
+
+70$:	TST	(PC)+			;clear carry for success
+80$:	SEC				;set carry for error/no message
+	POP	<R1,R0>			;restore regs
+	RETURN				;and exit
+
+GLOBAL	<NOSUCH,BADFUO,PBSPRV>
+
+.SBTTL	QMMSG	- GET MESSAGE FROM QUEUE MANAGER AND DISPATCH ON IT
+
+;+
+;
+; QMMSG:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCION BITS TABLE
+;		R3 -> Current file cells
+;		R5 -> IMPURE AREA
+;
+;	*N*O*T*E*
+;
+;	   Do NOT change these registers!!
+;	      ---
+;
+; CALL:
+;
+;	JSR	PC,QMMSG
+;
+; BACK:
+;
+;		OUR MESSAGE DECODED AND DISPATCHED
+;		RETURN AFTER DECODE OR NO MESSAGE
+;
+;-
+
+	.ENABL	LSB
+
+QMMSG:	PUSH	<R0,R3,R5>		;save some work regs
+	MOVBYT	QRIB(R5),R1		;set up rib number for receive	;004
+	MOV	#-1,R4			;sender must be priv'd		;007
+	CALL	GETMSG			;go try to get the message
+10$:	BCS	100$			;exit if none there or error
+	MOV	#BATSTR,R4		;get base addr of msg tbl
+	CMP	MSGLEN(R5),#HD.LEN	;is message at least the min length?
+	BLO	JMPRET			;no, so chuck it
+	MOV	MSGPTR(R5),R1		;get pointer to message
+	CMPB	HD.VER(R1),#P.VER	;do message versions match?
+	BNE	JMPRET			;no, so chuck it
+	CLR	HD.FLG(R1)		;clear out a handy cell (flg+ver)
+	CMPB	#1,HD.RTQ(R1)		;was return by job no. requested?
+	BNE	REDO			;no, so continue
+	MOV	#1,HD.RTN(R1)		;yes, so set for return by job no.
+	MOVBYT	@#FIRQB+5,HD.RTN+2(R1)	;save user's job no.
+	CLR	HD.RTN+4(R1)		;zero rest of rcvr return field
+	.BR	REDO			;and join RE-DO code
+
+REDO:	MOV	MSGPTR(R5),R1		;get pointer to message
+	MOVBYT	HD.CMD(R1),R3		;get command code		;004
+	CMP	R3,#QS.MAX		;is it out of range?
+	BHIS	JMPRET			;yes, so dump it
+	ASL	R3			;compute word offset
+	CMP	MSGLEN(R5),LENTBL(R3)	;is message long enough?
+	BLO	JMPRET			;no, so trash it
+	ASL	R3			;compute offset into state table
+	MOV	SAVSTA(R5),R4		;use the saved state (if any)
+	BNE	60$			;got one, so use it
+	MOV	SP.STA(R5),R4		;no saved state, so use current state
+60$:	PUSH	R4			;save table base
+	ADD	R3,R4			;add our message offset to table
+	POP	R3			;R3 = table base
+	TST	2(R4)			;is this a legal command now?
+	BEQ	JMPRET			;no, so chuck it
+	TST	SAVSTA(R5)		;is this a redo?
+	BNE	80$			;yes, no need to change states
+	MOV	R3,SAVSTA(R5)		;save the state for a possible retry
+80$:	TST	(R4)			;are we going to change states?
+	BEQ	90$			;no, so no change to state counters
+	MOV	SP.STA(R5),SP.OST(R5)	;save current state as old state
+	MOV	(R4),SP.STA(R5)		;and make new state current
+90$:	MOV	MSGPTR(R5),R1		;get pointer to message
+	MOV	MSGLEN(R5),R2		;and length
+	ADD	#HD.LEN,R1		;R1 -> message past header
+	SUB	#HD.LEN,R2		;R2 =  message length less header
+	POP	<R5,R3,R0>		;restore work regs
+	CALL	@2(R4)			;call through dispatch tbl
+	BCC	SNACK			;success, so send ack and chuck message
+	CMP	#ER$RLK,R1		;error, due to record lock?
+	BNE	SNNAC			;no, so send NACK and chuck message
+	SETFUN	B.REDO,R0		;yes, so ask for a re-do
+	STALL	#2			;take a short nap
+
+JMPRET:	CALL	RETMSG			;go return current message buffer   ;027
+
+100$:	POP	<R5,R3,R0>		;restore the work regs
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	SNACK	- SEND BACK AN ACK
+.SBTTL	SNNCK	- SEND BACK AN NACK
+
+;+
+;	* N * O * T * E * 
+;
+;	Keep this section of code right after Get Message routines
+;	or else the BR's will fail
+;
+;
+; SNACK:
+; SNNCK:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCION BITS TABLE
+;
+; CALL:
+;	JSR	PC,SNACK
+;	JSR	PC,SNNCK
+;
+;
+; BACK:
+;
+;		ACK OR NACK MESSAGE QUEUED TO SENDER OR CURRENT
+;		MESSAGE (IN MSGPTR(R5)) IF A RETURN RECIEPT WAS 
+;		REQUESTED.
+;
+;		ALL REGESTERS TRASHED
+;
+;-
+
+	.ENABL	LSB
+
+SNACK:	MOV	#QU.ACK,R2		;SET FOR ACK
+	BR	10$			;JOIN COMMON
+
+SNNAC:	MOV	#QU.NCK,R2		;SET FOR NACK
+	.BR	10$			;JOIN COMMON
+
+10$:	CLR	SAVSTA(R5)		;CLEAR THE SAVED STATE
+	MOV	MSGPTR(R5),R4		;GET POINTER TO MESSAGE
+	BEQ	20$			;MESSAGE DISAPEARED, SO NO (N)ACK
+	TSTB	HD.RTQ(R4)		;WAS RETURN RECIEPT REQUESTED?
+	BEQ	20$			;NO
+
+	SWAPR	R1,R2			;R1 SB CMD, R2 SB STS
+	MOV	HD.FLG(R4),R3		;FLAG FIELD
+	TST	JOBPTR(R5)		;Do we have a job?		;032
+	BEQ	15$			;Nope.				;032
+	MOV	JOBPTR(R5),R3		;Yes. Fetch job record		;032
+	MOV	JB.FLG(R3),R3		;Return JB.FLG for /NOTIFY	;032
+15$:	CALL	SNDCMN			;GO SEND A COMMON FORMAT MESSAGE
+20$:	JMP	RETMSG			;AND RETURN THE ORIGINAL PACKET BUFFER
+
+	.DSABL	LSB
+
+
+.SBTTL	HOLD	- Hold the current state of server ( Pause cmd rcved )
+
+;+
+;
+; HOLD:
+;
+;	Will hold current state of the server while waiting for continue
+;	command.
+;
+; INPUTS:
+;
+;
+; CALL:
+;
+;	JSR	PC,HOLD
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+HOLD:	SETFUN	B.MSG,R0		;Set the message getter
+	CALLR	NULLJOB			;and sleep forever
+
+	.DSABL	LSB
+
+.SBTTL	DEFJOB	- Define a job for this server to do
+
+;+
+;
+; DEFJOB:
+;
+;	Validate parameters, Setup running information, and acquire
+;	resources required for the job.  All validation is done before
+;	the PK allocation since the PK allocation may fail ( due to
+;	possible seizure of the PK ).  If the PK allocation ( opening )
+;	fails, we ACK the job to QMAN and go into a wait state to wait
+;	for the PK to come available.
+;
+;    Step #		Action
+;	
+;	1	Save the Job definition message in JOBMSG cells
+;	2	Compute the CPU and Time limits for the Job
+;	3	Store User's PPN
+;	4	Get Logfile Spec and make sure they can use that logfile
+;	5	Obtain the Pseudo Keyboard necessary for the Job
+;	6	Store/calculate running information of Pseudo Keyboard
+;	7	Set next processing bit
+;
+; INPUTS:
+;
+;	R0 -> Function bits
+;	R1 -> Message (past header)
+;	R2 =  Length 
+;	R5 -> Impure Area
+;
+; CALL:
+;
+;	JSR	PC,DEFJOB
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+DEFJOB:	
+;
+; Step 1 - Save the message
+;
+
+	BIC	#<BA$SPN!BA$BYE>,FLAGS(R5) ; Indicate not spawned and no logout.
+	BIT	#BA$DEF,FLAGS(R5)	; Did we fail during a previous JOBDEF?
+	BEQ	10$			; No, this is the first time through
+	JMP	90$			; Yes, try to allocate the routine
+
+10$:	BIS	#BA$DEF,FLAGS(R5)	; Nope, first time through, say so then
+	MOV	R1,JOBPTR(R5)		; First save the ->message 
+;
+;	R1 need not be saved now, JOBPTR(R5) contains the pointer needed
+;
+	MOV	MSGLEN(R5),JOBLEN(R5)	;   and its length
+	CLR	MSGLEN(R5)		; Say we shouldn't return the buffer
+	MOVB	JBNO(R5),QMJBNO(R5)	; Save QMAN's job number	;024
+	ASRB	QMJBNO(R5)		;  make in job number * 1
+	MOV	R5,R2			; Get copy of impure area ptr
+	GETLUN	PKCHNL(R2)		; Go get an I/O channel to use
+
+;
+; Step 2 - Set up the CPU and wall time limit cells
+;
+
+	CLR	RUNTIM(R5)		; initialize runtime word
+	CLR	LASTIM(R5)		; initialize "last" runtime word
+	CLR	RUNCPU(R5)		; initialize LSW cpu time 
+	CLR	<RUNCPU+2>(R5)		; initialize MSW cpu time
+	CLR	LASCPU(R5)		; initialize last LSW cpu time
+	CLR	<LASCPU+2>(R5)		; initialize last MSW cpu time
+	BIC	#<BA$NOT!BA$NOC!BA$ACK>,FLAGS(R5) ; Clear limitation + ACK bits
+	CMP	#-1,JB.TIM(R1)		; Was there a time limit specified?
+	BEQ	20$			; No, say it is unlimited
+	MOV	JB.TIM(R1),MAXTIM(R5)	; Store max wall time allowed
+	BR	30$			; And skip to CPU test
+
+20$:	BIS	#BA$NOT,FLAGS(R5)	; Set no time limit for this job
+30$:	CMP	#-1,JB.CPU(R1)		; Was there a CPU limit specified
+	BEQ	60$			; No, say it is unlimited
+	CLR	MAXCPU(R5)		; Initialize CPU limit
+	CLR	<MAXCPU+2>(R5)		;       both words
+	MOV	JB.CPU(R1),R2		; Get the CPU limit in minutes
+	BEQ	55$			;  They didn't specify a limit
+					;    skip conversion
+;
+;
+;	Multiply 600. x CPU limit specified ( making sure that they are
+;	unsigned integers ).  This converts the CPU limit in MINUTES (as 
+;	passed ) into 1/10ths of seconds.
+;
+;	Inputs:
+;
+;	R2 = CPU limit in minutes
+;
+;
+
+	PUSH	<R0,R1,R3>		; Save necessary registers
+	MOV	#16.,R0			; Get the number of shifts to do
+	MOV	#600.,R1		; Get the first multiplcan
+	CLR	R3			; Clear out the Most signifcant Word
+	CLR	R4			;    and the Least
+40$:	ROL	R4			; R3 contains the High Word
+	ROL	R3			;   R4 contains the Low Word
+	ROL	R1			; R1 and R2 are the numbers
+	BCC	50$			;   that are being multiplied
+	ADD	R2,R4			; Multiply by addition
+	ADC	R3			;   with carry for High Word
+50$:	SOB	R0,40$			; For the 16. bit word
+	MOV	R4,MAXCPU(R5)		; Save the LSW of the CPU time
+	MOV	R3,<MAXCPU+2>(R5)	;   and the MSW of it too
+	POP	<R3,R1,R0>		; Recall necessary registers
+	BR	70$
+
+55$:	JMP	130$
+
+60$:	BIS	#BA$NOC,FLAGS(R5)	; Set no CPU limit
+
+;
+; Step 3 - Store PPN information
+;
+
+70$:	MOV	JB.PPN(R1),SUBPPN(R5)	; Save the SUBMITTER's PPN
+	MOV	JB.PPN(R1),RUNPPN(R5)	;  and set it as the default "RUN" PPN
+
+;
+; Step 4 - Store logfile spec and check access to it
+;
+
+	BIC	#BA$LOG,FLAGS(R5)	; Assume no log file
+	TST	JB.LOG(R1)		; User spec a log file?
+	BEQ	100$			; no, do the rest of the checks
+	PUSH	<R0,R1>
+	MOV	R5,R0			; Get a copy of the impure area ptr
+	ADD	#LOGFIL,R0		; r0 -> log file firqb location
+	CLRBUF	R0,#FQBSIZ		; Clear the logfile buffer
+	CALLX	CLRFQX			; set known firqb state
+	ADD	JB.LOG(R1),R1		; r1 -> log file LG block
+	MOVB	LG.SPL(R1),@#XRB+XRLEN	; Set first length of spec
+	MOVB	LG.SPL(R1),@#XRB+XRBC	; set second length
+	ADD	#LG.SPC,R1		; r1 -> file spec
+	MOV	R1,@#XRB+XRLOC		; set file spec location
+	POP	<R1,R0>
+	.FSS				; FSS the logfile name
+	TST	@#FIRQB			; Any errors?
+	BNE	55$			; yes, bad logfile name
+	PUSH	<R5>
+	ADD	#LOGFIL,R5		; r5 -> log file area in impure
+	MOV	#FQBSIZ,R4		; r4 = max num of chars in file spec
+	CALLX	UNFSS			; give us a useable string
+	POP	<R5>
+	SUB	#FQBSIZ,R4		; get real number of characters
+	NEG	R4			;   that are in the buffer
+	MOV	R4,LOGLEN(R5)		;     and store the length in impure
+	CMP	SUBPPN(R5),@#FIRQB+FQPPN ; Is the log to go in SUBPPN's acct?
+	BEQ	80$			; Yes, skip the access checks
+	PUSH	<R0>
+	MOV	@#FIRQB+FQPPN,R0	; save ppn of logfile
+	MOV	R1,R4			; set up for setting of
+	ADD	#JB.PRV,R4		;    3PP of the submitters privmask
+	SETPRV	SUBPPN(R5),R4		; Set 3PP
+	CALLX	CLRFQB
+	MOVB	#UU.CHK,@#FIRQB+FQFUN	; set check function
+;	MOVB	#0,@#FIRQB+FQFIL	; set check access function
+	MOV	R0,@#FIRQB+FQPPN	; set the PPN to check
+	MOVB	#60.,@#FIRQB+FQPROT	; set the protection code
+	POP	<R0>
+	.UUO				; do the check
+	TST	@#FIRQB			; Any errors?
+	BNE	130$			; Yes, scrap the job
+	BIT	#BIT0,@#FIRQB+FQERNO	; create allowed?
+	BEQ	130$			; no, scrap the job
+	SETPRV	#0,R2			; Restore our privs
+80$:	BIS	#BA$LOG,FLAGS(R5)	; Show that we have a log file
+	BR	100$			; Branch around to PK allocation
+
+;
+; Restart for DEFJOB that failed trying to get PK:
+;
+
+90$:	MOV	JOBPTR(R5),R1		; Get the pointer to the saved message
+	.BR	100$			; Just to be sure common code is joined
+
+;
+; Step 5 - Allocate the Pseudo Keyboard to work on
+;
+
+100$:	CALLX	CLRFQB			; Clear file request block
+	MOV	#FIRQB,R2		;    and get its address
+	MOV	#BIT15!2!10!20,PKMODE(R5) ;Initialize PK mode		;031
+	MOV	JB.PKN(R1),FQDEVN(R2)	; Set PK number (QMAN got it)	;031
+	BEQ	102$			; Dynamic.  Just open it	;031
+	BIC	#20,PKMODE(R5)		; Change the open mode		;031
+	MOVB	#UU.ASS,FQFUN(R2)	; select assign function	;024
+	MOV	#100001,FQMODE(R2)	; snag the device from QMAN	;024
+	MOV	#"PK,FQDEV(R2)		;   we want a Pseudo Keyboard	;024
+	.UUO				; attempt to assign		;024
+	TST	@#FIRQB			; errors?			;024
+	BNE	105$			; yes, we must try, try, again	;024
+;	CMPB	QMJBNO(R5),@#FIRQB+FQFIL; Did we infact seize the device?;024
+;	BNE	sorry$			; No, we should really apologize;024
+	CALLX	CLRFQB			; Clean up the house
+	MOV	JB.PKN(R1),FQDEVN(R2)	; Reset PK number (QMAN got it)	;031
+102$:	MOVB	#OPNFQ,FQFUN(R2)	; Say we want to do an open	;031
+	MOVB	PKCHNL(R5),FQFIL(R2)	;  on the lun we just got
+	MOV	#"PK,FQDEV(R2)		;   we want a Pseudo Keyboard
+;	MOVB	#377,<FQDEVN+1>(R2)	;    it is really the unit number
+; Unit number real is assumed to be set by QMAN, or zero for dynamic PK
+;
+	MOV	PKMODE(R5),FQMODE(R2)	;   open as batch, trash output, ;031
+					;     and possibly dynamic mode	;031
+	CALFIP				;   go open it for us...
+	TST	FIRQB			; Everything go OK?
+	BEQ	120$			; Yupe, great.... keep going
+105$:	SETFUN	B.DEFJOB,R0		; PK open didn't work, reschedule us
+	BIT	#BA$ACK,FLAGS(R5)	; Have we sent the Ack to QMAN yet?
+	BNE	110$			; Yes, don't send another one
+	PUSH	R0
+	BIS	#BA$ACK,FLAGS(R5)	; Show that we sent an ACK
+	CALL	SNACK			; Send the ACK to QMAN
+	POP	R0
+110$:	MOV	#30.,R1			; Wait 30. seconds and try again
+	JMP	WAIT			;   bye...
+
+;
+; Step 6 - Save/calculate the device definition
+;
+
+120$:	BIC	#BA$DEF,FLAGS(R5)	; Got our PK, def will work
+	CALLX	CLRFQB			; Clean house
+	MOVB	#UU.FCB,FIRQB+FQFUN	; Say we need Open File Stats
+	MOVB	PKCHNL(R5),R2		;  on the channel we just openned (x2)
+	ASR	R2			;   now get its real channel number
+	MOVB	R2,FIRQB+FQFIL		;    and say that is what we want
+;	CLRB	FIRQB+FQSIZM		; Subfunction=0 ( already cleared )
+	.UUO				; Go get the PK's DDB
+
+	MOVB	FIRQB+14,KBNUM(R5)	; Now get the real KB number x2 (DDFLAG)
+	MOV	KBTBL(R5),@#XRB+XRLEN	; Set pointer to KB table location
+	ADD	KBNUM(R5),@#XRB+XRLEN	; Add the unit number * 2
+	.PEEK				; Get the pointer to the ddb
+	MOV	@#XRB+XRLEN,KBDDB(R5)	;  and store it in impure
+	ADD	#2,KBDDB(R5)		;    make it point to DDJBNO
+;	CLC				; C-bit better be clear		;031
+	RORB	KBNUM(R5)		; compute the actual KB number	;031
+
+;
+; Step 7 - Set dispatch to define com file
+;
+
+	SETFUN	B.OPNCOM,R0		; Say we need to define the com file
+
+;
+; Finish
+;
+
+	RETURN
+
+130$:	SETPRV	#0,R2			; always restore our privileges
+	MOV	#JS$ILL,EOJSTS(R5)	; show the entry as illegal
+	BIC	#<BA$DEF!BA$NOT!BA$NOC!BA$LOG>,FLAGS(R5) ; clean up status ;029
+	SETFUN	B.KILL,R0		; do the (abort) eoj routine
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	OPNCOM	- OPEN THE TEMPORARY COM FILE
+
+;+
+;
+; OPNCOM:
+;
+;	OPENS OUR SCRATCH TEMPORARY COM FILE.
+;
+;	FILE IS OPENED IN MODE:
+;		32. (BIT5) - CREATE TENTATIVELY
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,OPNCOM
+;
+; BACK:
+;
+;	COM FILE OPENED ON CHANNEL OUTLUN(R5)
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	R4 TRASHED
+;
+;-
+
+	.ENABL	LSB
+
+OPNCOM:	PUSH	R0
+	CALLX	CLRFQB				;CLEAR MR FIRQB
+	MOV	R5,R0				;GET COPY OF IMPURE AREA PTR
+	GETLUN	OUTLUN(R0)			;GET A LUN FOR US TO USE
+	MOVB	#CRBFQ,@#FIRQB+FQFUN		;SET CREATE EXECUTABLE FILE FUN
+	MOVB	OUTLUN(R5),@#FIRQB+FQFIL	;SET CHANNEL NUMBER*2
+	MOV	RUNPPN(R5),@#FIRQB+FQPPN	;SET PPN FOR WHERE TO CRE
+	ADD	#COMFIL,R0			;R0 -> TMP FILE NAME
+	MOVSTR	R0,#FIRQB+FQNAM1,#6		;FILE NAMES ARE 6 BYTES
+	MOV	#<BIT15!BIT5>,@#FIRQB+FQMODE	;SET MODE OF FILE (tent create)
+	MOVB	#-1,@#FIRQB+FQPFLG		;SAY PROT IS REAL
+	MOVB	#124.,@#FIRQB+FQPROT		;SET PROT
+	MOV	#"SY,@#FIRQB+FQDEV		;SET SY: AS DEV
+	POP	R0
+	CALFIP					;DO THE OPEN
+	TST	@#FIRQB				;DID IT WORK?
+	BEQ	10$				;YES, GO ON TO NEXT
+	MOV	R5,R4				;GET COPY FOR RETLUN
+	RETLUN	OUTLUN(R4)			;NO, RETURN THE LUN
+	MOV	#JS$FAI,EOJSTS(R5)		;SHOW JOB AS FAILED
+	SETFUN	B.KILL,R0			;KILL OFF OUR JOB
+	BR	30$				;AND FAIL
+
+10$:	CALLX	CLRFQB				;SET KNOWN FIRQB STATE
+	MOVB	#UU.NAM,@#FIRQB+FQFUN		;MOVE NAME FUNCTION
+	MOVB	OUTLUN(R5),@#FIRQB+FQFIL	;SET CHANNEL
+	ASRB	@#FIRQB+FQFIL			;WANTS CHANNEL NUMBER*1
+	MOVSTR	#DCL$,#FIRQB+FQSIZM,#L.DCL$	;MOV RAD50 REP OF 'DCL'
+	.UUO					;ASSOCIATE DCL RTS WITH FILE
+	TST	@#FIRQB				;ANY ERRORS?
+	BEQ	20$				;NO, SET NEXT FUNCTIONS
+	MOV	#JS$FAI,EOJSTS(R5)		;SHOW JOB AS FAILED
+	SETFUN	B.KILL,R0			;BOY, AM I A BAD PROGRAMMER ?
+	BR	30$				;FAIL
+
+20$:	SETFUN	B.MAKCOM,R0			;ALL IS WELL, MAKE THE COM FILE
+	SETFUN	B.CLSCOM,R0			;CLOSE THE COM FILE
+	SETFUN	B.DELCOM,R0			;AND DELETE THE COM FILE
+
+	TST	(PC)+				;SUCCESS
+30$:	SEC					;FAILURE
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	DCL	- RAD50 DCL STRING
+
+	.SAVE
+	.PSECT	PURE
+
+DCL$:	.RAD50	%DCL%
+	.RAD50	%   %
+
+	L.DCL$	=	<.-DCL$>
+
+	.RESTORE
+
+.SBTTL	MAKCOM	- Compose the com file
+
+;+
+;
+; MAKCOM:
+;
+;	Create the text for the com file.
+;
+; INPUTS:
+;
+;	R0 = Function bits
+;
+; CALL:
+;
+;	JSR	PC,MAKCOM
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+MAKCOM:	SAVREG
+	CLRBUF	OBUFF(R5),OBUFL(R5)	;Clear the buffers
+	BIC	#BA$IOE,FLAGS(R5)	;initialize i/o error flag
+	MOV	JOBPTR(R5),R1		;get pointer to the message packet
+	MOV	#COMTH1,R4		;Initialize thread list pointer	;032
+	BIT	#BA$LOG,FLAGS(R5)	;do we have a log file
+	BEQ	10$			;Nope, write out the info	;032
+	MOV	#COMTH2,R4		;Yes.  Use different a thread	;032
+10$:	MOV	JB.FIL(R1),CURFIL(R5)	;set the first file to start on	;032
+	BEQ	20$			;No files.  Get out now		;032
+	SETFUN	B.PROFIL,R0		;Schedule file spec processing	;032
+	CALL	@(R4)+			;Build the command file header	;032
+	TST	(PC)+
+20$:	SEC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	PROFIL	- PROCESS ALL USER COM FILE SPECS INTO TEMP COM FILE
+.SBTTL	PROSPC	- PROCESS USER COM FILE FILE SPEC
+.SBTTL	PROPPN	- PROCESS A PPN IN THE FILE SPEC
+
+;+
+;
+; PRO???:
+;
+;	PUT USER FILE SPEC(S) INTO THE TEMPORARY COM FILE.  THE ROUTINE
+;	WILL STALL AFTER PROCESSING A PPN.
+;
+;	FOR EACH GIVEN FILESPEC
+;	   BEGIN
+;	      FOR EACH PPN OF THE GIVEN FILESPEC
+;	         BEGIN
+;	            FOR EACH FILE OF THE GIVEN FILESPEC IN THE PPN ACCOUNT
+;	               WRITELN (_ @dev:[ppn]file.ext_) ;
+;	            STALL(0)
+;	         END ;
+;	      STALL(0)
+;	   END ;
+;
+; INPUTS:
+;
+;	R0 = FUNKY BITS TABLE
+;
+; CALL:
+;
+;	JSR	PC,PROFIL
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS TRASHED
+;
+;-
+
+	.ENABL	LSB
+
+PROFIL:	MOV	JOBPTR(R5),R1		;GET COPY OF JOB POINTER
+	BIC	#BA$FEX,FLAGS(R5)	;SET NO FILE WRITTEN FLAG
+	MOV	R5,R4			;GET COPY OF IMPURE AREA PTR
+	GETLUN	ONXLUN(R4)		;GET A LUN FOR OPEN NEXT
+PROSPC:	MOV	JOBPTR(R5),R1		;GET COPY OF THE JOB POINTER
+	MOV	R1,R2			;GET COPY OF MSG PTR
+	ADD	CURFIL(R5),R2		;POINT TO CURRENT FILESPEC BLOCK
+	BIC	#BA$DEL,FLAGS(R5)	;SHOW NO DELETE FILESPEC
+	BIT	#FF$DEL,FB.FLG(R2)	;IS THIS FILESPEC TO BE DELETED?
+	BEQ	5$			;NO, SO MAKE SURE THEY'RE NOT DELETED
+	BIS	#BA$DEL,FLAGS(R5)	;YES, INDICATE DELETE FLAG
+5$:	ADD	#FB.SPL,R2		;POINT TO CURRENT FILESPEC
+	CLR	PPNIDX(R5)		;CLEAR THE PPN INDEX
+	CALL	CLRXRB			;SET KNOWN XRB STATE FOR .FSS
+	MOVB	(R2),@#XRB+XRLEN	;SET LENGTH OF FILESPEC
+	MOVB	(R2)+,@#XRB+XRBC	;SET LENGTH OF FILESPEC AGAIN
+	MOV	R2,@#XRB+XRLOC		;SET LOCATION OF THE FILE STRING
+	.FSS				;SEE IF IT IS A GOOD STRING
+	TST	@#FIRQB			;ANY ERRORS?
+	BEQ	10$			;WELL, PART OF IT QUALIFIES
+	JMP	90$			;OTHERWISE, STOP THIS ROUTINE
+
+10$:	MOV	R5,R4			;GET COPY OF IMPURE AREA POINTER
+	ADD	#ONXFQB,R4		;R4 -> FIRQB SAVE AREA IN IMPURE
+	MOVSTR	#FIRQB,R4,#FQBSIZ	;COPY THE FIRQB INTO THE SAVE AREA
+	BR	20$			; SKIP ON TO PROCESS PPN
+
+PROPPN:	MOV	JOBPTR(R5),R1		;GET COPY OF JOB POINTER
+	MOV	R5,R4			;GET COPY OF IMPURE AREA POINTER
+	ADD	#ONXFQB,R4		;R4 -> FIRQB SAVE AREA IN IMPURE
+	MOVSTR	R4,#FIRQB,#FQBSIZ	;COPY THE FIRQB FROM THE SAVED AREA
+20$:	MOVB	#UU.PPN,@#FIRQB+FQFUN	;SPECIFY THE LOOKUP PPN SUBFUN
+	MOV	PPNIDX(R5),@#FIRQB+FQFIL;SET THE INDEX (IN CASE OF WILDCARDS)
+	.UUO				;LOOK UP THE NEXT (ONLY) PPN.
+	TST	@#FIRQB			;ANY ERRORS?
+	BEQ	50$			;NO, SEEMS THAT THERE IS A PPN
+	CMP	@#FIRQB,#NOSUCH		;WAS IT PPN NOT FOUND?
+	BNE	30$			;NO, PACK MUST BE LOCKED
+	MOV	R1,R4			;YES, MUST BE DONE WITH THIS FILESPEC
+	ADD	CURFIL(R5),R4		;GET POINTER TO CURRENT FILE SPEC
+	MOV	FB.NXT(R4),CURFIL(R5)	;GET OFFSET TO NEXT FILE SPEC
+	BNE	40$			;IF THERE IS ONE
+	BIT	#BA$FEX,FLAGS(R5)	;DOES ONE FILESPEC EXIST IN COM FILE?
+	BEQ	30$			;NO, BETTER FORGET THIS JOB
+	SETFUN	B.SPAWN,R0		;YES, LET'S GET THE SHOW ON THE ROAD
+	MOV	#EX$THR,R4		;But first, a word from our sponsor ;033
+	CALL	@(R4)+			;To make sure EXIT status is set up ;033
+	JMP	100$			;Close the file and proceed	;033
+
+30$:	JMP	90$
+
+40$:	SETFUN	B.PROSPC,R0		;PROCESS NEXT FILESPEC
+	JMP	STALL0			;AFTER A QUICKIE STALL
+
+50$:	MOV	@#FIRQB+FQPPN,PPNCUR(R5);SET CURRENT OPERATING PPN
+	INC	PPNIDX(R5)		;SET INDEX TO GET NEXT PPN
+60$:	MOV	R1,R2			;GET COPY OF MSG PTR
+	ADD	#JB.PRV,R2		;R2 -> SUBMITER'S PRIVS
+	SETPRV	SUBPPN(R5),R2		;SET THE SUBMITTERS PRIVILEGES
+	MOV	R5,R4			;GET COPY OF IMPURE AREA PTR
+	ADD	#ONXFQB,R4		;R4 -> SAVED FIRQB
+	MOVSTR	R4,#FIRQB,#FQBSIZ	;RESTORE THE SAVED FIRQB
+	MOVB	#UU.ONX,@#FIRQB+FQFUN	;SET THE OPEN NEXT FUNCTION
+	MOV	#BIT15+8192.+32.,@#FIRQB+FQMODE;SET READ ONLY + DIR ONLY MODE
+	MOV	PPNCUR(R5),@#FIRQB+FQPPN;SET THE PPN TO LOOKUP UNDER
+	MOVB	ONXLUN(R5),@#FIRQB+FQFIL;SET THE CHANNEL TO USE
+	.UUO				;GO DO IT
+	TST	@#FIRQB			;ANY ERRORS?
+	BEQ	70$			;NO, GO WRITE THE FILE NAME TO DISK
+	MOV	@#FIRQB,R3		;SAVE ERROR NUMBER
+	SETPRV	#0,R2			;RESET OUR PRIVS
+	CMP	R3,#NOSUCH		;WAS IT NO FILE MEETS THE SPEC?
+	BNE	90$			;NO, ABORT THE JOB
+	SETFUN	B.PROPPN,R0		;REQUEST PROCESS THE NEXT PPN
+	JMP	STALL0			;AFTER THE NEXT STALL
+
+70$:	PUSH	R5			;Need a work register		;032
+	MOV	#WORK$,R5		;SET POINTER TO WORK BUFFER
+	MOV	#L.WORK$,R4		;SET LENGTH OF THE WORK BUFFER
+	CALLX	UNFSS			;GET AN ASCII STRING
+	SUB	#L.WORK$,R4		;R4 = THE NEG SIZE OF SPEC LEN
+	NEG	R4			;R4 = POSITIVE SIZE OF SPEC
+	MOVB	R4,WORK$L		;Make WORK$L an .ASCIC string	;032
+	POP	R5			;Restore work registers		;032
+	SETPRV	#0,R2			;RESET OUR PRIVS
+	MOV	#AT$THR,R4		;Pick up thread pointer		;032
+	CALL	@(R4)+			;Build "$_@'filespec' 'parameters'" ;032
+	BIS	#BA$FEX,FLAGS(R5)	;SHOW THAT WE WROTE AT LEAST ONE SPEC
+	BR	60$			;TRY FOR ANOTHER SPEC
+
+90$:	MOV	#JS$ILL,EOJSTS(R5)	; JOB IS ILLEGAL
+	SETFUN	B.KILL,R0		; BETTER ABORT THE JOB
+	CALL	100$			; **** HACK...ENSURE ONXLUN IS CLOSED
+	BR	110$			; AND STOP THIS ROUTINE TOO
+
+100$:	CALL	CLRFQB			; SET KNOWN FIRQB STATE
+	MOVB	#CLSFQ,@#FIRQB+FQFUN	; SET CLOSE CHANNEL FUNCTION
+	MOVB	ONXLUN(R5),@#FIRQB+FQFIL; SET CHANNEL TO CLOSE
+	CALFIP				; CLOSE IT ( DON'T CARE ABOUT ERRORS )
+	MOV	R5,R4			; GET COPY OF IMPURE AREA POINTER
+	RETLUN	ONXLUN(R4)		; RETURN LUN
+	TST	(PC)+
+110$:	SEC
+	RETURN
+
+STALL0:	STALL	#0			;STALL, BUT COME RIGHT BACK
+
+	GLOBAL	<NOSUCH>
+
+	.DSABL	LSB
+
+.SBTTL	WRIBUF	- WRITE THE OUTPUT BUFFER TO OUTPUT FILE
+
+;+
+;
+; WRIBUF:
+;
+;	WRITE THE OUTPUT BUFFER TO THE OUTPUT FILE.
+;
+; INPUTS:
+;
+;	R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,WRIBUF
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+WRIBUF:	CALLX	CLRXRB			;set known xrb state
+	MOV	OBUFF(R5),@#XRB+XRLOC	;set address of buffer
+	MOV	OBUFL(R5),@#XRB+XRLEN	;set length of buffer
+	MOV	OBUFL(R5),@#XRB+XRBC	;set count of bytes to write
+	BEQ	10$			;don't write if zero is passed
+	MOVB	OUTLUN(R5),@#XRB+XRCI	;set channel to write to
+	.WRITE
+	TST	@#FIRQB			;any errors
+	BEQ	10$			;no, continue
+	BIS	#BA$IOE,FLAGS(R5)	;note that we have an error
+	BR	20$			;and fail
+
+10$:	MOV	OBUFL(R5),FREE(R5)	;reset the free counter
+	MOV	OBUFF(R5),OBUFP(R5)	;and the pointer
+	CLRBUF	OBUFF(R5),OBUFL(R5)	;clear the buffer
+	TST	(PC)+
+20$:	SEC
+	RETURN
+
+	.DSABL
+
+.SBTTL	CLSCOM	- Close the temporary com file
+
+;+
+;
+; CLSCOM:
+;
+;	CLOSE THE COM FILE
+;
+; INPUTS:
+;
+;	R0 = FUNCTION BIT TABLE
+;	R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,CLSCOM
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+
+	.ENABL	LSB
+
+CLSCOM:	SAVREG
+	MOV	OBUFF(R5),R2		;set pointer of buffer
+	MOV	OBUFL(R5),R3		;set length of output buffer
+	CALL	WRIBUF			;flush the remaining buffer
+	CALLX	CLRFQX			;set known state everywhere
+	MOVB	#CLSFQ,@#FIRQB+FQFUN	;set close file function
+	MOV	OUTLUN(R5),@#FIRQB+FQFIL ; set lun to close
+	CALFIP				;close the file
+	BIT	#BA$IOE,FLAGS(R5)	;I/O error on the write?
+	BNE	5$			;Yes, fail the job
+	TST	@#FIRQB			;errors
+	BEQ	10$			;no, continue on
+5$:	MOV	#JS$FAI,EOJSTS(R5)	;show job as failed
+	SETFUN	B.KILL,R0		;abort the job
+	CLRFUN	B.SPAWN,R0		;don't try to spawn anything
+	CLRFUN	B.DELCOM,R0		;delete won't work either
+					;what a waste of time
+					; ( non fault tolerant )
+10$:	MOV	R5,R4			;get copy for retlun
+	RETLUN	OUTLUN(R4)		;return the lun
+	CLC
+20$:	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	DELCOM	- Delete the temporary com file
+
+;+
+;
+; DELCOM:
+;
+;	Delete the com file so the user will not be able to see it.
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL:
+;
+;	JSR	PC,DELCOM
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+DELCOM:	CALLX	CLRFQX			;set known state everywhere
+	MOVB	#DLNFQ,@#FIRQB+FQFUN	;set the delete function
+	MOV	RUNPPN(R5),@#FIRQB+FQPPN ; set the ppn of the com file
+	PUSH	R0
+	MOV	R5,R0			;get copy of impure area pointer
+	ADD	#COMFIL,R0		;R0 -> com file name
+	MOVSTR	R0,#FIRQB+FQNAM1,#6	;move target file name ( 6 bytes )
+	POP	R0			;device is system disk
+	CALFIP				;delete the file
+	TST	@#FIRQB			;errors
+	BEQ	10$			;no, continue on
+	MOV	#JS$FAI,EOJSTS(R5)	;set error condition
+	CLRFUN	B.CHECKJ,R0		;don't watch the job, we're stopping it
+	SETFUN	B.KILL,R0		;kill the job
+
+10$:	CLC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	KILJOB	- Delete command received from QMAN
+
+;+
+;
+; KILJOB:
+;
+; INPUTS:
+;
+;	R0 = Function bits
+;	R5 -> Impure Area
+;
+; CALL:
+;
+;	JSR	PC,KILJOB
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+KILJOB:	CLRFUN	B.DEFJOB,R0		;CLEAR
+	CLRFUN	B.OPNCOM,R0		;  ALL
+	CLRFUN	B.MAKCOM,R0		;    FUNCTIONS
+	CLRFUN	B.PROFIL,R0		;      THAT
+	CLRFUN	B.PROPPN,R0		;        WOULD
+	CLRFUN	B.PROSPC,R0		;          PROCESS
+	CLRFUN	B.CLSCOM,R0		;            THE
+	CLRFUN	B.SPAWN,R0		;              JOB
+	CLRFUN	B.DELCOM,R0		;
+	CLRFUN	B.CHECKJ,R0		;
+	CLRFUN	B.HOLD,R0		;
+	CLRFUN	B.END,R0		;
+	MOV	#JS$KIL,EOJSTS(R5)	;SHOW JOB AS DELETED
+	SETFUN	B.KILL,R0		; SET FUN FOR ABNORMAL TERMINATION
+	CLC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	SPAWN	- Start up a BATCH job...
+
+;+
+;
+; SPAWN:
+;
+;	Create job on PK indicated by KBNUM.  Retry will occur on occurance
+;	of no logins set and no buffers available.  Job will be scrapped if
+;	privilege violation or account has an unacceptable password.
+;
+; INPUT:
+;
+;	R0 ->Function table bits
+;	R5 ->IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,SPAWN
+;
+; RETURN:
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+				
+SPAWN:	SAVREG
+	MOV	JOBPTR(R5),R1		; Get copy of job pointer
+;
+; The following code assigns the KB of the PK that we allocated.  When KB is 
+; assigned, the /OWNER does not need DEVICE privilege to spawn to a restricted
+; keyboard ( like most PKs are ).
+;
+	CALLX	CLRFQX			; Clear the FIRQB and XRB
+	MOVB	#UU.ASS,@#FIRQB+FQFUN	; Set Assign device call
+	MOV	#"KB,@#FIRQB+FQDEV	; set for KB
+	MOVB	KBNUM(R5),@#FIRQB+FQDEVN ; set KB number as determined
+	MOVB	#-1,@#FIRQB+FQDEVN+1	; Set Unit real flag
+	.ULOG				; Do the assign.  No error can occur
+	MOV	R1,R2			; Get another copy of job pointer
+	ADD	#JB.PRV,R2		; R2 -> submitter's (owners) mask
+	SETPRV	JB.PPN(R1),R2		; Set submitter's mask
+	CALLX	CLRFQX			; Clean House first thing
+	MOVB	#UU.JOB,@#FIRQB+FQFUN	; Store away the "SPAWN LOGGED IN" code
+	MOVB	#40!100,@#FIRQB+FQFIL	; Running under the account at FQSIZ
+	MOVB	KBNUM(R5),@#FIRQB+FQSIZM; on this KB #
+	MOV	RUNPPN(R5),@#FIRQB+FQPPN; The com file is in RUNPPN's account
+	MOV	R5,R3			; Get copy of impure area pointer
+	ADD	#COMFIL,R3		; R3 -> the name of the com file
+	MOVSTR	R3,#FIRQB+FQNAM1,#6	; The com file name is....
+	MOV	RUNPPN(R5),@#FIRQB+FQSIZ; Get the PPN to run under
+	MOV	#"SY,@#FIRQB+FQDEV	; The file is on the system disk
+	.UUO				; Go create him...
+	MOVBYT	@#FIRQB,R2		; Save the Err sts
+	MOVBYT	@#FIRQB+FQFIL,R3	; R3 = created job number * 2
+	ASR	R3			; R3 = created job number * 1
+	SETPRV	#0			; Restore our privileges
+	CALLX	CLRFQX			; Clear the FIRQB and XRB
+	MOVB	#UU.DEA,@#FIRQB+FQFUN	; Set Deassign device call
+	MOV	#"KB,@#FIRQB+FQDEV	; set for KB
+	MOVB	KBNUM(R5),@#FIRQB+FQDEVN ; set KB number as determined
+	MOVB	#-1,@#FIRQB+FQDEVN+1	; Set Unit real flag
+	.ULOG				; Do the deassign.  No error can occur
+	TST	R2			; Was there an error on the spawn?
+	BEQ	20$			; No, show that this routine is done
+	CMP	#NOROOM,R2		; Yes, was it a login problem?
+	BEQ	10$			; Yes, try again
+	CMP	#NOBUFS,R2		; Was it a buffer problem?
+	BEQ	10$			; Yes, try again
+	MOV	#JS$ILL,EOJSTS(R5)	; No, all other errors cause JS$ILL
+	SETFUN	B.KILL,R0		; Set the job killer
+	BR	30$			; and return
+
+10$:	SETFUN	B.SPAWN,R0		; Say we want to try spawn again
+	MOV	#30.,R1			; Sleep for 30 seconds
+	JMP	WAIT			; go stall
+
+20$:	CALLX	CLRFQB			; Set known firqb state
+	MOVB	#UU.PRI,@#FIRQB+FQFUN	; select UU.PRI function
+	MOVB	R3,@#FIRQB+FQFIL	; select job number to change
+	MOVB	#-1,@#FIRQB+FQSIZM	; select change priority
+	MOVB	#-1,@#FIRQB+7		; select change run burst
+	MOVB	JB.RPR(R1),@#FIRQB+FQPPN ; load server's priority
+	MOVB	JB.RBR(R1),@#FIRQB+FQNAM1 ; load server's run burst
+	.UUO				; I sure hope the job is still there
+	CALLX	CLRFQB			; Clear the FIRQB
+	MOVB	#UU.TRM,@#FIRQB+FQFUN	; Set Terminal Characteristics
+	MOVB	KBNUM(R5),@#FIRQB+FQSIZM;  for the KB we're working on (/NOPERM)
+	MOVB	#-1,@#FIRQB+35		; Disable broadcast
+	.UUO				; Do it.
+	SETFUN	B.CHECK,R0		; Say we should now keep an eye on him
+	BIS	#BA$SPN,FLAGS(R5)	; Show that we have spawned
+	CALLX	SETROK			; Set RUN OK bit to run ... whenever
+30$:	CLC
+	RETURN				; That's all
+
+	GLOBAL	<NOROOM,NOBUFS>
+
+	.DSABL	LSB
+
+.SBTTL	ENDJOB/ABORTJOB - Clean up after a run / Kill the current run NOW
+
+;+
+;
+; ENDJOB:
+; ABORTJOB:
+;
+;	Terminate processing of the current job ( either normally or
+;	abnormally ).
+;
+; INPUT:
+;
+;	R0 =  Dispatch bits
+;	R5 -> Impure Area
+;
+; CALL:
+;
+;	JSR	PC,ENDJOB
+;	JSR	PC,ABORTJOB
+;
+; BACK:
+;
+;	Message queued up to QMAN, Exit sts determined and written to log ( if
+;	any ).
+;
+;	REGS TRASHED
+;
+;-
+
+
+	.ENABL	LSB
+
+ENDJOB:	BR	10$			; Join common code
+
+ABORTJOB:
+	CALL	PKKILL			; Kill off the PK
+	.BR	10$			; Join the common code
+
+10$:	CALLX	CLRROK			; Clear RUN OK bit in our JDB
+	CALL	SNDEOJ			; Say we are done 
+	BIT	#BA$LOG,FLAGS(R5)	; Do we have a logfile?
+	BEQ	15$			; No, normal eoj
+	CALL	WRISTS			; Yes, write end of job status
+	MOV	JOBPTR(R5),R1		; Retrieve job pointer
+	MOV	R1,R2			; get copy of jopptr
+	ADD	JB.LOG(R1),R2		; R2 -> log file block
+	BIT	#FF$QLG,LG.FLG(R2)	; Does the user want to print log?
+	BEQ	15$			; no, so don't
+	CALL	PRTLOG			; yes, go URP it
+15$:	MOV	JOBPTR(R5),R2		; Get copy of job pointer
+	SUB	#HD.LEN,R2		; adjust to point to the beginning 
+	MOV	JOBLEN(R5),R1		; Get a copy of the job block length
+	RETBUF	R2,R1			; Return the buffer
+	CLR	JOBPTR(R5)		;   and the pointers to it
+	CLR	JOBLEN(R5)		;     along with its length
+	MOV	SP.STA(R5),SP.OST(R5)	; Save current state as old state
+	MOV	#BATIDL,SP.STA(R5)	; Set current state as IDLE
+	SETFUN	B.NULL,R0		; Say Batch is now idle, run null job
+	CLC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	PAUJOB	- Stall Controlled job
+
+;+
+;
+; PAUJOB:
+;
+;	Stall controlled job ( set prioirty to -128 ).
+;
+; INPUTS:
+;
+;	R0 = FUNCTION BITS
+;	R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,PAUJOB
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+PAUJOB:	PUSH	R2
+10$:	MOV	KBDDB(R5),@#XRB+XRLEN	; Get pointer to DDJBNO
+	.PEEK				; Get the job number
+	MOVBYT	@#XRB+XRLEN,R2		;   as a byte value
+	BEQ	20$			; Quit if there isn't one
+	ASR	R2			; Make into job num * 1
+	CALLX	CLRFQB			; Clear FIRQB for UU.PRI
+	MOVB	#UU.PRI,@#FIRQB+FQFUN	; set UU.PRI function
+	MOVB	R2,@#FIRQB+FQFIL	; set the job num
+	MOVB	#-1,@#FIRQB+FQSIZM	; set the change priority flag
+	MOVB	#-128.,@#FIRQB+FQPPN	; set the stall priority
+	.UUO				; and stall the job
+	TSTB	@#FIRQB			; only error possible is that
+	BNE	10$			;   the job isn't there
+20$:	SETFUN	B.HOLD,R0		; Put this server on hold
+	POP	R2
+	CLC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	CONJOB	- Continue paused job
+
+;+
+;
+; CONJOB:
+;
+;	Reset the priority of the controlled job to its running speed.
+;
+;	There are only two START commands for BATSER.
+;
+;		1) START which is the standard resume.
+;		2) START/NEXT_JOB which aborts the current job.
+;
+; INPUTS:
+;
+;	R0 = Function bits
+;	R1 -> Message (past header)
+;	R5 -> Impure area
+;
+; CALL:
+;
+;	JSR	PC,CONJOB
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+CONJOB:	BIT	#CD$NXT,CD.FLG(R1)	; Is this a START/NEXT ?
+	BEQ	10$			; No, it is just a start
+	CALL	KILJOB			; Yes, kill the running job
+	BR	30$			; and finish
+
+10$:	PUSH	<R1,R2>
+	MOV	KBDDB(R5),@#XRB+XRLEN	; Get pointer to DDJBNO
+	.PEEK				; Get the job number
+	MOVBYT	@#XRB+XRLEN,R2		;   as a byte value
+	BEQ	20$			; Quit if there isn't one
+	ASR	R2			; Make into job num * 1
+	CALLX	CLRFQB			; Clear FIRQB for UU.PRI
+	MOVB	#UU.PRI,@#FIRQB+FQFUN	; set UU.PRI function
+	MOVB	R2,@#FIRQB+FQFIL	; set the job num
+	MOVB	#-1,@#FIRQB+FQSIZM	; set the change priority flag
+	MOV	JOBPTR(R5),R1		; Get pointer to job/entry packet
+	MOVB	JB.RPR(R1),@#FIRQB+FQPPN ; set the resume priority
+	.UUO				; and resume the job
+	TSTB	@#FIRQB			; Only error possible is
+	BNE	10$			;   that job doesn't exist
+20$:	CLRFUN	B.HOLD,R0		; Don't hold the job anymore
+	POP	<R2,R1>
+30$:	CLC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	CHECKJOB - Check on the currently running job
+
+;+
+;
+; CHECKJOB:
+;
+;	Monitor spawned job.  Watch the job by retrieving the num out of
+;	the PK's KB DDB.
+;
+;	Special conditions related to .COM files to watch out for:
+;
+;	- If DDJBNO is 0, it may not always mean that the job is done
+;	  ( in most cases it will be ).  The .COM file may have run a
+;	  program that detached which will result in another job being
+;	  spawned for the remainder of the .COM file.  A SLEEP 0 is done
+;	  to counter the window where the monitor is creating the new
+;	  job.
+;
+; INPUT:
+;
+;	R0 =  Dispatch bits
+;	R5 -> Impure Area
+;
+; CALL:
+;
+;	JSR	PC,CHECKJOB
+;
+; BACK:
+;
+;	Nothing really meaningful to anyone else is returned
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+				
+CHECKJOB:
+	SAVREG
+10$:	CLR	R3			;Clear peek counter
+20$:	MOV	KBDDB(R5),@#XRB+XRLEN	;move in kb's ddb pointer
+	.PEEK				;fetch job number
+	MOVBYT	@#XRB+XRLEN,R2		;get job number that's running	;004
+	BNE	30$			;Continue if there is a number
+	TST	R3			;Have we repeated this PEEK once?
+	BNE	25$			;Yes, The job must be done.
+	CALLX	CLRXRB			;Clear the XRB
+	.SLEEP				; SLEEP 0 to make sure job is done
+	INC	R3			; Show that we've peeked once
+	BR	20$			; Now see if a job exists
+
+25$:	JMP	120$			;intermediate skip for "long" jump
+
+30$:	ASR	R2			;for some reason, we want job num * 1
+	CALLX	CLRFQB			; Clear the decks for the time checks
+	MOVB	#UU.SYS,FIRQB+FQFUN	; Say we want "RETURN JOB STATUS"
+	MOVB	R2,FIRQB+FQFIL		; For our controlled job
+;	CLRB	FIRQB+FQSIZM		; Subfunction zero...(cleared already)
+	.UUO				; Go find out about it
+	TSTB	@#FIRQB			; Did the job go away on us?
+	BNE	25$			; Yes, our job is done
+	CMPB	@#FIRQB+FQSIZM,KBNUM(R5); Does the job have the same tty?
+	BNE	10$			; No, try it again ( job detached )
+	BIT	#BA$BYE,FLAGS(R5)	; Has the logout text been sent?
+	BNE	110$			; Yes, don't mess with the times/limits
+
+;
+; Calculate elapsed wall time and elapsed CPU time usage.  Store new values.
+;
+
+	MOV	@#FIRQB+12,R2		; Get copy of current job's elapsed time
+	SUB	LASTIM(R5),R2		; Subtract the last stored time
+	BEQ	50$			; Skip if we haven't changed any
+	BPL	40$			; If there was a positive increase
+	MOV	@#FIRQB+12,R2		; Job's data has been reset. ($LOGIN)
+40$:	ADD	R2,RUNTIM(R5)		; calculate new elapsed time
+	MOV	@#FIRQB+12,LASTIM(R5)	; save the last recorded elapsed time
+50$:	NEG	LASCPU(R5)		; convert
+	ADC	<LASCPU+2>(R5)		;   last stored time to negative
+	NEG	<LASCPU+2>(R5)		;      form
+	MOV	@#FIRQB+FQNAM1,R2	; get copy of LSW of CPU
+	MOVBYT	@#FIRQB+21,R3		; get copy of MSB of CPU
+	ADD	LASCPU(R5),R2		; Subtract last from 
+	ADC	R3			;   current 
+	ADD	<LASCPU+2>(R5),R3	;      for 32 bit value
+	BPL	60$			; Continue if positive value found
+	MOV	@#FIRQB+FQNAM1,R2	; Job's data has been reset since
+	MOVBYT	@#FIRQB+21,R3		;    current CPU < last recorded CPU
+	BR	70$			; Update elapsed counter
+
+60$:	TST	R3			; Was MSW zero?
+	BNE	70$			; No, 1) something is wrong, or 2) OK
+	TST	R2			; Was LSW zero too?
+	BEQ	80$			; Yes, no changes from last time
+70$:	ADD	R2,RUNCPU(R5)		; Update new LSW of CPU
+	ADC	<RUNCPU+2>(R5)		;   make sure the overflow makes it
+	ADD	R3,<RUNCPU+2>(R5)	; Update new MSW of CPU
+80$:	MOV	@#FIRQB+FQNAM1,LASCPU(R5) ; Store new last recorded CPU value
+	CLR	<LASCPU+2>(R5)		  ; clear out high byte for byte xfer
+	MOVB	@#FIRQB+21,<LASCPU+2>(R5) ; Store new last MSB recorded CPU 
+
+;
+; Enforce time limits (If any).
+;
+
+	BIT	#BA$NOT,FLAGS(R5)	;Is there no time limit specified?
+	BNE	90$			;yes, it is unlimited
+	CMP	MAXTIME(R5),RUNTIM(R5)	; Have we exceed that time yet?
+	BHI	90$			; Nope, check the CPU time then
+	MOV	#JS$TIM,EOJSTS(R5)	; Show job as exceeding TIME limit
+	BR	100$			; Too bad, go set up for the KILL
+
+;
+; Enforce CPU limits (If any).
+;
+
+90$:	BIT	#BA$NOC,FLAGS(R5)	;Is there no cpu limit specified
+	BNE	110$			;yes, it is unlimited
+	CMP	<MAXCPU+2>(R5),<RUNCPU+2>(R5) ; Have we really blown it yet?
+	BHI	110$			; No, max not exceeded yet.
+	CMP	MAXCPU(R5),RUNCPU(R5)	;  Are we really within the limits?
+	BHI	110$			; Yep, job's doing OK by me
+	MOV	#JS$CPU,EOJSTS(R5)	; Show job as exceeding CPU limit
+100$:	SETFUN	B.KILL,R0		; Job's over the limit, ABORT
+	RETURN
+	
+110$:	CALLX	CLRXRB			; Clear Mr. XRB
+	MOV	#128.,@#XRB+XRLEN	; Give dummy byte count
+	MOV	#128.,@#XRB+XRBC	;   twice
+	MOV	SP,@#XRB+XRLOC		; Give dummy buffer location
+	MOVB	PKCHNL(R5),@#XRB+XRCI	; Set Channel to write to
+	MOV	#<BIT2!BIT1>,@#XRB+XRMOD; We want to know if job is in ^C read
+	.WRITE				; Well, find out
+	CMPB	@#FIRQB,#INUSE		; Is the job still working?
+	BEQ	150$			; Yes, call us back in a while
+120$:	BIT	#BA$BYE,FLAGS(R5)	; Have we sent the logout message?
+	BNE	140$			; Yes, the job must really be done
+	CALLX	CLRXRB			; Clear Mr. XRb
+	MOV	#1,@#XRB+XRLEN		; Set return EOJ status command
+	MOVB	PKCHNL(R5),@#XRB+XRCI	; Set channel to do it on
+	MOVB	#20,@#XRB+XRBLKM	; Set PK function
+	.SPEC				; and do it
+	CMP	@#FIRQB,#NOSUCH		; Did the job log out?
+	BNE	130$			; no, find the real eoj sts
+	MOV	#JS$UNX,EOJSTS(R5)	; yes, set sts of unknown
+	BR	140$			; and finish up
+
+130$:	MOVBYT	@#XRB+XRBC,R1		; R1 = the status
+	ASH	#-4,R1			; Get high nibble
+	CALL	SETSTS			; go set the EOJ status
+	CALLX	CLRXRB			; clear the xrb
+	MOV	#L.BYE$,@#XRB		; Load in length of text to write to
+	MOV	#L.BYE$,@#XRB+XRBC	;   PK twice.......
+	MOV	#BYE$,@#XRB+XRLOC	; Load in the address of logout text
+	MOV	PKCHNL(R5),@#XRB+XRCI	; Load in PK's channel
+	MOV	#<BIT0!BIT3>,@#XRB+XRMOD ; Set write anyway and wait fer buffs
+	.WRITE				; write the logout message
+	BIS	#BA$BYE,FLAGS(R5)	; indicate that we've written logout
+	BR	160$			; and wait for the job to finish
+
+140$:	CALL	PKKILL			; Kill off the PK
+	SETFUN	B.END,R0		; Our job is done, clean up and end
+	CLC
+	RETURN
+
+150$:	CALLX	CLRXRB			; Clear Mr. XRB
+	MOV	OBUFL(R5),@#XRB+XRLEN	; Use output buffer for trashing data
+	MOV	OBUFF(R5),@#XRB+XRLOC	;   that gets sent or forced to PK
+	MOVB	PKCHNL(R5),@#XRB+XRCI	; Set Channel
+	.READ				; Trash any data waiting
+160$:	SETFUN	B.CHECK,R0		; Say we want to check again 
+	MOV	#30.,R1			;   and wait 30 seconds before returning
+	JMP	WAIT			;      and go stall...
+
+	GLOBAL	<INUSE,NOSUCH>
+
+	.DSABL	LSB
+
+.SBTTL	CHECKJOB - SETSTS - SET THE END OF JOB STATUS
+
+;+
+;
+; SETSTS:
+;
+;	SET OUR END OF JOB STATUS DEPENDING ON JOB'S EOJ STATUS.
+;
+; INPUTS:
+;
+;	R1 =  EOJSTS FROM PK
+;	R5 -> IMPURE AREA POINTER
+;
+; CALL:
+;
+;	JSR	PC,SETSTS
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+SETSTS:	PUSH	<R2,R3>
+	MOV	#STSTBL,R2			;R2 -> STS TABLE
+	MOV	#STSENT,R3			;R3 = NUM OF ENTRIES IN TABLE
+10$:	CMP	R1,(R2)				;IS THIS THE RIGHT ENTRY?
+	BEQ	20$				;YES, RETURN THE CORRECT STS
+	ADD	#4,R2				;NO, SET R2 -> NEXT ENTRY
+	SOB	R3,10$				;FOR ALL ENTRIES IN TABLE
+	MOV	#JS$UNX,EOJSTS(R5)		;SET UNKNOWN EOJSTS
+	BR	30$				;AND EXIT
+
+20$:	MOV	2(R2),EOJSTS(R5)		;RETURN THE CORRECT ERROR
+30$:	CLC
+	POP	<R3,R2>
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	CHECKJOB - SETSTS - DEFINE RETURN VALUE TABLE
+
+	.SAVE
+	.PSECT	PURE
+
+;		PK'S STS	OUR STS		WHAT IT IS
+;		========	=======		==========
+STSTBL:	.WORD	0	,	JS$WAR		;WARNING
+	.WORD	1	,	JS$SUC		;SUCESS
+	.WORD	2	,	JS$ERR		;JOB COMPLETE IN ERROR
+	.WORD	4	,	JS$FAI		;JOB COMPLETE IN SEVERE ERROR
+
+	STSENT = <<.-STSTBL>/4.>		;NUMBER OF ENTRIES IN TABLE
+
+	.RESTORE
+
+.SBTTL	WRISTS	- Write end of job status into the log file
+
+;+
+;
+; WRISTS:
+;
+;	Write "! Entry Queue_name:[p,pn]entry_name exit status = xxxxxx"
+;	to log file.
+;	Where xxxxxx = either Warning, Success, Error, Severe Error
+;
+; INPUTS:
+;
+;	R0 = Funky bits table
+;	R5 -> impure area
+;
+; CALL:
+;
+;	JSR	PC,WRISTS
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+WRISTS:	SAVREG
+	BIC	#BA$IOE,FLAGS(R5)		; Initialize I/O error flag
+	MOV	R5,R1				; get copy of impure area ptr
+	ADD	#LOGFIL,R1			; R1 -> ascii logfile name
+	CALLX	CLRFQX				; Set known XRB and FIRQB state
+	MOV	LOGLEN(R5),@#XRB+XRLEN		; Set Length of log
+	MOV	LOGLEN(R5),@#XRB+XRBC		; Set Length of log again
+	MOV	R1,@#XRB+XRLOC			; Set addr of log
+	.FSS					; parse it
+	TST	@#FIRQB				; Errors?
+	BEQ	10$				; no, continue
+	JMP	100$				; yes, pretend we didn't happen
+
+10$:	GETLUN	R2				; Get us a lun
+	MOV	R2,OUTLUN(R5)			; Save the lun away
+	MOVB	#OPNFQ,@#FIRQB+FQFUN		; We wanna open the file
+	MOVB	R2,@#FIRQB+FQFIL		; on our lun
+	CLR	@#FIRQB+FQSIZ			; without any decnet
+	CLR	@#FIRQB+FQCLUS			;     device interference
+	MOV	#<BIT15+2.>,@#FIRQB+FQMODE	; Assume append mode
+	BIT	#BA$SPN,FLAGS(R5)		; Has the spawn occured yet?
+	BNE	20$				; Yes, Append mode is OK
+	MOVB	#CREFQ,@#FIRQB+FQFUN		; No, spawn failed, create file
+	MOV	#<BIT15+32.>,@#FIRQB+FQMODE	;   create tentative
+20$:	CALFIP					; Make the attempt
+	TST	@#FIRQB				; Errors?
+	BEQ	30$				; No, continue
+	JMP	90$				; Yes, return lun and finish
+
+30$:	MOV	OBUFL(R5),FREE(R5)		; Set
+	MOV	OBUFF(R5),OBUFP(R5)		;   Known 
+	CLRBUF	OBUFF(R5),OBUFL(R5)		;     Buffer State
+	MOV	JOBPTR(R5),R1			; R1 -> job record	;032
+	BIT	#JB$LTS,JB.FLG(R1)		; /LOG_TIME_STAMP Entry? ;032
+	BNE	50$				; Nope.  Don't build it	;032
+	CALLX	CLRXRB				; Clear the XRB
+	.DATE					; Find out current date/time
+	CLRB	@#XRB+XRLOC+1			; clear out high byte of secs
+	MOV	#60.,R3				; R3 = seconds in a minute ;032
+	SUB	@#XRB+XRLOC,R3			; subtract sec until minute ;032
+	CALLX	CLRFQB				; Clear the FIRQB
+	MOVB	#UU.CNV,@#FIRQB+FQFUN		; Set the date/time conversion 
+;	CLR	@#FIRQB+FQFIL			; Use the current date
+	MOV	@#XRB+XRBC,@#FIRQB+FQMODE	; Use the current time
+	.UUO					; Fetch
+	MOV	#STAMP$,R1			; Get copy of work buffer
+	CMPB	@#FIRQB+12,#'-			; Is the date alphabetic?
+	BEQ	35$				; yes, go on
+	CMPB	@#FIRQB+12,#'.			; Is the date numeric?
+	BEQ	35$				; yes, go on, no it is STARDATE
+	MOV	#L.STAR$,R2			; Length of 'STAR DATE'	;032
+	MOV	#STAR$,R0			; Location of string	;032
+	MOVSTR	R0,R1,R2			; Move keyword 'STAR DATE' ;032
+	ADD	R2,R1				; Update pointer	;032
+35$:	MOV	#9.,R2				; Fixed date length	;032
+	MOV	#FIRQB+FQNAM1,R0		; Location of date string ;032
+	MOVSTR	R0,R1,R2			; Move in date string	;032
+	ADD	R2,R1				; Compensate for length	;032
+	MOVB	#<CR$SP>,(R1)+			; Pad with a space
+	MOV	#5,R2				; Fixed time length	;032
+	MOV	#FIRQB+FQPFLG,R0		; Location of time string ;032
+	MOVSTR	R0,R1,R2			; Move in time string	;032
+	ADD	R2,R1				; Compensate for length	;032
+	MOVB	#':,(R1)+			; Insert colon for seconds
+	CMP	#10.,R3				; Less than 10 secs?	;032
+	BLOS	40$				; No.  Already two digits ;030
+	MOVB	#'0,(R1)+			; Yes, insert leading zero
+40$:	PUSH	R5				; save impure area ptr
+	MOV	#2,R4				; R4 = false length of buffer
+	MOV	R1,R5				; R5 = buffer pointer
+	CALLX	BIN2D				; convert the number
+	MOV	R5,R1				; restore new buffer addr
+	POP	R5				; restore impure area ptr
+	MOVB	#<CR$SP>,(R1)+			; Pad with a space
+	MOV	#2,R2				; AM, PM or two spaces	;032
+	MOV	#FIRQB+34,R0			; Location of string	;032
+	MOVSTR	R0,R1,R2			; Move it in		;032
+	ADD	R2,R1				; Compensate for length	;032
+	MOVB	#<CR$SP>,(R1)+			; Pad with a space
+	SUB	#STAMP$,R1			; subtract start to get len ;032
+	MOVB	R1,STMP$L			; STMP$L is an ASCIC string ;032
+	MOV	JOBPTR(R5),R1			; R1 -> job record	;032
+50$:	MOV	#STSTHR,R4			; Get thread list pointer ;032
+	CALL	@(R4)+				; Write out final status ;032
+	CALL	WRIBUF				; Flush the buffer
+	BIT	#BA$IOE,FLAGS(R5)		; Did an I/O error occur?
+	BEQ	80$				; No, carry on
+	MOV	#JS$FAI,EOJSTS(R5)		; Yes, set job failed error
+80$:	MOVBYT	OUTLUN(R5),R2			; Get copy of our lun number
+	CALLX	CLRFQB				; Set know firqb state
+	MOVB	#CLSFQ,@#FIRQB+FQFUN		; Select close fun
+	MOVB	R2,@#FIRQB+FQFIL		; on our lun
+	CALFIP					; do it
+						; **** Error check?
+90$:	RETLUN	R2				; return our lun
+100$:	CLC
+	RETURN
+	.DSABL	LSB
+
+.SBTTL	WRISTS	- WRIDIG - Divide and write a digit
+
+;+
+;
+; WRIDIG:
+;
+;	This routine is specific to WRISTS.  It writes ( in ascii ) the number
+;	that is the resultant of the divide.
+;
+; INPUTS:
+;
+;	R0 -> Current work buffer
+;	R1 = The number to divide by
+;	R2 ( low ), R3 ( high ) = The number to divide
+;
+; CALL:
+;
+;	JSR	PC,WRIDIG
+;
+; BACK:
+;
+;	R0 -> updated buffer position
+;	R2 ( low ), R3 ( high ) = remainder of division
+;	R1,R4,R5 are trashed
+;
+;-
+
+	.ENABL	LSB
+
+WRIDIG:	CALL	DIV32			;Divide the number
+	PUSH	<R4,R5>			;Save the remainder
+	CMP	#10.,R2			;Is there only one digit?
+	BLOS	10$			;No, there must be at least two  ;026
+	MOVB	#'0,(R0)+		;Precede by zero
+10$:	MOV	R2,R3			;Set the number to convert to ascii
+	MOV	#40.,R4			;Set the buffer length (dummy var)
+	MOV	R0,R5			;Set the buffer pointer
+	CALLX	BIN2D			;convert the number to ascii
+	MOV	R5,R0			;Update the pointer
+	POP	<R3,R2>			;Return R2,R3 as remainder
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	WRISTS	- DIV32	- Divide a 32  bit number by a 16 bit number
+
+;+
+;
+; DIV32:
+;
+;	Divide a 32 bit number by a sixteen bit number.  This code ( without
+;	the comments ) was stolen from the DCL code.
+;
+; INPUTS:
+;
+;	R2 ( low ), R3 ( high ) = The number to divide
+;	R1 = The number to divide by
+;
+; CALL:
+;
+;	JSR	PC,DIV32
+;
+; BACK:
+;
+;	R1 = same as passed
+;	R2 ( low ), R3 ( high ) = result
+;	R4 ( low ), R5 ( high ) = remainder
+;
+;	Carry set is meaningless.
+;
+;	All regs are, for the most part, trashed except for R0.
+;
+;-
+
+	.ENABL	LSB
+
+DIV32:	PUSH	R0
+	TST	R1		;Division by zero?
+	BEQ	30$		;Yes, perhaps there should be an error
+	MOV	#33.,R0		;Set interation counter
+	CLR	R4		;Clear remainder
+	CLR	R5		;...
+10$:	ROL	R4		;Shift out remainder
+	ROL	R5		;...
+	BNE	15$		;if the remainder is larger than denominator.
+	CMP	R1,R4		;Will this fit?
+	BHI	20$		;no
+15$:	SUB	R1,R4		;Sub from the remainder
+	SBC	R5		;both words
+	SEC			;signal the fact
+20$:	ROL	R2		;shift into result
+	ROL	R3		;...
+	DEC	R0		;decrement counter
+	BGT	10$		;and finish loop
+30$:	POP	R0
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	PRTLOG	- Send the print log file request to QMAN.
+
+;+
+;
+; PRTLOG:
+;
+;	Send the print request to QMAN via QMAN's URP facility.
+;
+; INPUTS:
+;
+;	R1 -> JOB DATA STRUCTURE
+;
+; CALL:
+;
+;	JSR	PC,PRTLOG
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+PRTLOG:	SAVREG
+	CLRB	LOGDEL			;Clear out the
+	CLRBUF	#LOGQUE,#LGQULN		;  buffers for the
+	CLRBUF	#LOGFS,#LGFSLN		;    URP packet
+	MOV	JB.PPN(R1),LOGOWN	;Set the owner of the logfile
+	ADD	JB.LOG(R1),R1		; R1 -> log file block
+	BIT	#FF$DEL,LG.FLG(R1)	;Did user request delete log file
+	BEQ	10$			;No, don't delete it
+	MOVB	#-1,LOGDEL		;Yes, Tell QMAN we want to
+10$:	TSTB	LG.QNL(R1)		;Did user speicify a queue?
+	BEQ	20$			; No, so don't bother to copy one
+	MOVBYT	LG.QNL(R1),R2		;Get length of queue name
+	MOV	R1,R0			;R0 -> log file block
+	ADD	#LG.QNM,R0		;R0 -> queue name block
+	MOV	R1,R4			;save R1
+	MOV	#LOGQUE,R1		;R1 -> file spec buffer (past len )
+	MOVSTR	R0,R1,R2		;copy the string
+	MOV	R4,R1			;restore R1
+20$:	ADD	#LG.SPL,R1		;R1 -> real file spec length
+	MOVBYT	(R1)+,R2		;R2 = length of file spec
+	MOV	R1,R0			;R0 -> the source
+	MOV	#LOGFS,R1		;R1 -> the destination
+	MOVSTR	R0,R1,R2		;copy the file spec string
+	XMITM	#LOGURP			;XMIT the mapped buffer
+	CLC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	PRTLOG	- LOGURP - Set fields for log file urps
+
+	.SAVE
+	.PSECT	IMPURE
+
+LOGURP:	.WORD	0		; Link to next
+	.WORD	LURLEN		; length of this packet
+	.BYTE	1		; one target
+	.BYTE	0		; no retries
+	.WORD	0		; reserved for broadcast target
+
+	.BYTE	4		; send URP (command #4 is URP/ORP cmd)	;032
+	.BYTE	1		; Print request
+	.BYTE	BIT7+LO.URP	; Local object type for URPs		;032
+	.BLKB0	5		; reserved				;032
+
+	.BYTE	2.		; URP code = 2. ( /QUEUE )
+	.BYTE	NAM.LEN		; queue name length
+LOGQUE:	.BLKB0	NAM.LEN+1	; queue name block
+
+	LGQULN	= . - LOGQUE	; LoG QUeue name buffer LeNgth
+
+	.BYTE	3.		; URP code = 3. ( /OWNER )
+	.BYTE	0.		; reserved
+LOGOWN:	.WORD	0.		; print job owner PPN
+
+	.BYTE	132.		; URP code = 132. ( /[NO]DELETE )
+LOGDEL:	.BYTE	0		; the flag word ( non-zero for delete )
+
+	.BYTE	128.		; URP code = 128. ( the file spec )
+	.BYTE	40.		; file spec length
+LOGFS:	.BLKB0	40.		; files spec text block ( zero this always )
+
+	LGFSLN = . - LOGFS	; LoG File Spec LeNgth
+
+	LURLEN = . - LOGURP	; Logfile URp LENgth
+
+	.RESTORE
+
+.SBTTL	OFFLIN	- Take us Off-Line
+
+.ENABL	LSB
+
+;+
+;
+;	CALL	OFFLIN
+;
+;		R0 ->Function dispatch bits
+;		R1 ->Offline Message ( Past Header )
+;		R3 ->Current file cells in job's context area
+;		R5 ->Subjob's Context Area
+;
+;-
+
+OFFLIN:	SETFUN	B.DIE,R0	; Say we should die
+	BIT	#OF$ABO,OF.FLG(R1); Was it STOP/ABORT?
+	BEQ	10$		; NOPE, die nice
+	TST	JOBPTR(R5)	; Do we have a job?
+	BEQ	10$		; No, we should just shut down
+	CALL	KILJOB		; Yes, kill the job
+10$:	CLC			; Always successful
+	RETURN
+
+.DSABL	LSB
+
+
+.SBTTL	STATRQ	- Status reuested
+
+.ENABL	LSB
+
+;**
+;**	Yet to be determined. Will need QMAN support and packet 
+;**	definitions.
+;**
+
+STATRQ:
+
+.DSABL	LSB
+
+
+.SBTTL	MODIFY	- Chnage current Job parameters
+
+.ENABL	LSB
+
+;**
+;**	Will probably not be implemented. Left in just in case it
+;**	is needed.
+;**
+
+MODIFY:	RETURN
+
+.DSABL	LSB
+
+
+.SBTTL	SNDCMN	- SEND COMMON FORMAT MESSAGE TO QMAN
+
+.ENABL	LSB
+
+;+
+;
+; SNDCMN:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCION BITS TABLE
+;		R1  = CMD TYPE
+;		R2  = STATUS
+;		R3  = FLAG VALUE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;
+;	JSR	PC,SNDCMN
+;
+; BACK:
+;
+;		MESSAGE QUEUED FOR SEND TO QMAN
+;
+;
+;-
+
+SNDCMN:	MOV	#CMNDAT,R4		;GET ADDRESS OF COMMON MESSAGE DATE
+	MOVB	#QT$BAT,JB.QUE(R4)	; INSERT QUEUE TYPE OF SPOOLER
+	MOV	R2,JB.STS(R4)		;INSERT STATUS VALUE
+	MOV	R3,JB.FLG(R4)		;INSERT FLAG VALUE
+	MOV	#XM.LEN+HD.LEN+ON.LEN,CMNMSG+XMITLN ;Assume short message ;032
+	TST	JOBPTR(R5)		;IS THERE A JOB ACTIVE?
+	BEQ	20$			;NO
+	ADD	#EJ.LEN-ON.LEN,CMNMSG+XMITLN ;Yes, make it a large message ;032
+	MOV	R0,-(SP)		;Save R0			;032
+	MOV	JOBPTR(R5),R0		;Get pointer to entry record	;032
+; 
+; Note:
+;
+; Next three instructions needs "+HD.LEN" add to the source
+; if this is to be a common routine with PRTSER
+;
+	MOV	JB.SEQ(R0),SU.SEQ(R4)	;Return the entry's Seq #	;032
+	MOV	JB.PPN(R0),SU.PPN(R4)	;Return the owner's PPN		;032
+	ADD	#JB.QNL,R0		;Point to name of queue		;032
+	MOV	#CMNDAT+SU.QNL,R4	;Destination of queue name	;032
+	MOVSTR	R0,R4,#2*<NAM.LEN+1>	;Copy queue & entry name blocks ;032
+.ASSUME	JB.NML	EQ <JB.QNM+NAM.LEN>	;Ensure proper order		;032
+.ASSUME	SU.NML	EQ <SU.QNM+NAM.LEN>	;Ensure proper order		;032
+	ADD	#JB.DVL-JB.QNL,R0	;Point to name of server	;032
+	ADD	#SU.DVL-SU.QNL,R4	; and to destination of server	;032
+	MOVSTR	R0,R4			;Copy server name block		;032
+	MOV	(SP)+,R0		;Restore R0			;032
+20$:	MOV	#CMNHD,R4		;GET ADDRESS OF COMMON MESSAGE HEADER
+	MOVB	R1,HD.CMD(R4)		;INSERT COMMAND VALUE
+	BCS	30$			;CAN'T FIND, SO DON'T USE IT
+	MOV	SP.SID(R5),HD.CID(R4)	;INSERT THE TARGET CID
+	MOV	SP.CTX(R5),HD.CTX(R4)	;AND THE CTX FIELD
+30$:	XMITM	#CMNMSG			;QUEUE UP THE UNMAPPED BUFFER
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	RETMSG	- Return the current Message Buffer (If any)
+
+.ENABL	LSB
+
+;+
+;
+; RETMSG:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCION BITS TABLE
+;
+; CALL:
+;	JSR	PC,RETMSG
+;
+;		RETURN MESSAGES AS REQUESTED
+;
+;
+; BACK:
+;
+;		ALL REGS PRESERVED
+;		CARRY PRESERVED
+;
+;-
+
+RETMSG:	PUSH	<R1,R2>
+	ROR	-(SP)			;SAVE CARRY ON STACK
+	MOV	MSGPTR(R5),R2		;POINTER TO MESSAGE PACKET
+	MOV	MSGLEN(R5),R1		;AND LENGTH
+	BEQ	10$			;NO MESSAGE SO DON'T RETURN BUFFER
+	RETBUF	R2,R1			;RETURN THE BUFFER
+10$:	CLR	MSGPTR(R5)		;SHOW BUFFER AS RETURNED
+	ROL	(SP)+			;RESTORE CARRY FROM STACK
+	POP	<R2,R1>
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	SNDEOJ	- Send the End-Of-Job Message off
+
+.ENABL	LSB
+
+;+
+;
+; SNDEOJ:
+;
+;
+; INPUTS:
+;
+;		R0 -> FUNCION BITS TABLE
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,SNDEOJ
+;
+;		CURRENT JOB IS OVER, SEND BACK STATUS TO QMAN
+;
+; BACK:
+;
+;
+;		C=0 SUCCESS
+;		C=1 FAILURE
+;		ERROR IN R1
+;		 ALL OTHER REGS PRESERVED
+;
+;-
+
+SNDEOJ:	SAVREG				;SEND OUR STATUS BACK TO QMAN
+	MOV	#BATIDL,SP.STA(R5)	;SET BACK TO 'IDLE' STATE
+	MOV	#SQ.EOJ,R1		;SET COMMAND CODE
+	MOV	EOJSTS(R5),R2		;RETURN THE JOB EXIT STATUS
+	MOV	JOBPTR(R5),R3		;Fetch the job record		;032
+	MOV	JB.FLG(R3),R3		;Return JB.FLG for /NOTIFY	;032
+	CALL	SNDCMN			;SEND COMMON FORMAT MESSAGE
+	RETURN
+
+.DSABL	LSB
+
+
+.SBTTL	.BPT	- ENTER DEBUGER IF DEBUGER PRESENT, ELSE IGNORE
+
+;**
+;**	Needs testing. Was lifted from PRTSER (SPLER)
+;**
+
+;+
+;
+; .BPT:
+;
+;
+; INPUTS:
+;		NONE
+;
+; CALL:
+;	JSR	PC,.BPT
+;
+;		DEBUGER CALLED IF THERE AND USER IS OPER
+;
+;
+; BACK:
+;
+;		C=0 DEBUGER CALLED
+;		C=1 NO DEBUGER
+;		ERROR IN R1
+;		 ALL OTHER REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+.BPT:	TST	@#R.ODTV		;IS A DEBUGER PRESENT? (TST R.ODTV)
+	BEQ	10$			;NO SO DON'T BPT
+	BPT				;YES,GO TO DEBUGER
+	MOV	#SU$SUC,R1		;SET STATUS TO SUCCESS
+RETURN:	TST	(PC)+			;AND CLEAR CARRY PRIOR TO RETURN
+10$:	SEC				;SET CARRY CUZ NO DEBUGER
+	RETURN
+
+	R.ODTV=112			;ADDR OF ODT SST VECTOR
+
+	.DSABL	LSB
+
+.SBTTL	PKKILL	- Get rid of the current PK ( and any job on it )
+
+;+
+;
+;	CALL	PKKILL
+;
+;		R0 ->Function dispatch bits
+;		R5 ->Subjob's Context Area
+;
+;-
+
+	.ENABL	LSB
+
+PKKILL:	PUSH	R2
+	TSTB	PKCHNL(R5)		; Is there a Channel to close?
+	BEQ	30$			; no, show this routine as succeeding
+	BIT	#BA$SPN,FLAGS(R5)	; Has the spawn occured yet?
+	BEQ	20$			; No, don't kill the job
+	MOV	KBDDB(R5),@#XRB+XRLEN	; get address of PK's DDJBNO
+	.PEEK				; look at it
+	MOVBYT	@#XRB+XRLEN,R2		; get the job running on it
+	BEQ	20$			; If there is no job
+	CALL	CLRFQB			; clear up the firqb
+	MOVB	#UU.CHU,@#FIRQB+FQFUN	; Set the CHU CHU function
+	ASR	R2			; Make the job number * 1
+	MOVB	R2,@#FIRQB+FQFIL	; Set the job number to chu chu
+	MOV	#^C<377>,@#FIRQB+FQCLUS	; and the ordinary flags
+	.UUO				; Kill the job
+10$:	MOV	#1,@#XRB+XRLEN		; Set to sleep and wait
+	.SLEEP				;    for job to go away....
+	MOV	KBDDB(R5),@#XRB+XRLEN	; Get addres of PK's DDJBNO
+	.PEEK				; look at it
+	TSTB	@#XRB+XRLEN		; is there a job there?
+	BEQ	20$			; No, finish up.
+	CALLX	CLRXRB			; Clear Mr. XRB
+	MOV	OBUFL(R5),@#XRB+XRLEN	; Use output buffer for trashing data
+	MOV	OBUFF(R5),@#XRB+XRLOC	;   that gets sent or forced to PK
+	MOVB	PKCHNL(R5),@#XRB+XRCI	; Set Channel
+	.READ				; Trash any data waiting
+	BR	10$			; See if the job goes away now
+
+20$:	CALLX	CLRFQB			; Now clean te FIRQB so we
+	MOVB	#CLSFQ,<FQFUN+FIRQB>	;  CLOSE the PK:
+	MOVB	PKCHNL(R5),<FQFIL+FIRQB>;     and specify the PK's channel
+	CALFIP				; See ya....
+	MOV	JOBPTR(R5),R2			; get copy of the job pointer
+	CALLX	CLRFQB				; clear the file request block
+	MOV	JB.PKN(R2),@#FIRQB+FQDEVN	; unit number+flag	   ;031
+	BEQ	25$				; dynamic PK. this is easy ;031
+	MOVB	#UU.ASS,@#FIRQB+FQFUN		; select assign function   ;024
+	MOVB	QMJBNO(R5),@#FIRQB+FQNAM1	; reassign to QMAN	   ;024
+	MOV	#"PK,@#FIRQB+FQDEV		; name our PK		   ;024
+	.UUO					; execute the reassign	   ;024
+
+25$:	RETLUN	PKCHNL(R5)		; Give them our LUN back...	;031
+	CLRB	PKCHNL(R5)		; Ensure no channel num there
+
+30$:	CLC
+	POP	R2
+	RETURN
+
+	.DSABL	LSB
+
+
+.SBTTL	$NOP	- Null command
+
+
+$NOP:	NOP	
+	RETURN
+
+
+.SBTTL	NULLJOB/WAIT - Routines to stall this subjob
+
+;+
+;
+; NULLJOB:
+;
+;	Stall until we have something to do ( wait until a message arrives ).
+;
+; WAIT:
+;
+;	Stall for a specified amount of seconds.
+;
+; INPUTS:
+;
+;	R0 -> Function dispatch bits
+;	R1 =  Stall time ( for Wait only )
+;
+; CALL:
+;
+;	JMP	PC,NULLJOB
+;	JMP	PC,WAIT
+;
+; BACK:
+;
+;	Calls to this routine never return.
+;
+;-
+
+	.ENABL	LSB
+
+NULLJOB:MOV	#-1,R1		; Infinite Sleep
+	SETFUN	B.NULL,R0	; Make sure the Null job is always set
+	.BR	10$		; Never hurts to be sure
+
+WAIT:
+10$:	SETFUN	B.MSG,R0	; Make sure we do something when we wake up
+	STALL	R1
+
+	CRASH			; Should never get here
+
+.DSABL	LSB
+
+.SBTTL	DIE	- Shutdown this Sub-Job
+
+DIE:	MOV	#SQ.OFL,R1	; Tell the world we are going...
+	CALL	SNDCMN		; ... going
+	SHUTUP			; *G*O*N*E* Good-bye Cruel world....
+				;  I'm off to join the circus...
+
+.SBTTL	Threaded routines
+
+;+
+; The threaded routines were written as part of edit 032.  Using threaded
+; routines to build the temporary .COM file, and append the to the log
+; file will produce a savings of around 1000 (decimal) bytes in the BATSER
+; module.   Believe it, or not.
+;
+; Input to all of the threads are:
+;
+;	R1 -> Entry record buffer (past header)
+;	R4 -> Next thread to execute
+;	R5 -> Impure area
+;
+;	R2 and R3 are always scratch
+;-
+
+;+
+; TIMSTP	Write out time-stamp from the STAMP$ buffer
+;-
+TIMSTP:	BIT	#JB$LTS,JB.FLG(R1)	; Is the entry /LOG_TIME_STAMP?
+	BNE	NXTTHR			; Nope.  It's /NOLOG_TIME_STAMP
+	MOV	#STMP$L,R2		; Get pointer to .ASCIC timestamp
+	BR	CASCIC			; Copy it
+
+;+
+; STPCHK	Check for /[NO]TIMESTAMP on log_file open
+;-
+STPCHK:	BIT	#JB$LTS,JB.FLG(R1)	; Is the entry /LOG_TIME_STAMP?
+	BEQ	NXTTHR			; Yes.  Nothing to do
+	MOV	#NOTXT$,R2		; Nope.  It's /NOLOG_TIME_STAMP
+	BR	CASCIC			;  so stick in the leading "NO"
+
+;+
+; WRITE0	Store	'$_WRITE0 "' in the output buffer
+;-
+WRITE0:	MOV	#WRT0$,R2		; Get pointer to .ASCIC text
+	BR	CASCIC			; Copy it
+
+;+
+; NEWLIN	Put a <CR><LF> into the buffer
+;-
+NEWLIN:	MOV	#NLTXT$,R2		; Get pointer to .ASCIC for <cr><lf>
+	BR	CASCIC			; Copy it
+
+;+
+; NEWLN2	Put a <"><CR><LF> into the buffer
+;-
+NEWLN2:	MOV	#QT.NL$,R2		; Get pointer to .ASCIC for <"><cr><lf>
+	BR	CASCIC			; Copy it
+
+;+
+; SEQTHR	Convert sequence number of entry to ASCII
+;
+;		 R1  -> Job record pointer
+;		 R4  -> Next thread
+;-
+
+SEQTHR:	MOV	JB.SEQ(R1),R3		; Get the sequence number in R3
+	.BR	NUM$R3			; Go convert it to ASCII
+
+;+
+; NUM$R3	Convert number in R3 to ASCII
+;
+;		 R3  =  Number to convert (NUM$R3)
+;		 R4  -> Next thread
+;-
+
+NUM$R3:	PUSH	<R4,R5>			; Save R4 for a little bit
+	MOV	#WORK$,R5		; Point to temporary buffer
+	MOV	#L.WORK$,R4		; Size of buffer
+	CALLX	BIN2D			; Convert R3 to ASCII
+	SUB	#L.WORK$,R4		; Compute length of number
+	NEG	R4			; ...
+	MOV	#WORK$L,R2		; Get pointer to .ASCIC string
+	MOVB	R4,(R2)			; Store string length
+	POP	<R5,R4>			; Restore registers
+	BR	CASCIC			; Now copy string into buffer
+
+;+
+; QUETHR	Move queue name into output buffer
+; SRVTHR	Move server name into output buffer
+; ENTTHR	Move entry name into output buffer
+;
+;		 R1  -> Job record
+;		 R4  -> Next thread
+;-
+
+	.ENABL	LSB
+
+QUETHR:	MOV	#JB.QNL,R2		; Pick up offset to queue name length
+	BR	10$			; Join common code
+
+SRVTHR:	MOV	#JB.DVL,R2		; Pick up offset to server name
+	BR	10$			; Join common code
+
+ENTTHR:	MOV	#JB.NML,R2		; Pick up offset to entry name length
+	.BR	10$			; Join common code
+
+10$:	ADD	R1,R2			; Make R2 a pointer to .ASCIC string
+	BR	CASCIC			; Go copy it into message buffer
+
+;+
+; PPNTHR	Build [p,pn] text into message buffer
+;
+;		 R1  -> Job record pointer
+;		 R4  -> Next thread
+;-
+
+PPNTHR:	MOV	#WORK$,R2		; Work buffer pointer into R2
+	MOV	R1,-(SP)		; Save R1
+	MOV	JB.PPN(R1),R1		; Get p,pn in R1
+	CALLX	BLDPPN			; Build the [p,pn] text
+	MOV	#WORK$L,R2		; Get pointer to .ASCIC string
+	MOVB	R1,(R2)			; Store the length of the string
+	MOV	(SP)+,R1		; Restore R1
+	BR	CASCIC			; Copy the text into the buffer
+
+;+
+; TASCIC	Threaded .ASCIC
+;
+;		(R4) -> .ASCIC string
+;-
+
+	.ENABL	LSB
+
+TASCIC:	MOV	(R4)+,R2		; Pick up .ASCIC string pointer
+	.BR	CASCIC			; Copy it into the buffer
+
+;+
+; CASCIC	Copy .ASCIC string
+;
+;		 R2  -> .ASCIC string
+;		 R4  -> Next thread
+;-
+
+CASCIC:	MOVBYT	(R2)+,R3		; Get length of string		;034
+	BR	CASCII			; Join common string copy
+
+;+
+; IASCIC	In-line .ASCIC thread
+;
+;		 R4  -> .ASCIC string
+;		 R5  -> Message buffer
+;-
+
+IASCIC:	MOVB	(R4)+,R3		; Get length of string
+	MOV	R4,R2			; Copy pointer to string
+	ADD	R3,R4			; Adjust thread pointer
+	.BR	CASCII			; Begin the copy
+
+CASCII:	TST	R3			; Anything to do?
+	BEQ	NXTTHR			; Nope.  That was easy
+10$:	TST	FREE(R5)		; Any room in buffer?
+	BNE	20$			; Yes, go store character
+	CALL	WRIBUF			; Write buffer to the file
+	BCS	RTS$PC			; Forget the rest if error occurred
+20$:	MOVB	(R2)+,@OBUFP(R5)	; Move a character
+	INC	OBUFP(R5)		; Adjust pointer for next character
+	DEC	FREE(R5)		; One less byte left in the well
+	SOB	R3,10$			; Loop until done
+	INC	R4			; Round up to next...
+	BIC	#1,R4			;  word boundary
+NXTTHR:	JMP	@(R4)+			; On to next thread
+
+;+
+; EOJTHR	Put EOJ status text into buffer
+;
+;		Destroys R0 (Not needed anyways)
+;-
+	.ENABL	LSB
+EOJTHR:	MOV	R1,-(SP)		; Save R1
+	MOV	#1,R0			; Assume we'll need an RMS error msg
+	MOV	EOJSTS(R5),R1		; Get the status of the entry
+	BMI	10$			; RMS error are < 0
+	INC	R0			; Set function for PBS status text
+10$:	CALLX	GETTXT			; Go get the status text
+	MOV	R2,R3			; Any message?
+	BNE	20$			; Yep.
+	MOV	#UNKTXT,R2		; Nope.  Say status is unknown
+	MOV	(SP)+,R1		; Restore R1
+	BR	CASCIC			; And go copy the text
+
+20$:	MOV	R1,R2			; Move text source into R2
+	MOV	(SP)+,R1		; Restore R1
+	BR	CASCII			; Copy the string into the buffer
+
+;+
+; LOGTHR	Write log_file spec in the output buffer
+;-
+
+LOGTHR:	MOV	R5,R2			;get copy of impure area ptr
+	ADD	#LOGFIL,R2		;R2 -> logfile data area
+	MOV	LOGLEN(R5),R3		;R3 = Length of log file name
+	BR	CASCII			;Go copy the string
+
+;+
+; FILTHR	Write a file_spec in the output buffer
+;
+;		R0 -> File spec block
+;-
+
+FILTHR:	MOV	#FB.SPL,R2		;Get offset to file spec
+	ADD	R0,R2			;R2 -> File spec length
+	BR	CASCIC			;Go copy .ASCIC string
+.ASSUME	FB.SPC	EQ <FB.SPL+1>		;Make sure this will work
+
+;+
+; CPUTHR	Write out total CPU time to output buffer
+; TIMTHR	Write out total elapsed time to output buffer
+;-
+	.ENABL	LSB
+CPUTHR:	PUSH	<R0,R1,R4,R5>		; Save some work registers
+	MOV	RUNCPU(R5),R2		; R2 = LSW of total CPU time
+	MOV	<RUNCPU+2>(R5),R3	; R3 = MSW of total CPU time
+	MOV	#WORK$,R0		; R0 -> work buffer
+	MOV	#36000.,R1		; R1 = divisor to find hours
+	CALL	WRIDIG			; Write out hours
+	MOVB	#':,(R0)+		; write out a ':' separator
+	MOV	#600.,R1		; R1 = divisor to find minutes
+	CALL	WRIDIG			; write out minutes
+	MOVB	#':,(R0)+		; write out a ':' separator
+	MOV	#10.,R1			; R1 = divisor to find seconds
+	CALL	WRIDIG			; write out seconds
+	MOVB	#'.,(R0)+		; write out a '.' separator
+	BISB	#60,R2			; convert tenths to ascii
+	MOVB	R2,(R0)+		; write out the tenths
+	BR	10$			; finish up in common code
+
+TIMTHR:	PUSH	<R0,R1,R4,R5>		; Save some work registers
+	MOV	RUNTIM(R5),R2		; R2 = LSW of total time
+	CLR	R3			; R3 = MSW of total time
+	MOV	#WORK$,R0		; R0 -> work buffer
+	MOV	#60.,R1			; R1 = divisor to find hours
+	CALL	WRIDIG			; Write out hours
+	MOVB	#':,(R0)+		; write out ':' separator
+	MOV	#1,R1			; Write out the remainder as min
+	CALL	WRIDIG			; Write out minutes
+10$:	SUB	#WORK$,R0		; compute length of cpu string
+	MOV	#WORK$L,R2		; Get pointer to WORK$L
+	MOVB	R0,(R2)			; Make WORK$L an .ASCIC string
+	POP	<R5,R4,R1,R0>		; Restore registers
+	BR	CASCIC			; Go output the buffer
+
+;+
+; PARCHK	Write out parameter block if required
+;
+;		If ..PARM is patch to two NOP's, then the parameters
+;		will be passed to each file_spec in the entry.
+;-
+PARCHK:	MOV	JB.PAR(R1),R2		;Fetch offset to parameter block
+	BEQ	NXTTHR			;No parameters if zero
+..PARM::CLR	JB.PAR(R1)		;Only write parameters for 1st file
+	ADD	R1,R2			;Make R2 -> parameter block
+	BR	CASCIC			;Store the parameter block
+.ASSUME	PB.PMS	EQ <PB.PML+1>		;Make sure this will work
+
+;+
+; DELCHK	Check for file_spec deletion
+;
+;		The thread list is ended at this point unless the
+;		command file is to be deleted.  If that is true,
+;		then we will continue in the thread list.
+;-
+DELCHK:	BIT	#BA$DEL,FLAGS(R5)	;Are we supposed to delete the file?
+	BNE	NXTTHR			;Yes, back to thread land for delete
+RTS$PC:	RETURN				;End the thread here and now
+
+;+
+; FILSPC	Write out all the file_specs to the output buffer
+;
+;		Destroys R0 (Needs to pass it to FILTHR thread)
+;-
+	.ENABL	LSB
+FILSPC:	MOV	JB.FIL(R1),R0		;get offset to first file
+	MOV	R4,-(SP)		;Save current thread pointer
+10$:	ADD	R1,R0			;R0 -> file spec block
+	MOV	#FILSUB,R4		;Get thread list for file spec
+	CALL	@(R4)+			;Execute it
+	MOV	(R0),R0			;Find next file spec block
+.ASSUME	FB.NXT	EQ 0
+	BNE	10$			;Got one, go write it out
+	BR	20$
+
+;+
+; SUBTHR	Perform a threaded subroutine
+;-
+SUBTHR:	MOV	(R4)+,R3		; Fetch address of threaded subroutine
+	MOV	R4,-(SP)		; Save current thread pointer
+	MOV	R3,R4			; Copy new thread pointer
+	CALL	@(R4)+			; Go execute the new thread list
+20$:	MOV	(SP)+,R4		; Restore old thread pointer
+	JMP	@(R4)+			; Back to the original thread
+
+.SBTTL	THREAD	Thread lists
+
+	.PSECT	PURE
+;+
+; ENTSUB	Threaded subroutine to output entry spec
+;-
+
+ENTSUB:	THREAD	SEQTHR			; Sequence number
+	THREAD	IASCIC
+	 .ASCIC	< >			; " "
+	THREAD	QUETHR			; Queue name
+	THREAD	IASCIC
+	 .ASCIC	<:>			; ":"
+	THREAD	PPNTHR			; [p,pn]
+	THREAD	ENTTHR			; Entry name
+	ENDTHR				; End of subroutine thread
+
+;+
+; COMTH1	Threaded routine to build temporary .COM file (/NOLOG_FILE)
+;-
+COMTH1:	THREAD	IASCIC
+	 .ASCIC	<$_CLOSE/LOGFILE>
+	THREAD	NEWLIN
+	THREAD	TASCIC
+	 .WORD	INI$			;"$_@[0,1]LOGIN.COM"
+	THREAD	NEWLIN
+	ENDTHR
+
+;+
+; COMTH2	Threaded routine to build temporary .COM file (/LOG_FILE)
+;-
+COMTH2:	THREAD	IASCIC
+	 .ASCIC	<$_OPEN/LOGFILE/REPLACE/ENABLE/>
+	THREAD	STPCHK
+	THREAD	IASCIC
+	 .ASCIC	<TIMESTAMP >
+	THREAD	LOGTHR			;Write out the log file name
+	THREAD	NEWLIN			;End of line
+
+	THREAD	WRITE0			;'$_WRITE 0 "'
+	THREAD	TASCIC
+	 .WORD	BATSRV			;"* Batch Server "
+	THREAD	SRVTHR			;Server name
+	THREAD	NEWLN2			;'"<cr><lf>'
+
+	THREAD	WRITE0			;'$_WRITE 0 "'
+	THREAD	IASCIC
+	 .ASCIC	<* Processing entry >	;"* Processing Entry "
+	THREAD	SUBTHR			; Threaded subroutine
+	 .WORD	ENTSUB			; To output the entry spec
+	THREAD	NEWLN2			;'"<cr><lf>'
+
+	THREAD	WRITE0			;'$_WRITE 0 "'
+	THREAD	IASCIC
+	 .ASCIC	<* Executing command files:>
+	THREAD	NEWLN2			;'"<cr><lf>'
+
+	THREAD	FILSPC			; File spec loop
+
+	THREAD	WRITE0			;'$_WRITE 0 "'
+	THREAD	TASCIC
+	 .WORD	SPLAT$			;Line of asterisks
+	THREAD	NEWLN2			;'"<cr><lf>'
+
+	THREAD	WRITE0			;'$_WRITE 0 "'
+	THREAD	NEWLN2			;'"<cr><lf>'
+
+	THREAD	TASCIC
+	 .WORD	INI$			;"$_@[0,1]LOGIN.COM"
+	THREAD	NEWLIN			;End of line
+
+	THREAD	IASCIC
+	 .ASCIC	<$_SET VERIFY>		;"$_SET VERIFY"
+	THREAD	NEWLIN			;End of line
+
+	ENDTHR				;End of thread
+
+;+
+; FILSUB	Routine to display a file_spec by the temporary .COM file
+;-
+FILSUB:	THREAD	WRITE0			;'$_WRITE 0 "'
+	THREAD	IASCIC
+	 .ASCIC	<*    >			;'*    '
+	THREAD	FILTHR			;File_spec
+	THREAD	NEWLN2			;'"<CR><LF>'
+	ENDTHR
+
+;+
+; AT$THR	Routine to execute a file_spec by the temporary .COM file
+;-
+AT$THR:	THREAD	IASCIC
+	 .ASCIC	<$_@>			;'$_@'
+	THREAD	TASCIC
+	 .WORD	WORK$L			;File_spec
+	THREAD	IASCIC
+	 .ASCIC	< >			;<space>
+	THREAD	PARCHK			;Parameters, if specified
+	THREAD	NEWLIN			;End of line
+
+	THREAD	DELCHK			;End of thread unless /DELETE
+	THREAD	IASCIC
+	 .ASCIC	<$_IF $SEVERITY THEN _DELETE >
+	THREAD	TASCIC
+	 .WORD	WORK$L			;File_spec
+	THREAD	NEWLIN			;End of line
+
+	ENDTHR				;End of thread
+
+;+
+; EX$THR	Routine to ensure entry's EXIT status is correct
+;-
+
+EX$THR:	THREAD	IASCIC							;033
+	 .ASCIC	<$_EXIT $STATUS>	;Explicit $_EXIT with $STATUS	;033
+	THREAD	NEWLIN			;End of the line, pilgrim	;033
+	ENDTHR				;End of the thread, too		;033
+
+;+
+; STSTHR	Routine to append final status to entry's log file
+;-
+
+STSTHR:	THREAD	NEWLIN			;Blank line
+	THREAD	TIMSTP			;Time-stamp
+	THREAD	TASCIC
+	 .WORD	SPLAT$			;Line of asterisks
+	THREAD	NEWLIN			;End of line
+
+	THREAD	TIMSTP			;Time-stamp
+	THREAD	TASCIC
+	 .WORD	BATSRV			;'* Batch server '
+	THREAD	SRVTHR			;Server name
+	THREAD	NEWLIN			;End of line
+
+	THREAD	TIMSTP			;Time-stamp
+	THREAD	IASCIC
+	 .ASCIC	<* Ending entry >	;'* Ending entry '
+	THREAD	SUBTHR			;Threaded subroutine
+	 .WORD	ENTSUB			;  to output the entry spec
+	THREAD	NEWLIN			;End of line
+
+	THREAD	TIMSTP			;Time-stamp
+	THREAD	IASCIC
+	 .ASCIC	<* Exit status = >	;'* Exit status = '
+	THREAD	EOJTHR			;Exit status
+	THREAD	NEWLIN			;End of line
+
+	THREAD	TIMSTP			;Time-stamp
+	THREAD	IASCIC
+	 .ASCIC	<* Total CPU time     = >
+	THREAD	CPUTHR			;Total CPU time
+	THREAD	NEWLIN			;End of line
+
+	THREAD	TIMSTP			;Time-stamp
+	THREAD	IASCIC
+	 .ASCIC	<* Total elapsed time = >
+	THREAD	TIMTHR			;Total elapsed time
+	THREAD	NEWLIN			;End of line
+
+	ENDTHR				;End of thread
+
+.SBTTL	The End
+
+
+
+	.END

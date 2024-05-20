@@ -1,0 +1,443 @@
+.INCLUDE	/CMN:COMMON/						;015
+.INCLUDE	/CMN:KERNEL/						;015
+.INCLUDE	/CMN:FLDEF/						;015
+.INCLUDE	/CMN:KBDEF/						;015
+.INCLUDE	/CMN:PFBDEF/						;015
+TITLE	PFB,<PERMANENT FILE HANDLING CODE>,0A,10-MAY-91,BSB/GPK/KPH/GMB/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for PFB
+
+;+
+;
+;  000	BSB  30-Jun-83	CREATION - [RSTS V9.0]
+;  001	BSB  10-Aug-83  Fix Error message if no PFB to work with
+;  002	GPK  02-Nov-83	Add ICFP stuff
+;  003	GPK  06-Jan-84	Shuffle some functions among the overlays
+;  004	GPK  07-Jan-84	Add JBF.PF subfunction
+;  005	GPK  22-Feb-84	Add exit status to JBF.PF
+;  006	GPK  20-Apr-84	Move PFBIO to EM2 phase
+;  007	KPH  29-Aug-84	Changes for APR5 FIP pool
+;  008	GPK  17-Oct-84	Add SET [NO]ECHO; CRLF at log flush
+;  009	KPH  24-Oct-84	Changes for "worst exit status", add counters
+;  010	KPH  29-Nov-84	Put counters back in; bugfix in 009
+;  011	KPH  27-Feb-85	Make JBF.PF function always resident
+;
+;			[RSTS V9.2]
+;  012  KPH  09-Aug-85	Add job control region
+;
+;			[RSTS V9.3]
+;  013  KPH  19-Nov-86	Get RMS EOF for ICF CCB
+;
+;			[RSTS V9.4]
+;  014  GMB  17-Feb-87	Prevent returning EOF position with -1 byte offset
+;			Don't return EOF error when positioning after EOF
+;			Check high order VBN for correctness in PFBPOS
+;
+;			[RSTS V10.0]
+;  015	JFM  06-Mar-90	Return /END_OF_DATA character on set/clear flags call
+;			Added .INCLUDEs
+;-
+
+	IONLY			; Invoke I-only FIP macros		;007
+
+FQFSRT	PFB,LODABL		; Set FIP overlay start			;007
+
+.ENABL	LSB
+
+;+
+; .PFB entry point and dispatching code
+;	
+;	R0 =  Job number * 2
+;	R1 -> JDB
+;	R2 -> JDB2
+;	R4 -> WRK containing User's FIRQB
+;		FQFIL = PFB Subfunction code			( Byte )
+;		FQPPN = IOB Channel to use in call 		( Byte )
+;		FQNAM1= PFB Channel to use in call		( Byte )
+;	
+;	Register setup for dispatch:
+;
+;	R0 ->	PFB entry for channel
+;	R1 ->	IOB
+;	R2 ->	JDB
+;	R3 ->	WRK containing User's FIRQB
+;		  FQNENT = MMU address to map job's JCR entry
+;	R4 =	PFB channel number (* 2)
+;
+;-
+
+	FQFENT	PFB,,<4,6,10,12,14,16,20,22,24,26,30,32,34>		;012
+
+	MOV	R1,-(SP)	; Stash away JDB pointer		;012
+	MOV	(R1),-(SP)	; Stash away IOB pointer		;012
+.ASSUME	JDIOB EQ 0
+	MOVB	FQFIL(R4),R5	; Pick up the subfunction code
+	MOV	R4,R3		;   and move WRK pointer out of harms way
+	MOVB	FQNAM1(R3),R4	; Get PFB channel number (x2)
+	BITB	#^C<15.*2>,R4	; Legal channel number?
+	BNE	80$		; Nope, so sad, Error
+	CALLX	GETJCR		; Get JCR entry info for this job	;012
+	MOV	R2,FQNENT(R3)	; Stash JCR mapping			;012
+	MOV	R1,R0		; Copy pointer to JCR entry		;012
+	ADD	#JCPFB,R0	; Point to start of PFB channels	;012
+	ADD	R4,R0		; Offset to the requested channel	;012
+	MOV	(SP)+,R1	; Pick up pointer to IOB		;012
+	MOV	(SP)+,R2	; Restore pointer to JDB		;012
+
+20$:	ASL	R5		; Get code times 2 for word offset
+	CMP	R5,#MAXFUN	; Check for legal function code		;002
+	BHIS	60$		; Ugh					;002
+	ADD	R5,PC		; Go for it...
+30$:	 BR	PFBMOV		; 0 -- Move to PFB			;003
+	 BR	PFBMOV		; 1 -- Move from PFB			;003
+	 BR	40$		; 2 -- Set/clear flags			;003
+	 BR	50$		; 3 -- Set position			;003
+	 BR	PFBSTA		; 4 -- Get status
+
+MAXFUN	=:	. - 30$		; First illegal function code
+
+40$:	FJMP	PFBSET							;003
+50$:	FJMP	PFBPOS							;003
+
+60$:	ERROR	BADFUO		; No PFB to work with for that Subfunction
+80$:	ERROR	BSERR		; Illegal channel number
+
+.SBTTL	PFBSTA - return PFB channel status
+
+;+
+;
+;	R0 ->	PFB entry for channel (but not mapped!)
+;	R1 ->	IOB
+;	R2 ->	JDB
+;	R3 ->	WRK containing User's FIRQB
+;	R4 =	PFB channel number
+;
+;	This function is used to find out whether a PFB channel is
+;	open or not.  For log and ICF channels, it also returns
+;	additional information:
+;
+;	FQNAM1+2 = Position (low order) of start of record just read
+;	FQEXT	= Position (high order)
+;	FQBUFL	= Offset within current buffer
+;	FQFLAG	= Flags for file
+;	FQPROT	= Command line flag character
+;	FQSIZ	= Length of current record				;003
+;	FQDEV	= Driver index (0 for disk, non-zero otherwise)		;003
+;
+;	Note that position and flag are only meaningful for the ICF channel
+;
+;-
+
+PFBSTA:	MAP	FQNENT(R3),APR=6,DATA,PIC ;Map the JCR entry		;012
+	MOV	(R0),R0		;Get CBB/WCB/DDB pointer
+	BEQ	120$		;Not open, say so
+	CLR	FQDEV(R3)	;Clear out a word for driver index	;003
+	CMP	R4,#PF$DAT*2	;Is it normal or ICF/LOG channel?
+	BLO	100$		;ICF/LOG, process it			;003
+	MAP	FIPPOL		;Restore FIP pool mapping for WCB/DDB	;012
+	MOVB	(R0),FQDEV(R3)	;Put the driver index in		;003
+	BR	110$		;Now we're done				;003
+
+100$:	MOV	R3,R1		;Copy FIRQB pointer			;003
+	MOV	R0,R4		;Copy CBB pointer
+	CALLX	MAPBUF		;Now map it
+	MOV	PF.SVL(R3),FQNAM1+2(R1) ;Return position
+	MOVB	PF.SVH(R3),FQEXT(R1) ; and high order
+	CLRB	FQEXT+1(R1)	;Force high order byte clear
+	MOV	PF.SBY(R3),FQBUFL(R1) ;Return buffer offset
+	BEQ	105$		;Don't dec if at EOF			;014
+	DEC	FQBUFL(R1)	;Fix up to point back at start of record ;003
+105$:	MOV	PF.SCN(R3),FQSIZ(R1) ;Return size of this record	;014
+	INC	FQSIZ(R1)	;Fix up to account for first char	;003
+	MOV	PF.FLG(R3),FQFLAG(R1) ;Return flags
+	MOVB	PF.CLF(R3),FQPROT(R1) ;Return command line flag character
+110$:	MAP	FIPPOL,DATA,PIC	;Restore FIP mapping
+	RETURN			;Done
+
+120$:	ERROR	NOTOPN		; Can't use a channel that isn't open
+
+.SBTTL	PFBMOV - Handle move to/from the PFB calls
+
+;+
+;
+;	R0 ->	PFB entry for specified PFB channel (but not mapped!)
+;	R1 ->	IOB
+;	R2 ->	JDB
+;	R3 ->	WRK containing User's FIRQB
+;		FQSIZM   = Record format flags (ICF)
+;		FQNAM1+1 = MSB of block number of last used block (ICF)
+;		FQNAM1+2 = LSB of block number of last used block (ICF)
+;		FQEXT    = Number of bytes used in last record (ICF)
+;		FQSIZ    = Record size (ICF, RF.FIX only)
+;		FQFLAG   = Log file flags
+;	R4 =	PFB channel number
+;
+;-
+
+PFBMOV:	MOVB	FQPPN(R3),R5	; Get IOB channel number (x2)
+	BEQ	80$		; Can't move channel 0!
+	BITB	#^C<15.*2>,R5	; Legal channel number?
+	BNE	80$		; Nope, too bad, Error
+	ADD	R1,R5		; Yep, make R5 -> IOB channel address
+	MOV	R5,-(SP)	; Save the IOB pointer
+	MOV	R4,-(SP)	;  and the PFB channel number
+	TSTB	FQFIL(R3)	; What is the function code?
+	BNE	170$		; Non-zero, must be "MOVE FROM PFB"
+	MAP	FQNENT(R3),APR=6,DATA,PIC,R=R4 ;Map JCR for PFB channel	;013
+	TST	(R0)		; Is channel in use?			;012
+	BNE	160$		; Yup! Can't clobber another open file
+	MAP	FIPPOL		; Re-map FIP pool for the IOB		;012
+	MOV	(R5),R4		; Get channel's WCB/DDB pointer
+	BEQ	120$		; Can't move a closed channel..
+	MOV	R3,R1		; Copy FIRQB pointer
+	MOV	#DDRLO,R5	; Flag to check
+	CMPB	(SP),#PF$ICF*2	; Check type of channel
+	BHI	145$		; Just a data channel
+.ASSUME	PF$DAT EQ PF$ICF+1
+	BEQ	130$		; ICF
+	ASL	R5		; Log, so have to check for write lock
+.ASSUME	DDWLO EQ DDRLO*2
+130$:	BIS	#DDNFS!WC$UPD!WC$UFD!377,R5 ;Also check these flags
+	BIT	R5,(R4)		; Legal file?
+.ASSUME	DDIDX EQ 0
+	BNE	230$		; No, reject
+	MOV	R4,R5		; Save the WCB pointer
+	MOV	R1,-(SP)	; Save useful registers
+	MOV	R2,-(SP)
+	MOV	#CBB$SZ,R1	; Set up size for a CBB			;007
+	MOV	#-1,R2		; Never use the monitor's pool		;007
+	MOV	#LRGPOL,R4	; Get the buffer from LRGPOL		;007
+	CALLX	BUFFR4,R5	; Allocate the CBB			;007
+	MOV	(SP)+,R2	; Restore saved registers
+	MOV	(SP)+,R1
+	BCS	220$		; No room, error
+	INC	@#USETBL+UT.PFB	; Indicate that we are using more XBUF	;010
+	CALLX	MAPBUF		; Map it
+	MOV	R3,-(SP)	; Copy the pointer
+	ADD	#CBB$SZ,R3	; Point above CBB
+140$:	CLR	-(R3)		; Clear it out
+	CMP	R3,(SP)		; Done?
+	BHI	140$		; Not yet
+	TST	(SP)+		; Clean up the stack
+	MOV	R5,PF.WCB(R3)	; Store WCB address
+	TSTB	(SP)		; Which channel was that again?
+	BEQ	150$		; Log
+.ASSUME	PF$LOG EQ 0
+	INC	PF.VBL(R3)	; Set VBN = 1
+	MOV	#PF.ACT!PF.INV!PF.BOR,PF.FLG(R3) ; Initialize flags
+	MOVB	FQSIZM(R1),PF.RFM(R3) ; Set record format
+	MOVB	FQNAM1+1(R1),PF.EBM(R3) ; Set MSB of EOF block		;013
+	MOV	FQNAM1+2(R1),PF.EBL(R3) ;  And LSB of EOF block		;013
+	MOV	FQEXT(R1),PF.EOF(R3) ;      and EOF byte		;013
+	MOV	FQSIZ(R1),PF.RSZ(R3) ;       and record size
+	MOVB	#'$,PF.CLF(R3)	; Default command line flag is "$"
+	BIS	#J2ICF,JDFLG3(R2) ; Mark ICF active in JDB		;012
+145$:	MAP	FQNENT(R1),APR=6,DATA,R=2,PIC ;Map JCR entry		;012
+	MOV	R4,(R0)		; Move the channel over and...
+	TST	(SP)+		; Pop the PFB channel number
+	MAP	FIPPOL		; Restore FIP pool mapping		;012
+	CLR	@(SP)+		; Clear (close) the IOB file
+	RETURN			; All done, bye
+
+150$:	CMP	-(SP),-(SP)	; Push two holes onto the stack
+	MAP	PUSH,DATA,PIC,APR=6 ; Save CBB mapping
+	MAP	FIPPOL,DATA,PIC	; Map FIP again
+	FJMP	LOGOPN		; Go finish up log file setup
+
+160$:	ERROR	NOTCLS		; Destination channel already opened
+
+GLOBAL	<LRGPOL,USETBL>							;012
+
+; Close PFB channel (move to IOB)
+
+170$:	TST	(R5)		; Is the IOB channel in use ( =0 )?
+	BNE	160$		; Yup! Can't bomb out an open file
+	MAP	FQNENT(R3),APR=6,DATA,PIC,R=R4 ;Map the job's JCR entry	;013
+	MOV	(R0),R4		; Get PFB channel contents
+	BEQ	120$		; Error if not open
+	MOV	#J2ICF,R5	; Get ICF active flag
+	CMPB	(SP),#PF$ICF*2	; What type of channel?
+	BHI	190$		; Normal one, that's easy
+.ASSUME	PF$DAT EQ PF$ICF+1
+	BEQ	180$		; ICF, skip log file flush check
+	SWAB	R5		; Change to log flag
+.ASSUME	J2LOG EQ J2ICF*400
+	MOV	R0,-(SP)	; Save a register
+	MOVB	FQJOB(R3),R0	; Get caller's job number
+	CALLM	LFLUSH,EM2AP5	; Flush the log				;006
+	BCS	220$		; Quit if we needed DSQ and there wasn't one
+	MOV	(SP)+,R0	; It was clean, good
+180$:	BIC	R5,JDFLG3(R2)	; Clear the appropriate active flag	;012
+	MOV	R3,-(SP)	; Save FIRQB pointer			;012
+	CALLX	MAPBUF		; Map the CBB
+	MOV	PF.WCB(R3),R5	; Retrieve the WCB pointer
+	MOV	#CBB$SZ,(R3)	; Set the CBB size
+.ASSUME	BF.SIZ EQ 0
+	BUFFER	RETURN		; Release it
+	DEC	@#USETBL+UT.PFB	; And update the counter		;010
+	MOV	(SP)+,R3	; Restore FIRQB pointer			;012
+	MOV	R5,R4		; Now put WCB pointer in R4 for move
+190$:	TST	(SP)+		; Pop PFB channel number
+	MAP	FQNENT(R3),APR=6,DATA,PIC,R=R3 ;Map the PFB channel	;013
+	CLR	(R0)		; Mark the PFB channel closed
+	MAP	FIPPOL		; Restore FIP pool mapping		;012
+	MOV	R4,@(SP)+	; Move WCB/DDB pointer into IOB
+	RETURN			; That's all folks!
+
+220$:	ERROR	NOBUFS		; Can't allocate the CBB
+
+230$:	ERROR	PRVIOL		; Wrong type of file or read- or write-locked
+
+.DSABL	LSB
+
+GLOBAL	<USETBL>							;012
+
+FQFEND
+
+FQFSRT									;003
+
+.SBTTL	PFBPOS - Set position on indirect command file
+
+.ENABL	LSB								;003
+
+;+
+;
+;	R0 ->	PFB entry for channel (but not mapped!)
+;	R1 ->	IOB
+;	R2 ->	JDB
+;	R3 ->	WRK containing User's FIRQB
+;		FQNAM1+2 = New VBN, low order
+;		FQEXT	 = New VBN, high order
+;		FQBUFL	 = New byte offset (0-512.)
+;		FQSIZ	 = New recordsize for this record		;003
+;	R4 =	PFB channel number
+;
+;-
+
+PFBPOS:	CMP	R4,#PF$ICF*2	;Must specify indirect file
+	BNE	60$		;All others are wrong
+	CMP	FQBUFL(R3),#PF$BSZ ;Legal offset?
+	BHI	50$		;No
+	MOV	R3,R1		;Copy FIRQB pointer
+	MAP	FQNENT(R1),APR=6,DATA,PIC,R=R4 ;Map JCR entry for PFB	;013
+	MOV	(R0),R4		;Get CBB pointer
+	BEQ	100$		;Not open
+	CALLX	MAPBUF		;Go map it
+	MOV	PF.WCB(R3),R5	;Get WCB for channel
+	MAP	FIPPOL,DATA,PIC	;Map FIP's pool again
+	MOV	W$FCB(R5),R5	;Now point to FCB
+	TSTB	FQEXT(R1)	;Is high order VBN ok?			;014
+	BMI	50$		;No, give error				;014
+	CALLX	MAPBUF		;Map the CBB again
+	CMP	FQNAM1+2(R1),PF.VBL(R3) ;Same low order VBN?
+	BNE	20$		;No, mark buffer invalid
+	CMPB	FQEXT(R1),PF.VBH(R3) ;How about high order?
+	BEQ	30$		;Yes, so buffer is still as good as before
+20$:	BIS	#PF.INV,PF.FLG(R3) ;Mark buffer no longer valid
+30$:	MOV	FQNAM1+2(R1),PF.VBL(R3) ;Set low order position
+	MOVB	FQEXT(R1),PF.VBH(R3) ; and high order
+	MOV	FQBUFL(R1),PF.BYT(R3) ;  and position
+	MOV	FQSIZ(R1),PF.CNT(R3) ;    and recordsize		;003
+	BIS	#PF.BOR,PF.FLG(R3) ;Indicate we're at start of record	;003
+	MAP	FIPPOL,DATA,PIC	;Fix mapping
+	RETURN			;Done
+
+50$:	ERROR	BADCNT		;Invalid offset value
+60$:	ERROR	BSERR		;Illegal channel number			;003
+
+.SBTTL	PFBSET - Set ICF/Log file flags
+
+;+
+;
+;	R0 ->	PFB entry for channel (but not mapped!)
+;	R1 ->	IOB
+;	R2 ->	JDB
+;	R3 ->	WRK containing User's FIRQB
+;		FQFLAG = bits to set
+;		FQBUFL = bits to clear
+;		FQPROT = new command line flag character or 0 for no change
+;	R4 =	PFB channel number
+;
+;-
+
+PFBSET:	MOV	#^C<PF.ACT>,R5	; Legal flags to set on ICF		;003
+	MOV	#J2ICF,R1	; Flag for log active
+	CMPB	R4,#PF$ICF*2	; What type of channel?
+	BHI	60$		; Data, error
+	BEQ	70$		; ICF, move on
+	MOV	#^C<PF.ACT!PF.TIM>,R5 ; Legal flags for log
+	SWAB	R1		; Change to log active flag
+.ASSUME	J2LOG EQ J2ICF*400
+	CLRB	FQPROT(R3)	; No delimiter setting
+70$:	MAP	FQNENT(R3),APR=6,DATA,PIC,R=R4 ;Map the JCR entry	;013
+	MOV	(R0),R4		; Get CBB address
+	BEQ	100$		; Not open!
+	MOV	R3,R0		; Copy FIRQB pointer
+	CALLX	MAPBUF		; Map the CBB
+	BIC	R5,FQBUFL(R0)	; Make the user's flag words legal
+	BIC	R5,FQFLAG(R0)	;  both of them
+	BIC	FQBUFL(R0),PF.FLG(R3) ; Clear some bits
+	BIS	FQFLAG(R0),PF.FLG(R3) ;  then set some others
+	TSTB	FQPROT(R0)	; Any end of data character		;015
+	BNE	75$		; Yes, then go change it to new one	;015
+	MOVB	PF.CLF(R3),FQPROT(R0) ; No, then return current to user	;015
+75$:	MOVB	FQPROT(R0),PF.CLF(R3) ; Store end of data character 	;015
+80$:	BIC	R1,JDFLG3(R2)	; Assume not active now			;012
+	BIT	#PF.ACT,PF.FLG(R3) ; Correct?
+	BEQ	90$		; Yes
+	BIS	R1,JDFLG3(R2)	; No, so set the active bit		;012
+90$:	MAP	FIPPOL,DATA,PIC	; Fix mapping
+	RETURN			; Done
+
+100$:	ERROR	NOTOPN		; Can't use a channel that isn't open
+
+.DSABL	LSB
+
+;+
+; Finish setting up log file info
+;-
+
+LOGOPN:	MOV	(SP),-(SP)	; Replicate CBB mapping
+	MAP	POP,DATA,PIC,APR=6,R=R5 ; Map CBB
+	MOV	PF.WCB(R3),R5	; Get WCB pointer
+	MAP	FIPPOL,DATA,PIC	; Now map FIP pool
+	MOV	W$FCB(R5),R5	; Get FCB pointer
+	MOV	F$SIZL-F$CLUS(R5),4(SP) ; Get low order file size
+	MOVB	F$SIZM-F$CLUS(R5),2(SP) ;  and high order size
+	MAP	POP,DATA,PIC,APR=6,R=R5 ; Restore CBB mapping
+	MOVB	(SP)+,PF.VBH(R3) ; Set current block number
+	MOV	(SP)+,PF.VBL(R3) ;  = end of file (to append)
+	MOV	FQFLAG(R1),R5	; Get user supplied log flags
+	BIC	#^C<PF.TIM>,R5	; Leave only legal ones
+	BIS	#PF.ACT,R5	;  plus some of our own
+	BIS	R5,PF.FLG(R3)	; Set it up
+	BIS	#J2LOG,JDFLG3(R2) ; Mark logfile active in JDB		;012
+	MAP	FQNENT(R1),APR=6,DATA,PIC,R=R5 ;Map the JCR entry	;013
+	MOV	R4,(R0)		; Move the channel over and...
+	TST	(SP)+		; Pop the PFB channel number
+	MAP	FIPPOL		; Restore FIP pool mapping		;012
+	CLR	@(SP)+		; Clear (close) the IOB file
+	RETURN			; All done, bye
+
+FQFEND
+
+	.END

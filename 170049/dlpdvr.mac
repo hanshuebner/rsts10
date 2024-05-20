@@ -1,0 +1,274 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+TITLE	DLPDVR,<DL-11 compatible port driver>,0A,10-MAY-91,KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	DLPDVR EDIT HISTORY
+
+;+
+;  000  KPH  28-Jun-87	Creation - extract from TTDVR.MAC
+;-
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	DLPDVR
+
+.SBTTL	KP$SEC	Once a second service
+
+;+
+; KP$SEC - Once a second service                        
+;
+;	C  =  0 if no hangup
+;	C  =  1 if port driver should hangup modem
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;
+;	Priority is Pr3
+;
+; This routine is called once a second by the class driver for port
+; specific checking.
+;-
+
+.ENABL	LSB
+
+	PRTENT	SEC		;Once a second service  
+
+	ROR	-(SP)		;Save hangup flag
+	MOV	#100040,R5	;DATASET STATUS CHANGE + IE ON DL11E
+	MOV	#10000,R4	;CARRIER DETECTOR IS BIT 12 ON DL11E
+	BIC	(R3),R5		;IF IE+STATUS CHANGE BOTH SET, THEN
+	BEQ	10$		;IT FORGOT TO INTERRUPT. SO BRANCH !!
+	MOV	(R3),R5		;GET CONTENTS OF INPUT CSR
+	BIC	#^C<300>,R5	;LEAVE ONLY RDY+IE BITS
+	SUB	#100,R5		;NOW REMOVE THE IE BIT
+	BEQ	20$		;IF ONLY BIT ON THEN ALL O.K.
+10$:	CLR	R2		;INDICATE NO "SILO" DATA
+	LOG$KB			;LOG THE TERMINAL INPUT HANG
+	INC	TTYHCT		; AND COUNT AS A "HUNG" TERMINAL
+	BIC	#140,(R3)	;NOW TRY TO UNHANG THE ANIMAL
+	TST	2(R3)		; BY FIDDLING WITH THE STATUS BITS
+20$:	BIS	#140,(R3)	;INTERRUPT ENABLE INPUT CSR
+	BIT	#TTMODM,TTINTF(R1) ;DATASET TYPE LINE?
+	BEQ	40$		;NOPE, SO NO CARRIER TESTS
+	SPLC	5		;;GO TO LEVEL 5 FOR SAFETY
+	TST	(SP)		;;SHOULD WE HANGUP DATASET ?
+	BMI	90$		;;YES					
+	TSTB	MODCLK(R1)	;;TIMING OUT?
+	BNE	30$		;;YES, SO LEAVE IT ALONE
+	BIT	R4,(R3)		;;NO, IS CARRIER ON??
+	BEQ	90$		;;NOPE, SO HANG IT UP FOR GOODNESS	
+	TST	MODCLK(R1)	;;YES, BUT IS IT ALREADY ENABLED?
+	BPL	30$		;;YES, SO LEAVE AS IS
+.ASSUME	TTDSBL	EQ	100000
+	CALLX	DDBSET		;;ELSE SET UP THE DDB
+30$:	BIS	#146,(R3)	;;ENSURE EI+DATASET IE+RQS+DTR ARE ON
+40$:	SPLC	3		;;BACK TO LEVEL 3 AGAIN
+	ADD	#4,R3		;BUMP R3 TO OUTPUT CSR
+	BIC	#4,(R3)		;CLEAR MAINT. BIT ALWAYS
+	BIT	#TTDSBL!TTWRC,MODCLK(R1) ;IS THIS TERMINAL HUNG
+	BMI	80$		;YES, BUT SKIP ANY CHECK IF DISABLED
+	BNE	50$		;YES
+.ASSUME	TTDSBL	EQ	100000
+	BIT	#TTHUNG,DDFLAG(R1) ;WAS IT FLAGGED HUNG ?
+	BNE	60$		;NO
+50$:	BIS	#TTHUNG,DDFLAG(R1) ;AVOID RACE CONDITION BY SETTING THIS NOW
+	MOV	(R3),R5		;GET CONTENTS OF OUTPUT CSR
+	ASLB	R5		;C-BIT='RDY'; N-BIT='IE'
+	BMI	80$		;START A TIMEOUT IF INTERRUPT ENABLED
+	BCS	70$		;ALL IS O.K. IF JUST READY
+60$:	CLR	R2		;INDICATE NO "SILO" DATA
+	LOG$KB			;LOG THE TERMINAL OUTPUT HANG
+	INC	TTYHCT		; AND COUNT AS A "HUNG" TERMINAL
+	BIC	#100,(R3)+	;TRY CLEARING INTERRUPT ENABLE
+	CLR	(R3)		; AND SENDING A NULL TO TERMINAL
+	BIS	#100,-(R3)	;  THEN RE-SETTING INTERRUPT ENABLE
+70$:	BIC	#TTHUNG,DDFLAG(R1) ;SAY O.K. FOR THIS TIME AROUND
+80$:	TST	(SP)+		;Dump the hangup flag
+	RETURN			;NOW EXIT
+
+90$:	MOV	#100140,(R3)	;;SET CSR TO HUNG UP STATE
+	BIC	#100!1,4(R3)	;;Disable the output side
+	SPLC	3		;Enable interrupts
+	TST	(SP)+		;Dump hangup flag
+	JMPX	TTHGLN		;And finish in common processing
+
+GLOBAL	<LOG$KB,TTYHCT>							
+
+.DSABL	LSB
+
+.SBTTL	FIELD TERMINAL INTERRUPTS (NON-MULTIPLXED)
+
+;+
+; SLINT? -  INPUT INTERRUPT SERVICE FOR NON-MULTIPLEXED LINES.
+;		?=0,1,2,3,... (FOR KL, DL, DE)
+;
+;	R0 =  UNIT NUMBER FOR THIS INTERRUPT TIMES 2
+;	PRIORITY IS INTERRUPT PRIORITY
+;
+;	...
+;
+;	RETURN
+;-
+
+
+	TMPORG	DLKINT,6
+	 .WORD	SLINT0
+
+	TMPORG	DLKINT,20+6
+	 .WORD	SLINT1
+	UNORG
+
+SLINT1:	ADD	#16.,R0		;;Set up for units 16-31
+SLINT0:	MOV	DEV.KB(R0),R1	;;Get the DDB pointer
+	MOV	CSR.KB(R0),R3	;;Get the CSR pointer
+	MOV	(R3)+,R2	;;Get contents of input CSR
+	BPL	10$		;;Data interrupt, process that
+	CMPB	#TTDE11,TTINTF(R1) ;;Is this a DL-11E?
+	BNE	10$		;;No, device must be confused
+	BIT	#TTMODM,TTINTF(R1) ;;Yes, but are we in modem mode?
+	BEQ	20$		;;No, forget the interrupt
+	TST	(R3)		;;Yes, read data CSR to reset device
+	BR	CHKCAR		;;And go off to carrier checking
+
+10$:	MOV	(R3),R2		;;It was a data interrupt, get the data
+	BIS	#140,-(R3)	;;Now ensure IE stays on...
+	CALLRX	TTINCH		;;And process the input data
+
+20$:	RETURN			;;All done
+
+GLOBAL	<DEV.KB,CSR.KB>
+
+;+
+; SLONT? - OUTPUT INTERRUPT SERVICE FOR NON-MULTIPLEXED LINES.
+;		?=0,1,2,3,... (FOR KL, DL, DE)
+;
+;	R0 =  UNIT NUMBER FOR THIS INTERRUPT TIMES 2
+;	PRIORITY IS INTERRUPT PRIORITY
+;
+;	...
+;
+;	RETURN
+;-
+
+	TMPORG	DLKINT,16
+	 .WORD	SLONT0
+
+	TMPORG	DLKINT,20+16
+ 	 .WORD	SLONT1
+	UNORG
+
+SLONT1:	ADD	#16.,R0		;;Set up for units 16-31
+SLONT0:	MOV	#100,-(SP)	;;PUT THE IE BIT ON THE STACK
+	MOV	DEV.KB(R0),R1	;;GET THE DDB POINTER
+	MOV	CSR.KB(R0),R3	;;GET THE CSR POINTER
+	JMPX	TTOUT		;;Now go to the non-DMA output routine
+
+GLOBAL	<DEV.KB,CSR.KB>
+
+.SBTTL	KP$DTR	Set DTR for interface
+
+;+
+; KP$DTR - Set DTR for interface
+;
+;	R0 =  Keyboard number times two
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;
+; This routine is used by the class driver to set DTR on a modem control
+; interface.
+;-
+
+	PRTENT	DTR
+
+	MOV	(R3)+,R2	;;GET CURRECT LINE STATUS
+	BIS	#40000,R2	;;FORCE RING (DL11E=>BIT 14)
+CHKCAR:	MOV	#10000,R5	;;SET BIT FOR CARRIER ON/OFF CHECKING
+	BIT	R2,#2		;;IS DTR ON NOW?
+	BNE	10$		;;YES, SO CHECK CARRIER STATUS
+	ASL	R5		;;NO, SHIFT CARRIER BIT AND
+	ASL	R2		;;CHECK FOR RING INTERRUPT
+	BPL	20$		;;NOT RING, SO IGNORE INTERRUPT
+	MOV	#146,-(R3)	;;RING, SO SET IE+DATASET IE+RQS+DTR
+	JMPX	TTMRNG		;;And process the ring in the class driver
+
+10$:	JMPX	TTMCAR		;;And process carrier checking in class driver
+
+20$:	RETURN			;;All done
+
+.SBTTL	KP$OUT	Output a character
+
+;+
+; KP$OUT - Output a character
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R2 =  Character to output
+;	R3 -> CSR
+;	Priority is PR5
+;
+; This routine is called by the class driver to output a character. We
+; will write the character directly into the CSR if it is not busy,
+; otherwise we will buffer the character.
+;-
+
+.ENABL	LSB
+
+	PRTENT	OUT		;;Output a character
+
+	ADD	#4,R3		;;POINT TO OUTPUT REGISTER
+	BIT	(R3)+,#100	;;ACTIVE?
+	BNE	10$		;;IF SO, THEN WE MUST BUFFER CHARACTER	
+	TST	DDFLAG(R1)	;;STALLED FOR PAGING?
+	BMI	10$		;;YES, JUST BUFFER CHARACTER
+.ASSUME	TTSTOP	EQ	100000
+	MOV	R2,(R3)		;;OUTPUT THE CHARACTER
+	BIS	#100,-(R3)	;;ENABLE THE INTERRUPT
+	RETURN			;;RETURN				
+
+10$:	JMPX	TTSTOR		;;Have the class driver buffer character
+
+.DSABL	LSB
+
+.SBTTL	KP$SRT	Start up output
+
+;+
+; KP$SRT - Start up output
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;
+; This routine is used to start up any output which has been bufferred
+; for the interface. We will request an output interrupt, and do the
+; actual work in the interrupt service routine.
+;-
+
+	PRTENT	SRT		;;Output data which has been bufferred
+
+	BIS	#100,4(R3)	;;ENABLE XMIT ON SINGLE LINE INTERFACE
+	RETURN			;;And we're done
+
+.END

@@ -1,0 +1,3867 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.INCLUDE	/CMN:KERNEL.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.LIBRARY	/DCL:DCLMAC.MLB/
+.NLIST
+.INCLUDE	/CMN:PFBDEF.MAC/
+.INCLUDE	/DCL:DCLPFX.MAC/
+.LIST
+TITLE	DCLSYM,<DCL Symbol Table Management>,0C,19-JUL-91,GMB/JFM/BGN/BTK/BTB/DLS
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR DCLSYM
+;+
+;
+;		[RSTS V9.3]
+;
+;  001	GMB  01-Nov-85	Let there be light.  This file was created from
+;			scratch using the previous DCLSYM as a reference.
+;  002  GMB  08-Dec-86	Make local symbol table pointers relocatable when
+;			saving and restoring.  Compute correct FRESIZ on
+;			restore.
+;  003  GMB  20-Feb-87	Added comments.  Began changes for all relative
+;			pointers.  Made TEMP01 global.  Defined $PROMPT and
+;			$LOGFILE_PROMPT.  Added GOSUB/RETURN support.  Added
+;			GBGFLG (garbage collector activity flag).  Removed
+;			SAVENT in favor of searching for entry if needed.
+;			Split GETENT into GETENT and MAKENT.  Made GETPOS
+;			out of common code.  Added POPPOS & PSHPOS routines.
+;			Carve local table out of global free pool if we can.
+;  004  GMB  18-Mar-87	Fixed garbage collector bug - didn't update SCOPE
+;  005  GMB  01-Apr-87	Add comments. Remove alternate names for NAMABB, NAMLNG.
+;
+;		[RSTS V9.4]
+;
+;  006	JFM  20-Apr-87	Initialize STFILE flag in REASTB subroutine
+;
+;		[RSTS V9.5]
+;
+;  007	JFM  27-May-87	Don't call JBFPFB in SAVSTB ... it wipes out last exit
+;			status.  Temporary fix.
+;  008	BGN  18-Jun-87	Fix garbage collector munging symbol table QAR #4202
+;  009  BGN   8-Jul-87  Don't "SHUFFLE" local symbol table if there is none
+;
+;		[RSTS V9.6]
+;  010  BGN   6-Jan-88	New symbol insertion routine
+;			Fix symbol confict problem
+;  011  BTK  23-May-88	Write all symbols when adjusting pool size, QAR 6110
+;
+;		[RSTS V9.7]
+;  012	JFM  15-Sep-88	Removed unused symbols, unglobalized others
+;  013	JFM  27-Nov-88	Globalized SEVERITY and RSVBEG so we can get at the
+;			current $SEVERITY value quickly.
+;  014	BTK  18-Dec-88	Define SRHABB (Bug 7010)
+;  015	BTK  10-Jan-89	Correct ENAMES table entries for TRAP type
+;  016	BTK  15-Jan-89	Put scratch files in DCLWRK$ (if it exists)
+;
+;		[RSTS V10.0]
+;  017	BTB  13-Jun-89	Correct ENAMES usage in MAKENT
+;
+;		[RSTS V10.1]
+;  018	DLS  19-Jun-91	Carve out space for Procedure file filespec.
+;  019	DLS  16-Jul-91	Expect "?Not enough available memory" error for .CORE
+;			in REASTB:.  Previously it was unexpected and caused
+;			ugly things to happen.
+;  020	JFM  17-Jul-91	Change variable name
+;-
+
+;+
+; DCLSYM - DCL symbol table management
+;
+; This module contains the subroutines for managing the global and local
+; symbol tables.  This includes initializing the tables, adding, changing
+; and deleting symbols from either table, searching the tables for a 
+; particular symbol or label, adding labels to a local symbol table and 
+; deallocating the symbol tables.
+;
+;% This module contains some comments which begin with the "%" character.
+;% These are "warning" comments which indicate that something important or
+;% non-obvious is going on.  Read these comments carefully.
+;-
+
+	.PSECT	DCLSYM,RO,REL,CON
+	DEFORG	DCLSYM		;Mainline code
+
+	$CUI	MSG		;Include message facility
+
+.SBTTL  Constants
+
+; Symbol substitution constants
+
+SUB.BSIZ==255.			;Maximum length of a command string, used for
+				;... setting up the symbol substitution buffer 
+				;... (must be same size as CMD.BSIZ)
+MAXSUB==100.			;Maximum number of times that apostrophe 
+				;... substitution is performed iteratively on
+				;... the user's command line (prevents circular
+				;... loops)
+
+.SBTTL	Define the Global Context Area locations
+
+; ***************************
+; *   GLOBAL CONTEXT AREA   *
+; ***************************
+
+;
+; The Global context area is defined in the module DCLGCA.  It lives there
+; because it must be the last contribution to the IMPURE psect.  Refer
+; to DCLGCA.MAC for a more detailed explanation of this strangness.
+;
+; Here are the global declarations of the symbols defined in DCLGCA:
+;
+; //Why are these here?  They should be globalized when they are used!//
+; //Some of these are defined in DCLPFX, so they shouldn't be here at all!//
+;
+
+GLOBAL	CMDLVL		;Current command procedure level 
+GLOBAL	F$SCHN		;Bit mask set for channels open by F$SEARCH
+GLOBAL	FILSTK		;Data files table
+GLOBAL	GCA		;Beginning of the global context area
+GLOBAL	GCASIZ		;Size of the global context area
+GLOBAL	GLISNM		;Number of lists in the global list table
+GLOBAL	ICFSTK		;ICF stack (PFB channel #, STB block #, # of blocks)
+GLOBAL	ICFSTL		;Max number of entries on ICF stack
+GLOBAL	NXISTK		;Pointer to next entry on ICFSTK
+GLOBAL	PFBCHN		;Open PFB channels bit mask
+GLOBAL	DCLPMT		;Pointer to $PROMPT string pointer
+GLOBAL	LOGPMT		;Pointer to $LOGFILE_PROMPT string pointer
+GLOBAL	STFBLN		;Offset to block # of saved symbol table
+GLOBAL	STFNBL		;Offset to # of blocks in symbol table
+GLOBAL	WATFLG		;Flags bits for /WATCH and /NOP on SET VERIFY
+
+
+; **************************
+; *   LOCAL CONTEXT AREA   *
+; **************************
+
+;%
+;% BEGIN ORDERED SECTION.  These locations must have the same offset from the
+;% beginning of the context area as their counterparts in the global table.
+;% If you make any changes to this section, be sure to update DCLGCA.MAC as
+;% well.
+;%
+
+	.DSECT
+FREPTR:	.BLKW			;Pointer to free pool
+FRESIZ:	.BLKW			;Size (in bytes) of free pool
+STBSIZ:	.BLKW			;Size (in bytes) of context area plus all
+				;... symbol entries
+CASIZ::	.BLKW			;Size (in bytes) of context area only
+STFNFG::.BLKW			;Symbol table on file is no good flag
+SLOTNM:	.BLKW			;Number of lists in the list table
+
+;% The list table must be the last thing in this ordered section since
+;% the local and global list tables are different lengths
+
+SLOTTB:	.BLKW	LLISNM		;The list table.
+
+;%
+;% END ORDERED SECTION.
+;%
+
+ICFEOF::.BLKW			;Current ICF end-of-file byte
+ICFEBL::.BLKW			;Current ICF size of data in blocks (LSB)
+RCDSIZ::.BLKW			;Current ICF record size
+RCDFMT::.BLKB			;Current ICF record format
+ICFEBM::.BLKB			;Current ICF size of data in blocks (MSB)
+LERFLG::.BLKB			;Flag to indicate if error checking is enabled
+				;... or disabled for this ICF 
+				;... 0 --> error checking is disabled
+				;... 1 --> error checking is enabled (default)
+
+LCCFLG::.BLKB			;Flag to indicate if CTRL/C checking is enabled
+				;... or disabled for this ICF 
+				;... 0 --> CTRL/C checking is disabled
+				;... 1 --> CTRL/C checking is enabled (default)
+
+LSEVLV::.BLKB			;The current level of severity for error
+				;... checking for this ICF (see DCLPFX.MAC): 
+				;... 0 --> warning
+				;... 2 --> error
+				;... 4 --> severe_error
+
+EODCHR::.BLKB			;EOD character (for the previous ICF); as given
+				;... on /END_OF_DATA=" " or by default = "$"
+	.EVEN
+
+LDTFLG::.BLKW			;Current SET [NO]DATA setting (for the previous
+				;... ICF)
+
+ICFPOS::.BLKW	4		;The @ position of the place in the previous
+				;... ICF of the next line to be read
+
+SLFILE::.BLKW	7		;Space for remembering file in F$SEARCH
+
+SLPFB::	.BLKW			;PFB Channel number (*2) which local F$SEARCH 
+				;... channel is opened.  This is used for
+				;... F$SEARCH when argument is null string
+
+PROFIL::.BLKW			;ICF Procedure filespec (PPN)		;018
+	.BLKW	2		;ICF Procedure filespec (NAME in RAD50)	;018
+	.BLKW			;ICF Procedure filespec (EXT in RAD50)	;018
+	.BLKW			;ICF Procedure filespec (DEV in ASCII)	;018
+	.BLKB			;ICF Procedure filespec (UNIT number)	;018
+	.BLKB			;ICF Procedure filespec (UNIT real flag);018
+
+	.BLKW	10.		;Reserved for future use		;018
+
+LCASIZ	=.			;End of local context area.  Get size.
+
+	UNORG
+
+.SBTTL	IMPURE storage definitions
+
+	TMPORG	IMPURE
+
+	.EVEN
+ICFFLG::.BLKW			;Flags relating to the Indirect Command File
+				;... that is currently active (its bit
+				;... definitions are in DCLPFX.MAC)
+
+NUMSTO::.BLKW	2		;32-bit number storage
+
+SAVSTP::.BLKW			;Save cell to hold the original stack pointer
+				;... (in case we lose track of where it should
+				;...  point when inside one routine)
+
+TPCHAN::.BLKW			;I/O channel # (*2) for opening the non-disk
+				;... Indirect Command File on (so it can be 
+				;... transferred to a scratch disk file and then
+				;... processed)
+
+DSKCHN::.BLKW			;I/O channel # (*2) used for opening the temp
+				;... scratch disk file on (it is a copy of the
+				;... non-disk ICF)
+
+IOCHAN::.BLKW			;I/O channel # (*2) used for saving the calling
+				;... ICF (to move it to a PFB channel for safe
+				;... keeping while the called ICF is processed)
+
+LCAPTR::.BLKW			;Pointer to the local context area if there
+				;... is one else zero
+
+GCAPTR::.BLKW			;Pointer to the global context area.  This is
+				;... currently equal to #GCA since the global
+				;... table is static (at a fixed location)
+
+LCLNFG::.BLKW			;Local table no good flag.  Set if the local
+				;... table on disk is out of date.
+
+GBLNFG::.BLKW			;Global table no good flag.  Set if the global
+				;... table on disk is out of date.
+
+SIZE:	.BLKW			;Requested size in bytes of a symbol table entry
+
+SCOPE::	.BLKW			;The current symbol table in use.  This is
+				;... equal to LCAPTR if the scope is local,
+				;... equal to GCAPTR is the scope is global,
+				;... equal to zero if both tables must be
+				;... searched.
+
+SLOT:	.BLKW			;Pointer to entry list of current symbol table
+				;... entry
+
+PRVENT:	.BLKW			;Pointer to previous entry in entry list
+
+TEMP01::.BLKW			;Temporary storage location
+
+MEMSIZ::.BLKB			;DCL's memory size in K words
+
+NEWENT::.BLKB			;Flag - set if most recently defined symbol
+				;... table entry is new
+
+	.EVEN
+	UNORG
+
+.SBTTL	Format of the Symbol Table File
+;+
+; The format of the symbol table file is: 
+;
+;// fix
+; The symbol table file is a 'temporary, but permanent' file which contains 
+; a header portion (called the 'global context area'), a global symbol 
+; table and maybe some local symbol tables, depending upon whether any 
+; command procedures were invoked.  It is placed on PFB channel #2 immediately 
+; after it has been created on an IOB channel, and kept there always (even
+; for reading and writing to it).  Part of the first block of the file
+; corresponds to the global context area which holds fixed information 
+; such as PFB channel #'s, the .COM stack, the local symbol tables
+; stack and information on files opened through a $OPEN.  The .COM stack 
+; indicates the position in an ICF of where you left off at the time you 
+; invoked another ICF.  A symbol table (local or global) consists of any number
+; of symbol name entries, which are of variable length.  In addition, a local 
+; symbol table can contain label and command entries too.  A local symbol 
+; table also contains a local context area at the beginning of its table 
+; which holds information such as the filespec, PPN, and index.
+;
+;-
+
+.SBTTL	Format of Symbol Name, Label and Command Entries
+;+
+; The format of a SYMBOL entry in the local or global symbol table is:
+;
+;  :---------------------------------------------------------------------------:
+;  : Type  :Abbrev: Symbol name :   Symbol name   :Value :    Symbol value     :
+;  :(symbl):length:   length    :                 :length:                     :
+;  : (byte):(byte):   (byte)    :(variable length):(byte):  (variable length)  :
+;  :---------------------------------------------------------------------------:
+;
+;
+;
+; The format of a LABEL entry in the local symbol table is:
+;
+;  :---------------------------------------------------------------:
+;  : Type  : Label  name :   Label name    :     Label  value      :
+;  :(label):   length    :                 :                       :
+;  : (byte):   (byte)    :(variable length):     (see LBVLNG)      :
+;  :---------------------------------------------------------------:
+;
+;
+;
+; The format of the COMMAND entry in the local symbol table is:
+;
+;  :----------------------------------------------:
+;  : Type  :Command:  Command   :  Actual Command :
+;  : (cmd) : Type  :Value length:    (variable 	  :
+;  : (byte):(byte) :  (byte)    :  length string) :
+;  :----------------------------------------------:
+;
+;-
+	.PSECT	DCLSYM
+
+
+;
+; The following definitions pertain to symbol name, label and command entries 
+; which make up the local and global symbol tables.
+
+	TMPORG	IMPURE
+
+EVLTYP::.BLKB			;Evaluation type|JFM>this isn't used here at all
+				;gmb - this belongs in DCLEXP
+
+TYPE::	.BLKB			;Entry type
+				;  -6 --> GOSUB stack	 (local table only)
+				;  -4 --> ^C trap	 (local table only)
+				;  -2 --> error trap	 (local table only)
+				;   0 --> label          (local table only)
+				;   2 --> numeric symbol (either table)
+				;   4 --> string symbol  (either table)
+
+NAMABB::.BLKB			;Length of minimum abbreviation point for this 
+				;... symbol name
+				;   0 --> no abbreviation was specified
+				;   n --> minimum # of characters to refer to
+				;          this symbol by (ex. 3 in ABC-DE=1)
+SRHABB::.BLKB			;Abbreviations are allowed on STB search  ;014
+NAMLNG::.BLKB			;Length of the symbol name or label, in bytes
+				;... (maximum name is 255 bytes)
+VALLNG::.BLKB			;Length of the expression to be assigned to 
+				;... the symbol name, in bytes
+				;... (maximum string length is 255 bytes)
+	.EVEN
+NAMADR::.BLKW			;Address of the symbol name or label
+				;... (still in the case it was typed - 
+				;... lower or uppercase)
+VALADR::.BLKW			;Address of the symbol value or label value
+				;... (for labels, it is the block # and
+				;... position within the ICF)
+	UNORG
+
+.SBTTL	Variables
+
+; The following cells are used when performing apostrophe substitution in a
+; user's command line.
+
+	TMPORG	IMPURE
+	.EVEN
+QUOFLG::.BLKB			;Flag indicating a quotation mark (") was found
+				; in user's command (beginning of a string)
+				;   0 --> quotation mark was not found
+				;   1 --> quotation mark was found
+COUNTR::.BLKB			;Running count of # of allowable substitution 
+				; iterations left on a particular command line
+				; (when = 0, then "?Substitution too complex")
+SUBBUF::.BLKB	SUB.BSIZ	;Scratch buffer used for various things	;012
+				; //Still need to be 255 bytes long?//	;012
+	.EVEN
+SUBEND	== .
+	UNORG
+
+
+.SBTTL	CBBs - Control Block Buffers
+;+
+; 
+; Control Block Buffers allocated for DCL READS and WRITES.
+;
+;-
+
+IO.CHN	==	CBB$SZ		;Offset of IO channel associated with CBB
+CBBSIZ	==	CBB$SZ+2	;Total number bytes allocated for each CBB
+
+	TMPORG IMPURE
+
+CBB1::	.BLKB	CBB$SZ		;Allocate first CBB block
+CHN1:	.BLKW			;IO channel associated with this CBB
+CBB2:	.BLKB	CBB$SZ		;Allocate another CBB block
+CHN2:	.BLKW			;IO channel associated with this CBB
+;CBB3:	.BLKB	CBB$SZ		;Allocate another CBB block
+;CHN3:	.BLKW			;IO channel associated with this CBB
+LSTCBB::			;Last CBB allocated address
+
+
+	UNORG
+
+.SBTTL	Reserved global symbol names
+;+
+; The following section defines the initial values of the reserved
+; global symbols.  One of the tasks of INIGBL (initializes the global
+; symbol table) is to copy this table directly to the beginning of the
+; global symbol table (immediately after the context area).  All pointers
+; have been precomputed to make set up easy.
+;
+; It is IMPORTANT TO NOTE that this table is static.  The addresses of it's
+; entries will never change.  Therfore the entries can be referenced directly
+; by their address without the need to search the symbol table for them.  This
+; is made possible because the entries are stored at the very beginning of the
+; symbol table.  There is no space which will go away and be reclaimed by the
+; garbage collector (thus the entries will never move).  For string entries,
+; it is necessary to store the potentially variable string value outside
+; of this fixed area.  Trap command entries are unsuitable for residence here
+; because the entries themselves can change in length.
+;
+; Reserved global symbols can never be deleted by the user.  The $STATUS and
+; the $SEVERITY symbols will however be reset to success if the user issues
+; a DELETE/SYMBOL/GLOBAL/ALL command.  The prompt symbols will remain
+; unchanged.
+;
+; Reserved global symbols historically have no abbreviation points.
+;
+;-
+
+	TMPORG	TEXT
+
+.ENABL	LSB
+
+.if df NULINK
+
+	.EVEN
+RSVBEG::								;013
+;
+; The default interactive DCL prompt
+;
+PROMPT::
+	.WORD	30$-RSVBEG+GCASIZ	;Link to next entry
+	.WORD	0			;Sort link
+	.WORD	0			;Unused word
+	.BYTE	STRTYP			;Entry type
+	.BYTE	0			;Name abbreviation length
+PMTSTR:	.WORD	80$-RSVBEG+GCASIZ	;Pointer to prompt string
+	.ASCIC	/$PROMPT/		;Entry name
+	.EVEN
+;
+; The default interactive logfile prompt.
+;
+LFPROMPT::
+30$:	.WORD	20$-RSVBEG+GCASIZ	;Link to next entry
+	.WORD	0			;Sort link
+	.WORD	0			;Unused word
+	.BYTE	STRTYP			;Entry type
+	.BYTE	0			;Name abbreviation length
+LFPSTR:	.WORD	90$-RSVBEG+GCASIZ	;Pointer to prompt string
+	.ASCIC	/$LOGFILE_PROMPT/	;Entry name
+	.EVEN
+;
+; The $SEVERITY symbol
+
+20$:	.WORD	10$-RSVBEG+GCASIZ	;Link to next entry
+	.WORD	0			;Sort link
+	.WORD	0			;Unused word
+	.BYTE	NUMTYP			;Entry type
+	.BYTE	0			;Name abbreviation length
+SEVERITY::								;013
+	.WORD	1,0			;Initial value is one
+	.ASCIC	/$SEVERITY/		;Entry name
+	.EVEN
+;
+; The $STATUS symbol
+;
+10$:	.WORD	0			;Link to next entry
+	.WORD	0			;Sort link
+	.WORD	0			;Unused word
+	.BYTE	NUMTYP			;Entry type
+	.BYTE	0			;Name abbreviation length
+STATUS:
+	.WORD	1,0			;Initial value is one
+	.ASCIC	/$STATUS/		;Entry name
+	.EVEN
+
+;% String definitions are not static and therefore must come after
+;% all static definitions.  Otherwise the garbage collector might
+;% move the supposedly "static" entries.
+
+; Default prompt string with no log file active
+
+80$:	.BYTE	0,0			;Unused word
+	.BYTE	2			;String allocation length
+	.BYTE	2			;String length
+DOL$P::	.ASCII	/$/<SPACE>		;String value
+
+; Default prompt string with log file active
+
+90$:	.BYTE	0,0			;Unused word
+	.BYTE	2			;String allocation length
+	.BYTE	2			;String length
+DOL.$P::.ASCII	/$./			;String value
+
+.iff  ;NULINK
+
+	.EVEN
+RSVBEG::								;013
+;					.ASSUME .-RSVBEG EQ E.NENT
+PROMPT::
+	.WORD	30$+GCA+GCASIZ-RSVBEG,0
+	.WORD	0
+	.BYTE	STRTYP,0
+PMTSTR:	.WORD	80$+GCA+GCASIZ-RSVBEG
+	.ASCIC	/$PROMPT/
+	.EVEN
+
+LFPROMPT::
+30$:	.WORD	20$+GCA+GCASIZ-RSVBEG,0
+	.WORD	0
+	.BYTE	STRTYP,0
+LFPSTR:	.WORD	90$+GCA+GCASIZ-RSVBEG
+	.ASCIC	/$LOGFILE_PROMPT/
+	.EVEN
+
+20$:	.WORD	10$+GCA+GCASIZ-RSVBEG,0
+	.WORD	0
+	.BYTE	NUMTYP,0
+SEVERITY::								;013
+	.WORD	1,0
+	.ASCIC	/$SEVERITY/
+	.EVEN
+
+10$:	.WORD	0,0
+	.WORD	0
+	.BYTE	NUMTYP,0
+STATUS:
+	.WORD	1,0
+	.ASCIC	/$STATUS/
+	.EVEN
+
+80$:	.BYTE	0,0		;S.UNUS
+	.BYTE	2
+DOL$P::	.ASCIC	/$/<SPACE>	;
+90$:	.BYTE	0,0
+	.BYTE	2
+DOL.$P::.ASCIC	/$./
+
+RSVEND:
+RSVSIZ	=: RSVEND-RSVBEG
+
+.endc ;NULINK
+
+	UNORG
+
+.DSABL	LSB
+
+.SBTTL	ICF paramters
+
+;  	              ICF parameters 
+;
+; The following parameters are local symbols which are added to the local 
+; symbol table as strings when an ICF is invoked.  They are initially set to 
+; the null string if the user does not equate them to a value when invoking 
+; the command procedure (ex. @SHOW.COM abc 2 3 "" 5 sets up values for P1-P5).
+; These symbols can be deleted or their values can be changed by the user 
+; at anytime.
+
+;gmb - I dislike taking up space with this table which probably
+;gmb - can be computed.  Would require rewrite of @ paramter set up.
+;gmb - This stuff probably should be in DCLCFP anyway.
+
+LCLPRM::			;Start of local parameter name table
+LCLP1:	.ASCIC	/P1/		;Parameter 1
+LCLP2:	.ASCIC	/P2/		;Parameter 2
+LCLP3:	.ASCIC	/P3/		; etc.
+LCLP4:	.ASCIC	/P4/		;
+LCLP5:	.ASCIC	/P5/		;
+LCLP6:	.ASCIC	/P6/		;
+LCLP7:	.ASCIC	/P7/		;
+LCLP8:	.ASCIC	/P8/		;
+ENDLP::				;End of local parameter names
+
+
+.SBTTL	Symbol table entry utility tables
+
+; These tables are used by various routines to get at portions of the
+; symbols in a common manner.  These tables allow allow of code sharing
+; by promoting generic subroutines.
+
+.ASSUME	GSBTYP	EQ -6		;GOSUB/RETURN stack entry type
+.ASSUME CCTYP	EQ -4		;ON CONTROL_C command entry type
+.ASSUME ERRTYP	EQ -2		;ON ERROR/WARN/etc command entry type
+.ASSUME LBLTYP	EQ  0		;Label entry type
+.ASSUME STRTYP	EQ  2		;String symbol entry type
+.ASSUME NUMTYP	EQ  4		;Numeric symbol entry type
+
+; This is table of entry sizes
+
+	.WORD	GSBSIZ,TRPSIZ,TRPSIZ
+ESIZES:	.WORD	LBLSIZ,STRSIZ,NUMSIZ					;012
+
+; This is a table of offsets to entry names or other text (for errors, this 
+; is the associated command string).  A zero entry is used to signal an entry 
+; which has no associated text.						;015
+
+	.WORD	0,T.CMND,T.CMND						;015
+ENAMES::.WORD	L.NAME,S.NAME,N.NAME
+
+.if df NULINK
+; This is a table of offsets to entry values.  It is used by GETVAL.
+; String entries are special (zero in this table) since their value
+; is really a pointer to the actual string, not the string itself.
+; See GETVAL for more clues as to why the string value offset is zero.
+
+	.WORD	G.ICFP,T.CMND,T.CMND
+EVALUS:	.WORD	L.LVAL,0,N.NMBR
+
+.iff  ;NULINK
+	.WORD	G.ICFP,T.CMND,T.CMND
+EVALUS:	.WORD	L.LVAL,S.VALP,N.NMBR
+
+.endc ;NULINK
+
+	.EVEN
+
+	UNORG
+	ORG	DCLSYM
+
+
+.SBTTL	ADDCMD
+
+;+
+; ADDCMD
+;
+; Description:
+;
+; Inputs:
+;	VALADR
+;	VALLNG
+;
+; Call:
+;	CALLX	ADDCMD
+;
+; Outputs:
+;	All registers except R0 are preserved.
+;
+;	If carry clear then
+;		R0 =  Junk
+;	Endif
+;
+;	If carry set then
+;		R0 =  Error code
+;	Endif
+;-
+
+.ENABL	LSB
+
+ADDCMD::
+	PUSH	<R1,R2>		;Save some registers
+;
+; Set up SIZE.  TYPE is set up by caller.
+;
+	MOV	#TRPSIZ,SIZE	;Get basic trap entry size
+	CLR	R2		;Ensure high byte clear
+	BISB	VALLNG,R2	;Get length of trap command
+	ADD	R2,SIZE		;Add in length to get total entry size
+	CLRB	NAMABB		;No abbreviations!
+	MOV	LCAPTR,SCOPE	;Set scope to local
+	CALL	GETENT		;Look for a trap entry or make a new one
+	BCS	20$		;Quit if error (like no more memory)
+	ADD	#T.CMND,R0	;Point to beginning of command storage
+	MOV	VALADR,R1	;Get address of user's command
+	MOVB	VALLNG,(R0)+	;Set command size
+10$:	MOVB	(R1)+,(R0)+	;Copy command into entry
+	SOB	R2,10$		;Do all bytes
+	MOVB	#1,LCLNFG	;The local symbol table has changed
+	CLR	R0		;Clear error code and carry
+20$:	POP	<R2,R1>		;Restore registers
+	RETURN			;Return
+
+.DSABL	LSB
+
+.SBTTL	ADDLBL	- Add or check a label entry
+
+;+
+; ADDLBL	- Add or check a label entry
+;
+; Description:
+;
+; Inputs:
+;
+; Calls:
+;
+; Outputs:
+;
+;-
+
+.ENABL	LSB
+
+.MACRO	$ADDLBL
+	.WORD	ADDLBL
+	.GLOBL	ADDLBL
+.ENDM	$ADDLBL
+
+ADDLBL::
+	PUSH	R1		;Save register
+;
+; Set up TYPE, NAMADR, NAMLNG, SIZE, & SCOPE
+;
+				.ASSUME LBLTYP EQ 0
+	CLRB	TYPE		;Set entry type to LABEL
+	MOV	LX.PMAT,NAMADR	;Get position of 1st character +1 matched
+	ADD	#CMDBUF-1,NAMADR
+				;Compute the address of the start of the label
+	CMP	LX.NMAT,#255.	;Is the label too long?
+	IFHI			;If so then
+	MOV	#LGLB.E,R0	;  Set error "?Label too long"
+	BR	20$		;  Display message and return
+	ENDIF			;Endif
+				;ASSUME maximum label length LE 255.
+	CLR	R0		;Ensure high byte is clear
+	BISB	LX.NMAT,R0	;Get the label's length
+	MOVB	R0,NAMLNG	;Store label's name length
+	MOV	#LBLSIZ,SIZE	;Compute size of
+	ADD	R0,SIZE		;... label
+	MOV	LCAPTR,SCOPE	;Set scope to LOCAL
+	CLRB	NAMABB		;No abbreviations!
+	CALL	GETPOS		;Get the current ICF position
+				;... R0 is error code (if Z=0)
+				;... R1 -> ICF pos in FIRQB
+	BNE	20$		;Error, go display the message and return
+;
+; Look for or create the label
+;
+	CALL	GETENT		;Get the old label or make a new one.
+	BCS	20$		;Go display error message if we ran out of
+				;... memory
+				;R0 -> label entry
+	TSTB	NEWENT		;Did we find the label or have to make one?
+	IFEQ			;If we found the label then
+;
+; Is the label we found in the symbol table the same as the one we're trying
+; to add?  We will compare the current position to the saved position to find
+; out.  If it's the same label everything is fine and we can ignore it.
+; If it's not the same label then the user screwed up and has multiple
+; labels with the same name in his command file.  That's a no-no and we
+; issue an error message.  Life goes on.
+;
+	ADD	#L.LVAL,R0	;  Point to label's stored ICF position
+	CMP	(R0)+,(R1)+	;  Compare LSB of block #
+	BNE	10$
+	CMP	(R0)+,(R1)+	;  Compare MSB of block #
+	BNE	10$
+	CMP	(R0)+,(R1)+	;  Skip record size (it's boring)
+	CMP	(R0)+,(R1)+	;  Compare byte offset
+	IFNE
+10$:	MOV	#MLBL.E,R0	;    Set error "?Label already defined"
+20$:	MOV	R0,R1		;    Save error code
+	REPAINT	LX.PMAT		;    Repaint the user's command line
+				;    ... pointing at start of label
+	CMESSAG	R1		;    Print the error message
+	BR	30$		;    Return with failure
+	ENDIF			;  Endif
+
+	ELSE			;Else this is a new label
+;
+; The label is new.  GETENT has already allocated space for it and filled in
+; the label's name. All we have to do is store the ICF position.
+;
+	ADD	#L.LVAL,R0	;  Point to home of label's ICF position
+				   .ASSUME L.LVLN EQ 8.
+	MOV	(R1)+,(R0)+	;  Store the LSB of block #
+	MOV	(R1)+,(R0)+	;  Store the MSB of block #
+	MOV	(R1)+,(R0)+	;  Store the record size
+	MOV	(R1)+,(R0)+	;  Store the byte offset
+	MOVB	#1,LCLNFG	;  The local symbol table has changed
+	ENDIF			;Endif
+	CLR	R0		;Clear R0 (error code)
+
+	TST	(PC)+		;Return with success
+30$:	SEC			;Return with failure
+	POP	R1		;Restore register
+	RETURN
+
+GLOBAL	<CMDBUF,LX.PMAT,LX.NMAT,LGLB.E,MLBL.E>
+
+.DSABL	LSB
+
+.SBTTL	ADDSYM	- Add or update a string or numeric symbol
+
+;+
+; ADDSYM	- Add or update a string or numeric symbol
+;
+; Inputs:
+;	NAMABB	=  Symbol name abbreviation length
+;	NAMADR	-> The symbol name
+;	NAMLNG	=  Length of the symbol name
+;	SCOPE	=  Symbol table to use - Global or Local
+;	TYPE	=  Type of the symbol - String or Numeric
+;	VALADR	-> The new string value
+;	VALLNG	=  Length of the new string value
+;	VALUE	=  New numeric value
+;
+; Call:
+;	CALL	UPDSYM
+;
+; Outputs:
+;	if c = 1 then
+;		R0	=  Error code
+;	endif
+;
+;	if c = 0 then
+;		SLOT	-> List head where the symbol was placed
+;	endif
+;
+;-
+
+.ENABL	LSB
+
+ADDSYM::
+	PUSH	<R1,R2,R3>	;Save some registers
+	MOVB	#-1,SRHABB	;Abbreviations are ambiguity errors
+	MOV	#NUMSIZ,SIZE	;Guess we have a numeric symbol
+	CMPB	TYPE,#NUMTYP	;Is is a numeric symbol?
+	IFNE			;If not then
+	MOV	#STRSIZ,SIZE	;  Use size for string symbol
+	ENDIF			;Endif
+	CLR	R0		;Ensure high byte is clear
+	BISB	NAMLNG,R0	;Get length of name
+;gmb // This next test should be done when NAMABB is computed. //
+	MOVB	NAMABB,R3	;Is there a abbrev hyphen in this name?
+	IFNE			;If so then
+	DEC	R0		;  Don't allocate space for it (its going away)
+	ENDIF			;Endif
+	ADD	R0,SIZE		;Compute size of entry
+	CALL	GETENT		;Get old entry or make a new one
+				;R0 -> first byte of entry
+	BCS	30$		;Leave if we ran out of memory
+	MOV	SCOPE,R2	;Get pointer to local or global context area
+	MOVB	#1,@STFNFG(R2)	;Mark the symbol table changed
+	MOVB	R3,E.ABLN(R0)	;Update the abbreviation length
+				;... in case it changed
+	CLRB	NAMABB		;Reset it--don't need it anymore and it might
+				;... interfere with SRHENT
+	CMPB	TYPE,#NUMTYP	;Is this a numeric entry
+	IFEQ			;If so then
+	MOV	#VALUE,R2	;  Get address of value
+	MOV	(R2)+,N.NMBR(R0);  Set the low order 16 bits
+	MOV	(R2),N.NMBR+2(R0)
+				;  Set the high order 16 bits
+	ELSE			;Else (it is a string entry)
+	MOV	R0,R3		;  Save pointer to entry
+	CLR	GBGFLG		;  Clear garbage collection activity flag
+	CLR	R2		;  Ensure high byte is clear
+	BISB	VALLNG,R2	;  Get length of new string value
+.if df NULINK
+	ADD	S.VALP(R0),R0	;  Get abs pointer to old string value
+.iff  ;NULINK
+	MOV	S.VALP(R0),R0	;  Get pointer to old string value
+.endc ;NULINK
+	TSTB	NEWENT		;  Is this a new entry?
+	BNE	10$		;  If so then get enough memory to store string
+				;  ... value
+	CMPB	R2,S.ALSZ(R0)	;  Is string value bigger than what's already
+				;  ... there?
+	IFHI			;  If so then
+	CLR	R1		;    Get length of
+	BISB	S.ALSZ(R0),R1	;    ... old string
+	ADD	#S.SVAL,R1	;    Add in length of string value overhead
+	CALL	RETMEM		;    Attempt to return old string memory
+				;    (only works if old string is at beginning
+				;    of free pool)
+10$:	MOV	R2,SIZE		;    Store the new string length
+	ADD	#S.SVAL,SIZE	;    Make room for string value overhead
+	CALL	GETMEM,R5,BYTE	;    Get that much memory (byte aligned)
+				;      R0 -> first byte of memory (carry clear)
+				;      R0 =  error code (carry set)
+	IFCS			;    If we ran out of memory then
+	MOV	R0,R3		;      Save the error code
+	CALL	DELENT		;      Delete the incomplete entry
+	MOV	R3,R0		;      Restore the error code
+	SEC			;      Set carry to indicate error
+	BR	30$		;      Return with error code in R0
+	ENDIF			;    Endif
+	MOVB	R2,S.ALSZ(R0)	;    Set allocation size
+	ENDIF			;  Endif
+	MOV	R0,R1		;  Put pointer to string memory into R1
+	TST	GBGFLG		;  Did the GETMEM cause a garbage collection?
+	IFNE			;  If so then our entry pointer may have changed
+	CALL	SRHENT		;    Look up our entry again
+				;    Now R0 -> old entry
+	ELSE			;  Else
+	MOV	R3,R0		;    Restore saved entry pointer
+	ENDIF			;  Endif
+	MOV	R1,S.VALP(R0)	;  Set the pointer to the string value
+.if df NULINK
+	SUB	R0,S.VALP(R0)	;  Make pointer relative to beginning of entry
+.endc ;NULINK
+	MOV	VALADR,R0	;  Get pointer to user's string value
+	ADD	#S.SLEN,R1	;  Point to string length
+	MOVB	R2,(R1)+	;  Store the string length
+	IFNE			;  If stringh length is non-zero then
+20$:	MOVB	(R0)+,(R1)+	;    Copy a character
+	SOB	R2,20$		;    Do the whole string
+	ENDIF			;  Endif
+	ENDIF			;Endif
+	CLR	R0		;No errors (& carry clear)
+30$:	POP	<R3,R2,R1>	;Restore registers
+	RETURN			;Return
+
+GLOBAL	<VALUE>
+
+.DSABL	LSB
+
+; DELALL	- Delete all symbols
+;
+; Inputs:
+;	SCOPE	- Global/Local/All
+;
+; Call:
+;	CALL	DELALL
+;
+; Outputs:
+;	None.
+;	All registers are preserverd.
+;	No errors are possible.
+;
+; Side effects:
+;
+; Optimization note:
+;	If we kept track of the highest address in use (the end of the highest
+;	entry or string value) then we could use this address to resize the
+;	free pool rather than waiting for the garbage collector.
+;-
+
+.ENABL	LSB
+
+DELALL:	CALL	SAVRGS,R5	;Save R1-R5
+	MOV	SCOPE,R1	;Get scope--is it ALL?
+	BNE	10$		;No, go do it
+	MOV	LCAPTR,R1	;Yes, do local table first
+	IFNE			;If there is a local table then
+	CALL	20$		; Delete the table
+	ENDIF			;Endif
+	MOV	GCAPTR,R1	;Then do global table
+10$:	CALL	20$		;Delete the table
+	RETURN			;% Return (with carry clear from 20$ routine)
+
+20$:	MOV	#SYMSSZ,R2	;Get number of (non-reserved) symbol entry slots
+				.ASSUME SYMSSZ GT 0
+				.ASSUME SYMSSZ LE 377
+	MOVB	R2,@STFNFG(R1)	;Assume we will delete at least one symbol
+				;... and mark the symbol table file as no good
+	ADD	#SLOTTB+SYMSEC,R1
+				;Point R1 to first list of symbol entries
+30$:	CLR	(R1)+		;% Clear a list pointer (and carry)
+	SOB	R2,30$		;% Do next list (doesn't touch carry)
+	RETURN			;% Return (with carry clear from CLR)
+
+.DSABL	LSB
+
+.SBTTL	DELENT	- Delete an entry from the symbol table
+
+;+
+; DELENT	- Delete an entry from the symbol table
+;
+; Inputs:
+; 	TYPE	=  The type of entry					[SRHENT]
+; 	NAMADR	-> The name of the entry (if it has a name)		[SRHENT]
+;	NAMLNG	=  The length of the name (if it has a name)		[SRHENT]
+; 	SCOPE	=  The symbol table - Global, Local, or All		[SRHENT]
+; 
+; Call:
+; 	CALL	DELENT
+;
+; Outputs:
+; 	If C = 1 then
+; 		R0	=  the error code
+; 	endif
+;
+; 	If C = 0 then
+; 		R0	-> The deleted entry
+;		PRVENT	-> The previous entry
+; 	endif
+;
+; Side effects:
+; 	The named entry has been removed from the symbol table.
+;-
+
+.ENABL	LSB
+
+DELENT:	PUSH	<R1,R2>		;Save some registers
+	CALL	SRHENT		;Search for the entry
+	IFCC			;If we found something then
+				  .ASSUME E.NENT EQ 0
+	MOV	(R0),@PRVENT	;  Unlink the entry from the STB
+	MOV	SCOPE,R1	;  Get pointer to context area
+	MOVB	#1,@STFNFG(R1)	;  Mark symbol table on file as no good
+	MOVB	E.TYPE(R0),R2	;  Get the entry type (sign extenstion expected)
+	PUSH	ESIZES(R2)	;  Save the basic entry size
+	CLR	R1		;  Set total entry size to zero initially
+	MOV	ENAMES(R2),R2	;  Get offset to name
+	IFNE			;  If there is a name then
+	ADD	R0,R2		;    Point to the name's length
+	BISB	(R2),R1		;    Get the name length
+	ENDIF			;  Endif
+	ADD	(SP)+,R1	;  Add in basic size to get total entry size
+		; R0 -> Entry
+		; R1 =  Size of entry
+	CALL	RETMEM		;  Try and return the memory used by the entry
+				;  ... to the free pool
+	CLR	R0		;  Clear error code and clear carry
+	ENDIF			;Endif
+	POP	<R2,R1>		;Restore registers (Carry untouched)
+	RETURN			;Return
+
+.DSABL LSB
+
+.SBTTL	DELSYM	- The guts of the DELETE/SYMBOL command
+
+;+
+; DELSYM	- The guts of the DELETE/SYMBOL command
+;
+;-
+
+.ENABL	LSB
+
+DELSYM::
+	CLRB	SRHABB		;Abbreviations are not allowed
+	TST	NAMADR		;Do we have a symbol name?
+	IFNE			;If so then
+	CMPB	@NAMADR,#'$	;  Is this a reservered name (like $STATUS)?
+	IFEQ			;  If so then
+	MOV	#RSVN.E,R0	;    "?Reserved symbol name"
+	BR	10$		;    Go set error position and return
+	ENDIF			;  Endif
+	MOVB	#STRTYP,TYPE	;  Look for string (or numeric) symbols
+	CALL	DELENT		;  Find and delete the symbol entry
+	ELSE			;Else
+	CALL	DELALL		;  Delete all symbol entries in the specified
+				;  ... tables
+	ENDIF			;Endif
+	IFCS			;If an error occurred then
+10$:	MOV	LX.POS,LX.ERP	;  Get position of 1st char past name
+	CLR	R2		;  Ensure high byte clear
+	BISB	NAMLNG,R2	;  Get name length
+	SUB	R2,LX.ERP	;  Point to beginning of name for error
+				;  ... error position
+	SEC			;  Set carry to indicate error
+	ENDIF			;Endif
+	RETURN			;Return
+
+GLOBAL	<RSVN.E>
+
+.DSABL	LSB
+
+.SBTTL	GETENT	- Get new or reuse old entry
+
+;+
+; GETENT	- Get new or reuse old entry
+;
+;-
+
+.ENABL	LSB
+
+GETENT:	PUSH	R2		;Save a register
+	MOVB	TYPE,R2		;Get the type of the entry we're looking for
+	CLRB	NEWENT		;Guess that we will find this entry
+	CALL	SRHENT		;Look for the entry
+	IFCS			;If there was an error then
+	CMP	R0,#USYM.E	;  Was it ?Undefined symbol?
+	BEQ	10$		;  Yes, Go attempt to allocate space for entry
+	SEC			;  Carry bit must stay on to indicate error;010
+	BR	50$		;  No, some other error, exit
+	ENDIF			;Endif
+				.ASSUME E.NENT EQ 0
+	MOV	(R0),@PRVENT	;Unlink entry from the list (we will link it
+				;... to the beginning of the list below)
+;
+; We have found an entry.  Check to see if it needs to grow in size here.
+; Only needs to grow if entry was a string and we want numeric OR the type
+; is error/control-c command and the new command is larger than the old.
+;
+
+	CMP	R2,#CCTYP	;Is the type an on control-c command?
+	BEQ	5$		;Check out command size if so
+	CMP	R2,#ERRTYP	;Is the type an on error command?
+	IFEQ			;If so then
+5$:	PUSH	R3		;  Save a register
+	CLR	R3		;  Ensure high byte clear
+	BISB	T.CMND(R0),R3	;  Get trap command size
+	ADD	#TRPSIZ,R3	;  Add in basic trap size to get total
+	CMP	R3,SIZE		;% Is it less than what we need?
+	POP	R3		;% Restore R3 (but don't touch carry for BLO)
+	BLO	10$		;% Yes, go get more memory
+	ENDIF			;Endif
+	CMPB	R2,E.TYPE(R0)	;Did we get the type we wanted?
+	BEQ	40$		;Yes. Everything is ok so exit.
+	CMPB	R2,#STRTYP	;Did we want string (and get numeric?)
+	BEQ	11$		;If EQ then yes.  We have enough space but
+				;... the name has to move down to proper
+				;... place for string symbol names.
+	BR	10$		;If NE then no.  We don't have enough space
+				;... so we go to the code to get more.
+
+.SBTTL	MAKENT	- Make a new entry
+
+;+
+; MAKENT
+;
+; Description:
+;	MAKENT is used to make a new entry when you don't have to worry about
+;	duplicate entries and you want to (have to) avoid searching the
+;	symbol table.
+;
+; Inputs:
+;
+; Call:
+;
+; Outputs:
+;	R0 -> New entry
+;
+; Side effects:
+;	NOTE: MAKENT does not call EDITNM.  It assumes the entry name (if
+;	present) has already been edited ala EDITNM.  See EDITNM for details.
+;
+; Optimization note:
+;	MAKENT was a late addition.  Better use of the stack should be
+;	possible.  There is also a potential for code sharing between
+;	SRHENT and the initial MAKENT setup.
+;-
+
+MAKENT:
+;
+; Get a slot number for the entry we are about to make.  Ordinarily this
+; is done in SRHENT, but we wanted to bypass SRHENT so we have to do it
+; here.
+;
+	PUSH	<R2,R1,R3>	;Save some registers
+	MOVB	TYPE,R1		;Get the entry type
+	MOV	NAMADR,R2	;Get a pointer to the entry name (if any)
+	MOVB	NAMLNG,R3	;Get the entry name length (if any)
+	CALL	HASH		;Hash the entry name to get a slot number
+	MOV	R0,SLOT		;Remember the slot number
+	MOV	R1,R2		;Copy the entry type for below
+	POP	<R3,R1>		;Restore registers except R2
+;
+; Get memory to make an entry (either because entry didn't exist or it
+; wasn't big enough.)
+;
+10$:	CALL	GETMEM,R5,WORD	;Get memory aligned on word boundary
+	BCS	50$		;Quit if there were errors
+				;% GETMEM may have caused a garbage collection
+				;% ... and rearranged memory.  Saved pointers
+				;% ... may not be correct.
+11$:	INCB	NEWENT		;Indicate we are creating a new entry
+				;... (also set if changing size of old entry)
+	PUSH	R3		;Save a register
+	MOV	SCOPE,R3	;Get pointer to current context area
+	MOVB	#1,@STFNFG(R3)	;Mark the local table on file as no good
+;
+; Set up the entry name (if there is one)
+;
+	TST	R2		;Is type negative?			;017
+	BMI	30$		;Yes - there won't be an entry name	;017
+	MOV	ENAMES(R2),R2	;Get offset to entry name
+	PUSH	<R4,R1>		;Save a register
+	ADD	R0,R2		;Point to start of name
+	MOV	NAMADR,R3	;Get address of name to set
+	CLR	R4		;Ensure high byte is zero
+	BISB	NAMLNG,R4	;Get length of name to set
+				;... (it had better be non-zero)
+	MOVB	R4,(R2)+	;Set the name length
+20$:	MOVB	(R3)+,R1	;Take a byte of name
+	CMPB	R1,#'A+40	;Does it need to be upcased?
+	IFHIS			;If so then
+	BIC	#40,R1		;  Upcase the letter
+	ENDIF			;Endif
+	MOVB	R1,(R2)+	;Store the letter
+	SOB	R4,20$		;Loop until done
+	POP	<R1,R4>		;Restore register
+30$:	POP	R3		;Restore register			;017
+40$:	MOVB	TYPE,E.TYPE(R0)	;Set up the entry type
+	CMPB	TYPE,#STRTYP	;Is this a string entry?
+	IFEQ			;If so then
+	TSTB	NEWENT		;  Is it a new entry?
+	IFNE			;  If so then
+	CLR	S.VALP(R0)	;    clear the value entry (this is how
+				;    we know it is partially formed in
+				;    the garbage collector)
+	ENDIF			;  Endif
+	ENDIF			;Endif
+	MOV	SCOPE,R2	;Get pointer to context area
+	ADD	SLOT,R2		;Point to our list
+				.ASSUME E.NENT EQ 0
+	MOV	(R2),(R0)	;Link the entry to the beginning
+	MOV	R0,(R2)		;... of the entry list
+.if df NULINK
+	SUB	SCOPE,(R2)	;Make pointer relative to context area
+.endc ;NULINK
+	CLC			;No errors
+50$:	POP	R2		;Restore register
+	RETURN
+
+GLOBAL	<USYM.E>
+
+.DSABL	LSB
+
+.SBTTL	GETMEM	- Get more memory
+
+;+
+; GETMEM	- Get more memory
+;
+; Inputs:
+;	SIZE
+;	SCOPE
+;
+; Call:
+;	CALL	GETMEM,R5,WORD		(Word aligned)
+;	CALL	GETMEM,R5,BYTE		(Byte aligned)
+;
+; Outputs:
+;	if c = 1 then
+;		R0	=  Error code
+;	endif
+;
+;	If c = 0 then
+;		R0	-> New entry
+;	endif
+;-
+
+BYTE	=:	0		;Byte alignment flag word		;012
+WORD	=:	1		;Word alignment flag word		;012
+
+.ENABL	LSB
+
+GETMEM:	PUSH	R2		;Save a register
+10$:	MOV	SCOPE,R2	;Get pointer to current context area
+.if df NULINK
+				.ASSUME STBSIZ EQ 0
+	BIT	(R5)+,(R2)	;% Is free pool already aligned?
+	IFNE			;If not then
+				   .ASSUME STBSIZ EQ 0
+	INC	(R2)		;  Fix symbol table size
+	DEC	FRESIZ(R2)	;  Fix free pool size
+	ENDIF			;Endif
+				.ASSUME FRESIZ EQ STBSIZ+2
+	CMP	SIZE,FRESIZ(R2)	;Is the free pool big enough?
+.iff  ;NULINK
+				.ASSUME FREPTR EQ 0
+	BIT	(R5),(R2)+	;Is free pool already aligned?
+	IFNE			;If not then
+				   .ASSUME FRESIZ EQ FREPTR+2
+	DEC	(R2)		;  Fix free pool size
+				   .ASSUME FREPTR EQ FRESIZ-2
+	INC	-2(R2)		;  Align free pool pointer
+	INC	STBSIZ-2(R2)	;  Fix symbol table size
+	ENDIF			;Endif
+				.ASSUME FRESIZ EQ FREPTR+2
+	CMP	SIZE,(R2)+	;Is the free pool big enough?
+.endc ;NULINK
+	IFHI			;If not then
+;gmb - This section is temporary debugging code.
+;gmb - Remove after V9.4 field test
+	MOV	LCAPTR,R0	;  Get address of local context area
+	IFEQ			;  If we don't have one then
+	MOV	#GCA,R0		;    Get address of global context area
+	ENDIF			;  Endif
+	PUSH	(R0)+		;  Save pointer to free pool a minute
+	MOV	(R0),R0		;  Get free pool size
+	ADD	(SP)+,R0	;  Calculate max memory address
+	ASH	#-11.,R0	;  Convert to K words
+	CMPB	R0,MEMSIZ	;  Are we using all our memory?
+	IFNE			;  If not then
+	MOV	#123456,R3	;    Debugging aid
+	BPT			;    We should be!  Crash.
+	ENDIF			;  Endif
+;gmb end temporary section
+	CALLX	CLRXRB		;  Clear the XRB
+	MOVB	MEMSIZ,XRB+0	;  Get current memory size
+	INCB	XRB+0		;  Ask for 1K more
+	.CORE			;  Attempt to get it
+	TSTB	FIRQB+0		;  Did we get it?
+	IFNE			;  If not then
+	CALL	GARBAGE		;    Collect the garbage and unused memory
+	BCS	20$		;    Return if error (maybe nothing to collect)
+	BR	10$		;    Go back and try again
+	ENDIF			;  Endif
+	INCB	MEMSIZ		;  Increase our current memory size 1K
+	MOV	SCOPE,R0	;  Get address of current context area
+	ADD	#4000,FRESIZ(R0);  Increase the free size 1K words
+	CMP	R0,#GCA		;  Are we adding to the global free pool?
+	IFEQ			;  If so then
+	MOV	#LCAPTR,R0	;    Get address of local context area
+	TST	(R0)		;    Is there a local context area?  	;009
+	IFNE			;    If so then				;009
+	CALL	SHUFFLE		;      Shift local table up 1K to bring the
+				;      ..new memory down to the global free pool
+	ENDIF			;    Endif				;009
+	ENDIF			;  Endif
+	MOV	SCOPE,R2	;  Get context area pointer again in case it
+.if df NULINK
+				;  ... was changed by GARBAGE or SHUFFLE
+.iff  ;NULINK
+	ADD	#STBSIZ,R2	;  ... was changed by GARBAGE or SHUFFLE
+.endc ;NULINK
+	ENDIF			;Endif
+.if df NULINK
+	MOV	R2,R0		;Copy pointer to context area
+				.ASSUME STBSIZ EQ 0
+	ADD	(R2),R0		;Make abs pointer to end of symbol table
+				;... (location of requested memory)
+				.ASSUME STBSIZ EQ 0
+	ADD	SIZE,(R2)+	;Update symbol table size
+				.ASSUME FRESIZ EQ STBSIZ+2
+	SUB	SIZE,(R2)	;Update free pool size
+	CLC			;Return with success (carry clear)
+20$:	POP	R2		;Restore register
+.iff  ;NULINK
+				.ASSUME STBSIZ EQ FRESIZ+2
+	ADD	SIZE,(R2)	;Update total size of symbol table (doesn't
+				;... include free pool)
+				.ASSUME FRESIZ EQ STBSIZ-2
+	SUB	SIZE,-(R2)	;Update size of free pool
+				.ASSUME	FREPTR EQ FRESIZ-2
+	MOV	-(R2),R0	;Get pointer to beginning of memory to be
+				;... allocated
+	ADD	SIZE,(R2)	;Allocate requested amount of memory
+	CLC			;Return with success (carry clear)
+20$:				;Return with error in R0 (& carry set)
+	MOV	(R5)+,R2	;% Fix return address non-destructively
+				;% ... and without touching carry
+	POP	R2		;Restore registers
+.endc ;NULINK
+	RETURN	R5
+
+.DSABL	LSB
+
+.SBTTL	GETPOS	- Get current ICF position
+
+;+
+; GETPOS - Get current ICF position
+;
+; Description:
+;	This is common code used by ADDLBL and PSHPOS to issue
+;	the monitor call to get the current ICF position.  It returns
+;	with the data in the FIRQB.
+;
+; Inputs:
+;	None
+;
+; Call:
+;	CALL	GETPOS
+;
+; Outputs:
+;	(THIS IS NON-STANDARD)
+;	If Z=1 then
+;		R0 is unchanged
+;		R1 -> ICF position in FIQRB
+;	If Z=0 then
+;		R0 =  Error code
+;		R1 is garbage
+;
+; Side effects:
+;	FIRQB is trashed.
+;-
+
+.ENABL	LSB
+
+GETPOS:	CALLX	CLRFQB		;Clear the FIRQB
+	MOVB	#STA.PF,FIRQB+FQFIL
+				;Function = "Read PFB channel status"
+	MOV	#PF$ICF*2,FIRQB+FQNAM1
+				;PFB channel number *2 for the ICF
+	.PFB			;Get the position
+	MOV	#FIRQB+FQNAM1+2,R1
+				;Point R1 to location of position
+	TSTB	FIRQB+0		;Was there an error?
+	IFNE			;If so then
+	CLR	R0		;  Set up to avoid sign-extend
+	BISB	FIRQB+0,R0	;  Get error code and set condition codes
+	ENDIF			;Endif
+	RETURN			;% Return (with error code in R0 if Z=0)
+
+.DSABL	LSB
+
+.SBTTL	GETVAL	- Get pointer to entry value
+
+;+
+; GETVAL	- Get pointer to entry value
+;
+;-
+
+.ENABL	LSB
+
+GETVAL::
+	CALL	SRHENT		;Look for the entry
+	IFCC			;If we found it then
+	PUSH	R1		;  Save a register
+	MOVB	E.TYPE(R0),R1	;  Get the entry type (sign extension expected)
+	MOVB	R1,TYPE		;  Set TYPE so caller knows what he found
+	ADD	EVALUS(R1),R0	;  Compute pointer to entry value
+	CMPB	R1,#STRTYP	;  Is it a string symbol entry?
+	IFEQ			;  If so then
+.if df NULINK
+	ADD	S.VALP(R0),R0	;    Get absolute pointer to string value
+.iff  ;NULINK
+	MOV	(R0),R0		;    Get real pointer to string value
+.endc ;NULINK
+	ADD	#S.SLEN,R0	;    Skip the alocation stuff and point to
+				;    ... the string size
+	ENDIF			;  Endif
+	POP	R1		;  Restore register
+	CLC			;  Clear carry to indicate no error
+	ENDIF			;Endif
+	RETURN			;Return (carry indicates status)
+
+.DSABL	LSB
+
+.SBTTL	HASH	- Hash a name and return slot number
+
+;+
+; HASH		- Hash a name and return slot number
+;
+; Inputs:
+;	R1	=  The type of the entry
+;	R2	-> The name of the entry (if label or symbol)
+;	R3	=  The length of the name (if label or symbol)
+;
+; Call:
+;	CALL	HASH
+;
+; Outputs:
+;	R0	=  Number of slot in slot table which contains entry
+;	R1	=  Unchanged
+;	R2	-- Garbage
+;
+;	No errors are possible.
+;-
+
+.ENABL	LSB
+
+HASH:	TSTB	R1		;Look at the entry type
+				.ASSUME NUMTYP GT 0
+				.ASSUME STRTYP GT 0
+	BGT	10$		;Branch if symbol name (numeric or string)
+				.ASSUME ERRTYP LT 0
+				.ASSUME CCTYP  LT 0
+				.ASSUME GSBTYP LT 0
+	BLT	20$		;Branch if trap command or GOSUB/RETURN stack
+				;... entry
+				.ASSUME LBLTYP EQ 0
+;
+; Label names
+;
+	MOVB	(R2),R0		;Get the first character
+	SUB	R3,R0		;Subtract twice the length
+	SUB	R3,R0
+	ADD	R3,R2		;Add the last character
+	MOVB	-(R2),R2
+	ADD	R2,R0
+	BIC	#^C<17>,R0	;Use lower 4 bits
+	ASL	R0		;Multiply by two to get word offset
+	ADD	#<41*2>+SLOTTB,R0
+				;Label names occupy slots 41-60
+	RETURN			;Return
+;
+; Symbol names
+;
+10$:	MOVB	(R2),R0		;Get the first character
+	CMPB	R0,#'$		;Is it a dollar sign ($)?
+	IFNE			;If not then
+	BIC	#^C<37>,R0	;  Use lower 5 bits.
+	ASL	R0		;  Multiply by two to get word offset
+	ADD	#<1*2>+SLOTTB,R0;  Add one so symbol names are slots 1-40
+	RETURN			;  Return
+	ENDIF			;Endif
+
+	MOV	#<0*2>+SLOTTB,R0;Reserved symbol names ($names) are in slot 0
+				;... (of global table)
+	RETURN			;Return
+;
+; Trap commands and GOSUB/RETURN stack entries
+;
+20$:	CMPB	R1,#GSBTYP	;Is this a GOSUB/RETURN stack entry
+	IFEQ			;If so then
+	MOV	#<0*2>+SLOTTB,R0;  they go into slot 0 (of local table)
+	ELSE			;Else
+	MOV	#<61*2>+SLOTTB,R0
+				;  Trap commands are always slot 61
+	ENDIF			;Endif
+	RETURN			;Return
+
+.DSABL	LSB
+
+.SBTTL	INILCL	- Initialize the local symbol table
+
+;+
+; INILCL	- Initialize the local symbol table
+;
+; Description:
+;	This routine is called when a new procedure level is invoked (probably
+;	via the @ command).  It assumes that the global symbol table has already
+;	been initialized.
+;
+;	Memory is expanded if needed and the local context area is initialized
+;	to the appropriate values--zeroes if nothing better comes to mind.
+;	The local free pool is set up, but not zeroed so don't expect it to be.
+;
+;	This routine can not be used on a DELETE/SYMBOL/LOCAL/ALL command
+;	because it initializes everything (not just the local symbols).
+;
+; Inputs:
+;	GCAPTR	-> The global context area
+;	MEMSIZ	=  Our current memory size in units of K words
+;
+; Call:
+;	CALL	INILCL
+;
+; Outputs:
+;	LCAPTR	-> Local context area
+;	MEMSIZ	=  New memory size in units of K words
+;
+; Side effects:
+;	The XRB and FIRQB+0 may have been trashed.
+;	Our memory usage may have increased by one K words.
+;
+; Caution:
+;	Don't forget to save the local symbol table before calling this
+;	routine.
+;
+;-
+
+.ENABL	LSB
+
+INILCL::
+	PUSH	<R0,R1,R2>	;Save some registers
+.if df NULINK
+5$:	MOV	#GCA,R0		;Get pointer to global context area
+	MOV	R0,R1		;Copy pointer
+				.ASSUME STBSIZ EQ 0
+	ADD	(R0)+,R1	;Point to end of symbol table
+				.ASSUME FRESIZ EQ STBSIZ+2
+	ADD	(R0),R1		;Point to end of free pool
+.iff  ;NULINK
+5$:	MOV	#GCA,R0		;Get pointer to global context area
+				.ASSUME FREPTR EQ 0
+	MOV	(R0)+,R1	;Get pointer to global free pool
+				.ASSUME FRESIZ EQ FREPTR+2
+	ADD	(R0),R1		;Compute pointer to end of global free pool
+.endc ;NULINK
+	BIT	#777,R1		;Sanity check-must be aligned on 1 blk boundary
+	IFNE			;If not then
+	MOV	#SYS.E,R0	;  Set error to "?Program failure in DCL"
+	BR	20$		;  Run for the hills
+	ENDIF			;Endif
+
+;% At this point R1 points to first word after global free pool.  If we are not
+;% reinitializing a local symbol table then R1 should equal MEMSIZ*4000. In
+;% other words, all memory belongs to the global symbol table/free pool.  We
+;% need to get memory for the local symbol table from somewhere (perhaps the
+;% global free pool has enough to donate some).  If we are reinitializing a
+;% local symbol table, then the old symbol table's memory exists between R1
+;% and MEMSIZ*4000 and we already have the memory we need to create a new local
+;% symbol table.
+
+	MOV	R1,LCAPTR	;Save potential local context area pointer
+	ADD	#LCASIZ,R1	;Point to where local free pool should start
+	MOVB	MEMSIZ,R2	;Get our current memory size in K words
+	ASH	#11.,R2		;Multiply by 4000 (convert to # of bytes)
+	SUB	R1,R2		;Calculate amount of memory available for the
+				;... local free pool (do we have any?)
+	IFLE			;If there wasn't enough then
+.if df NULINK
+				   .ASSUME FRESIZ EQ STBSIZ+2
+.endc ;NULINK
+	CMP	(R0),#1000	;  Can we take a block of space from the
+				;  ... global free pool?
+	IFHIS			;  If so then
+.if df NULINK
+				     .ASSUME FRESIZ EQ STBSIZ+2
+.endc ;NULINK
+	SUB	#1000,(R0)	;    Remove it from the global free pool
+	MOVB	#1,GBLNFG	;    Mark the global context area as changed
+	BR	5$		;    Go back and try again.
+	ENDIF			;  Endif
+	CALLX	CLRXRB		;  Clear the XRB
+	MOVB	MEMSIZ,XRB+0	;  Get our old memory size
+	INCB	XRB+0		;  Add 1K to it
+	.CORE			;  Nudder K pleez
+	TSTB	FIRQB+0		;  Did it work?
+	IFNE			;  If not then
+	MOV	#STFL.E,R0	;    Set error to "?Symbol table full" 
+	BR	20$		;    Catch the next train to Clarksville
+	ENDIF			;  Endif
+	INCB	MEMSIZ		;  Update our memory size
+				   .ASSUME LCASIZ LE 4000
+				;% R2 should always = -LCASIZ here
+	ADD	#4000,R2	;  Calculate free pool size given another K
+	ENDIF			;Endif
+	MOV	LCAPTR,R0	;Get local context area pointer
+.if df NULINK
+				.ASSUME STBSIZ EQ 0
+	MOV	#LCASIZ,(R0)+	;Set up the symbol table total size
+				;... (includes context area and symbols
+				;... but not free pool)
+				.ASSUME FRESIZ EQ STBSIZ+2
+	MOV	R2,(R0)+	;Set up the size of the free pool
+				.ASSUME CASIZ EQ FRESIZ+2
+.iff  ;NULINK
+				.ASSUME FREPTR EQ 0
+	MOV	R1,(R0)+	;Set up the free pool pointer
+				.ASSUME FRESIZ EQ FREPTR+2
+	MOV	R2,(R0)+	;Set up the size of the free pool
+				.ASSUME STBSIZ EQ FRESIZ+2
+	MOV	#LCASIZ,(R0)+	;Set up the symbol table total size
+				;... (includes context area and symbols
+				;... but not free pool)
+				.ASSUME CASIZ EQ STBSIZ+2
+.endc ;NULINK
+	MOV	#LCASIZ,(R0)+	;Set up the size of the context area
+				.ASSUME STFNFG EQ CASIZ+2
+	MOV	#LCLNFG,(R0)+	;Set up address of LCLNFG flag
+	MOV	#1,LCLNFG	;Local table is not on disk yet
+				.ASSUME SLOTNM EQ STFNFG+2
+	MOV	#LLISNM,(R0)+	;Set up the number of entry lists in list table
+				.ASSUME SLOTTB EQ SLOTNM+2
+	MOV	#<LCASIZ-SLOTTB+2>/2,R2 
+				;Get number of remaining uninitialized words
+				;... of context area
+				.ASSUME LCASIZ GT SLOTTB
+10$:	CLR	(R0)+		;Clear out the rest of the context area
+	SOB	R2,10$		;Loop till done
+	TST	(PC)+		;Return success (carry clear)
+20$:	SEC			;Return failure (error code in R0, carry set)
+	POP	<R2,R1,R0>	;Restore registers
+	RETURN			;Return
+
+GLOBAL	<SYS.E,STFL.E>
+
+.DSABL	LSB
+
+.SBTTL	MATCH	- Match entry names
+
+;+
+; MATCH		- Match entry names
+;
+; Inputs:
+;	R0	-> Entry
+;
+; Call:
+;	CALL	MATCH
+;
+; Outputs:
+;	C	=  0 if the entry DID match
+;	C	=  1 if the entry did NOT match
+;	R2	=  Garbage
+;	R3	=  Garbage if entry did NOT match
+;		   > 0 if a named entry matched abbreviation ok
+;		   < 0 if a named entry conflicted with another entry
+;		   = 0 if entry did not match abbreviation
+;	R4	=  Garbage
+;	R5	=  Garbage
+;
+; Side effects:
+;	None
+;-
+
+.ENABL	LSB
+
+	TMPORG	IMPURE
+MINENT:	.BLKB			;Minimum entry name length -- abbrev length if
+				;... present otherwise the name length
+MINUSR:	.BLKB			;Minimum user specified name length -- abbrev
+				;... length if present else name length
+	.EVEN
+	UNORG
+
+MATCH:	CLR	R3		;Zero minimum entry name length to start
+	MOVB	E.TYPE(R0),R4	;Get the entry type
+	BGT	5$		;Entry is a symbol			;015
+	BEQ	10$		;Entry is a label			;015
+;
+; Match "name-less" entries here (Errors and GOSUBs)			;015
+;
+	CMPB	TYPE,E.TYPE(R0)	;Do the types match?			;015
+	BNE	FAIL$		;Fail if not				;015
+	BR	SUCC$		;Otherwise succeed			;015
+
+5$:	BISB	E.ABLN(R0),R3	;Get abbrv point as min entry (name) length ;015
+
+10$:	MOV	ENAMES(R4),R4	;Get offset to entry name length	;015
+;
+; Do some preliminary checking to weed out impossible matches
+; (this is not optional)
+;
+	ADD	R0,R4		;Point to entry name length byte
+	TST	R3		;Have we got a minimum entry name length yet?
+	IFEQ			;If we don't then
+	BISB	(R4),R3		;  Use the entry name length
+	ENDIF			;Endif
+	CLR	R2		;Ensure high byte clear
+	BISB	NAMLNG,R2	;Get user specified name length
+	CMPB	R2,R3		;Is user name < min entry length
+	BLO	FAIL$		;Can't match if so
+	MOVB	NAMABB,MINUSR	;Get user name abbrev point
+	IFEQ			;If we don't have one then
+	MOVB	R2,MINUSR	;  Use the user name length and the minimum
+	ENDIF			;Endif
+	CMPB	MINUSR,(R4)	;Is min user name length > entry name length?
+	BHI	FAIL$		;Can't match if so
+	MOVB	R3,MINENT	;Save minimum entry name length
+	CLR	R3		;Ensure high byte clear
+	BISB	(R4)+,R3	;Get entry name length and move pointer to
+				;... entry name
+	SUB	R2,R3		;Calculate difference in lengths.
+	IFMI			;If user name is longer than entry name then
+	ADD	R3,R2		;  Make R2 equal to length of entry name
+	ENDIF			;Endif
+;
+; Compare the two names.
+;
+	MOV	NAMADR,R5	;Get pointer to user specified name
+20$:	CMPB	(R5)+,(R4)+	;Compare a byte of the two names
+	BNE	30$		;If they differ then go find out why
+	SOB	R2,20$		;Count down and loop until done
+				;All bytes matched to get here.
+	TST	R3		;If both names had the same length then
+	BEQ	SUCC$		;... it must have been a perfect match
+	INC	R5		;Fix the calculation below since all chars
+				;... did match
+;
+; Check for name abbreviation conflicts
+;
+30$:	SUB	NAMADR,R5	;Calculate the number matching characters
+	DEC	R5		;Compensate for the last char not matching
+	BEQ	FAIL$		;Fail if nothing matched
+	CMPB	MINENT,R5	;Is min entry length <= # of matched chars?
+	IFLOS			;If so then
+	CMPB	MINUSR,R5	;  Is min user length <= # of matched chars?
+	IFLOS			;  If so then
+	TSTB	NAMABB		;    If user name had no abbrev point then
+	BEQ	40$		;    ... see if it matched an abbreviation
+	MOV	#-1,R3		;    Set abbrev flag negative to indicate
+	BR	SUCC$		;    ... abbrev conflict and pretend success.
+	ENDIF			;  Endif
+	ENDIF			;Endif
+40$:	MOV	#1,R3		;Guess that the user name matched an
+				;... abbreviation (i.e. "ab" matches "a-bc")
+	TST	R2		;If all chars matched (SOB loop finished) then
+				;... user name DID match an abbreviation
+	BNE	FAIL$		;Otherwise it DID NOT match
+SUCC$:	TST	(PC)+		;Return with success (carry clear)
+FAIL$:	SEC			;Return with failure (carry set)
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	RETMEM	- Return memory immediately if possible
+
+;+
+; RETMEM - Return memory immediately if possible
+;
+; Description:
+;	This routine is called to return recently freed memory to the
+;	free pool.  It will only be able to return the memory if it
+;	is at the very beginning of the free pool.
+;
+;	This routine is used in ADDSYM to prevent a succession of string
+;	assignments to the same symbol from using more free pool than
+;	required.  It is also used in DELENT on the off chance that it
+;	will do some good
+;
+;gmb -	Get rid of this routine.  It probably doesn't help much.
+;gmb -  Replace this routine with a string resizing routine which contains
+;gmb -  code similar to this code and most of the code which deals with
+;gmb -  getting memory for longer strings in ADDSYM.
+;
+; Inputs:
+;	R0 -> Memory to be returned
+;	R1 =  Length of memory to be returned
+;
+; Call:
+;	CALL	RETMEM
+;
+; Outputs:
+;	R0 -- Unchanged
+;	R1 -- Garbage
+;
+; Side effects:
+;	STBSIZ - Symbol table size may change.
+;	FRESIZ - Free pool size may change.
+;
+; Note: This code does not change the symbol table file NO GOOD flags.
+; 	It assumes that you will set the NFG flags if necessary.
+;-
+
+.ENABL	LSB
+
+RETMEM:	PUSH	R2		;Save register
+	MOV	SCOPE,R2	;Get pointer to current context area
+	ADD	R0,R1		;Compute end address of old memory
+.if df NULINK
+				.ASSUME STBSIZ EQ 0
+	MOV	(R2),-(SP)	;Get symbol table size
+	ADD	R2,(SP)		;Point to start of free pool
+	CMP	R1,(SP)+	;Is end of old entry at start of free pool?
+	IFEQ			;If so then
+	SUB	R0,R1		;  Calculate amount of memory being returned
+				   .ASSUME STBSIZ EQ 0
+	SUB	R1,(R2)+	;  Remove it from symbol table
+				   .ASSUME FRESIZ EQ STBSIZ+2
+	ADD	R1,(R2)		;  Add it to free pool
+	ENDIF			;Endif
+.iff  ;NULINK
+				.ASSUME FREPTR EQ 0
+	CMP	R1,(R2)		;Is it at beginning of free pool?
+	IFEQ			;If so then
+				.ASSUME FREPTR EQ 0
+	MOV	R0,(R2)+	;  Reposition the free pool pointer
+	SUB	R0,R1		;  Calculate amount of memory being returned
+				.ASSUME FRESIZ EQ FREPTR+2
+	ADD	R1,(R2)+	;  Add it to the size of the free pool
+				.ASSUME STBSIZ EQ FRESIZ+2
+	SUB	R1,(R2)		;  Fix symbol table total size
+	ENDIF			;Endif
+.endc ;NULINK
+	POP	R2		;Restore register
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	SHUFFLE	- Move the local symbol table up
+
+; Note:  This routine does not update GBLNFG or LCLNFG because the contents
+; of the symbol tables do not change.  They only get moved around.
+
+.ENABL	LSB
+
+SHUFFLE:
+	CALL	SAVRGS,R5	;Save the whales er...registers R1-R5
+	MOV	#4000,R4	;We're moving the stb up 4000 bytes (1K)
+.if df NULINK
+	MOV	(R0),R3		;Get pointer to context area
+	ADD	R4,(R0)		;Fix context area pointer
+	CMP	SCOPE,R3	;Will our scope be wrong after the shuffle?
+	IFEQ			;If so then
+	ADD	R4,SCOPE	;  Fix the scope pointer
+	ENDIF			;Endif
+				.ASSUME STBSIZ EQ 0
+	MOV	(R3),R2		;Get symbol table size
+	INC	R2		;Round symbol table size up to
+	BIC	#1,R2		;... nearest word
+	ADD	R2,R3		;Compute pointer to end of the symbol table
+	MOV	R3,R1		;Compute pointer to end of
+	ADD	R4,R1		;... new home of symbol table
+.iff  ;NULINK
+	MOV	(R0),R5		;Get the context area address
+	PUSH	STBSIZ(R5)	;Save the size of the symbol table for a while
+;
+; Fix the various lists and pointers for the new location
+;
+	CALL	OFFSTP,R0,ABSPTR;Add 4000 to every pointer after looking at it
+	POP	R2		;Get saved symbol table size
+	INC	R2		;Round symbol table size up to
+	BIC	#1,R2		;... nearest word
+	MOV	(R0),R3		;Get pointer to context area
+	CMP	SCOPE,R3	;Will our scope be wrong after the shuffle?
+	IFEQ			;If so then
+	ADD	R4,SCOPE	;  Fix the scope pointer
+	ENDIF			;Endif
+	ADD	R4,(R0)		;Fix context area pointer
+	ADD	R2,R3		;Compute pointer to end of the symbol table
+	MOV	R3,R1		;Compute pointer to end of
+	ADD	R4,R1		;... new home of symbol table
+.endc
+;
+; Move the whole symbol table (and context area) up
+;
+; MOVBYT is not used here because this code is much faster.
+;
+;% Note:
+;%	The round up done below is to ensure that all of the symbol table gets
+;%	moved.  It may in fact cause up to 7 unwanted bytes to be moved
+;%	in the process, but this is harmless since they overwrite the area
+;%	just vacated.
+;
+	ADD	#7,R2		;Set up to round up to nearest 8. bytes
+	ASH	#-3,R2		;Divide symbol table size by 8.
+30$:	MOV	-(R3),-(R1)	;Move two bytes up
+	MOV	-(R3),-(R1)	;  "      "
+	MOV	-(R3),-(R1)	;  "      "
+	MOV	-(R3),-(R1)	;  "      "
+	SOB	R2,30$		;Loop until all bytes moved
+
+	RETURN			;Return 
+
+.DSABL	LSB
+
+.if ndf NULINK
+.SBTTL	OFFSTP	- Offset the symbol table pointers
+
+;+
+; OFFSTP	- Offset the symbol table pointers
+;
+; Description:
+;	This routine adds a given value to all of the pointers in a
+;	given symbol table.  It is used when the symbol table needs
+;	to be relocated to a new address.
+;
+; Inputs:
+;	R4	=  Value to be added to each pointer
+;	R5	-> The symbol table being relocated
+;	RELPTR	   Indicates add value before looking at pointer
+;		   (pointer is relative)
+;	ABSPTR	   Indicate add value after looking at pointer (pointer
+;		   is absolute)
+;
+; Call:
+;	CALL	OFFSTP,R0,ABSPTR
+;	CALL	OFFSTP,R0,RELPTR
+;
+; Outputs:
+;	R0, R1, R2, R3 - Unchanged
+;	R4, R5 - Garbage
+;
+;-
+
+	.ENABL	LSB
+
+OFFSTP:	PUSH	<R1,R2,R3>	;Save registers
+				.ASSUME FREPTR EQ 0
+	ADD	R4,(R5)		;Fix the free pool pointer
+	MOV	SLOTNM(R5),R2	;Get the number of lists in list table
+	ADD	#SLOTTB,R5	;Point to first list
+10$:	MOV	(R5)+,R1	;Get first entry on list
+	IFNE			;If the list is not null then
+	ADD	R4,-2(R5)	;  Fix the list pointer
+20$:	CMP	(R0),#ABSPTR	;  Is pointer absolute
+	BEQ	30$		;  Yes, leave it alone for now
+	ADD	R4,R1		;  No, it's relative.  Make it useful
+30$:	CMPB	E.TYPE(R1),#STRTYP
+				;  Is this a string symbol?
+	IFEQ			;  If so then
+	ADD	R4,S.VALP(R1)	;    Fix the pointer to the string value
+	ENDIF			;  Endif
+	MOV	(R1),R3		;  Save pointer to next entry
+	IFNE			;  If the next entry pointer is not null then
+	ADD	R4,(R1)		;    Fix pointer to next entry
+	ENDIF			;  Endif
+	MOV	R3,R1		;  Restore pointer to next entry
+	BNE	20$		;  Go do next entry on list unless we're at the
+				;  ... end of the list
+	ENDIF			;Endif
+	SOB	R2,10$		;Do all of the lists
+	POP	<R3,R2,R1>	;Restore registers
+	TST	(R0)+		;Skip our arg
+	RETURN	R0		;Return
+
+	.DSABL	LSB
+.endc ;NULINK
+
+.SBTTL	POPPOS	- Pop a GOSUB/RETURN stack entry
+
+;+
+; POPPOS - Pop a GOSUB/RETURN stack entry
+;
+; Description
+;	This routine pops the top entry in the GOSUB/RETURN "stack"
+;	and puts the result in a clean FIRQB.  The stack entry is put
+;	at the offsets required for the .PFB call to reposition the ICF
+;	to the position specified by the entry.
+;
+;	This is a special purpose routine which uses the local symbol table
+;	to store ICF positions in a linked list stack.  Each stack entry is
+;	made up to look like a standard symbol table entry so that the
+;	garbage collector will handle them properly.
+;
+;%	THIS STACK RELIES ON A SPECIAL PROPERTY OF THE GARBAGE COLLECTOR AND
+;%	THE MEMORY ALLOCATION SCHEME.  Memory is allocated with monotonically
+;%	increasing memory addresses.  Thus the top of the stack (most recently
+;%	allocated) is highest in memory and the bottom is lowest.  New stack
+;%	entries get linked in at the beginning of the list so that the top
+;%	of the stack (with the highest address) is first in the list and so
+;%	on with the bottom of the stack (having the lowest address) being last.
+;%	Got that?  It makes it easy to find the top of the stack.  Now the
+;%	garbage collector comes along and changes the order of the links while
+;%	it cleans up.  BUT, when done, the list of entries is left in reverse
+;%	address order (highest address first) -- just the way we want it.  Very
+;%	convenient.  Just don't change it without changing this to!
+;
+; Inputs:
+;	None
+;
+; Call:
+;	CALLX	POPPOS
+;
+; Outputs:
+;	If C=0 then
+;		R0 is garbage
+;	If C=1 then
+;		R0 = Error code
+;
+; Side effects:
+;	SCOPE	- Set to LOCAL
+;	FIRQB is loaded with the popped position.
+;	Local symbol table modified
+;-
+
+.ENABL	LSB
+POPPOS::
+	PUSH	R1
+	MOV	LCAPTR,R0	;Get pointer to local context area
+	MOV	R0,SCOPE	;Set scope to local (for RETMEM)
+	ADD	#SLOTTB+GSBSEC,R0
+				;Make pointer GOSUB/RETURN stack
+10$:	MOV	R0,R1		;Save pointer to previous entry
+	MOV	(R0),R0		;Get next entry on list.
+	IFNE			;If we got one then
+.if df NULINK
+	ADD	SCOPE,R0	;  Make pointer absolute
+.endc ;NULINK
+
+;% These next two instructions will be necessary if we ever have local
+;% symbols that begin with a "$" character.  Why?  Because we're using
+;% the local entry list which coresponds to the global reserved symbol entry
+;% list to store our stack entries on.
+;
+;	CMPB	E.TYPE(R0),#GSBTYP
+;				;  Is it a GOSUB/RETURN stack entry?
+;	BNE	10$		;  Go look for another if not.
+
+				   .ASSUME E.NENT EQ 0
+	MOV	(R0),(R1)	;  Got top of stack.  Delink it.
+	MOVB	#1,LCLNFG	;  Mark local symbol table changed
+
+; Put position data into FIRQB
+
+	ADD	#G.ICFP,R0	;  Point to stored position in entry
+	MOV	#FIRQB+FQNAM1+2,R1
+				;  Point into the FIRQB at the place where
+				;  ... .PFB expects the data
+	MOV	(R0)+,(R1)+	;  Set the LSB of block #
+	MOV	(R0)+,(R1)+	;  Set the MSB of block #
+	MOV	(R0)+,(R1)+	;  Set the record size
+	MOV	(R0)+,(R1)+	;  Set the byte offset
+	CLR	R0		;  Clear error code
+	ELSE			;Else
+	MOV	#EXITTM,R0	;  Set "?RETURN without GOSUB" error
+	ENDIF			;Endif
+	CMP	#0,R0		;Set carry if R0 contains an error code
+	POP	R1
+	RETURN
+
+.DSABL	LSB
+
+	GLOBAL	<EXITTM>
+
+.SBTTL	PSHPOS	- Push a GOSUB/RETURN stack entry
+
+;+
+; PSHPOS - Push a GOSUB/RETURN stack entry
+;
+; Description
+;	This routine gets the current ICF position and pushes it on to the
+;	GOSUB/RETURN stack.  The position saved is of the same form as that
+;	used by labels.
+;
+;	This is a special purpose routine which uses the local symbol table
+;	to store ICF positions in a linked list stack.  Each stack entry is
+;	made up to look like a standard symbol table entry so that the
+;	garbage collector will handle them properly.
+;
+;%	THIS STACK RELIES ON A SPECIAL PROPERTY OF THE GARBAGE COLLECTOR AND
+;%	THE MEMORY ALLOCATION SCHEME.  Memory is allocated with monotonically
+;%	increasing memory addresses.  Thus the top of the stack (most recently
+;%	allocated) is highest in memory and the bottom is lowest.  New stack
+;%	entries get linked in at the beginning of the list so that the top
+;%	of the stack (with the highest address) is first in the list and so
+;%	on with the bottom of the stack (having the lowest address) being last.
+;%	Got that?  It makes it easy to find the top of the stack.  Now the
+;%	garbage collector comes along and changes the order of the links while
+;%	it cleans up.  BUT, when done, the list of entries is left in reverse
+;%	address order (highest address first) -- just the way we want it.  Very
+;%	convenient.  Just don't change it without changing this to!
+;
+; Inputs:
+;	None
+;
+; Call:
+;	CALLX	PSHPOS
+;
+; Outputs:
+;	If C=0 then
+;		R0 is garbage
+;	If C=1 then
+;		R0 = Error code
+;
+; Side effects:
+;	LCLNFG	- Set to indicate local symbol table changed
+;	SCOPE	- Set to LOCAL
+;	SIZE	- Set to size of a GOSUB/RETURN stack entry
+;	TYPE	- Set to GSBTYP
+;	May cause a garbage collection.
+;	FIRQB is trashed.
+;-
+
+.ENABL	LSB
+
+PSHPOS::
+	PUSH	R1		;Save register
+	MOV	LCAPTR,SCOPE	;Set scope to local
+	MOV	#GSBSIZ,SIZE	;Set amount of space to allocate for entry
+	MOVB	#GSBTYP,TYPE	;Set entry type
+	CALL	MAKENT		;Make the new entry
+				;... R0 -> new entry (if c=0) or
+				;...       error code (if c=1)
+				;... LCLNFG set
+	BCS	10$		;Leave if error (like no memory avail)
+	CALL	GETPOS		;Get current ICF position from monitor
+				;... R0 =  Error code (if z=0) else
+				;...       unchanged
+				;... R1 -> Position data (garbage if error)
+	IFEQ			;If no error then
+	ADD	#G.ICFP,R0	;  Point to entry storage area
+	MOV	(R1)+,(R0)+	;  Store LSB of block #
+	MOV	(R1)+,(R0)+	;  Store MSB of block #
+	MOV	(R1)+,(R0)+	;  Store Record size
+	MOV	(R1)+,(R0)+	;  Store Byte offset
+	CLR	R0		;  Clear error code and carry
+	ELSE			;Else there was an error
+	SEC			;  Set carry to indicate error (code already
+				;  ... in R0)
+	ENDIF			;Endif
+10$:	POP	R1		;Restore register
+	RETURN			;Return with possible errors
+
+.DSABL	LSB
+
+.SBTTL	SRHENT	- Search the symbol tables for a specified entry
+
+;+
+; SRHENT	- Search the symbol tables for a specified entry
+; 
+; Inputs:
+; 	TYPE	=  The type of entry
+; 	NAMADR	-> The name of the entry (if it has a name)
+;	NAMLNG	=  The length of the name (if it has a name)
+; 	SCOPE	=  The symbol table - Global, Local, or All
+;	SRHABB	=  Search flags
+;		   < 0 - Matching abbreviation is ambiguous (assignments)
+;		   = 0 - Matching abbreviation means undefined (expressions)
+;		   > 0 - Matching abbreviation is ok (commands & show)
+;	
+; 
+; Call:
+; 	CALL	SRHENT
+; 
+; Outputs:
+; 	If C = 1 then
+; 		R0	 = Error code
+; 	endif
+; 
+; 	If C = 0 then
+; 		R0	-> Symbol table entry
+; 		PRVENT	-> Previous entry
+;		SCOPE	-> Pointer to context area of table containing
+;			   entry.
+; 	endif
+; 
+; Side effects:
+;	If we are looking for an entry with a name then
+;		The name is moved from the command buffer to
+;		TRNBUF by EDITNM and NAMADR now points to TRNBUF.
+;	endif
+;
+;-
+
+.ENABL	LSB
+
+SRHENT:	CALL	SAVRGS,R5	;Save R1-R5 for 30$
+	MOVB	TYPE,R1		;Get type
+	IFGE			;If type has a name then
+	MOV	NAMADR,TEMP01	;  Save address of symbol name in command
+				;  ... buffer in case we need it for reporting
+				;  ... conflict errors below
+	CALL	EDITNM		;  Edit the name (upcase and remove
+				;  ... abbreviation point if present)
+				;  ... (name is moved to TRNBUF)
+	ENDIF			;Endif
+	CALL	HASH		;Compute the symbol's list offset
+	MOV	R0,SLOT		;Save list offset into context area
+	TST	SCOPE		;Check scope--is it ALL?
+	BNE	SRHTBL		;No, go search specified table
+	MOV	LCAPTR,SCOPE	;Yes, do local table first
+	IFNE			;If there is a local table then
+	CALL	SRHTBL		;  Search the table
+	BCC	80$		;  Leave if we found entry
+	ENDIF			;Endif
+	MOV	SLOT,R0		;Get list offset into context area
+	MOV	GCAPTR,SCOPE	;Search global table last
+
+SRHTBL:	ADD	SCOPE,R0	;Point into specific context area
+	CLR	R1		;Clear found entry flag
+40$:	MOV	R0,PRVENT	;Save previous entry
+ 				.ASSUME	E.NENT EQ 0
+	MOV	(R0),R0		;Get next entry on list
+	IFNE			;If non-null then
+.if df NULINK
+	ADD	SCOPE,R0	;  Make pointer absolute
+.endc ;NULINK
+	CALL	MATCH		;  Do the entries match?
+	BCS	40$		;  Repeat if not
+	TST	R1		;  Have we already found a matching entry?
+				;  ... (Can only happen with symbols)
+	BNE	50$		;  Go complain if so
+	MOV	PRVENT,R1	;  Save previous entry pointer to entry and
+				;  ... set flag
+	TST	R3		;  Check match abbreviation flag
+	BMI	50$		;  Abbreviation is ambiguous
+	IFNE			;  If user's name matched abbrev then
+	TSTB	SRHABB		;    What do we do about it?
+	BMI	50$		;    Abbreviation is ambiguous (assignments)
+	BEQ	60$		;    Abbreviation means undefined (expressions)
+       ;BPL			;    Abbreviation is ok (commands & show)
+	ENDIF			;  Endif
+	TSTB	NAMABB		;  Was an abbrev length specified?
+	BNE	40$		;  Yes, check for possible name conflicts
+				;  ... by searching remainder of list
+	ENDIF			;Endif
+
+	TST	R1		;Did we find an entry?
+       ;CLC			;Clear carry in case we did
+	BEQ	60$		;No.  Couldn't find the entry.
+.if df NULINK
+	MOV	(R1),R0		;Yes, get relative pointer to entry
+	ADD	SCOPE,R0	;Make pointer absolute
+.iff  ;NULINK
+	MOV	(R1),R0		;Yes, get pointer to entry
+.endc ;NULINK
+	MOV	R1,PRVENT	;Make sure previous entry pointer is correct
+	BR	80$		;Return with pointer in R0
+
+
+50$:	MOVB	E.TYPE(R0),R2	;Get entry type (sign extension expected)
+	MOV	ENAMES(R2),R2	;Get offset to entry name
+	ADD	R0,R2		;Point to entry name
+	MOVB	E.ABLN(R0),R4	;Get abbreviation point
+	CALL	ADDHYP		;Insert hyphen at abbrev point
+;
+; Print the error message here so we can specify which symbol conflicts.
+;
+	SUB	#CMDBUF-1,TEMP01;Set error position to 1st char in name
+	REPAINT	TEMP01		;Repaint the command line
+	CMESSAG	#SYCF.E,<R2>	;"?Symbol name conflicts with <symbol>"
+	MOV	#U.QUIT,R0	;Quit
+	BR	70$
+
+60$:	MOV	#USYM.E,R0	;"?Undefined symbol"
+70$:	SEC			;Set carry to indicate error
+80$:	RETURN
+
+GLOBAL	<CMDBUF,LX.ERP,SYCF.E,USYM.E>
+
+.DSABL	LSB
+
+.SBTTL	EDITNM	- Edit symbol names
+
+;+
+; EDITNM - Edit symbol names
+;
+; Description:
+;	This routine removes abbreviation point indicators and upper cases
+;	letters in symbol names.
+;
+;	It does this because it avoid the overhead of doing it N times
+;	during symbol name matching.
+;
+; Note:	This routine does not do Multi-national uppercasing.
+;
+;-
+
+.ENABL	LSB
+
+EDITNM:	MOV	NAMADR,R2	;Get address of name
+	CLR	R4		;Ensure high byte is clear
+	BISB	NAMLNG,R4	;Get name length
+	MOV	#TRNBUF,R3	;Address to put name
+	MOV	R3,NAMADR	;Save new address
+10$:	MOVB	(R2)+,R0	;Get next byte
+	CMPB	#'-,R0		;Is it a dash to indicate an abbreviation point?
+	BEQ	20$		;Yes, skip it.
+	CMPB	#'*,R0		;Is it an asterisk for the same reason?
+	BEQ	20$		;Yes, skip it.
+	CMPB	R0,#'A+40	;Is it lower case?
+	IFHIS			;If so then
+	BIC	#40,R0		;  Upper case it
+	ENDIF			;Endif
+	MOVB	R0,(R3)+	;Write the byte
+20$:	SOB	R4,10$		;Go get next byte
+	MOV	#TRNBUF,R2	;Get address of the new name
+	SUB	R2,R3		;Calculate name length
+	MOVB	R3,NAMLNG	;Set the new name length
+	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<TRNBUF>
+
+.SBTTL	GARBAGE	- The inglorious garbage collector incarnate
+;+
+; GARBAGE - The inglorious garbage collector incarnate
+;
+;
+; One amusing aspect of this is that after calling the garbage collector
+; we could return with LESS total memory that we had when we started!
+;-
+.ENABL	LSB
+
+GARBAGE:
+	CALL	SAVRGS,R5	;Save R1-R5 so VACUUM doesn't have to.
+	INC	GBGFLG		;Set garbage collector activity flag
+	PUSH	GCA+FRESIZ	;Save the old global free pool size
+	MOV	#GCA,R0		;Get pointer to global context area
+	CALL	VACUUM		;Clean the global table
+;
+; Adjust global free pool
+;
+	MOV	#GCA,R0		;Get pointer to global context area
+	CALL	ADJUST		;Adjust size of global free pool
+	MOVB	#1,GBLNFG	;Save Global Context info		;011
+;
+; Move local context area down.  We may have freed up some memory from the
+; global free pool and we need to move it up to the top of memory where it
+; can be returned to the system.  This is done by moving the local context
+; area down to the top of the global free pool.  This effectively makes the
+; freed memory part of the local free pool.  It will then be handled as part
+; of the resizing of the local free pool.
+;
+	MOV	LCAPTR,R0	;Get pointer to local context area
+	BEQ	20$		;Skip this if there is no local table
+	CMP	R0,R3		;Is it the same as the end of the global
+				;... free pool?
+	IFNE			;If not then
+	MOV	R3,LCAPTR	;  Set pointer to new location of context area
+	CMP	#GCA,SCOPE	;% Does SCOPE -> old local context area?
+	IFLO			;  If so then
+	MOV	R3,SCOPE	;     Point SCOPE at new local context area
+	ENDIF			;  Endif
+	MOV	#LCASIZ/2,R2	;  Get number of words in local context area
+10$:	MOV	(R0)+,(R3)+	;  Move a word down
+	SOB	R2,10$		;  Do them all
+	ENDIF			;Endif
+
+	MOV	LCAPTR,R0	;Get local context pointer
+	ADD	FRESIZ(R0),(SP)	;Add local symbol table size to reclaimation
+				;... value in preparation for the final
+				;... calculation.
+
+	CALL	VACUUM		;Clean the local table
+;
+; Adjust local free pool
+;
+	MOV	LCAPTR,R0	;Get pointer to local context area
+	CALL	ADJUST		;Adjust size of local free pool
+	MOVB	#1,LCLNFG	;Save Local Context info		;011
+;
+; Return spare memory to the system
+;
+20$:	ASH	#-11.,R3	;Divide end of local free pool by 2048. to
+				;... get number of K in use.
+	CMPB	R3,MEMSIZ	;Is it different from what we using now?
+	IFNE			;If so then
+	CALLX	CLRXRB		;  Clear the XRB
+	MOVB	R3,XRB+0	;  Set new memory size for sys call
+	.CORE			;  Go for the gusto
+	CALLX	U$CHKE		;  Shouldn't be any errors
+	MOVB	R3,MEMSIZ	;  Set new memory size for us
+	ENDIF			;Endif
+;
+; The last word...
+;
+	TST	(SP)+		;Did we get any memory back?
+       ;CLC			;... (return with carry clear for success if so)
+	IFEQ			;If not then
+	MOV	#STFL.E,R0	;  Set error to "?Symbol table full"
+	CLR	LX.ERP		;  Clear the error position.  Where would it be?
+	SEC			;  Set carry to indicate error
+	ENDIF			;Endif
+
+	RETURN			;Return
+
+GLOBAL	<STFL.E,LX.ERP>
+
+.DSABL	LSB
+
+.SBTTL	ADJUST	- Adjust the size of the free pool
+
+;
+; This routine resizes the free pool.  It will result in about half of the
+; free pool memory being returned to the system.  Hopefully we won't ask
+; for it right back.
+;
+; Memory is freed in 1 K chunks.  For example if the free pool has 4.x K
+; then 2K will be returned and 2.x K will remain.
+;
+; The free pools are begin on block boundaries.  The global free pool ends
+; on a block boundary if there is a local symbol table and on a 1K (4 block)
+; boundary if there is no local table.  The local free pool always ends on a 1K
+; boundary.  The 1K boundary is required because that's how our memory is
+; given to use by the system.  Resizing is done in a way which preserves these
+; boundary alignments.  NOTE that the last (highest in memory) free pool is
+; the one which must be aligned on a 1K boundary.
+;
+;% The last free pool check works because the LCAPTR is zero if there is
+;% no local table.  Thus GCAPTR > LCAPTR when there is no local table.
+
+.ENABL	LSB
+
+ADJUST:	CMP	R0,LCAPTR	;Is this the last free pool in memory?
+	IFHIS			;%If so then
+	MOV	#3777,R3	;  Set alignment value to 1K
+	ELSE			;Else
+	MOV	#777,R3		;  Set alignment value to 1 block
+	ENDIF			;Endif
+				.ASSUME FREPTR EQ 0
+	MOV	(R0)+,R1	;Get pointer to free pool
+				.ASSUME FRESIZ EQ FREPTR+2
+	MOV	(R0),R2		;Get size of free pool
+	SUB	R2,2(SP)	;Calculate amount of memory reclaimed
+	ASR	R2		;Divide free pool size by 2
+	ADD	R1,R2		;Compute adjusted end of free pool
+	ADD	R3,R2		;Round up to nearest
+	BIC	R3,R2		;... alignment boundary
+	MOV	R2,R3		;Save this value for future use
+	SUB	R1,R2		;Compute new size of free pool
+	MOV	R2,(R0)		;Set the size of free pool
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	VACUUM	- Clean up the symbol table
+
+;+
+; VACUUM - Clean up the symbol table
+;
+; Description:
+;
+;	This routine compacts DCL's symbol table memory and places
+;	the unused memory after the symbol table to be used as free pool.
+;
+;	Basically it sorts all of the symbol table entries by their memory
+;	address creating a linked list of entries in ascending address order.
+;	Each entry in this list is then moved down to the first free memory
+;	location.
+;
+;%	String values are handled differently because they do not have the
+;%	standard entry header information and thus can not be part of the
+;%	above list.  See the description for INSERT for more information.
+;
+;-
+
+.ENABL	LSB
+
+	TMPORG	IMPURE
+	.BLKW			;Reserved for future use (was PRVADD)
+NXTFRE:	.BLKW			;Pointer to next free byte
+GBGFLG:	.BLKW			;Flag to say we did a garbage collect
+				;... (<>0 says yes we did)
+	UNORG
+
+VACUUM:	PUSH	<R0>		;Save pointer to context area
+	MOV	CASIZ(R0),NXTFRE;Set next_free to point just after
+	ADD	R0,NXTFRE	;... the context area (start of sym tbl)
+	MOVB	SLOTNM(R0),R5	;Get number of lists in list table
+	MOV	R0,R1		;Copy the context area pointer
+	ADD	#SLOTTB,R1	;Point to first list in list table
+	MOV	#SLIST,R4	;Get address of sort list
+;
+;  The following section of code builds a single list (called the sort list)
+;  of all the entries in the symbol table.
+;
+
+	CLR	R2		;Clear entry counter
+10$:	MOV	(R1)+,R3	;Get pointer to first entry on list
+	BEQ	30$		;Go do another if nobody home
+	CLR	-2(R1)		;Clear out pointer to list
+20$:	INC	R2		;Increment count of entries
+	MOV	(R3)+,R0	;Save pointer to next entry and point R3
+				;... to the sort link
+	MOV	R3,(R4)		;Link entry to end
+	MOV	R3,R4		;... of sort list
+	MOV	R0,R3		;Get next entry on entry list
+	BNE	20$		;Do another entry unless we're at end of list
+30$:	SOB	R5,10$		;Do another entry list
+	CLR	(R4)		;Terminate the sort list
+;
+; Sort the list we just built based on the address of the entry
+;
+	TST	R2		;Do we have any entries to sort?
+	BEQ	50$		;No, go fix up context area
+	MOV	#GBGCMP,CMPFUN	;Set the entry comparison function
+	CALLX	SORT		;Sort the list
+
+;
+; Move each entry on the sorted list down in memory to where it should be.
+;
+40$:	TST	-(R0)		;Point R0 to next entry link
+	CMPB	E.TYPE(R0),#STRTYP+1 
+				;Is entry here on behalf of its string value?
+	IFEQ			;If so then 
+;
+; Move strings values here.  String values are special cased because they
+; don't have entries on the sort list.  They must re-use the string symbol
+; entry.
+;
+	DECB	E.TYPE(R0)	;  Restore type to string type
+	MOV	S.VALP(R0),R2	;  Get pointer to string value
+	MOV	NXTFRE,S.VALP(R0)
+				;  Fix string pointer
+	CLR	R3		;  Get length of
+	BISB	S.SLEN(R2),R3	;  ... string value
+	MOVB	R3,S.ALSZ(R2)	;  Set allocation size to string size
+	ADD	#S.SVAL,R3	;  Add in length of string value overhead
+	MOV	NXTFRE,R4	;  Get pointer to destination
+	ADD	R3,NXTFRE	;  Update NXTFRE
+	CALL	MOVBYT		;  Move the string value down
+	ELSE			;Else
+;
+; Move entries here.
+;
+	INC	NXTFRE		;  Align NXTFRE
+	BIC	#1,NXTFRE	;  ... to nearest word boundarys
+	MOVB	E.TYPE(R0),R1	;  Get the type of the entry
+	MOV	ESIZES(R1),R5	;  Look up basic size of entry
+	CLR	R3		;  Initialize name size to zero
+	MOV	ENAMES(R1),R2	;  Get offset to entry name
+	IFNE			;  If entry has a name then
+	ADD	R0,R2		;    Point to name length
+	BISB	(R2)+,R3	;    Get name length and point to name
+	ENDIF			;  Endif
+	MOV	R0,R4		;  Save pointer to entry
+		; R1 =  type
+		; R2 -> name
+		; R3 =  name length
+	CALL	HASH		;  Hash entry name to get offset to list
+		; R0 =  Offset into context area
+	ADD	(SP),R0		;  Point to list in context area
+	MOV	(R0),(R4)	;  Make entry point to first entry on list
+	MOV	NXTFRE,(R0)	;  Make entry the first entry on list
+	MOV	R4,R0		;  Restore pointer to entry
+
+	ADD	R5,R3		;  Add entry size to name length to
+				;  ... get total entry length
+	MOV	R0,R2		;  Point to entry for MOVBYT
+	MOV	NXTFRE,R4	;  Point to destination for MOVBYT
+	MOV	R4,R0		;  Save pointer to new location of entry
+	ADD	R3,NXTFRE	;  Update NXTFRE
+	CALL	MOVBYT		;  Move entry down
+	CMPB	E.TYPE(R0),#STRTYP
+				;  Is this a string symbol entry?
+	IFEQ			;  If so then
+	MOV	S.VALP(R0),R4	;    Get address of string value
+	IFNE			;    If we got one (entry was not incomplete)
+	INCB	E.TYPE(R0)	;      Reinsert this onto sort list on behalf of
+	CALL	INSERT		;      its string value.
+	ENDIF			;    Endif
+	ENDIF			;  Endif
+	ENDIF			;Endif
+;
+; Go do more entries
+;
+	TST	(R0)+		;Point R0 to sort link
+	MOV	(R0),R0		;Get next entry on sort list
+	BNE	40$		;Go do it
+;
+; Finish up
+;
+50$:	MOV	(SP),R0		;Get pointer to context area
+				.ASSUME FREPTR EQ 0
+	MOV	(R0),R2		;Save pointer to free pool
+	INC	NXTFRE		;Align next free pointer to 
+	BIC	#1,NXTFRE	; ... word (otherwise GETMEM might infinite
+				; ... loop since it DECs the freesize if it 
+				; ... is called with WORD as 2nd parameter).
+	MOV	NXTFRE,R1	;Get pointer to first unused byte
+	MOV	R1,(R0)+	;Make that the new pointer to the free pool
+	SUB	R1,R2		;Difference between new & old pointers is the
+				;... number of bytes we gained
+				.ASSUME FRESIZ EQ FREPTR+2
+	ADD	R2,(R0)		;Add that to the size of the free pool
+	SUB	(SP)+,R1	;Subtract the ptr to context area from ptr to
+				;... free pool to get symbol table size
+	MOV	R1,STBSIZ-2(R0)	;Set the symbol table size
+	RETURN			;Return
+
+GLOBAL	<CMPFUN,GBGCMP,SLIST>
+
+.DSABL	LSB
+
+.SBTTL	INSERT	- Insert entry into sort list based on address
+;+
+; INSERT - Insert entry into sort list based on address
+;
+; Description:
+;	This routine is used to make insertions into the sort list based
+;	on some memory address.  The memory address usually used is the
+;	address of the string value of a string symbol.
+;
+;%	Since the string value of a string symbol is a separate entity
+;%	which does not resemble a standard entry (and therefore can not
+;%	be handled by the garbage collector directly), it is necessary
+;%	for a bit of trickery.  String values are handled by reinserting
+;%	the string entry (after it has already been processed by the GC) to
+;%	the location in the sort list where we would put a string value if
+;%	we could (but we can't because they do not have the standard entry
+;%	format.)
+;
+; Inputs:
+;	R0	-> Entry which we want to (re) insert into the sort list.
+;	R4	=  Address of the string value associated with this entry.
+;
+; Call:
+;	CALL	INSERT
+;
+; Outputs:
+;	R0	-> Fake next entry link (substitute for entry which got moved)
+;	R3	-> Entry which points to the entry which got moved
+;	R4	== unchanged
+;	R5	== unchanged (used to point at rest of list after new entry)
+;
+; Side effects:
+;	SLIST will be different.
+;	The sort list has been modified.
+;
+;-
+
+.ENABL	LSB
+
+INSERT:	PUSH	<R5>		;Save a register			;010
+	TST	(R0)+		;Point to sort link
+	MOV	R0,SLIST	;The new link is the same as the old(default)
+	MOV	(R0),R5		;Point at first record we are interested in
+	BEQ	30$		;There is only one thing on the list, EXIT
+	MOV	(R0),R3		;Also save a copy in R3
+
+10$:	CMPB	E.TYPE-2(R5),#STRTYP+1;entry placed in list for a string value?
+	IFEQ			;If so then
+	CMP	R4,S.VALP-2(R5)	;  new string address < current address?
+	ELSE			;Else	
+	CMP	R4,R5		;  new address < current address?
+	ENDIF			;End if
+	BLOS	20$		;Branch if insertion point found
+	MOV	R5,R3		;Save pointer to previous entry
+	MOV	(R5),R5		;Get next entry on list
+	BNE	10$		;No, go around again
+
+20$:	CMP	R3,R5		;Is the placement correct already?
+	BEQ	30$		;yes, exit
+	MOV	(R0),SLIST	;new head of list
+	MOV	R0,(R3)		;insert new entry after R3 entry
+	MOV	R5,(R0)		;point the new entry to rest of the list
+
+30$:	MOV	#SLIST-2,R0	;and pass the new list back in R0
+	POP	<R5>		;Restore register
+	RETURN			;Return
+
+GLOBAL	<SLIST>
+
+.DSABL	LSB
+
+.SBTTL	MOVBYT	- Byte mover
+
+;+
+; MOVBYT - Byte mover
+;
+; Description:
+;	This is a simple routine which moves bytes from one place to another.
+;	It handles overlapping correctly but it isn't all that fast.
+;
+; Inputs:
+;	R2	-> Data to be moved (source)
+;	R3	=  Number of bytes to move
+;	R4	-> Place to move the data to (destination)
+;
+; Call:
+;	CALL	MOVBYT
+;
+; Outputs:
+;	R2, R3, R4 -- Garbage
+;
+; Optimization note:
+;	If you are ambitious and we have the space you might want to look
+;	at MOVBYT in SUB.MAC (monitor module).  It is highly optimized and
+;	some of the techniques could be used here to speed our MOVBYT up at
+;	the cost of more code.
+;-
+
+.ENABL	LSB
+
+MOVBYT:	TST	R3		;Anything to move?
+	IFNE			;If so then
+	CMP	R2,R4		;  Which direction should we go?
+	BEQ	30$		;  Don't go anywhere
+	IFHI			;  If SRC > DST then go forwards
+10$:	MOVB	(R2)+,(R4)+	;    Move a byte forwards
+	SOB	R3,10$		;    Until all done
+	ELSE			;  Else SRC < DST so go backwards
+	ADD	R3,R2		;    Point after source
+	ADD	R3,R4		;    Point after destination
+20$:	MOVB	-(R2),-(R4)	;    Move a byte backwards
+	SOB	R3,20$		;    Until all done
+	ENDIF			;  Endif
+30$:	ENDIF			;Endif
+	RETURN			;Return
+
+.DSABL	LSB
+
+.SBTTL	$STATUS	- Set $STATUS & $SEVERITY symbols
+
+;+
+; $STATUS - Set $STATUS & $SEVERITY symbols
+;
+; Description:
+;	This routine sets the $STATUS & $SEVERITY symbols.
+;	$SEVERITY is ALWAYS the low three bits of $STATUS.
+;
+;	These variables are always among the first symbols in the global
+;	symbol table.  They can never be deleted nor can they change size.
+;	All this means that they are always at a fixed position in memory.
+;	We use that fact here to directly access their values bypassing
+;	the overhead normally associated with changing the value of a
+;	symbol.
+;
+; Inputs:
+;	LOW	=  The least significant 16 bits of status
+;	HIGH	=  The most significant 16 bits of status
+;
+; Call:
+;	CALB	$STATUS,<LOW,HIGH>
+;
+; Outpus:
+;	None
+;
+; Side effects:
+;	The DCL symbols $STATUS and $SEVERITY are changed to reflect
+;	the new status.
+;-
+
+.ENABL	LSB
+
+$STATUS::
+	SUBR	<LOW,HIGH>
+	MOV	LOW(R5),R1	;Get low order word of $STATUS
+	MOV	R1,R2		;Make a copy for $SEVERITY
+	BIC	#^C<7>,R2	;Clear all but low 3 bits for $SEVERITY
+	CMP	R2,#SUCCESS	;Is severity equal to success?
+	IFNE			;If not then
+	BIS	#STSUPD,ICFFLG	;  Make sure we update status & severity
+	ENDIF			;Endif
+	BITB	#STSUPD,ICFFLG	;Are we supposed to update status & severity?
+	IFNE			;If so then
+	MOV	R1,STATUS+GCA+GCASIZ-RSVBEG
+				;  Set low word of $STATUS
+	MOV	HIGH(R5),STATUS+2+GCA+GCASIZ-RSVBEG
+				;  Set high word of $STATUS
+	MOV	R2,SEVERITY+GCA+GCASIZ-RSVBEG
+				;  Set low word of $SEVERITY
+	CLR	SEVERITY+2+GCA+GCASIZ-RSVBEG
+				;  High word of $SEVERITY is always zero
+	ENDIF			;Endif
+	RETURN			;Return
+
+.DSABL	LSB
+
+
+.SBTTL	SHOSYM	- Show symbol entries (SHOW SYMBOL command)
+
+;+
+; SHOSYM	- Show symbol entries
+;
+; Inputs:
+;	NAMADR
+;	NAMLNG
+;	SCOPE
+;
+; Call:
+;	CALBX	SHOSYM
+;
+; Outputs:
+;
+;-
+.ENABL	LSB
+
+SHOSYM::
+	CALL	SAVRGS,R5	;Save R1-R5
+	MOVB	#STRTYP,TYPE	;Searching for string (or numeric) symbols
+	MOVB	#1,SRHABB	;Abbreviations allowed
+	CLR	-(SP)		;Clear did_something flag (set by DISPLY)
+	TST	SCOPE		;Check the scope
+	IFEQ			;If scope = all then
+	MOV	LCAPTR,SCOPE	;  Do the local table first
+	IFNE			;  If there is a local table then
+	CALL	DISPLY		;    Display symbol(s) in local table
+	IFCS			;    If there was an error then
+	CMP	R0,#USYM.E	;      Was error ?undefined symbol?
+	BNE	10$		;      Quit if not. Do global if it was
+	ENDIF			;    Endif
+	ENDIF			;  Endif
+	MOV	GCAPTR,SCOPE	;  Do the global table next
+	ENDIF			;Endif
+	CALL	DISPLY		;Display symbol(s) in specified table
+	IFCS			;If there was an error then
+	CMP	R0,#USYM.E	;  Was error undefined symbol?
+	BNE	10$		;  No, exit with error
+	ENDIF			;Endif
+	TST	NAMADR		;Was a symbol name specified?
+	IFNE			;If so then
+	TST	(SP)		;  Did we display any symbols?
+	IFEQ			;  If not then
+	MOV	#USYM.E,R0	;    Set error code to ?Undefined symbol
+	BR	10$		;    Exit with error
+	ENDIF			;  Endif
+	ENDIF			;Endif
+	CLR	R0		;Clear error code (indicate success)
+10$:	POP			;Clean up stack
+	RETURN			;Return
+
+GLOBAL	<USYM.E>
+
+.DSABL	LSB
+
+.SBTTL	DISPLY	- Display entry definitions
+
+.ENABL	LSB
+
+;
+; Non-symbol entries:
+;	This routine can be easily modified to display non-symbol entries
+;	like labels, and trap commands.  This would be useful for debugging
+;	purposes.
+;
+; "Wild card" implementation notes:
+;
+; 1.	Do the wild card matching in the loop which builds the sort list
+;	(rather than after the list has been sorted.)
+;
+; 2.	If the first character in the symbol name is not a wild card you
+;	can shorten the amount of work by only looking in the list which
+;	the symbol name will hash into.  We can tell which list because only
+;	the first character matters in the symbol name hash.  This could
+;	reduce the amount of work by as much as a factor of 32.
+;
+; Note:
+;	2(SP) (the did_something flag) is set up in SHOSYM above but set
+;	inside DISPLY.  Don't forget about this if you decide to save some
+;	stuff on the stack.
+;
+
+DISPLY:	TST	NAMADR		;Do we have a symbol name?
+	IFNE			;If so then
+	CALL	SRHENT		;  Look for it
+	BCS	99$		;  Return if not found or error (code in R0)
+	TST	(R0)+		;  Point R0 at sort link
+	CLR	(R0)		;  Clear sort link
+	BR	40$		;  Go display this entry
+	ENDIF			;Endif
+;
+; Display all symbols in the table
+;
+	MOVB	#STSSSZ+SYMSSZ,R5
+				;Get number of lists in symbol section &
+				;... reserved symbol section
+	MOV	SCOPE,R0	;Get pointer to context area
+				.ASSUME STSSEC EQ 0
+				.ASSUME SYMSEC EQ STSSEC+2
+	ADD	#SLOTTB,R0	;Point to first list
+	MOV	#SLIST,R1	;Get head of sort list
+	CLR	R2		;Set number of list entries to zero
+10$:	MOV	(R0)+,R3	;Get first entry on list
+	IFNE			;If this is not an empty list then
+20$:	MOV	(R3)+,R4	;  Save pointer to next entry on list and
+				;  ... point R3 to sort link
+       ;CALL	WLDCRD		;  Does the name match the wild card spec?
+       ;IFCC			;  If so then
+	MOV	R3,(R1)		;    Link entry to end
+	MOV	R3,R1		;    ... of sort list
+	INC	R2		;    Increment count of list entries (for sort)
+       ;ENDIF			;  Endif
+	MOV	R4,R3		;  Restore pointer to next entry
+	BNE	20$		;  Do next entry if not at end of list
+	ENDIF			;Endif
+	SOB	R5,10$		;Do each list
+	CLR	(R1)		;Terminate the sort list
+
+	MOV	#SYMCMP,CMPFUN	;Set up the entry comparison function
+	CALLX	SORT		;Sort the list by name
+		; R0 -> sorted list
+;
+; Output symbol definitions to terminal
+;
+	TST	R0		;Is there anything on the list to display?
+				;... (R0 = 0 on exit)
+	IFNE			;If so then
+40$:	CALL	DOSHOW		;  Output a definition
+	IFNE			;  If there are more entries on list then
+	TSTB	DCLFLG		;    Did user hit ^C?			;020
+	BEQ	40$		;    No, do another entry
+	MOV	#U.QUIT,R0	;    Set error code to QUIT (silently)
+	ENDIF			;  Endif
+	INC	2(SP)		;  Set did_something flag for DOSHOW
+	ENDIF			;Endif
+
+99$:	TSTB	R0		;Does R0 contain an error code?
+	IFNE			;If so then
+	MOV	LX.POS,LX.ERP	;  Get position of 1st char past name
+	CLR	R2		;  Ensure high byte clear
+	BISB	NAMLNG,R2	;  Get name length
+	SUB	R2,LX.ERP	;  Point to beginning of name for error
+				;  ... error position
+	SEC			;  Set carry to indicate error
+	ENDIF			;Endif
+	RETURN			;Return
+
+GLOBAL	<U.QUIT,CMPFUN,DCLFLG,SLIST,SYMCMP,LX.ERP,LX.POS,NAMLNG>
+
+.DSABL	LSB
+
+.SBTTL	DOSHOW	- Do the actual symbol display
+
+; This routine assumes that it is dealing with a symbol (rather
+; than a label or command).  It can be modified fairly easily to
+; display other table entries if desired.
+;
+
+.ENABL	LSB
+
+DOSHOW:	PUSH	(R0)		;Save link to next entry on sort list
+	TST	-(R0)		;Point R0 back to entry link
+	MOVB	E.TYPE(R0),R2	;Get type of entry
+	MOV	ENAMES(R2),R2	;Get offset to name (assumes we have a name)
+	ADD	R0,R2		;Point to name
+	MOVB	E.ABLN(R0),R4	;Get abbrev point. Can it be abbreviated?
+	IFNE			;If so then
+		; R2 -> Name to hyphenate
+	CALL	ADDHYP		;  Add a hyphen at abbrev point if necessary
+		; R2 -> Hyphenated symbol name
+	ENDIF			;Endif
+	CMPB	E.TYPE(R0),#STRTYP
+				;Is the symbol a string symbol?
+	IFEQ			;If so then
+
+	MOV	#GLST.M,R1	;  Guess at global format (ABC == "123")
+	CMP	SCOPE,LCAPTR	;  Is it a local symbol?
+	IFEQ			;  If so then
+	MOV	#LCST.M,R1	;    Set up local format (ABC = "123")
+	ENDIF			;  Endif
+	MOV	S.VALP(R0),R3	;  Point to counted ASCII
+	ADD	#S.SLEN,R3	;  ... string value
+
+	ELSE			;Else it is a numeric symbol
+
+	MOV	#GLSY.M,R1	;  Guess at global format (ABC == 123)
+	CMP	SCOPE,LCAPTR	;  Is it a local symbol?
+	IFEQ			;  If so then
+	MOV	#LCSY.M,R1	;    Set up local format (ABC = 123)
+	ENDIF			;  Endif
+	MOV	R0,R3		;  Get pointer to start of entry
+	ADD	#N.NMBR,R3	;  Point to beginning of numeric value
+
+	ENDIF			;Endif
+	CMESSAG	R1 <R2,R3>	;Display the symbol
+	POP	R0		;Restore pointer to next link on sort list and
+				;... set Z condition code if at end of list
+	RETURN			;Return
+
+GLOBAL	<LCST.M,GLST.M,LCSY.M,GLSY.M>
+
+.DSABL	LSB
+
+.SBTTL	ADDHYP	- Add abbreviation hyphen to name
+
+;+
+; ADDHYP	- Add abbreviation hyphen to name
+;
+; Input:
+;	R2 -> Name to hyphenate
+;	R4 =  Abbreviation point
+;
+; Call:
+;	CALL	ADDHYP
+;
+; Output:
+;	R1 -- Garbage
+;	R2 -> Hyphenated name
+;	R3 -- Garbage
+;-
+
+.ENABL	LSB
+
+ADDHYP:	MOV	#SUBBUF,R1	;Get address for output hyphenated name
+	CLR	R3		;Ensure no sign extension
+	BISB	(R2)+,R3	;Get name length
+	MOVB	R3,(R1)+	;Set name length of output
+	BIC	#^C<377>,R4	;Ensure no sign extension on abbrev point
+	BEQ	20$		;What, no abbrev point?  Just copy the name.
+	SUB	R4,R3		;Subtract abbrev length from name length
+				;... to get # of chars after abbrev point
+10$:	MOVB	(R2)+,(R1)+	;Copy the name
+	SOB	R4,10$		;... up to abbrev point
+	TST	R3		;Are there any characters after abbrev point?
+	IFGT			;If so then
+	MOVB	#'-,(R1)+	;  Add the hyphen char
+	INCB	SUBBUF		;  Inc name length for hyphen char
+20$:	MOVB	(R2)+,(R1)+	;  Copy the rest of the name
+	SOB	R3,20$		;
+	ENDIF			;Endif
+	MOV	#SUBBUF,R2	;Point to hyphenated name.
+	RETURN			;Return
+
+.DSABL	LSB
+
+.SBTTL	RELPTR	- Make local symbol table pointers relative
+.SBTTL	ABSPTR	- Make local symbol table pointers absolute
+
+	.ENABL	LSB
+
+;+
+; RELPTR
+;
+; Convert absolute pointers to relative pointers (relative to the
+; beginning of the local context area).
+;
+;-
+
+RELPTR:	MOV	LCAPTR,R5	;Get pointer to local context area
+	BEQ	10$		;Just return if nothing to do
+	MOV	R5,R4		;Copy it
+	NEG	R4		;Subtract it from each pointer in
+				;... local symbol table
+	CALL	OFFSTP,R0,ABSPTR;Do the subtractions (after looking
+				;... at the pointers)
+10$:	RETURN			;Return
+
+;+
+; ABSPTR
+;
+; Convert relative pointers to absolute pointers.
+;
+;-
+
+ABSPTR:	MOV	LCAPTR,R5	;Get pointer to local context area
+	BEQ	20$		;Just return if nothing to do
+	MOV	R5,R4		;Add it back to each pointer in local
+				;... symbol table
+	CALL	OFFSTP,R0,RELPTR;Do the addition (after looking at the
+				;... the pointers)
+20$:	RETURN			;Return
+
+	.DSABL	LSB
+
+.SBTTL	SAVSTB	- Save the global and/or local symbol tables
+;+
+; SAVSTB	- Save the global and/or local symbol tables
+;
+; Description:
+;
+;	This routine saves the global symbol table (and local if present)
+;	in the symbol table file.  It is used primarily before leaving
+;	DCL to ensure that all symbols and context are safe from change
+;	while some other program executes.
+;
+;	The global and local tables are always written at the end of the
+;	symbol table file.  This allows the current tables to change size
+;	without affecting the position of other tables stored in the file.
+;
+; Inputs:
+;	None
+;
+; Call:
+;	CALB	SAVSTB
+;
+; Outputs:
+;	None
+;
+; Side effects:
+;	LCLNFG	=  clear (the local table can be restored)
+;	GBLNFG	=  clear (the global table can be restored)
+;	The FIRQB and XRB are trashed.
+;
+; Note:
+;	SAVSTB and GETSTB assume that the symbol tables stored in the symbol
+;	table file (STF) were placed on block boundaries.  (This assumption
+;	allows the individual tables to be written and read easily.)  The DCL
+;	memory allocation routines assume that the symbol tables are stored
+;	in memory such that they END on a 1K boundary.  (Since the local table
+;	follows the global table, the local table also begins on a 1K boundary.)
+;	To save space the global table begins immediately after the impure
+;	psect which means it probably won't begin on a block boundary.
+;%	This means that when the global symbol table is restored, part of the
+;%	impure section (namely the top most portion) is going to be destroyed.
+;
+; Optimization note:
+;	Writing to the symbol table file can be further optimized by
+;	making a distinction between updates to the context area and updates
+;	to the symbol table.  If only the context area needs to be changed
+;	we can save some time by only writing the context area.  One write is
+;	better than two though, even if it means writing a symbol table
+;	when only the context changed.
+;
+; Optimization note:
+;	If global table needs updating but local table doesn't... 
+;	We can save time by writing only the global table if it
+;	hasn't changed in size (# of blocks). If it has changed in
+;	size we must write both the global and local tables
+;	otherwise either the local table would be overwritten or it
+;	would be read in at the wrong place in memory. 
+;-
+
+.ENABL	LSB
+
+SAVSTB::
+	CALBX	CLSCBB	<#-1>	;Close all CBBs open /WRITE so no data is lost
+	TSTB	GBLNFG		;Does the global table need to be written?
+	IFEQ			;If not then
+	TSTB	LCLNFG		;  Does the local table need to be written?
+	BEQ	99$		;  Leave if not
+	CLR	R1		;  Clear high byte
+	BISB	STFBLK+0,R1	;  Get block # of global table
+	CALL	TBLSIZ		;  Compute some table sizes
+		; R2 -> Local context area
+		; R3 =  Size of local table
+		; R4 =  Total size including rounding
+		; R5 =  # of blocks of just global table
+	ADD	R5,R1		;  Compute 1st block # after global table
+	ELSE			;Else global table needs to be written
+	CALL	GETBLN		;  Get block # of 1st block after previous
+				;  ... procedure level
+		; R1 =  block #
+	MOVB	R1,STFBLK+0	;  Set block # of beginning of save area in
+				;  ... the symbol table file
+	CALL	TBLSIZ		;  Compute some table sizes
+		; R2 -> Local context area
+		; R3 =  Size of local table
+		; R4 =  Total size including rounding
+		; R5 =  # of blocks of just global table
+	MOV	#GCA&^C777,R2	;  Write from beginning of global context area
+				;  ... rounded down to nearest block boundary
+	MOV	R4,R3		;  Set total size as the amount we will write
+	ENDIF			;Endif
+	ASH	#-9.,R4		;Compute # of blocks of symbol table file
+				;... we will use
+	MOVB	R4,STFBLK+1	;Set up # of blocks
+	CALL	WRISTB		;Write the symbol table
+	IFCC			;If there were no errors
+	CLRB	GBLNFG		;  Global table in file is good
+	CLRB	LCLNFG		;  Local table in file is good (or not present)
+	ENDIF			;Endif
+
+99$:	;%
+	;% JFM NOTE:
+	;% 	These five lines are a hack until we have a way to set 
+	;%	STB size without affecting the current exit status.  We
+	;%	want to set the STB size, but when we do, the exit status
+	;%	is set, regardless of what we put in it.  What these lines 
+	;%	do is to issue the set job call, then with the current 
+	;%	exit status unwantedly stuck into FQPROT, we issue a second
+	;%	call to the program using that status as the status to set.
+	;%	This hack will go away if we are given a way to indicate
+	;%	"don't touch $STATUS" in the .PFB call.
+
+	CALLX	JBFPFB		;Store these in our job's PFB context area
+	MOVB	FIRQB+FQPROT,-(SP) ;Save current exit status  
+	CALLX	CLRFQB		;Clear the FIRQB
+	MOVB	(SP)+,FIRQB+FQPROT ;Restore current exit status for setting
+	CALLX	JBFPF3		;Store these in our job's PFB context area
+
+	CLR	R0		;Clear error code and carry
+	RETURN			;Return
+
+.DSABL	LSB
+
+GLOBAL	<STFBLK>
+
+.SBTTL	TBLSIZ	- Compute some table sizes and fix local FREPTR
+
+;+
+; TBLSIZ - Compute some table sizes and fix local FREPTR
+;
+; Description:
+;	This is a utility routine called by SAVSTB to compute
+;	how much of memory needs to be written to the symbol table file.
+;	
+; Input:
+;	Global context area data
+;	Local context area data
+;
+; Call:
+;	CALL	TBLSIZ
+;
+; Output:
+;	R2 -> Local context area
+;	R3 =  Size of local table
+;	R4 =  Total size including rounding
+;	R5 =  # of blocks of just global table
+;
+;-
+
+TBLSIZ:
+	MOV	GCA+STBSIZ,R4	;Set size to size of context + symbols
+	ADD	#GCA&777,R4	;Add size of rounding to total size
+	CLR	R3		;Assume no local table
+	TST	LCAPTR		;Does a local table exist?
+	IFNE			;If so then
+	ADD	GCA+FRESIZ,R4	;  Include global free pool size
+	MOV	LCAPTR,R2	;  Get local context area pointer
+	MOV	STBSIZ(R2),R3	;  Get local symbol table size
+	ENDIF			;Endif
+	ADD	#777,R4		;Round up to nearest block
+	MOV	R4,R5		;Copy the size of the global table
+	ASH	#-9.,R5		;Convert to number of blocks
+	ADD	R3,R4		;Compute total number of bytes
+	BIC	#777,R4		;Round up to nearest block boundary
+	RETURN			;Return
+
+
+.SBTTL	PSHSTB - Push STB (save STB for @ command)
+
+;+
+; PSHSTB - Push symbol table
+;
+; Description:
+;
+; Inputs:
+;
+; Call:
+;
+; Outputs:
+;
+;-
+
+.ENABL	LSB
+
+PSHSTB::
+	TST	LCAPTR		;Is there a local table?
+	IFNE			;If so then
+	CALL	GETBLN		;  Find where in file to begin writting
+	MOV	LCAPTR,R2	;  Get pointer to local table
+	MOV	STBSIZ(R2),R3	;  Get local symbol table size
+	CALL	WRISTB		;  Write the local table out
+	IFCC			;  If there were no errors then
+	MOVB	CMDLVL,R4	;    Get the current command level
+	MOVB	R1,STFBLN(R4)	;    Update current table location in file
+	ASH	#-9.,R3		;    Calculate number of blocks written
+	MOVB	R3,STFNBL(R4)	;    Update number of blocks of current table
+	MOVB	#1,LCLNFG	;    Local table on file is no good for RESSTB
+	MOVB	#1,GBLNFG	;    Neither is global table
+	ENDIF			;  Endif
+	ENDIF			;Endif
+	CLR	R0		;Clear carry and error code
+	RETURN			;Return
+
+.DSABL	LSB
+
+.SBTTL	GETBLN	- Get block number
+
+;+
+; GETBLN - Get block number
+;
+; Description:
+;
+; Inputs:
+;
+; Call:
+;
+; Outputs:
+;
+;-
+
+.ENABL	LSB
+
+GETBLN:	MOVB	CMDLVL,R4	;Get pointer to top of ICF stack
+	CLR	R1		;Clear high byte
+	CMPB	R4,#1		;Are we level 1 or 0?
+	IFLOS			;If so then
+	INC	R1		;  Set block # to block 1
+	ELSE			;Else
+	BISB	STFBLN-1(R4),R1	;  Get block # of previous table in file
+	MOVB	STFNBL-1(R4),R4	;  Get # of blocks in table
+	ADD	R4,R1		;  Compute # of 1st block after table
+	ENDIF			;Endif
+	RETURN			;Return
+
+.DSABL	LSB
+
+.SBTTL	WRISTB	- Write to the symbol table file
+
+;+
+; WRISTB - Write to the symbol table file
+;
+; Description:
+;
+; Inputs:
+;	R1 =  # of block in symbol table to start writting to
+;	R2 -> Symbol table to write
+;	R3 =  Length in bytes to write
+;
+; Call:
+;
+; Outputs:
+;
+;-
+
+.ENABL	LSB
+
+WRISTB:
+	CALL	RELPTR		;Make local symbol table pointers relative
+	CALLX	CLRFQX		;Clear the FIRQB and XRB
+	MOVB	#BLK.PF,FIRQB+FQFIL
+				;Function = 'read/write a block buffer'
+	MOV	#XRB,R4		;Point to XRB
+	ADD	#777,R3		;Round up size in bytes
+	BIC	#777,R3		;... to nearest multiple of blocks
+				 .ASSUME XRLEN EQ 0
+	MOV	R3,(R4)+	;Set size
+				 .ASSUME XRBC EQ XRLEN+2
+	MOV	R3,(R4)+	;Set size
+				 .ASSUME XRLOC EQ XRBC+2
+	MOV	R2,(R4)+	;Set position
+				 .ASSUME XRCI EQ XRLOC+2
+	MOVB	#PF$DAT*2,(R4)+	;Set PFB channel #2 (*2) where symbol table
+				;... lives
+	INC	R4		;Skip MSB (already zero)
+				 .ASSUME XRBLK EQ XRCI+2
+	MOV	R1,(R4)+	;Set block #
+				 .ASSUME XRTIME EQ XRBLK+2
+	INC	(R4)		;Indicate a write
+	.PFB			;Write to the symbol table file
+	CLR	R0		;Clear high byte
+	BISB	FIRQB+0,R0	;Get the error code (if any)
+	CALL	ABSPTR		;Make local symbol table pointers absolute
+				;... again
+	TST	R0		;Check the error code
+	IFNE			;If there was an error then
+	MOV	#UNWR.E,R1	;  "?Unable to write DCL work file"
+	CALLX	DOCMES		;  Print the error message
+	MOV	R0,R1		;  Get error code from FIRQB
+	CALLX	DOCMES		;  Print that error message
+;
+; If we're in a command file then we will unnest back to the interactive level
+; by doing the equivalent of a STOP.  The user can continue to enter commands
+; however his global symbol table will be lost if he leaves DCL.  His local
+; tables are lost when we unnest.
+;
+	BIT	#ICFACT,ICFFLG	;  Is a command file active?
+	IFNE			;  If so then
+	CALLX	QCKSTP		;     STOP quickly (close all PFB channels
+				;     ... and return to interactive level)
+	ELSE			;  Else
+	MOV	#CMPR.W,R1	;     "%Command will proceed as requested"
+	CALLX	DOCMES		;     Print the warning
+	ENDIF			;  Endif
+	BR	99$		;  Exit with carry set to flag the error
+	ENDIF			;Endif
+	TST	(PC)+
+99$:	SEC
+	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<UNWR.E,CMDTYP,CMPR.W,ICFFLG>
+
+.SBTTL	RESSTB	- Restore the symbol table
+
+;+
+; RESSTB - Restore the symbol table
+;
+; Description:
+;
+; Inputs:
+;
+; Call:
+;
+; Outputs:
+;
+;-
+
+.ENABL	LSB
+
+RESSTB::
+	MOV	#GCA,GCAPTR	;Make sure pointer to global context area is set
+	CLR	R1
+	BISB	STFBLK+0,R1	;Get block #
+	MOVB	STFBLK+1,R2	;Get # of blocks
+	MOV	#GCA&<^C777>,R3
+	CLRB	GBLNFG
+	CLRB	LCLNFG
+	BR	REASTB
+
+.DSABL	LSB
+
+GLOBAL	<STFBLK>
+
+.SBTTL	POPSTB	- Pop the symbol table
+
+;+
+; POPSTB - Pop the symbol table
+;
+; Description:
+;
+; Inputs:
+;
+; Call:
+;
+; Outputs:
+;
+;-
+
+.ENABL	LSB
+
+POPSTB::
+	MOVB	CMDLVL,R4		;Get the current command level
+	CLR	R1			;Prevent sign extension
+	BISB	STFBLN(R4),R1		;Get block number of previous level
+					;... STB
+	MOVB	STFNBL(R4),R2		;Get number of blocks in previous STB
+	MOV	GCA+FREPTR,R3		;Compute pointer to
+	ADD	GCA+FRESIZ,R3		;... end of global free pool
+	CLRB	LCLNFG			;The local STB on file will match memory
+	MOVB	#1,GBLNFG		;The global context will be changed
+	.BR	REASTB			;Join common code
+
+.DSABL	LSB
+
+.SBTTL	REASTB	- Read the symbol table file
+
+;+
+; REASTB - Read the symbol table file
+;
+; Description:
+;
+; Inputs:
+;
+; Call:
+;
+; Outputs:
+;
+;-
+.ENABL	LSB
+
+REASTB:
+;
+; Get sufficient memory to hold the table(s)
+;
+	MOV	R3,R4		;Get starting address (multiple of 1000 bytes)
+	SWAB	R4		;% Compute number of blocks
+	ASR	R4		;%... (no rounding required)
+	ADD	R2,R4		;Add in size of table(s) in blocks
+	ASR	R4		;Convert to size in 1Kb chunks of memory
+	ADC	R4		;Round up to nearest Kb
+	ASR	R4		;Convert to size in 1Kw chunks of memory
+	ADC	R4		;Round up to nearest Kw
+	CMPB	MEMSIZ,R4	;Do we have that much memory?
+	IFLO			;If not then
+	CALLX	CLRXRB		;  Clear the XRB
+	MOVB	R4,XRB+0	;  Set the new size of memory
+	.CORE			;  Change our size
+	TSTB	FIRQB		;  "?Did it work?			;019
+	BEQ	10$		;  Yes, on to the next step		;019
+	CMESSAGE #EDBMCE	;  "?Not enough available memory"	;019
+	CALLX	GETNAM		;  Get ICF filespec			;019
+	CMESSAGE #TMGS.E <R2,R1>;  "?Too many global symbols on EXIT"	;019
+	CALLX	QCKSTP		;  No, close all open ICFs		;019
+	CLR	CMDLVL		;  Back to interactive level now	;019
+	CLR	LCAPTR		;  Start over at interactive level	;019
+	MOV	#U.QUIT,R0	;  No more messages need be dispalyed	;019
+	SEC			;  Indicate error			;019
+	RETURN			;  Get out now!				;019
+
+10$:	MOVB	R4,MEMSIZ	;  Update our idea of our memory size
+	ENDIF			;Endif
+;
+; Restore the table(s)
+;
+	MOVB	#1,STFILE	;Initialize the symbol table file existance flag
+	CALLX	CLRFQX		;Clear the FIRQB
+	MOVB	#BLK.PF,FIRQB+FQFIL
+				;Function = "read/write a block buffer"
+	MOV	#XRB,R4		;Get address of XRB
+	SWAB	R2		;Blks*256*2 to convert # of blocks to
+	ASL	R2		;... number of bytes for read.
+	BEQ	INISTF		;What? Nothing to do means no file yet.
+				.ASSUME XRLEN EQ 0
+	MOV	R2,(R4)+	;Set length of input buffer (bytes)
+				.ASSUME XRBC EQ XRLEN+2
+	TST	(R4)+		;XRBC is already zero for a READ so skip over it
+				.ASSUME XRLOC EQ XRBC+2
+	MOV	R3,(R4)+	;Set address of buffer to read into (global stb)
+				.ASSUME XRCI EQ XRLOC+2
+	MOV	#PF$DAT*2,(R4)+	;% Set PBF channel #2 (*2) for symbol table file
+				;%... (moving byte data but adds 2 to R4)
+       ;CLRB	XRB+XRBLKM	;% MSB of block number should be zero
+				.ASSUME XRBLK EQ XRCI+2
+	MOV	R1,(R4)+	;Set block number to start reading from
+       ;CLR	XRB+XRTIME	;Indicate a READ
+	.PFB			;Read'em an weep sucker
+	MOVB	FIRQB+0,R0	;Get error code in R0 if any
+	IFNE			;If there was an error then ... (cross fingers)
+;
+; Handle errors from .PFB
+;
+	CMPB	R0,#NOTOPN	; Is it "?PFB channel not open" ?
+				; ... (implies symbol table file doesn't exist)
+	BEQ	INISTF		; Yes, go see if we can create the file
+	MOV	#UNRD.E,R1	; "??Unable to read DCL work file"
+	CALLX	DOCMES		; Print that message
+	MOV	R0,R1		; Get .PFB error code
+	CALLX	DOCMES		; Print it also
+;
+; We've had an unexpected error and we can't read the user's symbol table file.
+; We will return to the interactive level (if in an ICF) and reinitialize the
+; global table (all previous symbol definitions have been lost) so that the user
+; can still execute commands.
+;
+	CALLX	QCKSTP		; QUICK STOP-Return to the interactive level now
+	CALLR	INIGBL		; Go initialize the global symbol table	;016
+	ENDIF			;Endif
+;
+; Set up a few variables
+;
+	CMP	R3,#GCA&<^C777>	;Did we restore the global table?
+	IFEQ			;If so then
+	CLRB	GBLNFG		;  Clear the global no good flag
+	ENDIF			;Endif
+	CLRB	LCLNFG		;The local table is always good (or not there)
+	TSTB	CMDLVL		;Do we have a local table?
+	IFNE			;If so then
+	MOV	GCA+FREPTR,R0	;  Compute where local table
+	ADD	GCA+FRESIZ,R0	;  ... should begin
+	MOV	R0,LCAPTR	;  Set the local context area pointer up
+	CALL	ABSPTR		;  Make the local symbol table pointers
+				;  ... absolute (they were store as relative)
+	ELSE			;Else
+	MOV	#GCA,R0		;  Point to global context area
+	CLR	LCAPTR		;  Clear local context pointer
+	ENDIF			;Endif
+;
+; The free pool size of the context area which is closest to the top
+; of memory is incorrect and must be fixed.  This happens because we
+; do not save the free pool in the STF if we do not have to.  Our
+; current memory size is based on the number of blocks we did save
+; and may not include all of the old free pool.
+;
+	MOVB	MEMSIZ,R1	;Get our current memory size in Kw
+	ASH	#11.,R1		;Multiply by 4000 to convert to # of bytes
+	SUB	FREPTR(R0),R1	;Calculate amount of free space available
+	MOV	R1,FRESIZ(R0)	;Set the free pool size
+	CLR	R0		;Clear error code and carry
+	RETURN			;Return
+
+GLOBAL	<UNRD.E,NOTOPN,STFBLK,EDBMCE,U.QUIT,TMGS.E>			;019
+
+.DSABL	LSB
+
+.SBTTL	INISTF	- Initialize the symbol table file
+
+.ENABL	LSB
+
+;+
+; INISTF
+;
+; Description:
+; 	The symbol table file doesn't exist so we're going to create a
+;	file on an IOB for it.  This file is temporary and does not have a
+;	name.  Other users cannot access it or delete it.  This file is
+;	deleted when the job is killed (during logout or sooner) and is never
+;	made a permanent file.
+;
+;	We first try to open the file on DCLWRK$:.  If this fails for any
+;	reason, we fall back to creating it in the user's directory.
+;
+;	Once the file is created it will be moved to a PFB channel where it
+;	will live for the life of the user.
+;
+; Call:
+;	CALL	INISTF
+;
+;-
+
+	TMPORG	TEXT							;016
+
+DCLWRK:	.ASCII	/DCLWRK$:DCL.TMP/ ;Text of file spec for work files	;016
+WRKLEN	=:	.-DCLWRK	  ;Length of logical name string	;016
+
+	UNORG								;016
+
+INISTF:
+;
+; Create the symbol table file
+;
+	CLRB	STFILE		;Clear symbol table file existance flag
+	CALLX	CLRFQB		;Clear the FIRQB			;016
+	MOVB	#PRV.PF,FIRQB+FQFIL ;Set function code			;016
+	.PFB			;Gain privileges!			;016
+	CALLX	U$CHKE		;Abort if error. (Shouldn't happen)	;016
+	CALLX	CLRFQX		;Clear the FIRQB and XRB		;016
+	MOV	#XRB,R0		;Point to the XRB			;016
+	MOV	#WRKLEN,(R0)	;Set logical name length in XRLEN	;016
+	MOV	(R0)+,(R0)+	;Set byte count in XRBC			;016
+	MOV	#DCLWRK,(R0)	;Set location in XRLOC			;016
+	.FSS			;Translate DCLWRK logical		;016
+	TSTB	FIRQB		;Were we successful?			;016
+	BNE	8$		;No - open file in user dir instead	;016
+	TST	XRB+10		;Does the logical exist?		;016
+	BMI	8$		;No - open file in user dir instead	;016
+.ASSUME	DSKHND	EQ 0		;Assure disk handler really is 0	;016
+	TSTB	XRB+14		;Does the logical point to a disk?	;016
+	BNE	8$		;No - open file in user dir instead	;016
+	MOVB	#CREFQ,FIRQB+FQFUN ;Function = "create and open a file"
+	MOVB	#1*2,FIRQB+FQFIL;On IOB channel #1 (*2)			;016
+	MOV	#OP$TEN!OP$MOD,FIRQB+FQMODE				;016
+				;Open file in tentative mode, set mode is real
+	CALFIP			;Create the file			;016
+	MOVB	FIRQB,R0	;Successful open?			;016
+	BEQ	9$		;Yes - go set up the file		;016
+
+8$:	CALLX	CLRFQB		;Clear the FIRQB
+	MOVB	#CRTFQ,FIRQB+FQFUN
+				;Function = "create and open a temporary file"
+	MOVB	#1*2,FIRQB+FQFIL;On IOB channel #1 (*2)
+	MOV	#"SY,FIRQB+FQDEV;Set disk device = "SY0:"
+	DECB	FIRQB+FQDEVN+1	;Set explicit device unit number
+	MOV	#OP$TEN!OP$MOD,FIRQB+FQMODE
+				;Open file in tentative mode, set mode is real
+	CALFIP			;Create the file
+	MOVB	FIRQB+0,R0	;Get the error code if any
+;
+; Move the symbol table file to its PFB channel
+;
+9$:	CALLX	CLRXRB		;Clear XRB.				;016
+	MOV	#JFSYS,XRB	;Drop temporary privileges		;016
+	.CLEAR			;					;016
+	CALLX	U$CHKE		;Abort if error. (Shouldn't happen.)	;016
+	TSTB	R0		;Did we open a file somewhere?		;016
+	BNE	10$		;Go handle errors
+	CALLX	CLRFQB		;Clear the FIRQB
+	MOVB	#I2P.PF,FIRQB+FQFIL
+				;Function = "move from IOB to PFB"
+	MOVB	#1*2,FIRQB+FQPPN;Set IOB channel #1 (*2)
+	MOVB	#PF$DAT*2,FIRQB+FQNAM1
+				;Set PFB channel # (*2)
+	.PFB			;Move it
+	MOVB	FIRQB+0,R0	;Get the error code if any
+	IFNE			;If there was an error then
+10$:	MOV	#UNCR.E,R1	;  "??Unable to create DCL work file"
+	CALLX	DOCMES		;  Print the good news
+	MOV	R0,R1		;  Get original FIP error code
+	CALLX	DOCMES		;  Print the reason why
+	CALLX	QCKSTP		;  QUICK STOP-Return to the interactive level
+				;  ... now
+	ELSE			;Else
+	MOVB	#1,STFILE	;  Set flag to indicate file exists
+	ENDIF			;Endif
+
+	.BR	INIGBL		;Initialize the global context and global table
+
+
+GLOBAL	<UNCR.E,STFILE>
+
+.DSABL	LSB
+
+.SBTTL	INIGBL	- Initialize the global symbol table
+
+;+
+; INIGBL	- Initialize the global symbol table
+;
+; Description:
+;	This routine initializes the global symbol table by
+;	initializing the global context area.  It also defines
+;	the reserved ($) symbols and sets up some miscellaneous
+;	variables.
+;
+; Note:
+;	INIGBL should be written so that it can be called by someone
+;	who wished to reset DCL to a known safe state.  In other words,
+;	INIGBL should not make any assumptions on the state of the world.
+;
+; Inputs:
+;	None
+;
+; Call:
+;	CALL	INIGBL
+;
+; Outputs:
+;	GBLNFG	=  1 (global table on file is no good)
+;	GCAPTR	-> Global context area
+;	ICFFLG	=  Clear the ICF present flag
+;	WATFLG	=  Clear the SET VERIFY/WATCH/NOP flag
+;	NXISTK	=  Initialized the ICF file stack pointer
+;	PFBCHN	=  Channels 0,1,2 reserved
+;	STFBLK	=  Block 1 and 0 blocks long
+;	DCLPMT	-> $PROMPT string pointer
+;	LOGPMT	-> $LOGFILE_PROMPT string pointer
+;	The global context area is initialized.
+;	The reserved symbols area defined.
+;	Registers R0, R1, R2 are garbage.
+;
+;-
+
+.ENABL	LSB
+
+
+INIGBL:	MOV	#GCA,R1		;Get pointer to global context area
+	MOV	R1,GCAPTR	;Set up GCAPTR to point to global context area
+				.ASSUME FREPTR EQ 0
+	MOV	#GCA+GCASIZ+RSVSIZ,(R1)+
+				;Set up pointer to global free pool
+				.ASSUME FRESIZ EQ FREPTR+2
+	MOV	#<O.ISIZ*4000>-<GCA+GCASIZ+RSVSIZ>,(R1)+
+				;Set up global free pool size
+				.ASSUME STBSIZ EQ FRESIZ+2
+	MOV	#GCASIZ+RSVSIZ,(R1)+
+				;Set up global symbol table size
+				.ASSUME CASIZ EQ STBSIZ+2
+	MOV	#GCASIZ,(R1)+	;Set up global context area size
+				.ASSUME STFNFG EQ CASIZ+2
+	MOV	#GBLNFG,(R1)+	;Set up pointer to NFG flag
+	MOVB	#1,GBLNFG	;Set global no good flag to true
+				.ASSUME SLOTNM EQ STFNFG+2
+	MOV	#GLISNM,(R1)+	;Set up number of lists in list table
+				.ASSUME SLOTTB EQ SLOTNM+2
+	MOV	#<GCASIZ-SLOTTB>/2,R2
+				;Get number of words remaining in context area
+10$:	CLR	(R1)+		;Clear a word
+	SOB	R2,10$		;Do all remaining words
+;
+; Define reserved symbols
+;
+	MOV	#RSVSIZ/2,R2	;Get number of words of reserved symbols
+	MOV	#RSVBEG,R0	;Get pointer to beginning of symbols
+	MOV	R1,GCA+SLOTTB+STSSEC
+				;Set up table pointer for reserved list to
+				;... point to first reserved symbol
+20$:	MOV	(R0)+,(R1)+	;Copy a word of reserved symbol
+	SOB	R2,20$		;Do all
+;
+; Initialize some other variables
+;
+	CLR	ICFFLG		;Clear the ICF present flag
+	CLRB	WATFLG		;Clear the SET VERIFY/WATCH/NOP flag
+	MOV	#ICFSTK,NXISTK	;Initialize the ICF file stack pointer
+	MOV	#^B0111,PFBCHN	;Initialize the PFB channels in use bit mask
+				;... to channels 0,1,2
+	MOVB	#1,STFBLK+0	;The symbol table will be stored in the symbol
+				;... table file starting at block 1
+	CLRB	STFBLK+1	;... and currently is 0 blocks long
+	MOV	#PMTSTR-RSVBEG+GCA+GCASIZ,DCLPMT
+				;Set pointer to $PROMPT string pointer
+	MOV	#LFPSTR-RSVBEG+GCA+GCASIZ,LOGPMT
+				;Set pointer to $LOGFILE_PROMPT string pointer
+
+	.BR	NOLOCAL		;Go reset the local symbol table
+
+.DSABL	LSB
+
+GLOBAL	<O.ISIZ,STFBLK,DCLPMT,LOGPMT>
+
+.SBTTL	NOLOCAL	- Remove the local symbol table
+
+;+
+; NOLOCAL - Remove the local symbol table
+;
+; Description:
+;	This routine disables the local symbol table and returns it's
+;	memory to the global free pool.
+;
+;%	This routine must not assume a local table exists.  It can
+;%	assume that the global table is correct.
+;
+; Inputs:
+;	MEMSIZ		- Current memory size in K words
+;	FREPTR(GCAPTR)	- Pointer to start of global free pool
+;
+; Call:
+;	CALLX	NOLOCAL
+;
+; Outputs:
+;	FRESIZ(GCAPTR)	- The global free pool size (includes old local table)
+;	LCAPTR		- Cleared to indicate no local table
+;	LCLNFG		- Cleared because there is no local table
+;	All registers preserved
+;-
+
+.ENABL	LSB
+
+NOLOCAL::
+	PUSH	R1		;Save register
+	MOVB	MEMSIZ,R1	;Get our current memory size in K words
+	ASH	#11.,R1		;Multiply by 4000 (convert to # of bytes)
+	SUB	GCA+FREPTR,R1	;Calculate the new global free pool size
+				;... (from returning local table space to the
+				;... global free pool)
+	MOV	R1,GCA+FRESIZ	;Set the global free pool size
+	POP	R1		;Restore register
+	CLR	LCAPTR		;Clear the local context area pointer
+	CLRB	LCLNFG		;Clear the local table no good flag
+	RETURN			;Return
+
+.DSABL	LSB
+
+.SBTTL	SAVRGS	- Save registers R1-R5
+
+;+
+; SAVRGS - Save registers R1-R5
+;
+; Description:
+;	See CUI module SAVREG.MAC for more details.
+;
+; Inputs:
+;	(SP)	- Caller's return address
+;
+; Call:
+;	CALLX	SAVRGS,R5
+;
+; Outputs:
+;	Registers R1 through R5 area preserved.
+;-
+
+SAVRGS::PUSH	<R4,R3,R2,R1>	;Save registers R4 through R1 (R5 already on
+				;... stack)
+	PUSH	R5		;Our return address.
+	MOV	5*2(SP),R5	;Fix R5.
+	CALL	@(SP)+		;Call caller back.
+	POP	<R1,R2,R3,R4,R5>;Restore registers
+	RETURN			;Return to caller's caller
+
+	.END

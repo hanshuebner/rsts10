@@ -1,0 +1,533 @@
+1	SUB SHOREQ
+	!
+	!	s u b p r o g r a m   t i t l e
+	!
+	!	subprogram : SHOREQ.B2S
+	!	   version : V10.1
+	!	      edit : A
+	!	 edit date : 10-MAY-91
+	!	 author(s) : DBM
+	!
+	!********************************************************************
+	!
+	!		  C O P Y R I G H T
+	!
+	!
+	!		      Copyright (C) 1987, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.
+	!
+	!
+	! This software is furnished under a license and may be used and
+	! copied  only  in accordance with the terms of such license and
+	! with the  inclusion  of  the  above  copyright  notice.   This
+	! software  or  any  other copies thereof may not be provided or
+	! otherwise made available to any other person.  No title to and
+	! ownership of the software is hereby transferred.
+	!
+	! The information in this software is subject to change  without
+	! notice  and should not be construed as a commitment by Digital
+	! Equipment Corporation.
+	!
+	! DIGITAL assumes no responsibility for the use  or  reliability
+	! of its software on equipment that is not supplied by DIGITAL.
+	!
+	!********************************************************************
+	!
+	!	m o d i f i c a t i o n   h i s t o r y   l o g
+	!
+	!
+	! VER/ED	EDIT DATE	REASON
+	!
+	! T10.0-01	07-Nov-88	(DBM) Creation
+	!		14-Feb-89	(DBM) Enhance /FACILITIES qualifier
+	!		23-May-89	(DBM) Add /TEXT /KEYBOARD and /ACCOUNT
+	!					Also, re-work /FULL support
+	!		06-Oct-89	(DBM) Add DELETE/REQUEST support
+	!		27-Jan-90	(DBM) Log/Work file split
+	!					Remove DELETE/REQUEST
+	!					/INPUT=wild-cards
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	p r o g r a m   d e s c r i p t i o n
+	!
+	!	SHOREQ handles the SHOW REQUESTS command.
+	!	It uses the Common User Interface (CUI) as its command parser.
+	!
+	!********************************************************************
+	!
+	!	c h a n n e l   a s s i g n m e n t s
+	!
+	!	channel #	file-spec	description
+	!	=========	=========	===========
+	!	  0		_KB:		User keyboard (BP2 default)
+	!	  LOG.CHNL	OMS$:REQLOG.OMS	OMS work file (/INPUT)
+	!	  OUT.CHNL	user-specified	Ouput channel (/OUTPUT)
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	C o m p i l e   O P T I O N s
+	!
+	!********************************************************************
+
+	OPTION	TYPE = EXPLICIT
+
+	!********************************************************************
+	!
+	!	I N C L U D E   r e q u i r e d   M A P s , C O M M O N s
+	!
+	!********************************************************************
+
+	%INCLUDE "CUI:CUICMN.E2S"		! Include CUI data section
+	%INCLUDE "SYSTEM:CMNDEF.B2S"		! Include OMS common defs
+	%INCLUDE "SYSTEM:OMSKEY.B2S"		! Include CUI key defs
+
+	!********************************************************************
+	!
+	!	D E F I N E   C O N S T A N T S
+	!
+	!********************************************************************
+
+	EXTERNAL WORD CONSTANT			! Define RSTS error codes:    &
+						! (LB:ERR.STB)		      &
+						! 			      &
+			DEVNFS,			!   ?Dev not file structured  &
+			EOF,			!   ?End of file	      &
+			NOBUFS,			!   ?No buffer space available&
+			NODEVC,			!   ?Not a valid device	      &
+			NOROOM,			!   ?No room for user on dev  &
+			NOSUCH,			!   ?Can't find file	      &
+			PRVIOL,			!   ?Protection violation     &
+			WRGPAK			!   ?Pack IDs don't match 
+
+
+	DECLARE WORD CONSTANT						      &
+			FACMAX = 8%,		! # of facilities allowed     &
+			QUOTE = 34%,		! ASCII value of (")	      &
+						! Define RMS error codes:     &
+			ER$ORG = 160%		!   ?File attributes not matched
+
+	DECLARE STRING CONSTANT NO = "NO"
+
+	!********************************************************************
+	!
+	!	D E C L A R E   F U N C T I O N S
+	!
+	!********************************************************************
+
+	DECLARE WORD FUNCTION DSPERR, SELECTED
+	DECLARE STRING FUNCTION KEY0, UNFSS
+
+	EXTERNAL WORD				! Patch points for OMSSUB     &
+				OMS$LO,		!   OMS Local Object Type     &
+				OMS$MM,		!   Message Max for declare   &
+				OMS$PD,		!   Raise privs for declare   &
+				OMS$PS		!   Raise privs for send
+
+	EXTERNAL WORD FUNCTION						      &
+			FORMAT,			! Function to format req hdr  &
+			PRIVED (STRING),	! Function to check for priv  &
+			MGRSND (WORD, WORD),	! Function to send to OMS     &
+			MGRRCV (STRING, WORD, WORD, STRING) ! FN to rcv OMS ack
+
+	!********************************************************************
+	!
+	!	M A P s
+	!
+	!********************************************************************
+
+	MAP (FMTBUF)	STRING	FILL = 160%
+	MAP DYNAMIC (FMTBUF)	STRING REQUEST
+
+	MAP (BEFKEY)	STRING	BEFKEY = 4%
+	MAP (BEFKEY)	WORD	BEF.D, BEF.T
+
+	MAP (SINKEY)	STRING	SINKEY = 4%
+	MAP (SINKEY)	WORD	SIN.D, SIN.T
+
+	MAP (FACNAM)	STRING	FACNAM(FACMAX) = 6%
+
+	MAP (S.KEY)	WORD	SEQ.NUM,				      &
+			BYTE	RPLY.ML, RPLY.STS
+
+	!********************************************************************
+	!
+	!	D E C L A R E   V A R I A B L E S
+	!
+	!********************************************************************
+	
+	DECLARE	WORD	I,			! Loop index/Temp storage     &
+			CONFPOS,		! Conflicting element position&
+			JOB.N,PPN.N,KBN.N,EXA.N,! Qualifier values and...     &
+			INP.P, BEF.P, SIN.P,	! Qualifier positions...      &
+			PPN.P, TXT.P, KBN.P,	! ...			      &
+			FUL.P, SEQ.P,		! ...			      &
+			JOB.P, RPLY.P,		! ...			      &
+			FAC.C, FAC.NO, FAC.M,	! Facility variables	      &
+			PRTHDR, FNDFIL, FNDREQ	! Flags for files/reqs found
+
+	DECLARE	STRING	TEMP, TMP1, FND.TXT,	! Temp strings and /TEXT value &
+			INP_FILE, FILNAM	! /INPUT filename, current file
+
+	!	P E R F O R M   C O M M A N D   P R O C E S S I N G
+
+ SHOW_REQUESTS:
+
+	GOTO SHOW_END UNLESS PRIVED(PRIV.OPER)	! Get out unless priv'd user
+
+	CALL FET$CQ BY REF (RPLY.Q)		! Check for /REPLY qualifier
+	RPLY.P = U.PRES				! Save presence indicator
+	IF U.PRES				! Was it there?
+	THEN
+	  IF U.NO				! Yes, was it /NOREPLY?
+	  THEN
+	    RPLY.ML = ML.MSG			!   Yes, process messages only
+	  ELSE
+	    RPLY.ML = ML.REQ			!   No, process requests only
+	  END IF
+	ELSE
+	  RPLY.ML = ML.MSK			! No, must have been /ALL
+	END IF
+
+	CALL FET$CQ BY REF (BEF.Q)		! Check for /BEFORE
+	BEF.P = U.PRES				! Save presence indicator
+	IF U.PRES				! Was it specified?
+	THEN
+	  CALL FET$A BY REF			! Yes, fetch the date and time
+	  BEF.D = SWAP%(U.DATE)			!   Save the date in key format
+	  IF U.TIME				!   Was a time specified?
+	  THEN
+	    BEF.T = SWAP%(1440% - U.TIME)	!   Yes, save the time specified
+	  ELSE
+	    BEF.T = 0%				!   No, set time as 12:00AM
+	  END IF
+	END IF
+
+	CALL FET$CQ BY REF (SIN.Q)		! Check for /SINCE
+	SIN.P = U.PRES				! Save the presence indicator
+	IF U.PRES				! Was it specified?
+	THEN
+	  CALL FET$A BY REF			! Yes, fetch the date and time
+	  SIN.D = SWAP%(U.DATE)			!   Save the date in key format
+	  IF U.TIME				!   Was a time specified?
+	  THEN
+	    SIN.T = SWAP%(1440% - U.TIME)	!   Yes, save it too
+	  ELSE
+	    SIN.T = 0%				!   No, use 12:00 in the morning
+	  END IF
+	END IF
+
+	FAC.C = 0%				! Say no facilities specified
+	CALL FET$CQ (FACS.Q)			! Check for /FACILITIES
+	CALL FET$CQ (FAC.Q) UNLESS U.PRES	! Check for /FACILITY
+	CALL FET$A IF U.PRES			! Fetch arg if either present
+	WHILE U.PRES AND (FAC.C < FACMAX)	! Got one and there's room?
+	  TEMP = EDIT$(LEFT$(U.STR,U.LEN), 32%)	! Yes, make name uppercase
+	  JUNK = LEFT$(TEMP, 2%) = NO		!   Set flag if NOname
+	  TEMP = RIGHT$(TEMP, 3%) IF JUNK	!   Strip NO from name if there
+	  IF (FAC.C = 0%)			!   First facility?
+	  THEN
+	    FAC.NO = JUNK			!   Yes, save list type
+	    CONFPOS = U.POS			!     and conflict position
+	  ELSE
+	    IF (JUNK <> FAC.NO)			!   No, same facility type?
+	    THEN
+	      JUNK = DSPERR("?Conflicting elements")
+	      GOTO SHOW_END			!     No, display error and exit
+	    END IF
+	  END IF
+	  FAC.C = FAC.C + 1%			!   Bump the facility count
+	  FACNAM(FAC.C) = TEMP			!   Save the facility name
+	  CALL FET$A				!   Look for another
+	NEXT					! Loop if there was
+	CONFPOS = 0%				! No more conflicting items
+	IF U.PRES				! Did we run out of room?
+	THEN
+	  JUNK = DSPERR("?Too many arguments")	! Yes, display error message
+	  GOTO SHOW_END				!   Get out
+	END IF
+
+	CALL FET$CQ BY REF (FUL.Q)		! Check for /FULL
+	FUL.P = U.PRES				! Save the presence indicator
+
+	CALL FET$CQ BY REF (JOB.Q)		! Check for /JOB
+	JOB.P = U.PRES				! Save the presence indicator
+	IF U.PRES				! Was it specified?
+	THEN
+	  CALL FET$A BY REF			! Yes, fetch the job number,
+	  JOB.N = U.LOW				!   Save it for later
+	END IF
+
+	CALL FET$CQ BY REF (PPN.Q)		! Check for /USER
+	PPN.P = U.PRES				! Save the presence indicator
+	IF U.PRES				! Was it specified?
+	THEN
+	  CALL FET$A BY REF			! Yes, fetch the PPN
+	  PPN.N = U.LOW				!   Save it for later
+	END IF
+
+	CALL FET$CQ BY REF (KBN.Q)		! Check for /TERMINAL
+	KBN.P = U.PRES				! Save the presence indicator
+	IF U.PRES				! Was it specified?
+	THEN
+	  CALL FET$KA BY REF (DET.K)		! Yes, look for /TER=DETACHED
+	  IF U.PRES				!   Was it there?
+	  THEN
+	    KBN.N = -1%				!   Yes, set KB # = -1%
+	  ELSE
+	    CALL FET$A BY REF			!   No, fetch the device name
+	    TEMP = LEFT$(U.STR, U.LEN) + ":"	!     Put a colon at the end
+	    FQB = FSS$(TEMP, 1%)		!     Run it through FSS
+	    IF ((STATUS AND 255%) <> 2%) 	!     Make sure it's a terminal
+	    THEN
+	      JUNK = DSPERR("?Not a valid device")
+	      GOTO SHOW_END			!     It's not.  Get out
+	    END IF
+	    KBN.N = FQDEVN			!     Save the KB #
+	    KBN.N = KB.NO UNLESS FQDEVF		!     Use _KB: if unit not real
+	  END IF
+	END IF
+
+	CALL FET$CQ BY REF (TXT.Q)		! Check for /TEXT
+	TXT.P = U.PRES				! Save the presence indicator
+	IF U.PRES				! Was it specified?
+	THEN
+	  CALL FET$A BY REF			! Yes, fetch the text
+	  U.STR = EDIT$(U.STR, 32% + 256%)	!   Up-case unquoted chars
+	  IF (ASCII(U.STR) = QUOTE) AND (ASCII(RIGHT$(U.STR, U.LEN)) = QUOTE)
+	  THEN					!   Save the text w/o quotes
+	    FND.TXT = SEG$(U.STR, 2%, U.LEN - 1%)
+	  ELSE					!   Unless they weren't used
+	    FND.TXT = LEFT$(U.STR, U.LEN)
+	  END IF
+	  EXA.N = 32%				!   Assume /NOEXACT
+	  CALL FET$CQ BY REF (EXA.Q)		!   Look for /[NO]EXACT
+	  IF U.PRES				!   Was it there?
+	  THEN
+	    EXA.N = 0% UNLESS U.NO		!   Yes, change value if /EXACT
+	  END IF
+	  FND.TXT = EDIT$(FND.TXT, EXA.N)	!   Edit search string as needed
+	END IF
+
+	CALL FET$P BY REF (STR.T)		! Check for request number
+	SEQ.P = U.PRES				! Save the presence indicator
+	IF U.PRES				! Was one specified?
+	THEN
+	  SEQ.NUM = U.LOW			! Yes, save it in key area
+	END IF
+
+	FNDREQ = FALSE				! Init flag to no reqs found
+	FNDFIL = FALSE				! Init flag to no files found
+	CALL GETCLS BY REF			! Ensure channel is closed
+
+	ON ERROR GOTO SHOW_ERR			! Local trap
+	CALL FET$CQ (INP.Q)			! Check for /INPUT
+	IF U.PRES				! Was it there?
+	THEN
+	  INP.P = U.POS				! Yes, set flag accordingly
+	  CALL FET$A				!   fetch the required arg
+	  INP_FILE = LEFT$(U.STR, U.LEN)	!   and save it here for now
+	  FQB = FSS$(INP_FILE, 1%)		!   run it through FSS
+	  CAUSE ERROR DEVNFS IF STATUS AND 255%	!   make sure it's on disk
+	ELSE
+	  INP_FILE = OMS.LOC + REQLOG.OMS	! No, use OMS$:REQLOG.OMS
+	  INP.P = 0%				!   indicate /INPUT wasn't there
+	  FQB = SYS(REGAIN.PRIVS)		!   We may need privs for this
+	END IF
+
+ OPEN_NEXT:
+	CALL SETBOF BY REF			! Reset attributes for GETREQ
+	PRTHDR = (INP.P <> 0%)			! Set header flag for file
+	FQB = FSS$(INP_FILE, 1%)		! Run file name through FSS
+	FQJOB = 6%				! SYS call to FIP
+	FQFUN = 33%				! Function is "Open next"
+	FQFIL = LOG.CHNL * 2%			! Channel number * 2
+	FQSIZM = 0%				! Reserved
+	FIRQB(I) = 0% FOR I = 13% TO 16%	! Reserved
+	FQMODE = 4096%+2048%+256%+BITVAL(15%)	! Read-regardless, cache:SEQ
+	FIRQB(I) = 0% FOR I = 19% TO 22%	! Reserved
+	FIRQB(I) = 0% FOR I = 27% TO 30%	! Reserved
+	FQB = SYS(FQB)				! Open next input file
+	FILNAM = UNFSS				! Save name of file opened
+	FQB = SYS(DROP.PRIVS)			! Done with any privs
+	FNDFIL = TRUE				! Say a file was found
+
+ SHOW_LOOP:
+	CALL GETREQ BY REF			! Get a record from the file
+	IF SELECTED				! Should we process this rec?
+	THEN
+	  IF PRTHDR				! Yes, need to print header?
+	  THEN
+	    PRINT #OUT.CHNL, FF; IF FNDREQ	!   Yes, do <FF> between files
+	    PRINT "File "; FILNAM		!     Print out file name
+	    PRTHDR = FALSE			!     Signal header was done
+	  END IF
+	  FNDREQ = TRUE				!   Say something was done
+	  REMAP (FMTBUF) REQUEST = FORMAT	!   Map formatted request header
+	  PRINT #OUT.CHNL, REQUEST;		!   Display header from FMTBUF &
+		LEFT$(REQ.TXT, REQ.LEN);	!   ...and request from OMSREQ
+	  PRINT #OUT.CHNL IF CCPOS(OUT.CHNL)	!   Add <cr><lf> if needed
+	END IF
+	GOTO SHOW_LOOP				! Find another record
+
+ CHECK_FLAG:
+	U.POS = 0%				! Don't redisplay command
+	JUNK = DSPERR("%No requests found") UNLESS FNDREQ
+
+ SHOW_END:
+	CALL GETCLS BY REF			! Done with log file
+	EXIT SUB				! Get next command
+
+15000	! F U N C T I O N S
+
+	DEF STRING KEY0 =			! Ordered date/time strng     &
+	  CVT%$(REQ.DATE) +			! Swap bytes in date word     &
+	  CVT%$(1440% - REQ.TIME)		! Swap bytes of mins since mid
+
+	DEF STRING UNFSS			! Un-FSS filename in FIRQB    &
+
+	  IF FQBWRD(12%)			! Real device name?
+	  THEN
+	    TEMP = "_" + FQDEV			! Yes, copy device name
+	  ELSE
+	    TEMP = "_SY"			! No, use _SY
+	  END IF
+
+	  TEMP = TEMP + NUM1$(FQDEVN) IF FQDEVF	! Add unit number, if real
+	  TEMP = TEMP + ":["			! Add colon and open bracket
+	  FQBWRD(3%) = PPN UNLESS FQBWRD(3%)	! Use our PPN if none there
+	  TEMP = TEMP				! 			      &
+	    + NUM1$(BYTE.TO.WORD(FQPROJ)) + ","	! Add project number	      &
+            + NUM1$(BYTE.TO.WORD(FQPROG)) + "]"	!   and programmer number
+	  TEMP = TEMP + TRM$(RAD$(FQNAM1(0%))	! Add file name part I	      &
+			  +  RAD$(FQNAM1(1%)))	!   and part II
+	  TEMP = TEMP + "." + TRM$(RAD$(FQEXT))	! Add file type
+
+	  UNFSS = TEMP				! Return value
+
+	END DEF					! End of function
+
+	DEF WORD DSPERR(STRING ERR_TEXT)	! Display error text
+
+	  DSPERR = RCTRLO(0%)			! Ensure echo is on
+	  PRINT IF CCPOS(0%)			! and carriage is at left margin
+
+	  IF U.POS				! Redisplay command line?
+	  THEN
+	    CALL FET$CS BY REF			! Yes, fetch the command line
+	    IF (U.STAT = 0%)			!   If we got it,
+	    THEN
+	      PRINT RECORD 32%, LEFT$(U.STR, U.LEN)
+	      PRINT RECORD 32%, TAB(CONFPOS - 1%); "^"; IF CONFPOS
+	      PRINT RECORD 32%, TAB(U.POS - 1%);"^"
+	    END IF
+	  END IF
+
+	  PRINT ERR_TEXT			! Print error text
+	  CONFPOS = 0%				! No more conflicting items
+
+	END DEF
+
+	DEF WORD SELECTED			! Select request tests
+
+	  JUNK = FALSE				! Assume it won't be selected
+	  GOTO END_SELECT IF (KEY0 < SINKEY)	! Skip if out of range	      &
+	    IF SIN.P				!   IF /SINCE specified
+
+	  GOTO END_SELECT IF (KEY0 > BEFKEY)	! Skip if out of range	      &
+	    IF BEF.P				!   IF /BEFORE specified
+
+	  GOTO END_SELECT IF			! Get out if		      &
+	    (REQ.TYP AND ML.REP) UNLESS FUL.P	!   this is a reply and /BRIEF
+
+	  GOTO END_SELECT IF REQ.NUM <> SEQ.NUM ! Get out if seq # differ     &
+	    IF SEQ.P				!   If a sequence # specified
+
+	  GOTO END_SELECT UNLESS		! Skip unless		      &
+	    REQ.TYP AND RPLY.ML			!   type match		      &
+	      IF RPLY.P				!     IF /[NO]REPLY specified
+
+	  GOTO END_SELECT IF REQ.JOB <> JOB.N	! Skip if job # differs	      &
+	    IF JOB.P				!   IF /JOB specified
+
+	  GOTO END_SELECT IF REQ.KB <> KBN.N	! Skip if KB # differs	      &
+	    IF KBN.P				!   IF /TERMINAL specified
+
+	  IF PPN.P				! Was /USER specified?
+	  THEN
+	    FQBWRD(3%) = PPN.N			! Yes, stick PPN into MAP area
+	    GOTO END_SELECT			!   Get out now if...	      &
+	      IF (FQPROJ <> REQ.PROJ)		!     Project #'s differ      &
+		IF FQPROJ <> -1%		!       Unless wild card #
+	    GOTO END_SELECT			!   Get out now if...	      &
+	      IF (FQPROG <> REQ.PROG)		!     Programmer #'s differ   &
+		IF FQPROG <> -1%		!       Unless wild card #
+	  END IF
+
+	  !
+	  ! Determine if facilty of request matches that specified by user...
+	  !
+	  ! Note: /FAC=NOxxx is treated as /FAC=(ALL,NOxxx)
+	  !
+
+	  IF (FAC.C = 0%)			! Any facilities specified?
+	  THEN
+	    JUNK = TRUE				! No, so match anything
+	  ELSE
+	    JUNK = FAC.NO			! Yes, initialize match flag
+	    FOR I = 1% TO FAC.C			!   Loop thru the facilty count
+	      FAC.M = (FACNAM(I) = REQ.FAC)	!     See if facility matches
+	      IF FAC.NO				!     NOxxx list?
+	      THEN
+		JUNK = JUNK AND NOT FAC.M	!     Yes, so boolean AND NOTs
+	      ELSE
+		JUNK = JUNK OR FAC.M		!     No, so boolean ORs
+	      END IF
+	    NEXT I				!   Next facility
+	  END IF
+
+	  JUNK = (POS(EDIT$(LEFT$(REQ.TXT,REQ.LEN),EXA.N),FND.TXT,1%) <> 0%)  &
+	    IF TXT.P IF JUNK			! Check /TEXT if facility match
+
+ END_SELECT:
+	 SELECTED = JUNK			! Return flag to diplay request
+
+	END DEF
+
+19000	!	Error Handling
+
+ SHOW_ERR:
+	FQB = SYS(DROP.PRIVS)			! Done with any privs
+	U.POS = INP.P				! Assume /INPUT file error
+
+	SELECT ERR
+
+	  CASE EOF
+	    RESUME OPEN_NEXT			! Open next file
+	  CASE NOSUCH
+	    RESUME CHECK_FLAG IF FNDFIL		! See if we found any requests
+	    IF INP.P
+	    THEN
+	      TEMP = "?File does not exist"	! No /INPUT files founds
+	    ELSE
+	      TEMP = "?Operator/Message Services log file does not exist"
+	      U.POS = 0%			! Don't redisplay command
+	    END IF
+	  CASE ER$ORG
+	    TEMP = "?Log file has invalid format" ! Invalid file organization
+	    U.POS = 0%				! Don't redisplay command
+	  CASE DEVNFS
+	    TEMP = "?File must reside on disk"	! /INPUT to non-disk device
+	  CASE ELSE
+	    ON ERROR GO BACK			! Return unknown error to caller
+
+	END SELECT				! End of selected errors
+
+	JUNK = DSPERR(TEMP) 			! Display selected error text
+	RESUME SHOW_END				! Resume to end of command
+
+	END SUB

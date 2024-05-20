@@ -1,0 +1,268 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	IMGRMS,<Image initialization>,0B,21-JUN-91,BGN
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for IMGRMS
+
+;+
+;  000  BGN  05-Oct-88  Creation from BCKRMS
+;  001  BGN  10-Nov-89  Remove RWDATA section, hook disks, use user blksiz
+;  002	REG  07-Dec-89	Add /COPY option
+;  003	REG  20-Dec-89	Add HOOK hook
+;  004	REG  20-Dec-89	Get input disk label
+;  005	REG  27-Dec-89	Change DO.COP to IM$COP
+;  006	REG  30-Dec-89	Cleanup
+;  007	REG  09-Jan-90	Lookup input disk DCN 1 for hook decision
+;  008	REG  12-Jan-90	Move HOOK from BCKSUB to make .TSK smaller
+;  009	REG  20-Jan-90	Call DSKINT's PK code for HOOK
+;  010  REG  03-Apr-90	Add big blocks
+;  011  REG  09-Apr-90	Fix Unexpected error 21 when disk not mounted
+;  012  REG  20-Apr-90	Check privs before hooking
+;  013  REG  24-Apr-90	Add /IN_LABEL check
+;  014  REG  27-May-90	Use input disk status for output disk flags for INIT
+;  015  REG  20-jun-90	Add error for input disk not mounted
+;  016  REG  21-jun-90	Fix error path for hook
+;  017  REG  21-Jun-90	Replace .UUO with CALFIP to fix multi-/image errors
+;  018  REG  07-Aug-90  Fix the header adjustment code for BLKSIZ
+;  019  REG  29-Aug-90	Suppress file messages if /NOFILE_DATA
+;			Add IFLAGS bit definitions
+;
+;			[RSTS V10.1]
+;  020	REG  22-May-91	Set flag to tell COMPK to reallocate disk for HOOK
+;-
+
+.SBTTL	Call all needed MACROs
+
+.MCALL	SUBR,CALBX,CALB,.ASCIC,ENAR$S,DSAR$S,WSIG$S,$CUI,$FAO		;008
+
+$CUI	MSG
+
+.SBTTL	Define our local data
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+MODNAM: .ASCIC	<"IMGRMS">	; Module name for program failures
+
+;
+; Hook information							;008+
+;
+
+HOOCTL:	.BLKB			;Reserved for the byte count
+	.ASCII	"$_WAIT ::5"	;Make sure we have the disk allocated	;020
+	.BYTE	15,12		;CR/LF					;020
+	.ASCII	"$_SET NOECHO"	;We don't need to echo anything		;020
+	.BYTE	15,12		;CR/LF					;020
+	.ASCII	"$_RUN SYSGEN$:HOOK" ;Start up hook			;020
+	.BYTE	15,12		;CR/LF
+	.ASCII	"!AD!UB:[0,1]INIT.SYS,,!AD!UB:[0,1]INIT.SYS" ;"The command"
+	.BYTE	15,12		;CR/LF
+	.ASCII	"$!AD_ALLOCATE/JOB=!UB !AD!UB:" ;reallocate disk to backup;020
+	.BYTE	15,12		;CR/LF					;020
+	.ASCII	"$_SET NODATA"	;Make sure out PK gets prompts		;020
+	.BYTE	15,12		;CR/LF
+	.ASCII	+$_INQUIRE/NOPUNCTUATION DUMMY ""+			;020
+				;And make the COM file wait for us
+	.BYTE	15,12		;And end it with a CR/LF
+
+HOOLEN	=	<.-HOOCTL>-1
+.ASSUME	HOOLEN	LE	377	;Max length
+.SAVE
+.	=	HOOCTL
+	.BYTE	HOOLEN
+.RESTORE
+
+	.PSECT	RWDATA,RW,D,LCL,REL,CON					;020
+
+HALLOC:	.BLKB			;Allocate text control byte		;020
+
+;
+; End of HOOK information						;008-
+;
+
+.EVEN	;I waste a byte on occasion
+
+
+	.BSECT	; Bits in IFLAGS
+
+FL$END:	.BLKB	; Finished with this file
+FL$PLA:	.BLKB	; Placed files have been done
+
+
+.SBTTL	Come here to do an IMAGE copy
+
+;+
+; IMGREC - Image copy operation
+;
+; This routine is called to initialize our context. We are called before
+; any other routines
+;
+;	CALLX	IMGREC
+;
+; All registers are preserved.
+;-
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+IMGREC::SAVREG			;Save all registers
+	CALLX	CLRFQB		;Clear out the FIRQB
+	MOV	#^RIMA,FIRQB+FQNAM1	;Change name
+	MOV	#^RGE ,FIRQB+FQNAM1+2	;  to IMAGE
+	.NAME
+	CLR	IFLAGS		;Clear out our flags
+	SUB	#HBSIZE,BLKSIZ	;Don't allocate a header		;018
+	MOV	BLKSIZ,-(SP)	;Save the blocksize			;018
+	CALLX	INIBUF		;Set up the I/O buffers
+	CMP	(SP)+,BLKSIZ	;Did INIBUF change BLKSIZ?		;018
+	BNE	1$		;Yes, so don't mess with it		;018
+	ADD	#HBSIZE,BLKSIZ	;Let image know what the real size is	;018
+1$:	CALLX	INVCHK		;Check for /IN_LABEL			;018
+	CALLX	CLRFQB		;Clear out the FIRQB			;004
+	MOVB	#UU.ATR,@#FIRQB+FQFUN ;Read Pack Attributes		;004
+	MOV	#-4,@#FIRQB+FQFIL ;Subfunction code			;004
+	MOV	$DSKDEV,@#FIRQB+FQDEV  ;Device				;004
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;Unit				;004
+	.UUO								;004
+	MOVB	@#FIRQB,R2	;Get the error				;015
+	BEQ	2$		;No error				;015
+	CMESSAGE #ERROPD	;Yes, say so				;015
+	CMESSAGE R2		;Be specific				;015
+	JMPX	RESTRT		;And begin again			;015
+2$:									;015
+	MOV	R0,-(SP)	;Save a reg				;004
+	MOV	R5,-(SP)	;Save a reg				;004
+	MOV	#$DEFLB,R5	;R5->default disk label string area	;004
+	MOV	@#FIRQB+FQNAM2,R0 ;Get input disk label			;004
+	CALLX	RAD$		;xlate RAD50 to ASCII			;004
+	MOV	@#FIRQB+FQMODE,R0 ;Both words				;004
+	CALLX	RAD$		;xlate RAD50 to ASCII			;004
+	MOV	@#FIRQB+FQSIZ,DSKSTA ;Get pack status flags		;014
+	MOV	(SP)+,R5	;Restore a reg				;004
+	MOV	(SP)+,R0	;and the last				;004
+	CALLX	MOUNT		;Go get the first volume mounted	;014
+	BIT	#C2$ONL,C$FLG2	;Is this a verify=only?			;006
+	BNE	5$		;Yup, go do it				;006
+	CALLX	IMGFIL		;Write the accounts & placed files
+	BIS	#FL$PLA,IFLAGS	;Say we've written placed files		;019
+	BIT	#DO.FIL,C$FLAG	;Not doing files?			;019
+	BEQ	2000$		;Then don't				;019
+	CMESSAGE #FILIMG	;Start non-placed pass with a message
+	CALLX	IMGFIL		;Write the non-placed files
+2000$:	BIT	#IM$COP,IMGSUB	;Is this a /COPY?			;019
+	BNE	5$		;Skip the hook if so			;002
+	BIT	#C2$HOK,C$FLG2	;Is it OK to hook this one?		;003
+	BEQ	5$		;No (no [0,1]INIT.SYS was xferred)	;003
+	BIT	#GF.HAL,GENFLG	;Do they have RDNFS and INSTAL?		;012
+	BEQ	3$		;No they don't				;012
+	NOP			;A little debug spot			;007
+	CALLX	CLRFQB		;Clear out the FIRQB			;007
+	MOVB	#OPNFQ,@#FIRQB+FQFUN ; Set up to open the input disk	;007
+	MOV	#SAVFIL,@#FIRQB+FQFIL ; On the input channel		;007
+	MOV	$DSKDEV,@#FIRQB+FQDEV ; Input device name		;007
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ; And unit			;007
+	CALFIP			;Open the disk				;007
+	TSTB	@#FIRQB		;Did we get an error?			;007
+	BNE	4$		;Yes, tell 'em				;007
+	CALLX	CLRXRB		;Clear it right out, ayuh		;007
+	MOV	#512.,@#XRB	;Byte count				;007
+	MOV	#DSIBUF,@#XRB+XRLOC ;Address of buffer			;007
+	MOV	#SAVFIL,@#XRB+XRCI ;Channel # and MSB of block # (0)	;007
+	.READ			;Read us some data			;007
+	MOVB	#CLSFQ,@#FIRQB+FQFUN ;Close the disk			;007
+	CALFIP			;Do it					;017
+	CMP	#6,DSIBUF+4	;Is there a 6 in the right place?	;007
+	BNE	5$		;No, input disk was not hooked		;007
+	TST	DSIBUF+6	;Is there a 0 in the right place?	;007
+	BNE	5$		;No, input disk was not hooked		;007
+	CMP	#12,DSIBUF+10	;Is there a 12 in the right place?	;007
+	BNE	5$		;No, input disk was not hooked		;007
+	TST	DSIBUF+12	;Is there a 0 in the right place?	;007
+	BNE	5$		;No, input disk was not hooked		;007
+	CMESSAGE #HOOSTA	;Let them know what we're doing
+	BIS	#GF.ASS,GENFLG	;Set reallocate flag			;020
+	CALB	HOOK,<#$SAVDEV,$SAVUNT> ;Try to hook the disk		;008
+	BIC	#GF.ASS,GENFLG	;Clear the flag				;020
+	CMP	R0,#2		;Check error status
+	BLT	5$		;No error
+	BR	4$		;Error					;016
+3$:	CMESSAGE #HOOHAL	;Tell 'em about the privs		;012
+4$:	CMESSAGE #HOOERR	;Print the error
+5$:	BIT	#DO.VER,C$FLAG	;Do we want to verify?
+	BEQ	10$		;No, continue
+	BIS	#RS$VFY,RESSUB	;Yes, so say so
+	CALLX	IMGFIL		;Allow IMGFIL to handle the rest
+
+10$:	
+;	CALLRX	DISMNT		;Now exit dismounting this image set
+	RETURN
+
+GLOBAL	<BLKSIZ,SAVSZL,SAVSZM,ACRTAL,RSTFLG>				;010
+GLOBAL	<RECPTR,RESSUB,C$FLAG,IFLAGS,$SAVDEV,$SAVUNT>			;008
+GLOBAL	<HOOERR,HOOSTA,FILIMG>
+GLOBAL	<C$FLG2>							;003
+GLOBAL	<$DSKDEV,$DSKUNT,$DEFLB>					;004
+GLOBAL	<IMGSUB>							;005
+GLOBAL	<GENFLG,HOOHAL>							;012
+GLOBAL	<DSKSTA>							;014
+GLOBAL	<ERROPD>							;015
+
+.SBTTL	Hook a disk							;008+
+
+;+
+; HOOK - Hook a disk
+;
+;	R5 -> Argument list
+;		.WORD	N	(Number of arguments)
+;		.WORD	M	(Address of device name)
+;		.WORD	U	(Device unit number/real flag)
+;
+;	CALL	HOOK
+;
+; And the disk is initialized.
+;
+;	R0 = Exit status
+;		0 = Warning                              
+;		1 = Disk hooked
+;		2 = Error
+;		4 = Severe error
+;-
+
+.ENABL	LSB
+
+HOOK:	SUBR	<M,U>							;020
+	CALLX	CLRFQB		;Clear out the FIRQB
+	MOVB	#RSTFQ,@#FIRQB+FQFUN ;Function is reset
+	MOVB	#INIFIL,@#FIRQB+FQFIL ;On the initialization channel
+	CALFIP			;Now reset the channel
+	CRASH			;And die on errors
+
+	MOVB	#' ,HALLOC	;Default to include reallocate line	;020
+	BIT	#GF.OWN,GENFLG	;Is the disk mounted /noshareable?	;020
+	BNE	10$		;Yes, so leave it alone			;020
+	MOVB	#'!,HALLOC	;No, so comment out the reallocate line	;020
+10$:	MOV	SP,R3		;R3 -> comment or space character	;020
+	$FAO	#HOOCTL,#OL,#512.,#DB,<#2,M(R5),<U(R5),B>,#2,M(R5),<U(R5),B>,#1,#HALLOC,<JOBNO,B>,#2,M(R5),<U(R5),B>> ;020
+	CRASH	R0		;And die on errors
+	CALLRX	COMPK		;Execute the .COM file			;009
+
+GLOBAL	<GENFLG,JOBNO>							;020
+GLOBAL	<OL,DSIBUF,DB>							;020
+
+.END

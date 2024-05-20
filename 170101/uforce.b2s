@@ -1,0 +1,532 @@
+1	SUB UFORCE							      &
+\	ON ERROR GOTO 19000						      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   t i t l e				      &
+	!								      &
+	!	  subprogram : UFORCE					      &
+	!	     version : V10.1					      &
+	!	        edit : A					      &
+	!	   edit date : 10-MAY-91				      &
+	!	   author(s) : JJT					      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!		  C O P Y R I G H T				      &
+	!								      &
+	!								      &
+	!		      Copyright (C) 1984, 1991 by		      &
+	!	Digital Equipment Corporation, Maynard, Mass.		      &
+	!								      &
+	!								      &
+	! This software is furnished under a license and may be used and      &
+	! copied  only  in accordance with the terms of such license and      &
+	! with the  inclusion  of  the  above  copyright  notice.   This      &
+	! software  or  any  other copies thereof may not be provided or      &
+	! otherwise made available to any other person.  No title to and      &
+	! ownership of the software is hereby transferred.		      &
+	!								      &
+	! The information in this software is subject to change  without      &
+	! notice  and should not be construed as a commitment by Digital      &
+	! Equipment Corporation.					      &
+	!								      &
+	! DIGITAL assumes no responsibility for the use  or  reliability      &
+	! of its software on equipment that is not supplied by DIGITAL.	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   c a l l   f o r m a t		      &
+	!								      &
+	!	CALL UFORCE						      &
+	!								      &
+	!	Argument	I/O	Usage				      &
+	!	========	===	=====				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m o d i f i c a t i o n   h i s t o r y   l o g		      &
+	!								      &
+	!								      &
+	! VER/ED	EDIT DATE	REASON				      &
+	!								      &
+	! V9.1-05	16-Aug-85	(JJT) Don't check for a gagged	      &
+	!				terminal on a FORCE command	      &
+	! V9.2-02	22-Oct-85	(JJT) Handle ?Not a valid device error &
+	! V9.3-03	15-Feb-86	(JJT) Allow multiple destinations     &
+	! V9.4-04	04-May-87	(JJT) Look for err 8; not err 6	      &
+	! V9.5-03	26-Jul-87	(JJT) Fix /NOBELL		      &
+	! V9.6-10	27-Apr-88	(JJT) Remove 'KB disabled' message    &
+	! V10.0-L	20-Jul-90	(JJT) Send entire message at one time &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   d e s c r i p t i o n		      &
+	!								      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	v a r i a b l e s  /  a r r a y s   u s e d		      &
+	!								      &
+	!	name		description				      &
+	!	====		===========				      &
+	!								      &
+	!******************************************************************** &
+
+
+700	!	i n c l u d e   r e q u i r e d   M A P s , C O M M O N s     &
+	!								      &
+	!								      &
+	%INCLUDE "CUI:CUICMN.B2S"		!include CUI data section     &
+	%INCLUDE "SYSTEM:UTYKEY.B2S"		!include CUI common data      &
+
+750	COMMON	(DSPCMN)	INDENT.COLUMN%				      &
+									      &
+
+
+910	DIM	FIRQB%(30%),			!SYScall array		      &
+		DEST.POS%(20%),			!POS of the destination array &
+		DEST$(20%)			!Destination array	      &
+
+									      &
+
+1000	!	m a i n   s u b p r o g r a m   l o g i c		      &
+	!								      &
+	!								      &
+									      &
+
+3999	!	p r o c e s s    c o m m a n d				      &
+									      &
+
+
+4100	!BROADCAST							      &
+	!FORCE								      &
+									      &
+	PRIV.NEED$ = "SEND"			!DEFAULT TO BROADCAST'S PRIV  &
+\	PRIV.NEED$ = "SYSIO" IF U.CMDC% = FOR.K% !SET FORCE'S PRIV IF RIGHT   &
+\	IF ASCII(SEG$(SYS(CHR$(6%)+CHR$(32%)+CHR$(1%)+ !IF WE DON'T HAVE      &
+		 STRING$(3%,0%)+PRIV.NEED$),3%,3%)) THEN !THE RIGHT PRIV      &
+		PRINT "?"+PRIV.NEED$+ " privilege required" ! PRINT ERROR MSG &
+\		SUBEXIT				!		AND EXIT      &
+\	END IF								      &
+\	CHANGE SYS(CHR$(6%)+CHR$(26%)) TO FIRQB%!RETURN JOB INFO	      &
+\	JOB.NO% = FIRQB%(1%)/2%			!SAVE JOB NUMBER	      &
+\	USER.PPN% = FIRQB%(21%)+SWAP%(FIRQB%(22%))!SAVE USER PPN	      &
+\	KB.NO% = FIRQB%(4%)			!SAVE KB NUMBER		      &
+\	FILE.TO.SEND% = 0%			!DEFAULT TO NO FILE TO SEND   &
+\	SEND.TO.PPN% = 0%			!DEFAULT TO NO PPN TO SEND TO &
+\	CALL FET$CQ BY REF (USE.Q%)		!/LOGGED_IN SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		SEND.TO.PPN% = -1%		!  SET THE FLAG		      &
+\		PROJ%,PROG% = 255%		!  SEND TO ALL LOGGED-IN USERS &
+\	END IF								      &
+\	DEST$(I%) = "" FOR I% = 0% TO 20%	!INIT THE DESTINATION ARRAY   &
+						!NOTE - THE LAST ELEMENT OF   &
+						! THE ARRAY WILL ALWAYS BE    &
+						! NULL. ONLY 20 DESTINATIONS  &
+						! ARE ALLOWED (UTYCUI.MAC)    &
+						! AND ELEMENTS 0 - 19 ARE     &
+						! USED TO STORE THEM.	      &
+\	DEST.CNT% = 0%				!INIT THE NUMBER OF DEST's    &
+\	CALL FET$P BY REF (KB.T%)		!GET THE DESTINATION	      &
+\	UNTIL U.PRES% = 0%			!LOOP UNTIL NO MORE PRESENT   &
+\		DEST.POS%(DEST.CNT%) = U.POS%	!  STORE ITS POSITION	      &
+\		DEST$(DEST.CNT%) = SEG$(U.STR$,1%,U.LEN%) !STORE THE DEST     &
+\		DEST.CNT% = DEST.CNT% + 1% 	!  INC TO THE NEXT ONE	      &
+\		CALL FET$NP BY REF		!  GET THE NEXT DESTINATION   &
+\	NEXT					!CONTINUE THE LOOP	      &
+\	DEST.CNT% = 0%				!REINIT THE COUNTER
+4101	ON ERROR GOTO 4130			!SET LOCAL ERROR TRAP	      &
+\	IF LEN(DEST$(DEST.CNT%)) THEN		!IF DESTINATION PRESENT	      &
+\		D$ = EDIT$(DEST$(DEST.CNT%),-2%)!  EXTRACT IT		      &
+\		CHANGE FSS$(D$,1%) TO FIRQB%	!DO THE FILE STRING SCAN      &
+\		S1% = FIRQB%(29%)+SWAP%(FIRQB%(30%)) !GET FLAG WORD 2	      &
+\		S1% = S1% AND NOT(1024%+2048%)	!  REMOVE PROTECTION CODE FLAG &
+			IF (S1% AND 2048%)=2048%!   IF THE DEFAULT PROTECTION &
+						!     CODE IS SET	      &
+\		GOTO 4102 IF (S1% AND NOT(128%+256%+512%)) <> 0% !GO CHECK FOR &
+						! A KB IF ANYTHING BUT A PPN  &
+\		SEND.TO.PPN% = -1%		!  SET THE FLAG		      &
+\		PROJ% = FIRQB%(6%)		!  GET PROJECT NUMBER	      &
+\		PROG% = FIRQB%(5%)		!  GET PROG NUMBER	      &
+\	END IF								      &
+\	ON ERROR GOTO 19000			!RESET THE ERROR TRAP
+4102	IF NOT (SEND.TO.PPN%) THEN		!IF NOT SENDING TO A PPN      &
+		GOSUB 10000			!  GET THE KB RANGE	      &
+\		SUBEXIT IF K0% < 0%		!  EXIT IF THERE WAS AN ERROR &
+\	END IF								      &
+									      &
+\	SELECT U.CMDC%				!SELECT THE COMMAND AGAIN     &
+\	  CASE FOR.K%				!FORCE			      &
+									      &
+\	SUB.FUNC% = -4%				!SET UP FOR THE FORCE SYSCALL &
+\	CALL FET$P BY REF (STR.T%)		!GET THE STRING		      &
+\	M$ = SEG$(U.STR$,1%,U.LEN%)		!EXTRACT IT		      &
+\	M$ = EDIT$(M$,8%+128%)			!TRIM LEADING & TRAILING <SP> &
+\	IF ASCII(M$) = 34% AND			!IF THE FIRST CHAR IS A "     &
+	   ASCII(SEG$(M$,LEN(M$),LEN(M$))) = 34% ! AND THE LAST IS A "	      &
+	THEN	M$ = SEG$(M$,2%,LEN(M$))	!   TRIM LEADING "	      &
+\		M$ = SEG$(M$,1%,LEN(M$)-1%)	!   TRIM TRAILING "	      &
+\	END IF								      &
+\	M$ = EDIT$(M$,8%+128%)+CHR$(13%)	!TRIM SPACES, ADD <CR>	      &
+\	IF ASCII(M$) = 94% THEN			!IF 1ST CHAR IS UPARROW/CARET &
+		M$ = EDIT$(M$,32%)		! TRANSLATE LOWERCASE TO UPPER &
+\		IF LEN(M$) = 2% THEN		! IF JUST UPARROW & <CR>      &
+			M$ = CHR$(3%)		!   SET STRING = ^C	      &
+		ELSE	IF LEN(M$) = 3% THEN	! IF UPARROW, CHAR, & <CR>    &
+				M$=CHR$(ASCII(SEG$(M$,2%,2%))-64%) !CTRL/<CHR> &
+			ELSE	M$=CHR$(3%)+SEG$(M$,2%,LEN(M$)) !^C + STRING  &
+\			END IF						      &
+\		END IF							      &
+\	END IF								      &
+\	MSG.OR.COM$ = "Command"			!WE ARE SENDING A COMMAND     &
+\	LOG% = -1%				!TURN ON LOGGING	      &
+\	GOSUB 12000				!GO SEND THE COMMAND	      &
+									      &
+
+4103	  CASE BRD.K%				!DO THE BROADCAST	      &
+									      &
+\	SUB.FUNC% = -5%				!SET UP FOR THE SEND SYSCALL  &
+\	CALL FET$P BY REF (STR.T%)		!GET THE STRING		      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		STR.POS% = U.POS%		!  SAVE THE POSITION	      &
+\		M$ = SEG$(U.STR$,1%,U.LEN%)	!  EXTRACT IT		      &
+\		M$ = EDIT$(M$,8%+128%)		! TRIM LEADING & TRAILING <SP> &
+\		IF ASCII(M$) = 34% AND		!  IF THE FIRST CHAR IS A "   &
+		   ASCII(SEG$(M$,LEN(M$),LEN(M$))) = 34% !AND THE LAST IS A " &
+		THEN	M$ = SEG$(M$,2%,LEN(M$))!    TRIM LEADING "	      &
+\			M$ = SEG$(M$,1%,LEN(M$)-1%)! TRIM TRAILING "	      &
+		ELSE				!  MUST BE A FILE TO SEND     &
+			F$ = EDIT$(M$,-2%)	!    REMOVE ALL JUNK	      &
+\			ON ERROR GOTO 4130	!    SET LOCAL ERROR TRAP     &
+\			V$ = FSS$(F$,1%)	!    FSS THE FILE	      &
+\			ON ERROR GOTO 19000	!    RESET STANDARD ERROR TRAP &
+\			S1% =  ASCII(SEG$(V$,29%,29%))+	!GET THE SECOND	      &
+	       		 SWAP%(ASCII(SEG$(V$,30%,30%)))	!SCAN FLAG WORD	      &
+\			GOTO 4135 IF (S1% AND 1%) = 0%  !ERROR IF NO FILENAME &
+\			GOTO 4140 IF		!    ERROR IF WILDCARD	      &
+			   (S1% AND (2%+4%+32%+64%+256%+512%+32767%+1%)) <> 0% &
+\			FILE.TO.SEND% = -1%	!    SET THE FLAG	      &
+\		END IF							      &
+	ELSE					!IF NOT PRESENT		      &
+		FILE.TO.SEND% = -2%		!  SET THE FLAG		      &
+\		GOTO 4107 IF DEST.CNT%		!  GO AROUND UNLESS FIRST TIME &
+\		F$ = "TEMP"+NUM1$(JOB.NO%)+".TMP"! CREATE THE TEMP FILE NAME  &
+\		OPEN F$ FOR OUTPUT AS FILE 1%	!  OPEN A TEMPORARY FILE      &
+\		OPEN "KB:" AS FILE 2%		!  OPEN THE KEYBOARD	      &
+\		ON ERROR GOTO 4130		!  SET LOCAL ERROR TRAP	      &
+\		WHILE 1% = 1%			!  LOOP FOREVER		      &
+\			PRINT "Message: ";	!    PRINT MESSAGE PROMPT     &
+\			INPUT LINE #2$, L$	!    GET THIS LINE	      &
+\			PRINT #1%, L$;		!    STORE THE LINE	      &
+\		NEXT				!  NEXT LINE		      &
+\	END IF								      &
+
+4107	CLOSE 1%,2%				!CLOSE THE TEMP FILE AND KB   &
+\	ON ERROR GOTO 19000			!RESET THE ERROR TRAP	      &
+
+4110	NODE$ = ""				!DEFAULT TO NO NODE NAME      &
+\	ON ERROR GOTO 4130			!SET LOCAL ERROR TRAP	      &
+\	NODE$ = SEG$(SYS(CHR$(6%)+CHR$(22%)+CHR$(-19%)+CHR$(1%)),5%,10%)      &
+\	NODE$ = EDIT$(NODE$,-2%) + "::"		!GET NODE NAME AND ADD COLONS
+4115	A.NAME$ = ""				!DEFAULT TO NO ACCOUNT NAME   &
+\	ON ERROR GOTO 4130			!SET LOCAL ERROR TRAP	      &
+\	FIRQB%(0%) = 30%			!30 BYTES		      &
+\	FIRQB%(1%) = 6%				!SYS CALL TO FIP	      &
+\	FIRQB%(2%) = -25%			!FILE ATTRIBUTE FUNCTION      &
+\	FIRQB%(3%) = -1%			!READ ACCOUNT ATTRIBUTE	      &
+\	FIRQB%(4%) = 5%				!READ ACCOUNT NAME	      &
+\	FIRQB%(5%) = USER.PPN% AND 255%		!PUT IN PROGRAMMER NUMBER     &
+\	FIRQB%(6%) = SWAP%(USER.PPN%) AND 255%	!PUT IN PROJECT NUMBER	      &
+\	FIRQB%(I%) = 0% FOR I% = 7% TO 30%	!CLEAR UNNEEDED BYTES	      &
+\	CHANGE FIRQB% TO FIRQB$			!CHANGE THE ARRAY TO A STRING &
+\	FIRQB$ = SYS(FIRQB$)			!DO THE READ		      &
+\	A.NAME$ = EDIT$(SEG$(FIRQB$,8%,20%),132%)!EXTRACT AND SET IT	      &
+\	A.NAME$ = ' "' + A.NAME$ + '"'		!PUT ON A SPACE AND QUOTES    &
+		IF LEN(A.NAME$)			!  IF THERE IS A NAME
+4120	ON ERROR GOTO 19000			!RESET ERROR TRAP	      &
+\	CALL FET$CQ BY REF (HDR.Q%)		!/HEADER SPECIFIED?	      &
+\	HEADER$ = ""				!DEFAULT TO NO HEADER	      &
+\	PRE.FIX$ = ""				!DEFAULT TO NO MESSAGE PREFIX &
+\	TRL.SPC$ = ""				!DEFAULT TO NO TRAILING SPACES &
+\	IF (NOT (U.PRES%)) OR (NOT (U.NO%)) THEN!IF NOT PRESENT OR /HEADER    &
+		HEADER$ = CHR$(13%) + CHR$(10%) +! FORM THE HEADER	      &
+			"*** From "+NODE$+"["				      &
+			+NUM1$(SWAP%(USER.PPN%) AND 255%)		      &
+			+","+NUM1$(USER.PPN% AND 255%)+"]"		      &
+			+A.NAME$+" on KB"+NUM1$(KB.NO%)			      &
+			+": at "+TIME$(0%)+" "+DATE$(0%)+SPACE$(5%)	      &
+			+CHR$(13%)+CHR$(10%)				      &
+\		PRE.FIX$ = "** "		!  FORM THE MESSAGE PREFIX    &
+\		TRL.SPC$ = SPACE$(5%)		!  FORM THE TRAILING SPACES   &
+\	END IF								      &
+\	CALL FET$CQ BY REF (BEL.Q%)		!/[NO]BELL SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		IF NOT U.NO% THEN		!  IF /BELL		      &
+			HEADER$ = CHR$(7%) + HEADER$ ! PUT ON THE BELL CHAR   &
+\		END IF							      &
+\	END IF								      &
+\	MSG.OR.COM$ = "Message"			!WE ARE SENDING A MESSAGE     &
+\	LOG% = -1%				!TURN ON LOGGING	      &
+\	IF FILE.TO.SEND% = 0% THEN		!IF NO FILE TO SEND	      &
+		M$ = PRE.FIX$ + M$		!PUT ON THE PREFIX	      &
+\		M$ = M$ + TRL.SPC$		!PUT ON TRAILING SPACES	      &
+\		M$ = EDIT$(M$,128%) IF LEN(M$) > 70% !REMOVE TRAILING SPACES  &
+						!     IF THEY MADE IT TOO LONG &
+\		M$ = HEADER$+M$+CHR$(13%)+CHR$(10%)!PUT ON THE HEADER	      &
+\		GOTO 4123			!  GO SEND THE MESSAGE	      &
+\	END IF								      &
+\	ON ERROR GOTO 4130			!SET LOCAL ERROR TRAP	      &
+\	OPEN F$ FOR INPUT AS FILE 1%		!OPEN THE MESSAGE FILE	      &
+\	M$ = HEADER$				!PREPARE TO SEND THE HEADER   &
+\	WHILE 1% = 1%				!LOOP FOREVER		      &
+\		INPUT LINE #1%, L$		!  GET A LINE OUT OF THE FILE &
+\		L$ = PRE.FIX$ + L$		!PUT ON THE PREFIX	      &
+\		IF LEN(TRL.SPC$) THEN		!IF THERE ARE TRAILING SPACES &
+			L$ = EDIT$(L$,4%) + TRL.SPC$!  PUT THEM ON	      &
+\			L$ = EDIT$(L$,128%) IF LEN(L$) > 70% !REMOVE THEM IF  &
+						!      THEY MADE IT TOO LONG  &
+\			L$ = L$ + CHR$(13%) + CHR$(10%)!RESTORE <CR> + <LF>   &
+\		END IF							      &
+\		M$ = M$ + L$			!  APPEND THE PREFIX AND MSG  &
+\	NEXT								      &
+
+4123	GOSUB 12000				!SEND THE ENTIRE MESSAGE      &
+
+4125	END SELECT							      &
+
+4127	SEND.TO.PPN% = 0%			!INIT THE SEND TO PPN FLAG    &
+\	DEST.CNT% = DEST.CNT% + 1%		!INC TO THE NEXT DESTINATION  &
+\	GOTO 4101 IF LEN(DEST$(DEST.CNT%))	!GO USE NEXT DEST IF THERE    &
+\	KILL F$ IF FILE.TO.SEND% = -2%		!KILL THE TEMP FILE	      &
+\	SUBEXIT					!EXIT WHEN ALL DONE	      &
+
+4130	RESUME 4107 IF ERR = 11% AND ERL = 4103 !ALL DONE WITH MULTI-LINE MSG &
+\	RESUME 4115 IF ERL = 4110	!CONTINUE IF NETWORK NOT UP	      &
+\	RESUME 4120 IF ERL = 4115	!CONTINUE IF ERROR WITH ACCOUNT NAME  &
+\	RESUME 4102 IF ERL = 4101	!CHECK FOR A KB IF DEST IS NOT A PPN  &
+\	RESUME 4140 IF ERL = 4103	!INVALID FILENAME		      &
+\	RESUME 4150 IF ERR = 5% AND ERL = 4120 !HANDLE FILE NOT FOUND	      &
+\	RESUME 4140 IF ERR <> 11% AND ERL = 4120 !INVALID FILE SPEC	      &
+\	GOTO 19000 IF ERR <> 11%	!LET MAIN ERROR HANDLER HAVE IT IF    &
+					! NOT END-OF-FILE ERROR		      &
+\	RESUME 4123 IF ERL = 4120	!WE HAVE THE WHOLE MESSAGE; GO SEND IT &
+\	ON ERROR GOTO 19000		!RESET ERROR TRAP		      &
+\	RESUME 32767			!EXIT CLEANLY			      &
+
+4135	CALL DISPLY ("?File name required")!PRINT ERROR			      &
+\	SUBEXIT				!AND EXIT			      &
+
+4140	U.POS% = STR.POS%		!RESTORE THE POSITION		      &
+\	CALL DISPLY ("?Invalid file specification")!PRINT ERROR		      &
+\	SUBEXIT				!AND EXIT			      &
+
+4150	U.POS% = STR.POS%		!RESTORE THE POSITION		      &
+\	CALL DISPLY ("?File does not exist")!PRINT ERROR		      &
+\	SUBEXIT				!AND EXIT			      &
+
+
+10000	!								      &
+	!	S U B R O U T I N E S					      &
+	!								      &
+	CALL FET$CQ BY REF (ALL.Q%)		!/ALL SPECIFIED?	      &
+\	IF U.PRES% THEN				!IF PRESENT		      &
+		CHANGE SYS(CHR$(6%)+CHR$(-3%)) TO FIRQB% !GET MONITOR TABLES I &
+\		K0% = 0%			!  FIRST KB IS KB0:	      &
+\		K1% = FIRQB%(3%)		!  HIGHEST KB NUMBER	      &
+\		RETURN				!  GO BACK		      &
+
+10010	K0% = -1%				!DEFAULT TO ERROR	      &
+\	Z$ = D$					!EXTRACT IT		      &
+\	Z$ = Z$ + ":" UNLESS POS(Z$,":",1%)	!APPEND A COLON IF NONE THERE &
+\	KB$ = EDIT$(Z$,-2%)			!STORE THE KB		      &
+\	ON ERROR GOTO 10020			!SET LOCAL ERROR TRAP	      &
+\	V$ = FSS$(KB$,1%)			!DO THE FILENAME STRING SCAN  &
+\	ON ERROR GOTO 19000			!RESET THE STANDARD ERROR TRAP &
+\	S1% = ASCII(SEG$(V$,29%,29%))+		!GET THE SECOND		      &
+	       SWAP%(ASCII(SEG$(V$,30%,30%)))	!SCAN FLAG WORD		      &
+\	IF (S1% >= 0%) THEN			!IF A DEVICE WAS SPECIFIED    &
+		IF (STATUS AND 255%) <> 2% THEN	!  IF NOT A KB		      &
+			U.POS% = DEST.POS%(DEST.CNT%) !RESTORE THE POSITION   &
+\			CALL DISPLY ("?Device is not a terminal")	      &
+\			RETURN			!    PRINT ERROR AND GO BACK  &
+\		END IF							      &
+\		S1% = S1% AND NOT(1024%+2048%)	!  REMOVE PROTECTION CODE FLAG &
+			IF (S1% AND 2048%)=2048%!   IF THE DEFAULT PROTECTION &
+						!     CODE IS SET	      &
+\		GOTO 10030 IF (S1% AND NOT(4096%+8192%+16384%)) <> 0%	      &
+						!  GO ERROR IF ANYTHING BUT   &
+						!   A DEVICE WAS SPECIFIED    &
+	ELSE					!IF NOT A VALID DEVICE	      &
+		GOTO 10030			!  GO PRINT ERROR MESSAGE     &
+\	END IF								      &
+\	KB% = KB.NO%				!DEFAULT TO OUR OWN KB	      &
+\	IF ASCII(SEG$(V$,26%,26%)) <> 0% THEN	!IF A UNIT NUMBER SPECIFIED   &
+		KB% = ASCII(SEG$(V$,25%,25%))	!  GET KB NUMBER	      &
+\	END IF								      &
+\	IF (KB% = KB.NO%) AND (U.CMDC% = FOR.K%) THEN !IF OUR OWN KEYBOARD    &
+		U.POS% = DEST.POS%(DEST.CNT%)	!  RESTORE THE POSITION	      &
+\		CALL DISPLY ("?Own Keyboard not allowed")		      &
+\		RETURN				!  PRINT ERROR AND GO BACK    &
+\	END IF								      &
+\	K0%, K1% = KB%				!RETURN THE KB NUMBER	      &
+\	RETURN					!GO BACK		      &
+
+10020	RESUME 10030				!CLEAR THE ERROR FLAG + CONT  &
+
+10030	U.POS% = DEST.POS%(DEST.CNT%)		!RESTORE THE POSITION	      &
+\	CALL DISPLY ("?Invalid destination")	!PRINT ERROR		      &
+\	ON ERROR GOTO 19000			!RESET THE STANDARD ERROR TRAP &
+\	RETURN					!AND GO BACK		      &
+									      &
+
+12000	!								      &
+	!	S E N D   T H E   M E S S A G E				      &
+	!								      &
+	GOTO 12010 IF SEND.TO.PPN% 		!CONTINUE IF SENDING TO A PPN &
+\	ON ERROR GOTO 12050			!Set local error trap	      &
+\	FOR I% = K0% TO K1%			!FOR ALL SPECIFIED KEYBOARDS  &
+\		V% = FNSEND%(M$,I%,SUB.FUNC%)	!  SEND THE MESSAGE	      &
+		     UNLESS (I% = KB.NO%) AND	!   UNLESS OWN KEYBOARD AND   &
+			   (U.CMDC% = FOR.K%)	!   WE ARE DOING A FORCE      &
+\		V$ = SYS(CHR$(6%)+CHR$(-21%)+CHR$(0%)) !GET TEMP PRIVS	      &
+\		CHANGE SYS(CHR$(6%)+CHR$(16%)+CHR$(0%)+CHR$(I%))	      &
+			TO FIRQB%		! GET TERMINAL CHARACTERISTICS &
+\		V$ = SYS(CHR$(6%)+CHR$(-21%)+CHR$(255%))!DROP PRIVS	      &
+\		IF (((FIRQB%(28%) = 255%) AND	! IF NOBROADCAST AND	      &
+			(U.CMDC% = BRD.K%)) OR	!  IT IS A BROADCAST OR	      &
+			(V% = -1%)) AND		!  NO CHARACTERS WERE SENT    &
+			   (LOG%) THEN		!  AND LOGGING TURNED ON      &
+				PRINT "KB";NUM1$(I%);": busy" ! SAY SO	      &
+		ELSE				! IF SUCCESS		      &
+			PRINT MSG.OR.COM$;" sent to KB";NUM1$(I%);":"	      &
+				       	IF LOG%	!   SAY SO		      &
+\		END IF
+12005	NEXT I%					!NEXT KEYBOARD		      &
+\	RETURN					!AND EXIT		      &
+
+12010						!SENDING TO A PPN	      &
+	JOB.NO% = 1%				!START AT JOB 1		      &
+\	PPN.FOUND% = 0%				!DEFAULT TO PPN NOT FOUND     &
+\	ON ERROR GOTO 12030			!SET LOCAL ERROR TRAP	      &
+\	WHILE 1% = 1%				!LOOP FOREVER		      &
+\		V$ = SYS(CHR$(6%)+CHR$(-21%)+CHR$(0%)) !REGAIN TEMP PRIVS     &
+\	       CHANGE SYS(CHR$(6%)+CHR$(26%)+CHR$(JOB.NO%)+CHR$(0%)) TO FIRQB% &
+						!  RETURN THE JOB STATUS      &
+\		V$ = SYS(CHR$(6%)+CHR$(-21%)+CHR$(255%))!DROP TEMP PRIVS      &
+\		KB% = FIRQB%(4%)		!  SAVE THE KEYBOARD	      &
+\		THIS.PROG% = FIRQB%(21%)	!  SAVE THE PROGRAMMER #      &
+\		THIS.PROJ% = FIRQB%(22%)	!  SAVE THE PROJECT #	      &
+\		IF ((PROG% = THIS.PROG%) OR 	!  IF (PROG # MATCH OR	      &
+		    (PROG% = 255%)) AND      	!     WILDCARD PROG #) AND    &
+		   ((PROJ% = THIS.PROJ%) OR	!     (PROJ # MATCH OR	      &
+		    (PROJ% = 255%)) AND		!     WILDCARD PROJ #) AND    &
+		   ((KB% AND 128%) = 0%) AND	!     (NOT DETACHED) AND      &
+		  (((KB% <> KB.NO%) AND		!   (((NOT OUR KB) AND	      &
+		    (U.CMDC% = FOR.K%)) OR	!     (DOING A FORCE)) OR     &
+		    (U.CMDC% = BRD.K%)) THEN	!     (DOING A BROADCAST))    &
+			PPN.FOUND% = -1%	!	 FLAG THAT WE FOUND IT &
+\			V% = FNSEND%(M$,KB%,SUB.FUNC%)!  SEND THE MESSAGE     &
+\			V$ = SYS(CHR$(6%)+CHR$(-21%)+CHR$(0%)) !GET TEMP PRIVS &
+\			CHANGE SYS(CHR$(6%)+CHR$(16%)+CHR$(0%)+		      &
+			     CHR$(KB%)) TO FIRQB%!GET TERMINAL CHARACTERISTICS &
+\			V$ = SYS(CHR$(6%)+CHR$(-21%)+CHR$(255%))!DROP PRIVS   &
+\			SUCCESS% = -1%		!     DEFAULT TO SUCCESS      &
+\			IF (((FIRQB%(28%) = 255%) AND ! IF NOBROADCAST AND    &
+				(U.CMDC% = BRD.K%)) OR ! IT IS A BROADCAST OR &
+				(V% = -1%)) AND ! NO CHARACTERS WERE SENT     &
+				   (LOG%) THEN	!        AND LOGGING TURNED ON &
+				PRINT "KB";NUM1$(KB%);": busy" !SAY SO	      &
+\				SUCCESS% = 0% ! CLEAR SUCCESS FLAG	      &
+\			END IF						      &
+\			PRINT MSG.OR.COM$;" sent to [";NUM1$(THIS.PROJ%);","; &
+				       NUM1$(THIS.PROG%);"]";		      &
+				       " on KB";NUM1$(KB%);":"		      &
+				       	IF (SUCCESS%) AND (LOG%)	      &
+					!PRINT LOG MESSAGE IF SUCCESS	      &
+\		END IF
+12020		JOB.NO% = JOB.NO% + 1%	!  INCREMENT JOB NUMBER		      &
+\	NEXT				!GET NEXT JOB			      &
+
+12030	RESUME 12020 IF (ERR = 10%)	!GET NEXT JOB IF THIS ONE NONEXISTANT &
+		     OR (ERR = 8%)	! Or ?Device not available error      &
+\	GOTO 19000 IF ERR <> 18%	!LET MAIN ERROR HANDLER HAVE IT IF    &
+					! NOT END-OF-JOBS ERROR		      &
+\	ON ERROR GOTO 19000		!RESET ERROR TRAP		      &
+\	RESUME 12040			!EXIT CLEANLY			      &
+
+12040	RETURN IF PPN.FOUND%		!EXIT IF WE FOUND A PPN		      &
+\	PRINT "%No user logged into account ["; !PRINT BEGINNING	      &
+\	PRINT NUM1$(PROJ%); UNLESS PROJ% = 255%	!PRINT NON-WILDCARD PROJECT # &
+\	PRINT "*";	    IF     PROJ% = 255%	!PRINT     WILDCARD PROJECT # &
+\	PRINT ",";				!PRINT COMMA		      &
+\	PRINT NUM1$(PROG%); UNLESS PROG% = 255%	!PRINT NON-WILDCARD PROG #    &
+\	PRINT "*";	    IF	   PROG% = 255%	!PRINT     WILDCARD PROG #    &
+\	PRINT "]"				!PRINT CLOSING BRACKET	      &
+\	RETURN								      &
+
+12050	IF ERR = 8% THEN		!If ?Device not available error	      &
+		IF LOG% THEN		!  If LOGGING TURNED ON		      &
+			IF K0% = K1% THEN !  If it was a specific terminal    &
+				U.POS% = DEST.POS%(DEST.CNT%) !RESTORE THE POS &
+\				CALL DISPLY ("?Terminal disabled") !Print err &
+\			END IF						      &
+\		END IF							      &
+\		RESUME 12005		!Goto next keyboard		      &
+\	END IF								      &
+\	GOTO 19000			!Handle unexpected errors	      &
+
+15000	!								      &
+	!	F U N C T I O N S					      &
+	!								      &
+									      &
+	DEF FNSEND%(MESS$,DEST%,FUNC%)		!DEFINE THE SEND FUNCTION     &
+	!	MESS$ - MESSAGE/COMMAND TO SEND				      &
+	!	DEST% - KEYBOARD TO RECEIVE MESSAGE			      &
+	!	FUNC% - MESSAGE OR COMMAND FLAG				      &
+\	FNSEND% = 0%				!DEFAULT TO SUCCESS	      &
+\	FIRST.PASS% = -1%			!FLAG THE FIRST PASS	      &
+\ SEND_LOOP:								      &
+	UNTIL LEN(MESS$) = 0%			!LOOP UNTIL ALL SENT	      &
+\		SUB.MESS$ = SEG$(MESS$,1%,32766%)	!BREAK OFF A 128-BYTE CHUNK &
+\		MESS$ = SEG$(MESS$,32767%,LEN(MESS$)) !GET THE REST	      &
+\		SUB.PASSES% = 1%		!INIT NUMBER OF PASSES	      &
+\		UNTIL LEN(SUB.MESS$) = 0%	!LOOP UNTIL ALL SENT	      &
+\			V$ = SYS(CHR$(6%)+CHR$(FUNC%)+CHR$(DEST%)+SUB.MESS$)  &
+						!  SEND THE MESSAGE	      &
+\			R1% = RECOUNT		!  GET THE # OF CHARS UNSENT  &
+\			IF R1% = 0% THEN	!  IF ALL CHARS SENT	      &
+				FIRST.PASS% = 0%  !  CLEAR THE FIRST PASS FLAG &
+\				ITERATE SEND_LOOP !  GO SEND NEXT CHUNK	      &
+\			END IF						      &
+\			IF (R1% = LEN(SUB.MESS$)) THEN ! IF NO CHARS WERE SENT &
+			  IF (FIRST.PASS% = -1%) OR !	  IF IT'S FIRST PASS  &
+			     (SUB.PASSES% >= 30%) THEN !   OR 30 PASSES	      &
+				FNSEND% = -1%	!	    SET ERROR FLAG    &
+\				GOTO 15010	!	    AND EXIT	      &
+			  ELSE			!    A SUBSEQUENT PASS < 30   &
+				SUB.PASSES% = SUB.PASSES% + 1% !INC PASS #    &
+\			  END IF					      &
+			ELSE			!  SOME CHARS WERE SENT	      &
+				SUB.PASSES% = 1%!    BACK TO PASS ONE	      &
+\			END IF						      &
+\			FIRST.PASS% = 0%	!  CLEAR THE FIRST PASS FLAG  &
+\			SLEEP 1%		!  WAIT FOR SOME SMALL BUFFERS &
+\			SUB.MESS$ =		!  GET THE UNSENT CHARS	      &
+			  SEG$(SUB.MESS$,LEN(SUB.MESS$)-R1%+1%,LEN(SUB.MESS$)) &
+\		NEXT							      &
+\	NEXT					!SEND THE NEXT CHUNK
+15010	FNEND					!END OF FUNCTION	      &
+
+
+19000	!	s t a n d a r d   e r r o r   h a n d l i n g		      &
+	!								      &
+	!								      &
+	ON ERROR GO BACK			!Let the Root error	      &
+						! handler handle it	      &
+
+
+32767	!	e n d   o f   s u b p r o g r a m			      &
+	!								      &
+	!								      &
+	SUBEND

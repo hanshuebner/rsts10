@@ -1,0 +1,94 @@
+.INCLUDE	%CMN:COMMON%
+.INCLUDE	%SYSTEM:CMNDEF%
+
+TITLE	SYSIO,<Relative Request Get/Put Routines>,0F,13-NOV-89,DBM
+
+;
+;		COPYRIGHT (c) 1974, 1989 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	SYSIO Edit History
+;+
+; EDIT	BY	DATE		REASON
+; 000	DBM	11-Jan-90	Creation
+;-
+
+.SBTTL	Program description
+
+;+
+; These routines are called by OMS/OMSMGR to read/write request
+; records in the OMS work file.  The work file is assumed to be
+; open on channel SYS.CHNL.
+;
+; Format:	CALL PUTSYS BY REF (SLOT%, BUFFER$)
+;		CALL GETSYS BY REF (SLOT%, BUFFER$)
+;-
+
+.SBTTL	Define the PSECTS
+
+	.PSECT	SYSIO,RO,I,GBL,REL,CON	; Code area for SYSIO routines
+
+.SBTTL	Main program logic
+
+	.ENABL	LSB
+
+PUTSYS::				; Write buffer to specifed slot
+	MOV	#-1,R1			; Set R1 to indicate write
+	BR	10$			; Join common
+
+GETSYS::				; Read buffer from specified slot
+	CLR	R1			; Set R1 to indicate read
+	.BR	10$			; Join common
+
+10$:	NOP				; For debugging, *** remove ***
+	MOV	#FUNERR,R0		; Preset "?Arguments don't match" error
+	CMP	(R5)+,#2		; Verify # of parameters
+	BNE	ERROR			; Whoops!  Bad call
+	MOV	#<RECSIZ+511.>/512.,R2	; Compute # of blocks per record
+	MUL	@(R5)+,R2		; Compute starting block for slot
+	ADD	#1,R3			; We need it to be one relative
+	ADC	R2			; Update MSB if needed
+	CALLX	CLRXRB			; Clear out the XRB
+	MOV	#XRB,R0			; Get handy pointer
+	MOV	#RECSIZ,(R0)+		; Length of I/O buffer
+	MOV	R1,(R0)+		; Set XRBC for read/write
+	MOV	(R5),(R0)+		; Starting address of buffer
+	MOVB	SYS.CH,(R0)		; Channel number * 1
+	ASLB	(R0)+			;                * 2
+	MOVB	R2,(R0)+		; MSB of block number
+	MOV	R3,(R0)			; LSB of block number
+	TST	R1			; Read or write?
+	BNE	20$			; Write.  Go do it
+	.READ				; Read. Do it now
+	BR	30$			; Rejoin common code
+
+BLKS	=: <RECSIZ+511.> & <^C<511.>>	; Must use 512-byte multiple on .WRITE
+20$:	MOV	#BLKS,XRB+XRLEN		; So change the XRB around for it
+	MOV	#BLKS,XRB+XRBC		; Both places
+	.WRITE				; Do the write
+	.BR	30$			; Rejoin common code
+
+30$:	MOVB	FIRQB,R0		; Any error?
+	BNE	ERROR			; Yes, return it to BP2
+	RETURN				; No, all done
+
+ERROR:	TRAP	377			; Return error in R0 to BP2
+
+	.DSABL	LSB
+	.GLOBL	FUNERR
+	.END

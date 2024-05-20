@@ -1,0 +1,764 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:LATDEF/
+.INCLUDE /CMN:FETDEF/							;004
+TITLE	LATDSP,<LAT CCB Dispatch Routines>,0H,20-DEC-91,SRC/DWF/KPH/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for LATDSP
+
+;+
+;
+;			[RSTS/E V9.6]
+;  000  KPH  20-Oct-87	Create for RSTS/E from SRC's and DWF's efforts
+;  001  KPH  07-Dec-87	Fix problems with virtual circuit flow control
+;			Remove BF.VIR references
+;			Fix crash on inability to get circuit block
+;			Fix crash on inability to get buffer for start messages
+;  002  KPH  23-Dec-87	Remove start and stop code
+;  003	JFM  17-Feb-88	Have counters use 32-bit counter routine
+;  004	DWF  19-Feb-88	Use LAT L3Q bit, make C.CTIM and C.TMR each a word,
+;			add FETPAT for tracing
+;  005	JFM  03-Mar-88	Use INC32 instead of COU32 (saves code)
+;			Add code to store Version, ECO and buffersize of server
+;  006	JFM  12-Apr-88	Count number of transmit errors and circuit timeouts 
+;  007	DWF  12-Apr-88	Use new-style FETPAT bit macros, maintain count of
+;			receive buffers per datalink
+;  008	JFM  31-May-88	Return buffers continued across CCBs.
+;  009	JFM  07-Jun-88	Track minimum idle communication buffers required
+;
+;			[RSTS/E V9.7]
+;  010	JFM  07-Feb-89	Fix various RCVSTR parameters so they live up to spec
+;  011	JFM  16-Feb-89	Clean up some comments, reformat COU32 and INC32 calls
+;			Added .ENABL and .DSABL LSB directives
+;
+;			[RSTS/E V10.0]
+;  012	DRP  13-Nov-89	Add solicitation support
+;  013	DRP  01-Jun-90	Preserve reason code on circuit timeouts.
+;
+;			[RSTS/E V10.1]
+;  014	DRP  09-Nov-91	Make the circuit timer ten times the keepalive
+;			timer in RCVSTR.
+;-
+
+	DEFORG	LATDSP							
+
+	.SBTTL	Process Dispatch Tables
+   
+;
+; Main CCB dispatch table.
+;
+
+CCBDSP:
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	FTLCCB		; Illegal function			
+	.WORD	RCCMP		; FC$RCP - Receive complete		
+	.WORD	ERRCCB		; FC$ERR - Error detected by Datalink	
+	.WORD	TXCMP		; FC$XCP - Transmit complete		
+	.WORD	TXERR		; FC$XER - Error in transmitting message
+	.WORD	SUPBFR		; FC$RER - Buffer received in error	
+	.WORD	FTLCCB		; Illegal function			
+
+; // the above should really be done with MACROs which fill in the tables
+; // this will give independance from changes to CCB function codes
+
+$RCDSP:	.WORD	RCVRUN		;  0 - Run message
+	.WORD	RCVSTR		;  1 - Start message
+	.WORD	RCVSTP		;  2 - Stop message
+	.WORD	RCVILL		;  3 - Illegal message type
+	.WORD	RCVILL		;  4 - Illegal message type
+	.WORD	RCVILL		;  5 - Illegal message type
+	.WORD	RCVILL		;  6 - Illegal message type
+	.WORD	RCVILL		;  7 - Illegal message type
+	.WORD	RCVILL		;  8 - Illegal message type
+	.WORD	RCVILL		;  9 - Illegal message type
+	.WORD	SUPBFR		; 10 - Multicast message received
+	.WORD	RCVILL		; 11 - Illegal message type
+	.WORD	RCVILL		; 12 - Illegal message type                 
+	.WORD	RCVSTA		; 13 - Status Message (CALL STSMSG)   	;012
+ 	.WORD	RCVILL		; 14 - Illegal message type
+	.WORD	RCVRES		; 15 - Response Information (CALL RESMSG) ;012
+
+FTLCCB:	CRASH			; Bad news, folks!			
+
+GLOBAL	<SUPBFR>
+
+.SBTTL	L3Q Service Entry
+;+               
+;	This entry point is called whenever someone has asked us to run
+;	(e.g. Ethernet driver receive completion, etc).
+;-
+.ENABL	LSB
+
+	L3QENT	QLAT,,LATAP5	; Level Three Service Entry		;004
+
+10$:	MOV	#LATQUE,R0	; Pick up LAT queue pointer		
+	SPLC	5		; Lock out interrupts			
+	CALLX	POPQUE		;; Get the next CCB			
+	SPL	3		;; Enable interrupts			
+	BCS	60$		; All done, check for transmits to do
+	MOV	CC.DDB(R5),R1	; Get DDB pointer
+	TSTFET	FB.LTT,FETPAT	; Is LAT tracing enabled?		;007
+	BEQ	20$		; No, on to some real work. . .		;004
+	TST	EVLAP5		; Can we send trace packets?		;004
+	BMI	20$		; No, just forget it			;004
+	CALLM	TRNTRC,EVLAP5	; Yes, give this to the tracer
+20$:	MOV	#LATCTL+L.EDDB,R3 ; Get the address of the DDB table	
+	MOV	#LATLIN,R2	; Get the maximum number of lines	
+30$:	CMP	CC.DDB(R5),(R3)+ ; Does the DDB passed match this one?	
+	BEQ	40$		; Yes, go finish the dispatch work	
+	SOB	R2,30$		; Nope, go around one more time
+	CALLX	COMRET		; Circuit must have closed, return buffer
+	BR	10$		; And loop
+
+40$:	SUB	#<LATCTL+L.EDDB+2>,R3 ; Compute L.EDDB/EPDB/NRCV offset	;007
+				.ASSUME L.EDDB+<LATLIN*2> EQ L.EPDB	
+				.ASSUME L.EPDB+<LATLIN*2> EQ L.NRCV	;007
+	MOV	R3,CC.DDB(R5) 	; Store that offset in the CCB		;007
+	TST	LATCTL+L.EPDB(R3); Is there a PDB?			;007
+	BEQ	50$		;  No, bugcheck				;007
+	MOVB	CC.FC(R5),R0	; Get CCB function code			
+	;
+	; Dispatched routines are entered with:
+	;	R0 =  Function code
+	;	R3 =  Offset in L.EDDB/EPDB/NRCV tables for datalink
+	;	R5 -> CCB
+	;
+	CALL	@CCBDSP(R0)	; Dispatch according to function	
+	BR	10$		; Check for more			
+
+50$:	CRASH			; PDB table not filled in correctly
+
+60$:	MOV	LATCTL+L.AVCB,R1; Pick up first active circuit block
+	BEQ	90$		; None, get out
+70$:	BIT	#CF.DWF,C.FLAG(R1) ; Data waiting?
+	BEQ	80$		; No, not this time
+	CALLX	GETCBF		; Get a buffer for the circuit
+	BCS	80$		; None, skip this
+	CALLX	XMTCHK		; Yes, check for transmissions
+80$:	MOV	(R1),R1		; Get the next one
+.ASSUME	C.LNK	EQ	0
+	BNE	70$		; Now loop for the whole thing	
+90$:	JMPX	RTI3		; Get out				
+
+GLOBAL	<LATAP5,LATQUE,LATCTL,FETPAT>					;004
+
+.DSABL	LSB							
+
+.SBTTL	ERRCCB - Process error notification from the Datalink Layer
+;+        
+; ERRCCB - Process error notification from the Datalink Layer
+;
+;	R5 -> Error CCB
+;               
+; LAT will ignore any errors; timers will take care of everything.
+;-                        
+.ENABL	LSB
+
+ERRCCB:	MOV	R5,R4		; Set up to return the buffer		
+	BUFFER	RETSML		; Return it to the system		
+	RETURN			; And get out				
+
+.DSABL	LSB
+
+.SBTTL	TXERR - Handle a transmit error
+;+
+; TXERR - Handle a transmit error
+;
+;	R5 -> CCB (with an attached buffer)
+;
+; This routine will simply count another transmit error and handle 	;006
+; this as though the transmit completed.  The message will end up 	;006
+; unacknowleged, and will eventually be re-transmitted.			;006
+;-
+.ENABL	LSB
+
+TXERR:	MOV	#LATCTL,R3	; Point to LAT control region		;006
+	CALLX	INC32,R1,L.XMTE	; Increment transmit error count	;011
+	.BR	TXCMP		; Just drop into completion processing	
+
+.DSABL	LSB
+
+.SBTTL	TXCMP - Transmit Complete Function                          
+;+
+; TXCMP - Transmit Complete Function                                        
+;                  
+; Description:
+;	This entry is called with a CCB describing a transmit data buffer or
+; chain of transmit data buffers. 
+;              
+; Inputs:       
+;	R5 -> Transmit CCB (or first in chain of transmit CCB's)
+;                                                                           
+;-            
+.ENABL	LSB
+
+TXCMP:	BICB	#DF.NSP,CC.DFL(R5) ; Indicate transmit is complete	;001
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Map the buffer           
+	MOV	#140000+BUFHDR+<EP.SIZ-2>,R2 ; Point to start of header
+	BIT	#BIT00,-<EP.SIZ-2>(R2) ; Was it a multicast transmit?  
+.ASSUME	EP.DST EQ 0		
+	BNE	20$		; Yes, see if it is a solicit info
+	MOV	CC.LLB(R5),R1	; No, get circuit block pointer     
+	BEQ	40$		; None, check for turnaround buffer
+	BIT	#1,R1		; Is this a solicit command block?
+	BNE	30$		; Yes, handle that
+	MOVB	LATCTL+L.XMTV,C.XMTT(R1) ; Assume we should await a reply
+	BITB	#CF.RRF,C.FLAG(R1) ; Was response requested set on this
+				; last message?
+	BNE	10$		; If NE, Yes - Should get a response soon.
+	CLRB	C.XMTT(R1)	; Don't keep timer running - next message
+				;  from server could be on keep alive timer.
+10$:	DEC 	C.OXMT(R1)	; One less outstanding transmit
+	TSTB	CC.DFL(R5)	; Still waiting for an ACK?		;001
+.ASSUME	DF.WAK	EQ	200
+	BPL	50$		; No, must have been ACKed quickly	;001
+	RETURN			; Yes, all done				;001
+
+	;
+	; Here, check for solicit information transmit complete
+	;
+20$:	CMPB	(R2),#70	; Is this a solicit information?
+	BNE	40$		; If not, just return resource
+	CLR	R1		; Flag it as such for TXCMPS		;012	
+30$:	CALLRX	TXCMPS		; Finish up in the application driver	;012
+
+40$:	BITB	#DF.TUR,CC.DFL(R5) ; Is this a turnaround message?
+	BEQ	50$		; No, not this time, nothing to do
+	CALLRX	SUPBFR		; Yes, give the buffer to the DLL
+
+50$:	CALLRX	COMRET		; Return the resource
+
+GLOBAL	<LATCTL>                                                         
+
+.DSABL	LSB
+
+.SBTTL	RCCMP - Receive Complete Entry
+;+
+; RCCMP - Receive Complete Entry
+;                                       
+; Description:
+;	This entry is called when a LAT message has been received on the
+;	system.
+;          
+; Inputs:
+;	R3 =  Offset in L.EDDB/EPDB/NRCV table for this datalink
+;	R5 -> Receive buffer CCB
+;                  
+; Outputs:
+;                  
+;-
+.ENABL	LSB
+
+RCCMP: 	DECB	LATCTL+L.NRCV+R.NUM(R3) ; Count one less receive buffer	;007
+				;          supplied to this datalink	;007
+
+	; Add this message and the number of bytes to the host node 	;008
+	; counters.							;008
+
+	PUSH	<R3>		; Save register				;008
+	MOV	#LATCTL,R3	; Point to LAT control region
+	CALLX	INC32,R1,L.MRCV	; Increment number of messages received	;011
+	POP	<R3>		; Restore register			;008
+	CALL	CNTBYT		; Map the CCB and update the 		;008
+				;   byte count in LATCTL 		;008
+
+	; Check to see if this message is continued on the next CCB.	;008
+
+	BITB	#DF.CNT,CC.DFL(R5) ; Is this a continued buffer?	;008
+	BNE	10$		; Yes, return buffer to system		;008
+	MOV	#140000+BUFHDR+<EP.SIZ-2>,R2 ; Point to LAT header
+	MOVB	#DF.TUR,CC.DFL(R5) ; Mark as a turnaround buffer
+	MOV	#ER.IVM,R3	; Assume invalid message
+	MOVB	(R2)+,R0	; Get message type
+	BIC	#^C<MT.MSG>,R0	; Drop invalid bits from message type
+	ASR	R0		; Make a table offset
+	JMP	@$RCDSP(R0)	; Dispatch to proper routine
+
+10$:	;
+	; We have a buffer which is continued across CCBs.  Return 	;008
+	; this CCB and all the others until there are no more marked	;008
+	; "continued".							;008
+	;
+	MOVB	CC.DFL(R5),-(SP); Save buffer flags			;008
+	MOV	R3,CC.DDB(R5)	; Set up to return buffer		;008
+	CALLX	SUPBFR		; Return buffer to circuit		;008
+	BITB	#DF.CNT,(SP)+	; Are we done yet?			;008
+	BEQ	30$		; Yes, done with this message		;008
+	MOV	#LATQUE,R0	; Point to LATs CCB queue		;008
+	SPLC	5		; Stop the world, I'm busy		;008
+	CALLX	POPQUE		;;Get next item on the queue		;008
+	BCS	20$		;;No more?  Queue is messed up!		;008
+	SPLC	3		;;Start the world again			;008
+	CALL	CNTBYT		; Map the next CCB and count 		;008
+				;   it's bytes as well.			;008
+	DECB	LATCTL+L.NRCV+R.NUM(R3) ; Count one less receive buffer	;008
+				; supplied to this datalink		;008
+	BR	10$		; Loop					;008
+
+20$:	CRASH			; Buffer chain messed up!		;008
+
+CNTBYT:	PUSH	<R3>		; Save R3				;008
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Map the buffer           ;008
+	MOV	@#140000+BF.CNT,R0 ; Get byte count of this message
+	SUB	#EP.SIZ-2,R0	; Not including DLL overhead
+	MOV	#LATCTL,R3	; Point to LAT control region
+	CALLX	COU32,R1,L.BRCV	; Update the byte count			;011
+	POP	<R3>		; Restore register			;008
+30$:	RETURN			; Return
+
+GLOBAL	<LATQUE>
+
+.DSABL	LSB
+
+.SBTTL	RCVSTR	Process received VC start message
+;+
+; RCVSTR - Process received VC start message
+;
+; Inputs:
+;	R2 -> 	Virtual circuit header @ SM.NSL (NBR_SLOTS)
+;	R3 = 	ER.IVM, The illegal message or slot received error code
+;	R5 ->   Receive CCB
+;
+; Outputs:
+;
+; Description:
+; 	A start circuit message was received.  First check the start message
+;	for valid format.  If the format checks out, start the virtual circuit.
+;
+;-
+.ENABL	LSB
+
+RCVSTR:	BITB	#MF.MST,-(R2)	; Is master set? (and -> R2 at msg type);010
+	BEQ	10$		; If not, it's an illegal message	;010
+	TSTB	SM.NSL(R2)	; Check number of slots
+	BNE	10$		; If non-zero, it's an illegal message	
+	TST	SM.SID(R2)	; Make sure SRC is non-zero
+	BEQ	10$		; If zero, it's an illegal message	
+	TST	SM.DID(R2)	; Make sure DEST is zero		;010
+	BNE	10$		; If non-zero, it's an illegal message	;010
+	CMPB	#PROVER,SM.PTV(R2) ; Check protocol version
+	BNE	10$		; If not correct, it's illegal message	
+	TSTB	SM.NNL(R2)	; Make sure node name length field is	;010
+				;  non-zero (even though we don't use	;010
+				;  it.  This is where the new servers 	;010
+				;  send our service name back to us!)	;010
+	BEQ	10$		; If EQ, No good - send stop		;010
+	CMP	#LATMIN,SM.RDS(R2) ; Check buffer size
+	BHI	10$		; If HI, send stop - buffer too small
+	CMP	#LATMAX,SM.RDS(R2) ; Check against the max size
+	BLO	10$		; If LO, Too big - send stop
+	TSTB	SM.SCT(R2)	; Check service circuit timer	
+	BEQ	10$		; Send stop message if zero		;010
+	MOV	#ER.SCT,R3	; Assume bad timer value		;010
+	CMPB	#SCTMAX,SM.SCT(R2) ; Check max value
+	BHIS	20$		; Continue if in range			;010
+10$:	CALLR	RCVILL		; Illegal message received		;010
+
+	; Now that the checks are done, lets start it up....
+
+20$:	MOV	#ER.RES,R3	; Assume no resources
+	MOV	R5,R0		; Copy CCB pointer
+	CALLX	COMGET		; Get a new CCB for DLL
+	BCS	50$		; Failed, send a turnaround stop message;001
+	MOV	CC.DDB(R0),CC.DDB(R5) ; Success, copy PDB table offset	;007
+	MOV	R5,-(SP)	; Save buffer address			;007
+	CALLX	COMGET		; Get another receive buffer		;007
+	BCS	40$		; Bad news, go deal with it		;007
+	MOV	CC.DDB(R0),CC.DDB(R5) ; Success, copy PDB table offset	;007
+	CALLX	GTCBLK		; Go get a Server (circuit) Block 
+	BCS	30$		; Failed, return extra buffers		;007
+;
+; All required resources are available, so increase the receive buffer
+; quota for the datalink, and supply 2 buffers; one buffer to replace
+; the received message, the other to handle an additional Virtual Circuit.
+;
+	MOV	(SP),-(SP)	; Duplicate the other CCB addr on stack	;007
+	MOV	R2,2(SP)	; Save buffer pointer *under* CCB address;007
+	MOVB	#2,R2		; Get number of buffers required.  	;009
+				; NOTE: For V5.2, this number will be	;009
+				;	supplied in the start message	;009
+	MOVB	R2,C.NXBF(R1)	; Store number of buffs			;009
+	ADD	R2,ICBFMN	; Increase minimum idle comm buffs req'd;009
+	MOV	CC.DDB(R0),R2	; Pick up L.NRCV offset			;007
+	INCB	LATCTL+L.NRCV+R.QTA(R2) ; Increase the rcv buffer quota	;007
+	CALLX	SUPBFR		; Give this buffer to DLL
+	MOV	(SP)+,R5	; Get the other receive buffer		;007
+	CALLX	SUPBFR		; Give it to the datalink		;007
+	MOV	(SP)+,R2	; Restore buffer pointer		;007
+	MOV	R0,R5		; And original received CCB pointer
+	CLRB	CC.DFL(R5)	; Not a turnaround buffer anymore
+	MOV	SM.RDS(R2),C.BSIZ(R1) ; Save server buffer size		;004
+	MOVB	SM.PTV(R2),C.VERS(R1) ; Save protocol version value	;004
+	MOVB	SM.PTV+1(R2),C.ECO(R1); Save ECO level as well		;004
+	CLR	R3		; Clear a cell				;014
+	BISB	SM.KLT(R2),R3	; Get keep alive timer value		;014
+	MUL	#10.,R3		;  Times ten				;014
+	MOV	R3,C.CTIM(R1)	; Save refresh value			;014
+	MOV	R3,C.TMR(R1)	; Start circuit timer			;014
+	BISB	#CF.VIR,C.FLAG(R1) ; Mark as no sessions started yet
+	TST	(R2)+		; Point at destination circuit ID field
+	CALLRX	SNDSTR		; Send a start message back to server
+
+30$:	CALLX	COMRET		; Return second receive buffer		;007
+40$:	MOV	(SP)+,R5	; Get back the first receive buffer	;007
+	CALLX	COMRET		; Return extra buffer to the system
+50$:	MOV	R0,R5		; Get original CCB pointer		;001
+	BR	RCVREF		; And send a turnaround stop message
+
+GLOBAL	<ICBFMN>							;009
+
+.DSABL	LSB
+
+.SBTTL	RCVRUN	Process received VC run message
+;+
+; RCVRUN - Process received VC run message
+;
+; Inputs:
+;	R2 -> 	Virtual circuit header @ SM.NSL (NBR_SLOTS)
+;	R3 = 	ER.IVM, The illegal message or slot received error code
+;	R5 ->   Receive CCB
+;
+; Outputs:
+;
+; Description
+;
+;-
+.ENABL	LSB
+                        
+RCVRUN:	BITB	#MF.MST,-1(R2)	; Is master set?
+	BNE	10$		; If NE, Yes - continue
+	CALLR	RCVILL		; Illegal message received
+                        
+10$:	CALLX	FNDBLK		; Find VCB for this circuit
+	BEQ	NOVCB		; Branch if no matching VCB		;011
+	;               
+	; FNDBLK stores number of slots in the buffer in CC.SLT and points R2 at
+	; the message sequence number field.
+	;
+	; R1 -> Server block    
+	; R2 -> MSG_SEQ_NBR in message
+	; R5 -> Receive CCB 
+	;
+	CALLX	GETCBF		; Allocate a transmit buffer	
+	MOV	C.CTIM(R1),C.TMR(R1) ; Reset circuit timer		;004
+	ADD	#2,R2		; Point to first slot
+	MOVB	C.SEQ(R1),R3	; Get sequence number of last message
+	INC	R3		; One more message
+	CMPB	-2(R2),R3	; Should be equal for this message
+	BEQ	20$		; How about that... 
+
+	CMPB	-2(R2),C.SEQ(R1); Is it our previous message again?
+	BNE	OUTSEQ		; No, message is out of sequence	;011
+	CLRB	CC.SLT(R5)	; Show no slots - Check ACK numbers again.
+				; Maybe our last XMT is being ACKed this time.
+
+20$:	;                       
+	; Now check for transmit acks
+	;                      
+	PUSH	<R5>		; Need a register		
+	MOVB	-1(R2),R3	; Get MSG_ACK_NBR
+	MOVB	C.LXMT(R1),R0	; Get last message number acked
+	NEG	R0		; Negate it
+	MOV	R0,-(SP)	; and save it
+	MOVB	C.HXMT(R1),R5	; Get highest message number	
+	ADD	R5,(SP)		; Compute number of messages currently 
+				; unacknowledged
+	ADD	R3,R0		; Compute the difference between the
+				; last number acked and the message 
+				; number being acked
+	CMPB	(SP)+,R0	; Is the ack received in range?
+	BLO	OUTSQ1		; If LO - Bad ACK - drop message    
+	;               
+	;   R0  - Number of messages being acked
+	;   R1  - Server block pointer
+	;   R2  - First slot in message
+	;   R3  - transmit number being acked
+	;   R5	- Highest number message outstanding
+	;  (SP) - Receive CCB address
+	;               
+	CMPB	R3,C.HXMT(R1)	; Is last transmit being ACKed?
+	BNE	30$		; No, don't touch RRF			;001
+	BICB	#CF.RRF,C.FLAG(R1) ; Not waiting for a reply now	;001
+30$:	MOVB	R3,C.LXMT(R1)	; Save new last ACKed message
+	CALLX	CHKACK		; Remove acked transmits from queue	
+   	POP	<R5>		; Restore receive CCB pointer	
+
+	MOV	R1,R3		; Set up for circuit level count
+	CALLX	INC32,R1,C.MRCV	; Increment count of messages received	;011
+	MOV	@#140000+BF.CNT,R0 ; Get message byte count		;011
+	CALLX	COU32,R1,C.BRCV	; Update byte count			;011
+	TST	C.CXMT(R1)	; Do we have a buffer to transmit with?
+	BEQ	NORSRC		; No, return resource allocation failure
+	MOVB	-2(R2),C.SEQ(R1); Save new sequence number
+	CALLRX	PROSLT		; Go process slot information
+
+GLOBAL	<MF.MST>                                                        
+
+.DSABL	LSB
+
+.SBTTL	RCVILL	Process received illegal VC message
+;+
+; RCVILL - Process received illegal VC message
+;
+; Inputs:
+;	R2 -> 	Virtual circuit header @ SM.NSL (NBR_SLOTS)
+;	R3 = 	ER.IVM, The illegal message or slot received error code
+;		if we came from dispatch table, otherwise it is set up with the
+;		error code to report back to the server.
+;	R5 ->   Receive CCB
+;
+; Outputs:
+;
+; Description
+;
+;-
+.ENABL	LSB
+
+RCVILL: PUSH	<R3>		; Save register				;003
+	MOV	#LATCTL,R3	; Point to LAT control region		;003
+	CALLX	INC32,R1,L.ILLM	; Increment number of illegal messages	;011
+	POP	<R3>		; Restore register			;003
+	.BR	RCVREF		; And send stop message			;010
+
+.DSABL	LSB
+
+.SBTTL	RCVREF	Turn receive message into a stop message
+;+
+; RCVREF - Turn receive message into a stop message
+;
+; Inputs:
+;	R3 = 	Stop reason code to report back to the server.
+;	R5 ->   Receive CCB
+;
+; Outputs:
+;
+; Description
+; 	Turn this receive buffer into stop message for the server
+;
+;-
+.ENABL	LSB
+
+RCVREF:	CLR	CC.LLB(R5)	; Make sure this transmit is returned 
+	MOV	#140000+BUFHDR+EP.SRC,R2 ;Point to source address
+	MOV	(R2)+,-10(R2)	; Copy the Source Address to the
+	MOV	(R2)+,-10(R2)	;  Destination Address field	
+	MOV	(R2)+,-10(R2)	;  ...				
+	TST	(R2)+		; Skip over the protocol type	
+	MOV	#MT.STP,(R2) 	; Set message type (and no slots)
+	MOV	SM.SID(R2),SM.DID(R2) ; Send message back to source
+	CLR	SM.SID(R2)	; Show no source ID
+	MOVB	SM.SEQ(R2),SM.ACK(R2) ; Set ACK number for the start
+	CLRB	SM.SEQ(R2)	; Our first message
+	BIC	#^C<377>,R3	; Only byte value for reason code
+	MOV	R3,SP.REA(R2)	; Set reason code
+	MOV	#STPLEN,@#140000+BF.CNT ; Set length of stop circuit msg ;001
+	CALLRX	XMTMG1		; Go send the message           
+                
+GLOBAL	<MT.STP,SM.SID,SM.DID,SM.SEQ,SM.ACK,SP.REA,STPLEN>              
+
+.DSABL	LSB
+
+.SBTTL	RCVSTP	Process received VC stop message
+;+
+; RCVSTP - Process received VC  stop message
+;
+; Inputs:
+;	R2 -> 	Virtual circuit header @ SM.NSL (NBR_SLOTS)
+;	R3 = 	ER.IVM, The illegal message or slot received error code
+;	R5 ->   Receive CCB
+;
+; Outputs:
+;
+; Description
+;
+;-
+.ENABL	LSB
+
+RCVSTP:	MOVB	#-1,(R2)+	; Point to DST_CIR_ID field (and flag as stop)
+	MOV	LATCTL+L.AVCB,R1; Get pointer to first server block 
+	BEQ	NOVCB		; If EQ, count as invalid message
+10$:	CMP	C.LCID(R1),(R2)	; Find block for this circuit
+	BNE	20$		; If EQ, We found it!
+	CALLX	SUPBFR		; Give this buffer back to DLL
+	MOV	#-1,R3		; Flag no stop circuit message
+	CALLRX	STPCIR		; Stop circuit and return all resources
+
+20$:	MOV	(R1),R1		; Get next block address
+	BNE	10$		; Loop till found
+
+	;
+	; Common error exit - VCB (Virtual Circuit Block) not found
+	;
+NOVCB:	MOV	#LATCTL,R3	; Point to LAT control region		;003
+	CALLX	INC32,R1,L.INVM	; Increment number of invalid messages	;011
+	MOV	#ER.NSL,R3	; Error code for stop
+	TSTB	-(R2)		; Align for common routine
+	BPL	RCVREF		; Send back a stop for circuit	
+	BR	30$		; Just return the resource
+
+	;
+	; Common error exit - Out of sequence message received
+	;
+OUTSQ1:	POP	<R5>		; Restore CCB pointer		
+OUTSEQ:	PUSH	<R3>		; Save register				;003
+	MOV	#LATCTL,R3	; Point to LAT control region		;003
+	CALLX	INC32,R1,L.OSEQ	; Increment out of sequence msg count	;011
+	MOV	R1,R3		; Point to VCB (virctual circuit block)	;003
+	CALLX	INC32,R1,C.OSEQ	; Increment out of sequence msg count	;011
+	POP	<R3>		; Restore register			;003
+	CLRB	CC.SLT(R5)	; Show no slots			
+	CALLRX	PROSLT		; The server might be giving us a  
+				; chance to ACK his last message
+
+NORSRC:	PUSH	<R3>		; Save register				;003
+	MOV	#LATCTL,R3	; Point to LAT control region		;003
+	CALLX	INC32,R1,L.RESC	; Increment resource allocation failure	;011
+	POP	<R3>		; Restore register			;003
+30$:	CALLRX	SUPBFR		; Return the receive buffer for now 
+
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	RCVSTA	Process received Status Message
+;+									;012
+; RCVSTA - Process received Status Message
+;
+; Inputs:
+;	R2 -> 	Virtual circuit header @ SM.NSL (NBR_SLOTS)
+;	R3 = 	ER.IVM, The illegal message or slot received error code
+;	R5 ->   Receive CCB
+;
+; Outputs:
+;
+; Description
+;
+;-									;012
+
+.ENABL	LSB
+
+RCVSTA:	CALLRX	STSMSG		; Go process the status message.	;012
+
+.DSABL	LSB
+
+.SBTTL	RCVRES	Process received Response Message
+;+									;012
+; RCVRES - Process received Response Message
+;
+; Inputs:
+;	R2 -> 	Virtual circuit header @ SM.NSL (NBR_SLOTS)
+;	R3 = 	ER.IVM, The illegal message or slot received error code
+;	R5 ->   Receive CCB
+;
+; Outputs:
+;
+; Description
+;
+;-									;012
+
+.ENABL	LSB
+
+RCVRES:	CALLRX	RESMSG		; Go process the response message.	;012
+
+.DSABL	LSB
+
+.SBTTL	TIMER - Timer services entry point
+;+
+; TIMER - Timer services entry point
+;
+;-
+
+	TMPORG	LATDIS,4
+	.WORD	TIMER		; Calls to LATTMO come here	
+	UNORG
+
+.ENABL	LSB
+                 
+TIMER:	TSTB	LATCTL+L.ACT	; Any lines running?		
+	BEQ	80$		; If EQ, No - just exit
+;
+; Check transmit timers
+;
+10$:	MOV	LATCTL+L.AVCB,R1; Get pointer to first server table 
+	BEQ	70$		; If EQ, No servers active
+20$:	MOV	C.LNK(R1),-(SP)	; Save link word
+	MOV	#ER.TIM,R3	; Timer expired error
+	TST	C.TMR(R1)	; Is timer running?			;004
+	BEQ	30$		; If EQ, No
+	DEC	C.TMR(R1)	; Check circuit timer			;004
+	BEQ	40$		; If EQ, Stop the circuit
+30$:	TSTB	C.XMTT(R1)	; Is the transmit timer running?
+	BEQ	50$		; If EQ, No
+	DECB	C.XMTT(R1)	; One less to go
+	BNE	50$		; If NE, continue
+	TST	C.XMTQ(R1)	; Any transmits still outstanding?
+	BEQ	50$		; If EQ, no - ignore timeout
+	INCB	C.XMTC(R1)	; Inc number of transmit timeouts
+	MOV	#ER.RTM,R3	; Retransmit limit exceeded error
+	CMPB	C.XMTC(R1),LATCTL+L.XMTC ; Check for max retry count	
+	BGT	40$		; If GT, Give up!
+	CALLX	XMTRTY		; Resend the unacked transmits  
+	BR	50$
+
+40$:	;
+	; The circuit has timed out.  Count the timeout and stop the 	;006
+	; circuit.							;006
+	; 
+	MOV	R3,-(SP)	; Save the reason code			;013
+	MOV	#LATCTL,R3	; Point to LAT control region		;006
+	CALLX	INC32,R1,L.TIMO	; Increment number of time outs		;011
+	MOV	(SP)+,R3	; Restore saved reason code		;013
+	CALLX	STPCIR		; Go stop the circuit           
+	BR	60$		; Join common code
+  
+50$: 	TST	C.SESQ(R1)	; Are there sessions on this circuit?
+	BNE	60$		; Yes, don't stop the circuit
+	BITB	#CF.VIR,C.FLAG(R1) ; Have any sessions been started?
+	BNE	60$  		; If NE, No - leave it alone
+	MOV	#ER.NSL,R3	; "No slots exist" error code
+	CALLX	STPCIR		; Go stop the circuit           
+60$:	MOV	(SP)+,R1	; Get pointer to next circuit block
+	BNE	20$		; If NE, More to go
+70$:	CALLX	TIMER1		; Off to do application terminals	;012
+	DECB	LATCTL+L.MCTT	; Count down multicast timer	
+	BNE	80$		; If NE, Don't send it yet
+	CALLRX	SNDMCT		; Go send the multicast message
+
+80$:	RETURN			; Exit timer service			;012
+
+.DSABL	LSB
+
+.END

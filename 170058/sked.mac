@@ -1,0 +1,1732 @@
+.INCLUDE	%CMN:COMMON%
+.INCLUDE	%CMN:KERNEL%
+TITLE	SKED,<SCHEDULER FOR MULTI-FUNCTION JOB>,0A,10-MAY-91,SJM/PRL/KCG/DBM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR SKED
+;+
+;
+;  001  SJM  23-Sep-82	CREATION - And it was a good thing
+;  002	PRL  23-Dec-82	Check run parameter word for P.VER (both bytes)
+;  003	PRL  13-Jan-83	Change null job name from ...NUL to SPL...
+;  004	PRL  16-Jan-83	Add code to kill SPL.TSK when all subjobs CRASHED
+;  005	PRL  18-Jan-83	Rename XMIT job name to 'SPL.XM'
+;  006	PRL  11-Jun-83	Prep for V9.0
+;  007	KCG  20-Sep-83	New MOVSTR and CMPSTR made.
+;  008	KCG  28-Oct-83	Added JOBFLG for multi-job spawning control
+;  009	KCG  14-Jan-84	Corrected CISCLR to use correct registers
+;  010	KCG  26-Apr-84	Added .INCLUDGEs.
+;  011	PRL  14-May-84	Fix bug PEEKing at job number in RIB
+;  012	PRL  17-May-84	Add global privilege name strings
+;  013	PRL  22-May-84	Rename SKDCON macro to PBSCON
+;  014	PRL  31-May-84	Add FILL routine  ( Made global 6/6/84 KCG )
+;  015	KCG  28-Oct-84	Add new RIB peek architecture
+;  016	KCG  30-Oct-84	Add code in SKED and ACTIVE to support RUN OK jobs
+;  017	KCG  30-Oct-84	Add SETROK and CLRROK global routines
+;  018	KCG  30-Oct-84	Add PBSPRI and PBSRNB patchable features
+;  019	PRL  30-Oct-84	Change QT$MNM symbol -> QT$BAD
+;  020	KCG  10-Jan-85	PBSPRI and PBSRNB are no longer patchable features.
+;  021	KCG  16-Mar-85	MACRO assembler doesn't do 32 bit arithmatic
+;  022	KCG  20-Mar-85	Allow 2 print + 3 batch servers in primary job
+;
+;  	KCG  07-Aug-85	Creation of 9.1 from 9.0
+;  023	KCG  07-Aug-85	Used UU.SYS to get J2MPTR instead of peeks
+;  024	PRL  28-Jan-86	Add ALWTAP global flag for (undocumented) TAP feature
+;
+;			[RSTS/E V9.5]
+;  025	DBM  22-Sep-87	Enhance checks for date change
+;
+;			[RSTS/E V10.0]
+;  026	DBM  23-Aug-89	Remove DJS spooler count
+;  027	DBM  11-Jun-90	Change ..RESW value
+;-
+
+.SBTTL	PROGRAM DESCRIPTION
+
+;+
+; THIS CODE (THE ROOT SECTION OR SCHEDULER) AND THE MACRO FILE PBSMAC
+; (CONTAINS COMMON DEFINITIONS AND MACROS) MAKE UP THE BASE FOR SPL.
+; IT PROVIDES THE FOLLOWING FUNCTIONS:
+;
+;	SCHEDULING
+;	----------
+;	THE SCHEDULER IS A SIMPLE ROUND-ROBIN SCHEDULER. JOBS ARE SCHEDULED
+;	BASED ON EITHER A VARIABLE TIME INTERVAL OR ON THE RECEPTION OF SOME
+;	REAL MESSAGE (RSTS/E SEND/RECEIVE).
+;
+;	SUBJOB SWAPPING
+;	---------------
+;	THE SWAPPER SETS UP POINTERS FOR EACH SUBJOB BEFORE THE SUBJOB IS
+;	ACTUALLY RUN.
+;
+;	SERVICE ROUTINES
+;	----------------
+;	THE SERVICE ROUTINES ALL DO RANDOM USEFUL THINGS.
+;-
+
+.LIBRARY	%SYSTEM:PBSMAC%
+.LIBRARY	%LB:RMSMAC%
+
+.SBTTL	MACROS	- DEFINE/INVOKE ANY NEEDED MACROS
+
+	.PSECT
+
+	.MCALL	SPLCMD,QUEDEF
+	.MCALL	SKDJDB,SKDSTA,RIBDEF,PBSCON
+	.MCALL	PSECTS,BITDEF,SAVREG
+	.MCALL	FQBERR,CR$LF,MOVBYT
+	.MCALL	SUBRIB,GETLUN,RETLUN,GETBUF,RETBUF
+	.MCALL	GETDEV,RETDEV
+	.MCALL	SUBJOB,CRASH
+	.MCALL	EXIT$S
+	.MCALL	FIXSTG
+
+	SPLCMD
+	QUEDEF
+	SKDJDB
+	SKDSTA
+	RIBDEF
+	PBSCON
+	PSECTS
+	BITDEF
+	CR$LF
+
+;+
+; SET UP THE ADDRESSES FOR THE PSECTS THAT WILL BE MERGED IN
+; THE MESSAGE TRANSMITTER SUBJOB (XMIT) IS DEFINED HERE
+;-
+
+	.PSECT	DISPAT
+DISPRO:	.WORD	XMIT			;FIRST SUBJOB ADDRESS
+DSPAT::
+P.XMIT==<DISPRO-DSPAT>			;AND IT'S SUBJOB NUMBER
+MAXPRO=1				;WE ONLY KNOW ABOUT 1 SUBJOB
+
+	GLOBAL	<XMIT>
+
+	.PSECT	DISPAU
+DSPEND:
+
+	.PSECT	NAMES
+	.RAD50	/PBS.XM/		;NAME OF THE FIRST SUBJOB
+NAME::
+
+	.PSECT	JDB
+	.WORD	RUNNOW			;JOB STATUS WORD (START ME PLEASE)
+	.WORD	0			;INITIAL SLEEP TIMER
+JDBS:
+
+.ASSUME	JDBSIZ	EQ 4
+
+.SBTTL	PATCH	- ALLOCATE PATCH SPACE
+
+; ALLOCATE THE MINIMAL AMOUNT OF PATCH SPACE
+
+	.PSECT	PATCH,RW,OVR		;OVR SO WE CAN SPECIFY IN .CMD HOW BIG
+PATCH::	.BLKW0	200			;WORST COME TO WORST WE HAVE THIS MUCH
+
+.SBTTL	IMPURE	- ALLOCATE FIXED DATA CELLS
+
+;+
+;
+; ALLOCATE FIXED DATA CELLS
+;
+; CHANGEABLE VIA ONLPAT
+;
+;	...PRT	=	MAXIMUM NUMBER OF PRINT SERVERS ALLOWED IN JOB.
+;	...BAT	=	   "      "    "  BATCH    "       "      "  " .
+;	..IDLE	=	SLEEP TIME (IN MINUTES) BEFORE SERVER IS MARKED
+;			AS NOT ACTIVE.
+;	..RESW	=	SLEEP TIME (IN SECONDS) BEFORE QMAN WILL TRY 
+;			REALLOCATION OF A BUSY DEVICE.
+;	...JOB	=	MAXIMUM NUMBER OF RSTS JOB SLOTS TO USE FOR SPOOLING.
+;
+;	( ALL OF THE ABOVE ARE SET/VAIDATED BY ROUTINE VALUSR IN SKDINI )
+;
+;-
+
+	.PSECT	IMPURE
+
+PROMAX::.WORD	0-<<DSPAT-DISPRO>/2> ;NUMBER OF SUB-PROCESSES
+JOBMAX::.WORD	<DSPEND-DSPAT-2>/2 ;NUMBER OF ACTIVE JOBS MINUS NULL JOB
+JOBNUM::.WORD	0		;OUR RSTS JOB NUMBER
+JOBFLG::.WORD	0		;PRIMARY/SECONDARY JOB FLAG INDICATOR
+ROKFLG:	.WORD	0		;RUN OK FLAG WORD ( For processing ROK jobs )
+SPRO::	.WORD	0		;LAST ACTIVE SUB-PROCESS
+SJOB::	.WORD	0		;CURRENTLY ACTIVE JOB * 2
+RIBLST::.WORD	0		;RIB DATA STRUCTURE LIST POINTER
+RUNABL:	.WORD	0		;1 BIT PER JOB, IF BI SET JOB READY O RUN
+CRASHD:	.WORD	0		;COUNT OF CRASHED SUBJOBS
+STACK:	.WORD	0		;SAAAVE THE STACK HERE
+LASDAT:	.WORD	0		;Date of last time we went to sleep	;025
+CURDAT:	.WORD	0		;Current date at time of expired sleep 	;025
+CIS::	.WORD	0		;=0 IF NO CIS, =-1 IF CIS PRESENT
+ALWTAP::.WORD	0		;=0 to disallow TAP features, =-1 to allow ;024
+DEVLST::.WORD	0		;LINKED LIST OF ALLOCATED DEVICES
+	.BLKW0	MAXPRO		;TABLE FOR SUB-PROCESSES
+UCNTXT::.WORD	UCNTXT+2	;POINTER TO USERS JOB CONTEXT AREA
+	.BLKW0	MAXJOB		;USER CONTEXT TABLE
+..SPTB::.WORD	0.		; MAXIMUM SERVER PER TYPE TABLE
+...PRT::.WORD	0.		; PRINT SERVER TABLE ENTRY
+...BAT::.WORD	0.		; BATCH SERVER TABLE ENTRY
+.ASSUME		QT$BAD EQ <<.-..SPTB>/2.>				;026
+..IDLE::.WORD	5.		; DEFAULT IDLE TIME IS 5 MINUTES
+..RESW::.WORD	2.		; Initial resource retry wait time is 2 sec ;027
+..RWLO::.WORD	2.		; Minimum value for ..RESW		;027
+..RWHI::.WORD	60.		; Maximum value for ..RESW		;027
+...JOB::.BYTE	63.		; DEFAULT RSTS JOB SLOTS USEABLE
+	.EVEN
+.SPLER::.WORD	0.		;NUMBER OF SPLERS IN THIS JOB
+PATFTR::			;PATCHABLE FEATURE TABLE
+..PPRT::.WORD	2.		;PRIMARY PRINT SUBJOBS
+..PBAT::.WORD	3.		;PRIMARY BATCH SUBJOBS
+..SPRT::.WORD	3.		;SECONDARY PRINT SUBJOBS
+..SBAT::.WORD	4.		;SECONDARY BATCH SUBJOBS
+PATFLN	==	<<.-PATFTR>/2.>	;SET LENGTH OF TABLE
+
+PBSPRV::.BLKW0	PRVSIZ		;MESSAGES MUST HAVE THESE PRIVILEGES
+
+.SBTTL	PRIVS	- DEFINE PRIVILEGE NAMES USED BY PBS			;012
+
+;+
+; The following global strings define the 6-character
+; privilege names used by various modules in the PBS
+; package.  All privilege names must start on a word
+; boundary and be padded with nulls to 6 characters.
+;-
+
+	.EVEN								;012
+GACNT::	FIXSTG	"GACNT",6		;GACNT - Group accounting priv	;012
+WACNT::	FIXSTG	"WACNT",6		;WACNT - World accounting priv	;012
+EXQTA::	FIXSTG	"EXQTA",6		;EXQTA - Exceed quota priv	;012
+
+.SBTTL	ROKBITS	- DEFINE RUN OK FLAG WORD BITS
+
+	.SAVE
+	.BSECT	,CREF
+
+ROK$F:	.BLKB	.		;"Run OK" job found on first pass
+ROK$R:	.BLKB	.		;"Run OK" jobs ineligible to run
+
+	.RESTORE
+
+.SBTTL	LUNTBL	- ALLOCATE LUN TABLE
+
+;+
+; ALLOCATE THE LUN TABLE
+
+; THIS TABLE SUPPORTS EACH OF THE 16 RSTS/E CHANNELS. THE CONTENTS OF
+; EACH CELL IS ITS OWNER'S SUBJOB NUMBER.  THE FOLLOWING LUNS ARE
+; PERMANENTLY ALLOCATED:
+;
+;	CHANNEL  0 -> KB:
+;	CHANNEL 15 -> OVERLAY FILE
+;-
+
+LUNTBL::
+LUN0::	.BYTE	-1		;ALLOCATED TO KB:
+LUN1::	.BYTE	0
+LUN2::	.BYTE	0
+LUN3::	.BYTE	0
+LUN4::	.BYTE	0
+LUN5::	.BYTE	0
+LUN6::	.BYTE	0
+LUN7::	.BYTE	0
+LUN8::	.BYTE	0
+LUN9::	.BYTE	0
+LUN10::	.BYTE	0
+LUN11::	.BYTE	0
+LUN12::	.BYTE	0
+LUN13::	.BYTE	0
+LUN14::	.BYTE	0
+LUN15::	.BYTE	-1		;ALLOCATED TO OVERLAY FILE
+	.EVEN
+
+.SBTTL	START	- AND IN THE BEGINING
+
+;+
+;
+; START:
+;
+; 	This routine first checks the contents of the parameter word
+; 	to determine if the server was run directly or spawned by
+; 	the user interface.  If run directly, an error is displayed
+; 	and the program exits.  If spawned, then this routine calls
+; 	the initialization routines, then detaches.  
+;
+; INPUTS:
+;
+;		NONE
+;
+; CALL:
+;
+;	JSR	PC,START
+;
+; OUTPUT:
+;
+;		NONE
+;
+;		ALL REGS PRESERVED
+;
+;-
+
+	.PSECT	SYSROO
+
+START::	NOP			;for debuging
+	CLR	JOBFLG		;assume primary job
+	MOV	#FIRQB,R0	;R0 -> start of firqb
+	MOV	FQNENT(R0),R1	;R1 =  parameter word
+	BIC	#BIT15,R1	;clear out the sign bit
+	CMPB	#P.VER,R1	;lo byte contain version no.?
+	BNE	10$		;no, so test to see if secondary job.
+..RUN==.-2			;** patch to nop to allow 'RUN SPL'
+	SWAB	R1		;swap bytes
+	CMPB	R1,#BIT0	;is this a secondary job ?
+	BLO	20$		;no, this is a primary job
+	BHI	10$		;no, we don't know what it is.
+	MOV	SP,JOBFLG	;yes, mark this job as secondary
+	MOV	#^R..2,NAMPT2	;have name show up as secondary job
+	BR	20$		;and join common
+
+10$:	CLR	R3		;R3 =  print mode
+	MOV	#RUNERL,R4	;R4 =  length of err msg
+	MOV	#RUNERR,R5	;R5 -> error msg
+	CALLX	PRINT		;print the error msg
+	EXIT$S			;and exit
+	CRASH			;crash (just in case)
+
+20$:	CALLX	CLRFQX		;clear FIRQB/XRB
+	MOVB	#UU.DET,@#FIRQB+FQFUN ;load function of detach
+	MOVB	#BIT7,@#FIRQB+4	;and flag of close all
+	.UUO			;and do the detach
+	MOV	SP,STACK	;save the initial stack
+	CALL	SETTRP		;set up the trap handler
+	CALLX	INISYS		;call initialization routine
+	BCC	NXTJOB		;if no error continue
+	CRASH
+
+	.SAVE
+	.PSECT	INIT
+
+RUNERR:	.ASCII	"?Please use START/QUEUE/MANAGER command"
+RUNERL	= .-RUNERR
+
+	.RESTOR
+
+.SBTTL	NXTJOB	- MAIN DISPATCH LOOP FOR SKED
+
+;+
+; NXTJOB
+;
+; MAIN DISPATCH LOOP FOR SKED
+;
+; INPUTS
+;	NONE
+;
+; CALL	NXTJOB
+;
+; OUTPUT 
+;	NONE
+;
+;
+;	NO OTHER REGISTERS CHANGED
+;
+;-
+
+NXTJOB::MOV	STACK,SP	;RESET THE STACK
+	CALL	SKED		;CALL SCHEDULER FIND OUT WHO'S NEXT
+				; IF A SUBJOB WANTS TO RUN, CARRY IS CLEAR
+				;  AND SUBJOB NUMBER*2  IS IN R5
+				; IF NO SUBJOB WANTS TO RUN, CARRY IS SET
+				;  AND TIME (IN SECONDS) UNTILL NEXT
+				;  SUBJOB WANTS TO RUN IS IN R5 
+	BCC	20$		;BRANCH IF SUBJOB WANTS TO RUN
+	CMP	CRASHD,JOBMAX	;ARE ALL OUR SUBJOBS CRASHED?
+	BLO	10$		;NO, SO RUN THE NULL JOB
+	CALLX	CLRFQB		;YES, CLEAR FIRQB
+	MOVB	#UU.CHU,@#FIRQB+FQFUN ;LOAD KILL JOB FIP SUBFUN
+	MOVB	JOBNUM,@#FIRQB+4 ;LOAD OUR JOB NO. TO KILL
+	MOVB	#-1,@#FIRQB+35	;LOAD REQUIRED BYTE FOR KILL
+	.UUO			;GOODNITE DAVID.
+	CRASH			;OH MY, AM I STILL HERE?
+
+10$:	CALL	NULJOB		;GO RUN THE NULL JOB
+	BR	NXTJOB		;AND BACK TO THE SCHEDULER
+
+20$:	CALL	PAGER		;GO SET UP THE CONTEXT FOR THIS SUBJOB
+				; (R5--> TO SUBJOB NUMBER*2)
+	BCC	30$		;NO ERROR, SO RUN THE SUBJOB
+	CRASH
+
+30$:	CALL	RUN		;RUN THE SUBJOB (R5--> TO SUBJOB NUMBER*2)
+	BR	NXTJOB		; AND BACK TO THE SCHEDULER
+
+.SBTTL	NULJOB 	- NULJOB/SLEEPER
+
+;+
+; NULJOB
+;
+; MAIN SLEEP LOOP 
+; ALSO SET'S UP THE JOB NAME FOR THE NULJOB AND EAT'S TYPE AHEAD IF
+; THE JOB IS ATTACHED
+;
+; INPUTS
+;		R5= SECONDS TO SLEEP
+;
+; CALL	NULJOB
+;
+; OUTPUT 
+;	NONE
+;
+;
+;	ALL REGISTERS PRESERVED
+;
+;-
+
+NULJOB:	PUSH	<R0,R5>
+	CALLX	CLRFQB		;CLEAR FIRQB
+	MOV	#NAME,R0	;POINTER TO FIRST WORD OF NAME
+	MOV	(R0)+,@#FIRQB+FQNAM1  ;FIRST WORD OF NAME
+	MOV	(R0),@#FIRQB+FQNAM1+2 ;AND SECOND
+	.NAME			;LET THERE BE NAME
+	.TTRST			;GET'S AN ERROR IF DETACHED
+	FQBERR	10$		;SKIP AHEAD IF DETACHED
+	CALLX	CLRXRB		;CLEAR XRB AS SETUP FOR .SPEC
+	MOV	#7.,@#XRB+0	;CANCEL TYPE AHEAD
+	MOVB	#TTYHND,@#XRB+7	;.SPEC FOR A TTY
+	.SPEC
+10$:	CALLX	CLRXRB		;CLEAR XRB AS SETUP FOR .SLEEP
+	BIS	#BIT15,R5	;MAKE SURE WE DON'T SLEEP UNLESS WE WANT TO
+	MOV	R5,@#XRB	;PUT SLEEP COUNTER INTO XRB
+	.SLEEP			;AND TAKE A NAP
+	CLC			;CLEAR CARRY AND RETURN
+	POP	<R5,R0>
+	RETURN
+
+.SBTTL	SKED	- SCHEDULER FOR SUBJOBS
+
+;+
+;
+; SKED:
+;
+;	 This routine determines which job should next run by examining
+;	 the 'RUNABL' word. If no jobs are marked to run it then calls
+;	 the activator to refresh the 'RUNABL' word. At which point it
+;	 knows absolutly if there are any jobs to run and if not, it
+;	 knows how long to request to sleep.
+;
+;	 This scheduler is a non-prioritized round-robin scheduler.
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL:
+;
+;	JSR	PC,SKED
+;
+; BACK:
+;
+;	R5	= SUBJOB NUMBER * 2 (CARRY CLEAR)
+;	R5	= SLEEP TIME IN SECONDS (CARRY SET)
+;
+;	No other registers changed
+;
+;-
+
+SKED::	PUSH	<R0,R1>
+	TST	RUNABL		;is any one ready to run ?
+	BNE	10$		; yes so find out who
+	CALL	ACTIVE		;refresh 'RUNABL' word, get sleep timer
+	BCS	50$		; else carry is set and we must sleep
+				; (sleep time returned in R5)
+				;carry came back clear if now have a runable 
+				; job or sub-process
+	TST	SPRO		;is there a sub-process ready to run?
+	BEQ	10$		;no
+	MOV	SPRO,R5		;yes, so put it's sub-pro number in R5
+	BR	40$		;and join common
+
+10$:				;we can only get here if there is a
+				;job that want's to run now
+	MOV	RUNABL,R0	;get the job runable word
+	MOV	#1,R1		;set a bit into R1 for rol through R0
+	MOV	R1,R5		;start with job #1
+20$:	BIT	R1,R0		;is this jobs bit set 
+	BNE	30$		;yes so jump on
+	INC	R5		;up the job count
+	ASL	R1		;shift up a bit
+	BR	20$		;go try again
+30$:	BIC	R1,R0		;remove this jobs bit from runabl word
+	MOV	R0,RUNABL	;put runabl back
+40$:	ASL	R5		;make it job # time 2
+	TST	(PC)+		;clear carry
+50$:	SEC			;set carry (for sleep)
+	POP	<R1,R0>
+	RETURN
+
+.SBTTL	ACTIVE	- ACTIVATE ALL JOBS THAT ARE READY TO RUN
+
+;+
+;
+; ACTIVE:
+;
+; 	This routine refreshes the job ready to run word ('RUNABL')
+; 	and returns either with some job to run or with the shortest
+; 	time to sleep until a job is ready to run.
+;
+;	"RUN OK" jobs are jobs that are ok to run when nothing else happened
+;	to make anyone else runable ( the only known causes of this condition
+;	are state transitions on a PK and the setting of logins ).
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL:
+;
+;	JSR	PC,ACTIVE
+;
+; BACK:
+;
+;	R5	= shortest sleep time in seconds (if carry set)
+;	R5	= junk (if carry clear)
+;
+;
+;	Carry clear if any job is runabl
+;
+;	Carry set if no job is runabl
+;
+;	NO OTHER REGISTERS CHANGED
+;
+;-
+
+ACTIVE:	SAVREG
+	CLR	CRASHD		;clear the crashed subjob counter
+	CLR	RUNABL		;start with no jobs runnable
+	CLR	R4		;start with a zero sleep timer
+	CALL	GETTIM		;get time unill midnight/2 (seconds)
+	MOV	R5,R3		;store it in R3
+	CMP	SPRO,PROMAX	;have we examined the last sub-pro yet?
+	BGT	10$		;no
+	CLR	SPRO		;yes, so start over at sub-pro number 1
+10$:	DEC	SPRO		;on to examine the next sub-pro
+
+20$:	MOV	#JDBS,R0	;get pointer to first sub-pro
+	MOV	SPRO,R1		;get number of sub-pro to examine
+	MUL	#JDBSIZ,R1	;get offset to it's jdb
+	ADD	R1,R0		;now is a pointer to it's jdb
+	MOV	JDBSTA(R0),R2	;get job status word
+	BIT	#WTSUB!NORUN,R2 ;is the job waiting or crashed?
+	BNE	40$		;yes, so go check for next
+	MOV	SLEP(R0),R2	;get sleep counter
+	BEQ	160$		;go run sub-pro if no sleep time
+	CMP	#-1,R2		;does job want to sleep forever
+	BEQ	40$		;yes so goto next sub-pro
+	CMP	R2,R3		;does this job want to wake up
+	BHIS	160$		; yes so go run it
+	CMP	CURDAT,LASDAT	;Did the date change?			;025
+	BNE	160$		;Yes, so we probably wrapped around.	;025
+30$:	CMP	R2,R4		;is this sleep time less then any other
+	BLO	40$		; no so go on
+	MOV	R2,R4		; yes so save it	
+40$:	DEC	SPRO		;get ready to look at the next sub-process
+	CMP	SPRO,PROMAX	;are we done with the last sub-pro
+	BGE	20$		;no, so go check it out
+	CLR	SPRO		;show no sub-pro active
+	MOV	#JDBS,R0	;get a pointer to first jdb
+	MOV	JOBMAX,R1	;get number of jobs
+	MUL	#JDBSIZ,R1	;get offset to last jdb
+	ADD	R1,R0		;now is a pointer to begining of last jdb
+	MOV	JOBMAX,R5	;job counter starting with last job
+	PUSH	<R0,R5>		; R0=pointer to last jdb, R5=jobmax
+
+50$:	MOV	JDBSTA(R0),R2	;get job status word
+	BIT	#NORUN,R2	;is the job crashed?
+	BEQ	60$		;no, so continue
+	INC	CRASHD		;yes, inc the crashed subjob counter
+	BR	100$		;and go check next subjob
+60$:	BIT	#WTSUB!NORUN,R2 ;is the job waiting or dead?
+	BNE	100$		;go check for next subjob
+	BIT	#RUNOK,R2	;run this job when there is nothing else to do?
+	BEQ	70$		;no, it is a normal job
+	BIS	#ROK$F,ROKFLG	;mark that we found at least one RUN OK job
+70$:	CALL	CHKMSG		;any messages for job (R5 --> job #)
+	BCS	80$		;carry is clear if no messages pending
+	MOV	SLEP(R0),R2	;get sleep counter
+	BEQ	80$		;go run job if no sleep time
+	CMP	#-1,R2		;does job want to sleep forever
+	BEQ	100$		;yes so goto next job
+	CMP	R2,R3		;does this job want to wake up
+	BHIS	80$		; yes, so go run it
+	CMP	CURDAT,LASDAT	;Did the date change?			;025
+	BEQ	90$		;No, so we probably didn't wrap around.	;025
+				;yes, probably was midnight wraparound
+80$:	BIS	#BIT0,RUNABL	;mark job as runable
+90$:	CMP	R2,R4		;is this sleep time less then any other
+	BLO	100$		; yes so go on
+	MOV	R2,R4		; no so save it	
+100$:	DEC	R5		;like the man said 'move on to next job'
+	BEQ	110$		; br if no more jobs to check
+	SUB	#JDBSIZ,R0	;point to next jdb
+	ASL	RUNABL		;move on to next job
+	BR	50$		;and go check next job
+
+110$:	POP	<R5,R0>		; R0=pointer to last JDB, R5 = jobmax
+	TST	RUNABL		;are any jobs 'RUNABL' now ?
+	BNE	160$		; yes so show success
+	BIT	#ROK$F,ROKFLG	;were there any ROK jobs found?
+	BEQ	150$		;No, then we can't run any
+	BIT	#ROK$R,ROKFLG	;Are ROK jobs eligible to run?
+	BNE	150$		;No, so don't run any
+130$:	BIT	#RUNOK,JDBSTA(R0)	;Is this job a ROK job?
+	BEQ	140$		;No, try the next one
+	BIS	#BIT0,RUNABL	;mark this job to run
+140$:	DEC	R5		;decrement the job count
+	BEQ	160$		;If checked all jobs
+	SUB	#JDBSIZ,R0	;point to the next JDB
+	ASL	RUNABL		;move on to the next job
+	BR	130$		;and try it out
+
+150$:	CLR	ROKFLG		;Clear out RUN OK flag
+	MOV	R3,R5		;put sleep time into R5
+	SUB	R4,R5		;subtract current time base
+	ASL	R5		;make seconds/2 = seconds
+	BPL	170$		;skip if want to sleep less than 32767. secs
+	MOV	#32767.,R5	;nuts, set to sleep as long as we can
+	BR	170$		;perform the sleep
+
+160$:	BIS	#ROK$R,ROKFLG	;Disable RUN OK jobs from running on next pass
+	TST	(PC)+		;clear carry and return (job found)
+170$:	SEC			;set carry and return (no job found)
+	MOV	R5,TOS.R5(SP)	;put R5 back on stack
+	RETURN
+
+.SBTTL	GETTIM	- GET TIME IN SECONDS TO MIDNIGHT/2
+
+;+
+; GETTIM
+; THIS ROUTINE CALCULATES THE TIME IN SECONDS/2 UNTILL MIDNIGHT
+;
+; INPUTS
+;	NONE
+;
+; CALL	GETTIM
+;
+; OUTPUT 
+;	R5	= TIME IN SECONDS TO MIDNIGHT/2
+;
+;
+;	NO OTHER REGISTERS CHANGED
+;
+;	CARRY RANDOM
+;
+;-
+
+GETTIM:	PUSH	R0
+	CALLX	CLRXRB		;CLEAR XRB
+	MOV	CURDAT,LASDAT	;Save the date from last time		;025
+	.DATE			;GET SYSTEM DATE/TIME
+	MOV	@#XRB,CURDAT	;Save the current date			;025
+	MOV	@#XRB+2,R5	;GET MINUTES UNTIL MIDNIGHT
+	MUL	#60./2,R5	;MAKE THAT SECONDS * 2
+	MOVB	@#XRB+4,R0	;GET SECONDS TO MINUTE
+	CLC			;ensure carry is cleared
+	ROR	R0		;MAKE SECONDS TO MINUTE == SECONDS/2
+	ADC	R0
+	ADD	R0,R5		;NOW HAVE SECONDS/2 TILL MIDNIGHT
+	POP	R0
+	RETURN
+
+.SBTTL	CHKMSG	- Check for pending messages for a subjob
+
+;+
+;
+; CHKMSG:
+;
+;	This routine determines if there are any pending
+;	messages for a given subjob.
+;
+; INPUTS:
+;
+;	R5	= SUBJOB NUMBER
+;
+; CALL:
+;
+;	JSR	PC,CHKMSG
+;
+; BACK:
+;
+;	Carry clear if no message pending
+;
+;	Carry set if message pending
+;
+;	NO REGISTERS CHANGED
+;
+;-
+
+	.ENABL	LSB
+
+CHKMSG::
+	PUSH	R1
+	MOV	#RIBLST,R1		;R1 -> the rib list pointer
+10$:	MOV	(R1),R1			;R1 -> the next rib data structure
+	BEQ	20$			;Exit, there is no message pending
+	CMPB	RIB.SJ(R1),R5		;Is this a RIB belonging to the SJ?
+	BNE	10$			;No, try the next
+	MOV	RIB.MC(R1),@#XRB	;Yes, set the address of the mess cnt
+	.PEEK				;Peek at the message count
+	TSTB	@#XRB+1			;Any messages?
+	BEQ	10$			;No, try for another receiver
+	BR	30$			;Yes, say so
+
+20$:	TST	(PC)+			;No messages pending
+30$:	SEC				;Message(s) pending
+	POP	R1
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	ENTRCV	- Enter receiver in to the linked list of RIB pointers
+
+;+
+;
+; ENTRCV:
+;
+;	Link the RIB with the passed sub-rib number into our chain of RIB
+;	pointers.  Every sub-job calls this routine for every receiver that
+;	they declare.
+;
+; INPUTS:
+;
+;	R3 = Sub-RIB number
+;
+; CALL:
+;
+;	JSR	PC,ENTRCV
+;
+; BACK:
+;
+;	C=0 ON SUCCESS, C=1 FAILURE
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+ENTRCV::
+	SAVREG
+	CALLX	CLRFQB				;clear Mr. Firqb	;023
+	MOVB	#UU.SYS,@#FIRQB+FQFUN		;load job stats fun	;023
+	MOVB	#1,@#FIRQB+FQSIZM		;subcode one		;023
+	.UUO					;lookup the stats	;023
+	MOV	@#FIRQB+FQNENT,@#XRB		;save J2MPTR in XRB	;023
+	BR	15$				;join common code	;023
+
+10$:	.PEEK					;find the address of first RIB
+15$:	MOV	@#XRB,R0			;save RIB address
+	BEQ	30$				;Exit if there is none
+	ADD	#S.JBNO,@#XRB			;add offset to job number
+	.PEEK					;look it up
+	ASRB	@#XRB				;Make it jobnum * 1
+	CMPB	@#XRB,JOBNUM			;Does this RIB belong to us?
+	BNE	30$				;Nope, exit(RIBs are ordered)
+	MOV	R0,@#XRB			;Restore RIB starting addr
+	ADD	#S.SRBN-1,@#XRB			;Add offset to find sub RIB num
+	.PEEK					;find out the value
+	MOVBYT	@#XRB+1,R2			;fetch the high byte ( S.SRBN )
+	MOV	R0,@#XRB			;Save base addr of this RIB
+.ASSUME	S.LINK	EQ 0				;Ensure base addr -> next
+	CMPB	R2,R3				;Is this the RIB we want?
+	BNE	10$				;No, try next rib
+	MOV	R0,R4				;Save base addr of this RIB
+	MOV	#RIB.SI,R1			;Set size of buffer to get
+	GETBUF	R0,R1				;Get the buffer
+	BCS	30$				;Wow, I hope we never run out
+	CLR	RIB.NX(R0)			;Clear the next link pointer
+	MOV	R1,RIB.LN(R0)			;Set in actual length
+	MOVB	R3,RIB.SR(R0)			;Set in sub-rib number
+	MOVB	SJOB,RIB.SJ(R0)			;Set in sub-job number*2
+	ASRB	RIB.SJ(R0)			;make it sub-job number*1
+	ADD	#S.MCNT-1,R4			;Add offset to message count
+	MOV	R4,RIB.MC(R0)			;Set in pointer to message count
+	MOV	#RIBLST,R1			;R1 -> RIB list pointer
+20$:	MOV	R1,R2				;R2 -> Previous data structure
+	MOV	(R1),R1				;R1 -> next RIB link data struct
+	BNE	20$				;Search for end of list
+	MOV	R0,(R2)				;Link in new data structure
+	TST	(PC)+			;success
+30$:	SEC				;Failure
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	PAGER  - SWITCHES CONTEXT FOR NEXT SUBJOB
+
+;+
+; PAGER
+;		PERFORMS CONTEXT SWITCH BETWEEN JOBS
+;
+; INPUTS
+;	R5	= NEW SUBJOB NUMBER * 2
+;
+; CALL	PAGER
+;
+; OUTPUT 
+;
+;	R5	= NEW SUBJOB NUMBER * 2
+;
+;	SJOB	= NEW SUBJOB NUMBER * 2
+;
+;	CARRY CLEAR IF SUCCESS
+;
+;	CARRY SET IF FAILURE
+;
+;	NO REGISTERS CHANGED
+;
+;-
+
+PAGER::	PUSH	R1		;SAVE R1
+	MOV	R5,SJOB		;MARK US AS IN THE NEW JOB
+	CALLX	CLRFQB		;CLEAR FIRQB
+	MOV	R5,R1		;GET JOB # X2
+	ASL	R1		;JOB NUMBER TIMES 4
+	ADD	#NAME,R1	;POINTER TO FIRST WORD OF NAME
+	MOV	(R1)+,@#FIRQB+FQNAM1  ;FIRST WORD OF NAME
+	MOV	(R1),@#FIRQB+FQNAM1+2 ;AND SECOND
+	.NAME			;LET THERE BE NAME
+	POP	R1		;RESTORE R1
+	CLC			;CLEAR CARRY AND RETURN
+	RETURN
+
+.SBTTL	RUN    - RUN NEXT SUBJOB
+
+;+
+; RUN
+;
+; THIS ROUTINE CALLS THE SUBJOB THROUGH THE DISPAT TABLE
+;
+;
+; INPUTS
+;	R5	= SUBJOB NUMBER*2
+;
+; CALL	RUN
+;
+; OUTPUT 
+;	AT JOB CALL TIME:
+;		R5 =  OUR SUBJOB NUMBER*2 (SHOULD NOT BE USED BY USER)
+;
+;	CARRY CLEAR IF SUCCESS
+;
+;	CARRY SET IF FAILURE
+;
+;-
+
+RUN::	MOV	#DSPAT,R1	;GET POINTER TO DISPAT TABLE
+	ADD	R5,R1		;ADD OUR JOB OFFSET
+	MOV	#UCNTXT+2,R0	;GET POINTER TO USER CONTXT TABLE (PAST LABEL)
+	ADD	R5,R0		;ADD OUR JOB OFFSET
+	MOV	R0,@#UCNTXT	;AND STASH THE ADDRES FOR THE USER
+	CALL	@(R1)		;JUMP THROUGH THE VECTOR
+	CLC			;FOR GOOD LUCK
+	RETURN			;JUST IN CASE SUBJOB RETURNS BY MISTAKE
+
+.SBTTL	STALL	- STALL A SUBJOB FOR 'N' SECONDS
+
+;+
+; STALL A JOB
+;
+; THIS IS THE MAIN RE-ENTRY POINT FOR A SUBJOB THAT IS DONE RUNNING.
+; THIS ROUTINE CALCULATES THE TIME AT WHICH A SUBJOB SHOULD
+; WAKE UP AGAIN, GIVEN THE NUMBER OF SECONDS IT DESIRES
+; TO SLEEP. THIS VALUE IS THEN INSERTED INTO THE SUBJOBS
+; JDB FOR THE 'ACTIVATOR' TO FIND
+;
+;
+;
+; INPUTS:
+;
+;	R5= NUMBER OF SECONDS TO SLEEP
+;		0  = DON'T SLEEP (RUN ME ASAP)
+;		-1 = DON'T RUN ME UNTIL SOMETHING HAPPENS (..MESAG)
+;
+; CALL	STALL
+;
+; OUTPUTS:
+;
+;	REGISTERS TRASHED
+;
+;-
+
+STALL::	MOV	R5,R3		;GRAB THE REQUEST
+	BEQ	20$		;ASAP, SO STUFF IT
+	CMP	#-1,R5		;IS IT A REQUEST FOR AN INFINITE SLEEP
+	BEQ	20$		; YES JUMP FOR A LONG SLEEP
+	CLC			;CLEAR CARRY FOR THE ROR
+	ROR	R5		;MAKE SECONDS TO SLEEP = SECONDS/2
+	ADC	R5		;PICK UP ANY LOOSE BITS
+	PUSH	R5		;SAVE R5
+	CALL	GETTIM		;GETTIME TO MIDNIGHT IN SECONDS/2
+	MOV	R5,R3		;SAVE IT IN R3
+	POP	R5		;RESTORE R5
+	CMP	R5,R3		;DO WE WANT TO WAKE BEFORE MIDNIGHT
+	BLO	10$		;YES ALL IS OK 
+	MOV	#1,R3		;NO, WANT TO WAKE AT OR AFTER MIDNIGHT
+	BR	20$		;SET TO WAKE AT 1 SEC BEFORE MIDNIGHT
+
+10$:	SUB	R5,R3		;TIME TO WAKE IS CURRENT TIME - SLEEP TIME
+20$:	CALL	GETJDB		;GET POINTER TO JOBS JDB
+	MOV	R3,SLEP(R5)	;STUFF IN SLEEP TIME
+	JMPX	NXTJOB		;AND WERE OFF FOR THE NEXT GUY (GAL?)
+
+.SBTTL	GETJDB	- GET POINTER TO JOBS JDB
+
+;+
+; GETJDB
+;
+; THIS ROUTINE GET A POINTER TO CURRENT JOBS JDB
+;
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL	GETJDB
+;
+; OUTPUTS:
+;
+;	R5 -> JDB
+;
+;	ALL OTHER REGISTERS PRESERVED
+;
+;-
+
+GETJDB::PUSH	<R0,R1>
+	MOV	#JDBS,R5	;GET POINTER TO FIRST JDB
+	MOV	SJOB,R0		;GET JOB NUMBER * 2
+	ASR	R0		;NOW JOB NUMBER
+	MUL	#JDBSIZ,R0	;GET OFFSET TO OUR JDB
+	ADD	R1,R5		;POINT THERE
+	POP	<R1,R0>
+	RETURN
+
+.SBTTL	GETLUN	- ASSIGN LUN
+.SBTTL	RETLUN	- DEASSIGN LUN
+
+;+
+; GETLUN
+; RETLUN
+;
+; THIS ROUTINE SELECTS OR RETURNS A LUN.
+;
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL	GETLUN
+; CALL	RETLUN
+;
+; OUTPUTS:
+;
+;	R5 = LUN NUMBER * 2
+;
+;	ALL OTHER REGISTERS PRESERVED
+;
+;-
+
+	.ENABL LSB
+GETLUN::PUSH	<R0,R1>
+	MOV	#16.,R0			;GET MAX NUMBER OF LUNS IN TBL
+	MOV	#LUNTBL,R1		;GET ADDR OF LUNTBL
+10$:	TSTB	(R1)+			;IS LUN INUSE ?
+	BEQ	20$			;NO SO BR
+	SOB	R0,10$			;YES SO TRY AGAIN IF MORE
+	BR	40$			;SORRY NONE AVAILABLE
+
+20$:	MOVB	SJOB,	-(R1)		;MARK LUN AS USED AND BY WHO
+	SUB	#LUNTBL,R1		;GET CHANNEL NUMBER
+	ASL	R1			;MAKE THAT CHANNEL TIME 2
+	MOV	R1,R5			;MOVE CHANNEL INTO R5
+	BR	30$			;SKIP OVER RETLUN
+
+RETLUN::PUSH	<R0,R1>
+	ASR	R5			;MAKE CHANNEL *2 INTO JUST CHAN #
+	CMP	R5,#15.			;ABOVE RANGE?
+	BHIS	40$			;SORRY TO HIGH (OR TOO LOW)
+	MOV	R5,R0			;GET A SPARE COPY
+	ADD	#LUNTBL,R0		;POINT TO LUN CELL
+	CMPB	SJOB,(R0)		;IS THIS GUY THE OWNER OF LUN
+	BNE	40$			;NO SO DONE RETURN IT
+	CALLX	CLRFQB			;CLEAR THE OLD FIRQB
+	MOVB	#RSTFQ,@#FIRQB+FQFUN	;SET UP FOR A RESET
+	ASL	R5			;CHANNEL NUMBER TIMES 2
+	MOVB	R5,@#FIRQB+FQFIL	;SET IN CHANNEL NUMBER
+	CALFIP				;DO IT AND IGNORE ERRORS
+	CLRB	(R0)			;MARK IT AS RETURNED
+
+30$:	TST	(PC)+			;CLEAR CARRY
+40$:	SEC				;OR SET CARRY
+	POP	<R1,R0>
+	RETURN				;AND RETURN
+	.DSABL LSB
+
+.SBTTL	GETDEV	- ALLOCATE A DEVICE
+.SBTTL	RETDEV	- DEALLOCATE A DEVICE
+.SBTTL	RETDAL	- DEALLOCATE ALL DEVICES OWNED BY USER
+
+;+
+; GETDEV::
+; RETDEV::
+; RETDAL::
+;
+; GETDEV CHECKS FOR LEGAL ACCESS TO DEVICE
+; RETDEV AND RETDAL UNDOES ACCESS LOCK TO DEVICE
+;
+;
+; INPUTS:
+;
+;	R0 ->	DEVICE NAME IN ASCII
+;	R1=	LENGTH
+;
+; CALL	GETDEV
+; CALL	RETDEV
+; CALL	RETDAL
+;
+; OUTPUTS:
+;
+;	C=0 IF SUCCESS, C=1 IF FAILURE
+;	ILLEGAL OR NO DEVICE ERROR RETURNED AS SUCCESS!
+;
+;	ALL REGISTERS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+	.SAVE
+	.DSECT
+DEVNXT:	.BLKW				;POINTER TO NEXT ENTRY OR ZERO
+DEVLNN:	.BLKW				;TOTAL LENGTH OF THIS BLOCKET
+DEVUSR:	.BLKW				;OWNERS SUBJOB NUMBER
+DEVDEV:	.BLKW				;FQDEV
+DEVDVN:	.BLKW				;FQDEVN
+DEVLEN:	
+	.RESTORE
+
+GETDEV::SAVREG
+	CALL	50$			;DO WE NEED TO SCAN THE LIST?
+	BCC	60$			;NO, ALL IS ALREADY OK
+	CALL	30$			;YES, SO GO SCAN
+	BCC	10$			;NOT IN LIST, GO LINK IT IN
+	CMP	SJOB,DEVUSR(R2)		;WAS IN LIST, DID USER OWN IT?
+	BEQ	60$			;YES SO HE CAN STILL USE IT
+	BR	70$			;NO SO RETURN ERROR NO ACCESS
+
+10$:	MOV	#DEVLEN,R1		;LENGTH OF DEV ALLOC BLOCK
+	GETBUF	R0,R1			;GO GET THE NEEDED SPACE
+	BCS	70$			;NO BUFFS PRETEND DEVICE BAD
+	CLR	DEVNXT(R0)		;SET NO POINTER TO NEXT
+	MOV	R1,DEVLNN(R0)		;AND REAL LENGTH OF THIS BLOCK
+	MOV	@#FIRQB+FQDEV,DEVDEV(R0);LOAD IN DEVICE TYPE
+	MOV	@#FIRQB+FQDEVN,DEVDVN(R0);AND UNIT NUMBER/REAL
+	MOV	SJOB,DEVUSR(R0)		;AND SAY IT BELONGS TO CURRENT USER
+	MOV	R0,(R3)			;AND FINALLY LINK TO TO PREVIOUS
+	BR	60$			;AND ALL IS WELL
+
+RETDEV::SAVREG
+	CALL	50$			;DO WE NEED TO SCAN THE LIST?
+	BCC	60$			;NO, ALL IS ALREADY OK
+	CALL	30$			;YES, SO GO SCAN
+	BCC	70$			;NOT IN LIST, RETURN ERROR
+	CMP	SJOB,DEVUSR(R2)		;WAS IN LIST, DID USER OWN IT?
+	BNE	70$			;NO SO RETURN ERROR NO ACCESS
+	MOV	(R2),(R3)		;YES, SO LINK IT OUT
+	MOV	DEVLNN(R2),R1		;GET LENGTH OF BLOCK TO RETURN
+	RETBUF	R2,R1			;AND RETURN THE BUFFER
+	BR	60$			;AND WE ARE DONE
+
+RETDAL::SAVREG
+	MOV	#DEVLST,R2		;ADDRES OF HEAD OF DEVICE LIST
+20$:	MOV	R2,R3			;SAVE ADDR OF PREVIOUS
+	MOV	(R2),R2			;AND GET ADDR OF NEXT ENTRY
+	BEQ	60$			;NO MORE THERE, RETURN CLC
+	CMP	SJOB,DEVUSR(R2)		;WAS IN LIST, DID USER OWN IT?
+	BNE	20$			;NO SO RETURN ERROR NO ACCESS
+	MOV	(R2),(R3)		;YES, SO LINK IT OUT
+	MOV	DEVLNN(R2),R1		;GET LENGTH OF BLOCK TO RETURN
+	RETBUF	R2,R1			;AND RETURN THE BUFFER
+	BR	20$			;AND SCAN FOR NEXT
+
+; ROUTINE TO SCAN DEVICE LIST FOR MATCH ON DEVICE NAME
+; RETURNS WITH CARRY SET IF ENTRY FOUND AND R2 WILL POINT TO ENTRY
+; AND R3 TO PREVIOUS NOTE THAT WE DO NOT VERYIFY USER FIELD
+; RETURNS WITH CARRY CLEAR IF ENTRY NOT FOUND
+
+30$:	MOV	#DEVLST,R2		;ADDRES OF HEAD OF DEVICE LIST
+40$:	MOV	R2,R3			;SAVE ADDR OF PREVIOUS
+	MOV	(R2),R2			;AND GET ADDR OF NEXT ENTRY
+	BEQ	60$			;NO MORE THERE, RETURN CLC
+	CMP	@#FIRQB+FQDEV,DEVDEV(R2);IS DEVICE TYPE THE SAME?
+	BNE	40$			;NO TRY NEXT
+	CMP	@#FIRQB+FQDEVN,DEVDVN(R2);ARE UNITS THE SAME
+	BNE	40$			;NO TRY NEXT
+	BR	70$			;YES SO RETURN SEC
+
+; ROUTINE TO FSS SPEC AND RETURN CARRY SET ONLY IF A VALID DEVICE
+; WAS PASSED AND IT WAS NOT A DISK, DEVICE SPEC IS RETURNED IN FIRQB
+
+50$:	CALLX	CLRFQX			;CLEAR FIRQB/XRB
+	MOV	R1,@#XRB+XRLEN		;LENGTH OF FILE SPEC
+	MOV	R1,@#XRB+XRBC		;LENGTH OF FILE SPEC
+	MOV	R0,@#XRB+XRLOC		;ADDRESS OF FILE SPEC
+	.FSS				;GO FSS THE DEVICE NAME
+	FQBERR	60$			;TWAS AN ERROR ALLOW THE DEVICE
+					; MIGHT BE A NET SPEC OR SOME THING
+	BIT	#BIT13,@#XRB+10		;WAS A DEVICE FOUND?
+	BEQ	60$			;NO SO IS LEGAL
+	CMPB	#DSKHND,@#XRB+14	;WAS DEVICE A DISK?
+	BEQ	60$			;YES SO SAY IT'S GOOD
+	CMPB	#NULHND,@#XRB+14	;WAS IT THE NULL DEVICE?
+	BNE	70$			;NO SO SET CARRY FOR SCAN
+60$:	TST	(PC)+
+70$:	SEC
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	GETBUF	- ALLOCATE A BUFFER
+.SBTTL	GTCBUF	- ALLOCATE AND ZERO A BUFFER
+
+;+
+; GETBUF::
+; GTCBUF::
+;
+; GETBUF ALLOCATES A BUFFER
+; GTCBUF ALLOCATES AND ZERO'S A BUFFER
+;
+;
+; INPUTS:
+;
+;	R1=	SIZE
+;
+; CALL	GETBUF
+; CALL	GTCBUF
+;
+; OUTPUTS:
+;
+;	R0=	ADDR
+;	R1=	SIZE
+;	C=0 IF SUCCESS, C=1 IF FAILURE
+;
+;	ALL OTHER REGISTERS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+GETBUF::PUSH	R2		;SAVE R2
+	CLR	R2		;SET UP TO GET IT
+	CALL	GETSPACE	;GO GET IT
+	POP	R2		;RESTORE R2
+10$:	RETURN			;AND BACK WE GO
+
+GTCBUF::CALL	GETBUF		;GO GET THE BUFFER
+	BCS	10$		;RETURN ANY ERRORS
+	.CALLR	CLRBUF		;AND CLEAR IT OUT
+
+	.DSABL	LSB
+
+.SBTTL	RETBUF	- DE-ALLOCATE A BUFFER
+.SBTTL	CLRBUF	- ZERO A BUFFER
+
+;+
+; RETBUF
+; CLRBUF
+;
+; RETBUF DE-ALLOCATES A BUFFER
+; CLRBUF ZERO'S A BUFFER
+;
+;
+; INPUTS:
+;
+;	R0=	ADDR
+;	R1=	SIZE
+;
+; CALL	RETBUF
+; CALL	CLRBUF
+;
+; OUTPUTS:
+;
+;
+;	ALL REGISTERS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+CLRBUF::TST	CIS		;DO WE HAVE THE CIS OPTION?
+	BNE	CISCLR		;YES SO GO DO IT THE CIS WAY
+	PUSH	R0		;SAVE R0
+	PUSH	R1		;SAVE R1
+	TST	R1		;CHECK FOR ZERO LENGTH BUFFER
+	BEQ	20$		;ZERO LENGTH SO WE ARE DONE
+10$:	CLRB	(R0)+		;CLEAR IT ALL OUT
+	SOB	R1,10$		;TILL DONE
+20$:	POP	R1		;RESTORE R1
+	POP	R0		;RESTORE R0
+	CLC			;SET SUCCESS AND
+	RETURN			;BACK WE GO
+
+RETBUF::PUSH	R0		;SAVE R0
+	CALL	GETSPACE	;GO PUT IT BACK
+	POP	R0		;RESTORE R0
+	RETURN			;AND BACK WE GO
+
+	.DSABL	LSB
+
+.SBTTL	MOVSTR	- COPY A STRING
+
+;+
+; MOVSTR:
+;
+; RETBUF COPIES SOURCE STRING INTO DESTINATION STRING
+;
+;
+; INPUTS:
+;
+;	R0=	SOURCE ADDRESS
+;	R1=	DESTINATION ADDRESS
+;	R2=	LENGTH
+;
+; CALL	MOVSTR
+;
+; OUTPUTS:
+;
+;
+;	ALL REGISTERS PRESERVED
+;
+;
+;-
+
+	.ENABL	LSB
+
+MOVSTR::TST	R2		;ANY THING TO COPY?
+	BEQ	20$		;NOPE, THAT SURE WAS EASY
+	SAVREG
+	TST	CIS		;IS CIS PRESENT?
+	BNE	CISMOV		;YES SO DO IT THE CIS WAY
+10$:	MOVB	(R0)+,(R1)+	;COPY THE BYTES
+	SOB	R2,10$
+20$:	RETURN			;NOW WE ARE DONE
+
+	.DSABL	LSB
+
+.SBTTL	CIS	- COMMERCIAL INSTRUCTION SET UTILITIES
+
+;+
+; CISCLR
+; CISMOV
+;
+;	CIS SPECIAL UTILITY ROUTINES.  CLEAR AND MOVE
+;
+; INPUTS:
+;
+; CALLR	<ROUTINE NAME>
+;
+; OUTPUTS:
+;
+;
+;	ALL REGISTERS PRESERVED FOR CISCLR
+;
+;	R4 IS DESTROYED IN CISMOV
+;
+;
+;-
+
+	.ENABL	LSB
+
+CISCLR:	SAVREG
+	MOV	R1,R2		;SET DESTINATION SIZE
+	MOV	R0,R3		;AND DESTINATION ADDRESS
+	CLR	R0		;SORCE IS ZERO LENGTH
+	BR	10$		;AND GO MOVE THE 'NULL' STRING
+
+CISMOV:	MOV	R1,R3		;R3 = DESTINATION ADDR
+	MOV	R0,R1		;R1 = SOURCE ADDR
+	MOV	R2,R0		;R0 = LENGTH
+10$:	CLR	R4		;FILL CHARACTER IS ZERO
+	MOVC			;AND COPY THE STRING
+	CLC			;SET SUCCESS AND
+	RETURN			;BACK WE GO
+
+	.DSABL	LSB
+
+.SBTTL	CMPSTR	- COMPARE 2 COUNTED ASCII STRINGS FOR MATCH
+
+;+
+;
+; CMPSTR:
+;
+;
+; INPUTS:
+;
+;		R1 -> COUNTED ASCII STRING 1 (MAY CONTAIN WILD CHARS)
+;		R2 -> COUNTED ASCII STRING 2 (MAY CONTAIN WILD CHARS)
+;
+; CALL:
+;	JSR	PC,CMPSTR
+;
+;		THE TWO STRINGS ARE COMPARED FOR INDENTICAL NESS
+;		THIS ROUTINE IS NOT CASE SENSITIVE
+;		THE CHAR ? IS TREATED AS A WILD CARD CHARACTER
+;		TRAILING SPACES AND NULLS MATCH
+;
+; BACK:
+;
+;
+;		ALL REGISTERS PRESERVED
+;
+;		C=0 STRINGS MATCH
+;		C=1 STRINGS DO NOT MATCH
+;
+;-
+
+CMPSTR::SAVREG
+
+	CLR	R3
+	BISB	(R0)+,R3	;PUT LENGTH OF STRING ONE INTO R3
+	MOVB	(R1)+,R4	;PUT LENGTH OF STRING TWO INTO R4
+
+	CMPB	R3,R4		;SEE IF STRINGS ARE THE SAME LENGTH
+	BNE	50$		;NOT THE SAME LENGTH, SO FAIL
+
+10$:	MOVB	(R0)+,R4	;R4=CHARACTER FROM STRING 1
+	MOVB	(R1)+,R5	;R5=CHARACTER FROM STRING 2
+
+	CMPB	#'?,R4		;IS THIS THE WILD CHAR CHAR?
+	BEQ	40$		;YES
+	CMPB	#'?,R5		;IS THIS THE WILD CHAR CHAR?
+	BEQ	40$		;YES
+
+	CMPB	R4,#'A+40	;IS CHAR BELOW THE LOWER CASE CHARS?
+	BLO	20$		;YES
+	CMPB	R4,#'Z+40	;IS CHAR ABOVE THE LOWER CASE CHARS?
+	BHI	20$		;YES
+	BICB	#40,R4		;NO, SO CONVERT TO UPPPER CASE
+20$:	CMPB	R5,#'A+40	;IS CHAR BELOW THE LOWER CASE CHARS?
+	BLO	30$		;YES
+	CMPB	R5,#'Z+40	;IS CHAR ABOVE THE LOWER CASE CHARS?
+	BHI	30$		;YES
+	BICB	#40,R5		;NO, SO CONVERT TO UPPPER CASE
+30$:	CMPB	R4,R5		;NOW SEE IF THEY MATCH
+	BNE	50$		;NO, SO ERROR EXIT
+40$:	SOB	R3,10$		;AND ON TO NEXT,IF ANY, ELSE SUCCESS
+
+	TST	(PC)+		;CLEAR CARRY AND EXIT
+50$:	SEC			;SET CARRY AND EXIT
+	RETURN
+
+.SBTTL	GETSPACE - ALLOCATE/DEALLOCATE DYNAMIC DATA BLOCKS
+
+;+
+; GETSPACE - ALLOCATE/DEALLOCATE DYNAMIC DATA BLOCKS
+;
+; THIS SUBROUTINE USES THE LIBRARY ROUTINES $RQCB AND $RLCB
+; TO ALLOCATE AND DEALLOCATE DYNAMIC MEMORY BLOCKS.
+;
+; INPUTS:
+;	FOR REQUEST OF SPACE
+;		R1 = NUMBER OF BYTES REQUESTED or
+;		     NEG OF NUMBER OF BYTES REQUESTED FOR FIRST FIT
+;		R2 = 0
+;
+;	FOR RETURN OF SPACE
+;		R1 = NUMBER OF BYTES BEING RETURNED
+;		R2 ->BLOCK BEING RETURNED
+;
+; CALL	GETSPACE
+;
+; OUTPUTS:
+;	FOR REQUEST OF SPACE
+;		R0 ->ALLOCATED BLOCK
+;		R1 = ACTUAL SIZE OF BLOCK
+;		R2 DESTROYED
+;
+;	FOR RETURN OF SPACE
+;		R0,R1,R2 DESTROYED
+;
+;	ALL OTHER REGISTERS PRESERVED
+;
+;	C=0 SUCCESS	C=1 FAILURE
+;-
+
+	.ENABL	LSB
+
+	.MCALL	GSA$
+
+;	$SETGSA	#GETSPACE		; SET UP POINTER FOR EXTRA BUFFER POOL
+	GSA$	GETSPACE
+
+GETSPACE::MOV	#XBUFF,R0		; ALWAYS USE OUR POOL
+	TST	R2			; IS THIS A GET OR RETURN?
+	BNE	40$			; <>0, IT'S A RETURN
+	TST	TSKSIZ			; HAS XBUFF BEEN INITIALIZED?
+	BEQ	10$			; YES, SO TRY FOR NEXT GETSPACE
+	CLR	TSKSIZ			; ASSUME SUCCESS
+	PUSH				; INDICATE NO INCREMENT DESIRED
+	CALL	EXPAND			; RELEASE TO END OF 1K-BOUNDARY
+10$:	PUSH	<R0>			; SAVE LISTHEAD
+	CALLX	$RQCB			; REQUEST MORE SPACE
+	BCS	30$			; NO SPACE LEFT IN POOL, TRY XBUFF
+	TST	(SP)+			; TRASH SAVED LISTHEAD, CLEAR CARRY
+20$:	RETURN				; DONE
+
+30$:	POP	<R0>			; RESTORE LIST HEAD
+	CMP	R0,#XBUFF		; HAVE WE TRIED XBUFF YET?
+	BEQ	MORBUF			; YES, SO GO TRY TO GET MORE POOL
+	MOV	#XBUFF,R0		; ROOM IN XBUFF?
+	BR	10$			; MAYBE, SO GO TRY AGAIN
+
+40$:	MOV	#XBUFF,R0		; ALWAYS RETURN SPACE TO XBUFF
+	CALLRX	$RLCB			; RELEASE SPACE
+
+MORBUF: PUSH	<#4000>			; EXPAND BY A 1K INCREMENT
+	CALL	EXPAND			;
+	BCS	20$			; CAN'T GET IT, ABORT
+	BR	10$			; TRY AGAIN
+
+EXPAND:	PUSH	<R0,R1>			; SAVE LISTHEAD,# BYTES
+	MOV	TSKSIZ+2,R2		; GET ADDR OF THE END OF TASK
+	MOV	R2,R1			; AND A COPY
+	ADD	#<4000-1>,R1		; ROUND TO 1K
+	BIC	#<4000-1>,R1		; TRIM TO 1K
+	MOV	6(SP),R0		; IS THIS AN INCREMENT?
+	BEQ	50$			; NO, SO JUST UPDATE
+	ADD	R0,R1			; ADD 1K (IF DESIRED)
+	PUSH	<R1>			; SAVE OUR SIZE TO BE
+	ASH	#-11.,R1		; AND TURN IT INTO A NUMBER OF K-WORDS
+	BIC	#^C<40-1>,R1		; TRIM OFF AND BITS THAT APPEARED
+	MOV	R1,@#XRB		; PUT IT INTO THE XRB
+	POP	<R1>			; RESTORE OUR SIZE TO BE
+	.CORE				; AND ASK FOR THE EXTEND CORE
+	NEGB	@#FIRQB			; CHECK FOR ERRORS AND SET CARRY
+	BCS	60$			; RETURN ERROR TO USER
+50$:	MOV	R1,TSKSIZ+2		; UPDATE OUR TASK SIZE
+	SUB	R2,R1			; GET SIZE OF EXTEND (IN BYTES)
+	MOV	#XBUFF,R0		; SET LIST HEAD POINTER
+	CALLX	$RLCB			; AND RETURN NEW SPACE TO XBUFF
+60$:	POP	<R1,R0>			;
+	MOV	(SP)+,(SP)		; TRASH ORIGINAL INCREMENT
+	RETURN
+
+	.SAVE
+	.PSECT	IMPURE
+
+	.EVEN
+XBUFF::	.WORD	0,0			; POINTER TO NEXT FREE BLOCK OR 0
+TSKSIZ::.LIMIT				; OUR LOW AND HIGH VIRTUAL ADDR
+
+	.RESTOR
+
+	.DSABL	LSB
+
+.SBTTL	SETROK	- Set RUN OK bit in Current job's JDB STS
+
+;+
+;
+; SETROK:
+;
+;	Set current job's RUN OK bit.  When this bit is set in a JDB, the
+;	corresponding job is made runable whenever the package is waken up
+;	and 1) nobody's timers has expired, 2) no messages have been received.
+;
+; INPUTS:
+;
+;	None
+;
+; CALL:
+;
+;	JSR	PC,SETROK
+;
+; BACK:
+;
+;	The RUNOK bit set in the calling jobs JDB
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+SETROK::
+	PUSH	R5
+	CALL	GETJDB			;Get the current jobs JDB
+	BIS	#RUNOK,JDBSTA(R5)	;Set the RUN OK bit
+	POP	R5
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	CLRROK	- Clear RUN OK bit in Current job's JDB STS
+
+;+
+;
+; CLRROK:
+;
+;	Clear current job's RUN OK bit.
+;
+; INPUTS:
+;
+;	None
+;
+; CALL:
+;
+;	JSR	PC,CLRROK
+;
+; BACK:
+;
+;	The RUNOK bit cleared in calling jobs JDB
+;
+;	ALL REGS PRESERVED
+;
+;-
+
+	.ENABL	LSB
+
+CLRROK::
+	PUSH	R5
+	CALL	GETJDB			;Get the current job's JDB
+	BIC	#RUNOK,JDBSTA(R5)	;Clear the RUN OK bit
+	POP	R5
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	SETTRP	- SETUP TRAP HANDLER
+.SBTTL	CLRTRP	- CLEAR TRAP HANDLER
+
+;+
+; SETTRP/CLRTRP
+;
+;
+; SETTRP SETS UP THE TRAP HANDLER TO
+; INTERCEPTS UNECPECTED SST PROGRAM TRAPS
+; AND SET UP TO DO THE CALL TO THE CRASHER
+;
+; CLRTRP CLEARS THE TRAP HANDLER
+; 
+;
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL SETTRP/CLRTRP
+;
+;
+; OUTPUTS:
+;
+;
+;	REGISTERS PRESERVED
+;
+;-
+
+; STACK LOOKS AS FOLLOWS AFTER A MEMORY PROTECT VIOLATON
+;
+;	(SP)->	INSTRUCTION BACKUP REGISTER (SR1)
+;		VIRTUAL PC OF FAULTING INSTRUCTION (SR2)
+;		MEMORY PROTECT STATUS REGISTER (SR0)
+;		(PC) AT TIME OF TRAP
+;		(SP) AT TIME OF TRAP
+
+; STACK LOOKS AS FOLLOWS AFTER AN EMT OR TRAP
+;
+;	(SP)->	INSTRUCTION OPERAND
+;		(PC) AT TIME OF TRAP
+;		(SP) AT TIME OF TRAP
+
+; STACK LOOKS AS FOLLOWS AFTER ALL OTHER TRAPS
+;
+;	(SP)->	(PC) AT TIME OF TRAP
+;		(SP) AT TIME OF TRAP
+
+	.MCALL	SVTK$S,SCCA$S
+
+SETTRP:	SVTK$S	#TRPTBL,#8.		;SET UP TRAP HANDLER
+	.IIF	NDF $$TEST	SCCA$S	#STACK0	;SET UP CONTROL-C HANDLER
+	CLC
+	RETURN
+
+CLRTRP:	SVTK$S	#0,#0.			;CLEAR TRAP HANDLER
+	.IIF	NDF $$TEST	SCCA$S	;CLEAR CONTROL-C HANDLER
+	CLC
+	RETURN
+
+TRPTBL:	.WORD	STACK0			;ODD ADDRESS TRAP
+	.WORD	STACK3			;MEMORY PROTECT TRAP
+	.WORD	STACK0			;T BIT/BPT TRAP
+	.WORD	STACK0			;IOT TRAP
+	.WORD	STACK0			;RESERVED INSTRUCTOIN TRAP
+	.WORD	STACK1			;NON-RSX EMT TRAP
+	.WORD	STACK1			;TRAP TRAP
+	.WORD	STACK0			;FIS TRAP
+
+STACK3:	CMP	(SP)+,(SP)+		;POP 2 WORDS FROM STACK (+ 1 BELOW)
+STACK1:	TST	(SP)+			;POP 1 WORD FROM STACK
+STACK0:	POP	(SP)			;DISCARD PS, LOAD PC INTO FIRST CELL 
+					;ON STACK
+	CALL	CLRTRP			;INHIBIT ANY TRAPS WHILE DUMP IS IN
+					;PROGRESS
+	.BR	CRASH			;BR TO CRASH, (LOOKS TO CRASH LIKE IT
+					;WAS CALLED FROM OFFENDING INSTRUCTOIN
+
+.SBTTL	CRASH	- CRASH A JOB (NEVER TO BE RUN AGAIN)
+
+;+
+; CRASH
+;
+; THIS ROUTINE MARKS A JOB AS CRASHED
+; AND WRITES A PMD AS A .TMP FILE
+;
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL	CRASH
+;
+; OUTPUTS:
+;
+;
+;	REGISTERS TRASHED
+;
+;-
+
+CRASH::	CALLX	PMD		;GO WRITE A CRASH DUMP
+SHUTUP::MOV	SJOB,R5		;R5 = THE SUBJOB NUMBER TIMES 2
+	CALLX	SKDCRA		;AND THEN CRASH THE JOB
+	CALLRX	SETTRP		;RE-ENABLE THE TRAP HANDLER
+
+.SBTTL	CHKFRE	- WALK THE FREE BUFFER LIST AND VERIFY IT
+
+;+
+; CHKFRE
+;
+; WALK AND VERIFY THE FREE LIST
+; THIS IS A DEBUGING ROUTINE, IT MAKES USE OF ALL KNOW ASSUMPTIONS ABOUT
+; THE STRUCTURE OF THE FREE LIST, AND ENSURES THAT THE LIST IS VALID
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL	CHKFRE
+;
+; OUTPUTS:
+;
+;
+;	REGISTERS PRESERVED
+;
+;-
+
+	.IF	DF,$DEBUG		;ONLY WANT THIS IF DEBUGGING
+
+CHKFRE::PUSH	<R1,R2,R3>		;SAVE A WORK REG OR 2
+	CLR	R1
+	MOV	#XBUFF,R2	;GET NEXT ENTRY
+10$:	MOV	R2,R1		;MAKE CURRENT THE OLD
+	MOV	(R2),R2		;AND NEXT THE NEW
+	BEQ	20$		;END OF LIST, ALL IS WELL
+	BIT	#1!3,R2		;IS VALUE ODD? OR USE LOW 2 BITS?
+	BNE	30$		;ERROR IF VALUE WAS ODD OR USED LOW 2 BITS
+	CMP	R2,R1		;IS NEW GREATER THE OLD?
+	BLOS	30$		;NO, LIST SUPPOSED TO BE SORTED
+	CMP	R2,TSKSIZ+2	;DOES ENTRY START ABOVE OUT HIGH END?
+	BHIS	30$		;YES, ERROR
+	MOV	R2,R3		;GET SCRATCH COPY OF ADDR
+	ADD	2(R2),R3	;ADD IN LENGTH
+	CMP	R3,TSKSIZ+2	;IS THAT ABOVE OUR HIGH END?
+	BHI	30$		;YES, ERROR
+	TST	2(R2)		;ANY LENGTH TO THIS ENTRY?
+	BEQ	30$		;NO, ERROR, NO ZERO LENGTH ENTRIES
+	BIT	#3,2(R2)	;IS LENGTH IN INTERVALS OF 4?
+	BNE	30$		;NO, ERROR
+	BR	10$		;AND GO LOOK FOR MORE
+
+20$:	TST	(PC)+		;SUCCESS
+30$:	SEC			;ERROR EXIT !!!!
+	POP	<R3,R2,R1>	;RESTORE REGS
+	RETURN
+
+	.ENDC				;$DEBUG
+
+.SBTTL	FILL	- FILL BUFFER WITH CHAR
+
+;+
+; FILL:
+;
+;		Fill buffer with character.
+;
+; Input:	R0 = fill character
+;		R1 -> dst buffer
+;		R2 =  no. chars to fill
+;
+; Call:		JSR	PC,FILL
+;
+; Return:	Dst buffer filled with char
+;		R1 updated, R2 = 0
+;		All other regs preserved
+;
+;-
+	.ENABL	LSB
+
+FILL::	TST	R2			;any chars to fill?
+	BLE	20$			;no, so exit
+10$:	MOVB	R0,(R1)+		;yes, copy char into next byte
+	SOB	R2,10$			;  until done
+20$:	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	DATA	- COMMON PURE DATA
+
+	.SAVE
+	.PSECT	DATA
+
+	.EVEN
+CRLF::	.BYTE	CR$CR,CR$LF
+	.EVEN
+
+	.RESTOR
+
+.SBTTL	DEFJOB	- DEFINE PARAMETERS FOR NULJOB
+
+	.SAVE
+	.PSECT	NAMES
+	NAMPT2 = .+2
+	.RESTORE
+
+	SUBJOB	PBS...,NULJOB
+
+	.END	START
+

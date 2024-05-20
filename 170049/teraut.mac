@@ -1,0 +1,350 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+TITLE	TERAUT,<Autobaud Subroutines>,0A,10-MAY-91,KPH/DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	TERAUT EDIT HISTORY
+
+;+
+;
+;  000  KPH  26-Jun-87	Creation - extract from TTDVR.MAC
+;  001	DRP  25-NOV-87	Send a BELL character when the speed is detected
+;			on an autobaud line.
+;  002	DRP  02-Mar-88	Don't do autobaud checking for disabled keyboards
+;			in the level three processing.
+;  003	DRP  08-Mar-88	Add PKs changes and autobaud queue
+;-
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	TERAUT		;Autobaud code
+
+	ORG	SPDCLR		;Table of bit masks to clear existing speed
+	ORG	SPDTBL		;Pointer to speed vectors for each interface
+
+	ORG	TERAUT
+
+.SBTTL	Define our .MACROs
+
+.MACRO	SPDTBL	INTFAC,BITCLR
+$$$$$$	=	.
+.SAVE
+	.PSECT	SPDCLR
+.=SPDCLR+TT'INTFAC'11
+	.WORD	^C<BITCLR>
+	.PSECT	SPDTBL
+.=SPDTBL+TT'INTFAC'11
+	.WORD	$$$$$$
+.RESTORE
+.ENDM	SPDTBL
+
+.SBTTL	AUTTMR	Autobaud once a second service
+
+;+
+; AUTTMR - Autobaud once a second service
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;
+;	CALL	AUTTMR
+;
+;	R2 =  Undefined
+;	R3 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;
+; This code handles autobaud once a second service. It checks to see
+; if the line is doing autobaud. If so, it will count down the three
+; second timer which is used to reset autobaud terminals to default
+; state.
+;-
+
+	TMPORG	AUTDSP,0
+	 .WORD	AUTTMR
+	UNORG
+
+AUTTMR:	SPLC	5		;Lock out terminal interrupts
+	BITB	#TTTIM1!TTTIM2,TTCTRL(R1) ;;3-second timer ticking	;003
+	BEQ	10$		;;No					;003
+	SUB	#TTTIM1,TTCTRL(R1) ;;Yes, count it down			;003
+.ASSUME	TTCTRL&1 EQ 0							;003
+	BITB	#TTTIM1!TTTIM2,TTCTRL(R1) ;;Now finished counting?	;003
+	BNE	10$		;;No, skip				;003
+	MOV	R3,-(SP)	;;YES, SO SAVE THE CSR POINTER		
+	CLR	R3		;;SET SPEED=9600			
+	BICB	#TTLOW!TTVERF,TTFCNT(R1) ;AND BACK TO DEFAULT STATE	
+	CALL	AUTOSP		;;AND SET THE SPEED			
+	MOV	(SP)+,R3	;;RESTORE THE CSR POINTER		
+10$:	SPLC	3		;AND BACK DOWN AGAIN			;003
+	RETURN			;All done
+
+.SBTTL	AUTO-BAUD DETECTION SERVICE				
+
+;+
+; AUTOBD - AUTO-BAUD DETECTION FOR DH11, DZ11,
+;	   DHV11 AND DHU11 SUBLINES
+;
+;	R0 =  KB # * 2
+;	R1 -> DDB
+;	R2 =  Character and framing error/overflow bits
+;
+;	Priority is PR5
+;
+;	CALL	AUTOBD
+;
+;	R2 =  Undefined
+;	R3 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;-
+
+.ENABL	LSB
+
+	TMPORG	AUTDSP,2
+	 .WORD	AUTOBD
+	UNORG
+
+AUTOBD:	BIT	#TIC1!TIC2!TIC3,TTCAPB(R1) ;;Is our tick timer running?
+	BNE	70$		;;Yes, ignore characters right now
+	BISB	#TTTIM1!TTTIM2,TTCTRL(R1) ;;SET OUR 3-SECOND TIMER 
+	BIC	#^C<20177>,R2	;;ONLY WANT 7 BITS & FRAME BIT	
+	BITB	#TTVERF,TTFCNT(R1) ;;ARE WE VERIFYING?		
+	BNE	VERIFY		;;YES, SO GO VERIFY SPEED	
+	BITB	#TTLOW,TTFCNT(R1) ;;SHOULD WE GO TO LOSYNC?	
+	BNE	LOSYNC		;;Yes					;003
+
+HISYNC:	TST	R2		;;IS THIS A 0?			
+	BNE	10$		;;NOPE				
+	MOV	#20,R3		;;SPEED=1200			
+	BR	60$		;;SO, SET IT TO 1200		
+
+10$:	CMP	R2,#020000	;;IS THIS A 0 WITH FRAMING ERROR? 
+	BNE	30$		;;NOPE				
+	BISB	#TTLOW,TTFCNT(R1) ;;YES, SET LOSYNC FLAG	
+20$:	CLR	R3		;;SET SPEED TO 600 OR 9600	
+	CALL	AUTOSP		;;SET IT			
+	BR	70$		;;AND EXIT				
+
+30$:	CMPB	R2,#160		;;IS THIS A 160?		
+	BNE	40$		;;NOPE				
+	MOV	#6,R3		;;YES. SPEED=1800 OR 110	
+	BR	60$		;;AND SET IT.			
+
+40$:	MOV	#AUTOCH,R5	;;GET LIST OF VALID CHARS.	
+	CLR	R3		;;CLR OUR COUNTER		
+50$:	CMP	(R5)+,R2	;;IS IT A MATCH?		
+	BEQ	60$		;;OH BOY, YES A MATCH!		
+	TST	(R3)+		;;POINT TO NEXT SPEED		
+	TST	(R5)		;;IS THIS THE END?		
+	BPL     50$		;;NOPE CONTINUE CHECKING...	
+	BICB	#TTLOW,TTFCNT(R1) ;;HISYNC IS ALWAYS THE DEFAULT 
+	BR	70$
+
+60$:	CALL	AUTOSP		;;SET THE SELECTED SPEED	
+	BISB	#TTVERF,TTFCNT(R1) ;;SET FOR VERIFY NEXT ENTRY	
+70$:	RETURN			;;And we're done
+
+LOSYNC:	CMP	R2,#020000	;;IS THIS A 0 WITH FRAMING ERROR? 
+	BNE	30$		;;NO, SO DO SOME CHARACTER CHECKS 
+	BICB	#TTLOW,TTFCNT(R1) ;;YES, SO ENTRY=HISYNC 
+	BR	20$		;;ENSURE NEXT CHAR. SPEED IS CORRECT 
+
+
+VERIFY:	BICB	#TTVERF,TTFCNT(R1) ;;WE ONLY COME HERE ONCE	
+	CMP	R2,#015		;;IS IT THE SYNC. CHAR. (<CR>)? 
+	BNE	80$		;;NO, SO CHANGE HISYNC/LOSYNC FLG 
+	BICB	#TTLOW,TTFCNT(R1) ;;YES, SET DEFAULT TO HISYNC 
+	CALLMI	CLRTER,KBDAP5	;;CLEAR THE TERMINAL BUFFERS 		
+	MOV	#007,R2		;;Setup to send a BELL character	;001
+	CALLX	CHOUTE		;; and send it				;001
+	MOV	#15,R2		;;Say he typed a carriage return	
+	CALLRX	TTIN09		;;And exit providing that as data
+
+80$:	BITB	#TTLOW,TTFCNT(R1) ;;IS ENTRY FROM LOSYNC?	
+	BEQ	90$		;;NO, IT'S HI SO MAKE IT LOSYNC 
+	BICB	#TTLOW,TTFCNT(R1) ;;IT'S LO SO MAKE IT HISYNC	
+	BR	70$		;;AND EXIT
+
+90$:	BISB	#TTLOW,TTFCNT(R1);;SET NEXT ENTRY=LOSYNC	
+	BR	70$		;;AND EXIT			
+
+.DSABL	LSB
+
+;+
+;  AUTOSP - SET SELECTED SPEED FOR AUTO-BAUD 
+;
+;	R0 =	KB# * 2
+;	R1 ->	DDB 
+;	R2 =	RECEIVED CHARACTER
+;	R3 =	OFFSET INTO SPEED TABLES
+;	
+;	CALL	AUTOSP
+;
+;	R4 =	UNDEFINED
+;	R5 =	UNDEFINED
+;-
+
+.ENABL	LSB
+
+AUTOSP::BITB	#TTLOW,TTFCNT(R1) ;;COMING FROM LOSYNC?			
+	BEQ	10$		;;NO, SO BYPASS LOSYNC SPEC. CASE 
+	ADD	#10,R3		;;LOSYNC SPEEDS BEGIN AT OFFSET 10 
+10$:	MOV	R2,-(SP)	;;SAVE THE CHARACTER		
+	MOV	R3,-(SP)	;;SAVE OFFSET			
+20$:	MOV	R3,R5		;;SAVE OFFSET			
+	MOV	CSR.KB(R0),R3	;;GET CSR POINTER		
+	MOV	TTPARM(R1),R2	;;AND GET THE PARAMETER WORD	
+	CMPB	#1,(SP)		;;DO WE WANT TO SET THIS AS PERM? 
+	BEQ	30$		;;YES WE DO			
+	TSTB	DDJBNO(R1)	;;IS THERE A JOB?		
+	BEQ	40$		;;NO, SO OKAY TO CONTINUE	
+30$:	MOV	#TTRING,R3	;;ELSE, GET PERM. LIST OFFSET	
+	ADD	R1,R3		;;ADD IN DDB ADDRESS		
+	MOV	(R3),R2		;;GET PERMANENT TTPARM		
+40$:	MOVB	TTINTF(R1),R4	;;Get interface type code
+	BIC	SPDCLR(R4),R2	;;Now clear out old speed
+	MOV	SPDTBL(R4),R4	;;Get pointer to base speed
+	ADD	R5,R4		;;Now point to speed itself
+	BIS	(R4),R2		;;And get the new speed
+	CMPB	#1,(SP)		;;SHOULD THIS BE SET AS PERM?	
+	BEQ	50$		;;YES				
+	TSTB	DDJBNO(R1)	;;ALREADY A JOB?		
+	BEQ	60$		;;NO, SO CONTINUE		
+50$:	MOV	R2,(R3)		;;RETURN NEW PERMANENT TTPARM	
+	TST	(SP)+		;;CLEAN UP THE STACK		
+	BR	80$		;;ALL DONE			
+
+60$:	MOV	R2,TTPARM(R1)	;;RETURN NEW PARAMETER WORD	
+	CALLX	SETPRM		;;AND SET SPEED			
+	MOV	R1,R4		;;Copy the DDB ->			;003
+	ADD	#DDLINK,R4	;;R4 -> DDB @ DDLINK			;003
+	MOV	AUTLST,(R4)	;;Link in this DDB			;003
+	MOV	R4,AUTLST	;; at the head of the list		;003
+	BIS	#TIC3!TIC2,TTCAPB(R1) ;;SET REC. OFF TIMER	
+	L3QSET	QKBTIC,WAIT2T	;;START REC. DELAY L3Q PROCESS	
+70$:	MOV	(SP)+,R3	;;DO WE WANT TO SET PERM. SPEED? 
+	BNE	80$		;;NOPE				
+	MOV	#1,-(SP)	;;NEXT TIME AROUND LET'S LEAVE	
+	BR	20$		;;AND SET  AS THE PERM. SPEED	
+
+80$:	MOV	(SP)+,R2	;;RESTORE CHARACTER		
+	RETURN		
+           
+GLOBAL	<CSR.KB,WAIT2T,AUTLST>						;003
+
+.DSABL	LSB
+
+.SBTTL	AUTO-BAUD - LEVEL THREE PROCESSING			
+                                 
+;+         
+;	Welcome to the Auto-baud L3Q processor. Once we set the		;003
+;	auto-baud detected speed for a line, we place the DDB for	;003
+;	that line on the auto-baud queue list and set a suppression	;003
+;	timer. The suppression timer is used to shut the receiver off	;003
+;	for 2*6 tics to avoid possible noise generated from the change	;003
+;	in speed. This L3Q processing routine performs the count down	;003
+;	of the suppression timer. If the timer for a DDB is expired	;003
+;	that DDB is removed from the queue list. After each DDB has	;003
+;	been serviced, we reset the L3Q bits to re-enter this routine	;003
+;	if the queue is not empty.
+;									;003
+;	Note: Entries in the queue list point to the DDB @ DDLINK	;003
+;-
+           
+.ENABL	LSB
+
+	L3QENT	QKBTIC,,KINAP5
+
+	MOV	#AUTLST,R4	;R4 -> at the auto-baud queue list	;003
+10$:	MOV	(R4),R1		;Get an entry (R1 -> DDB @ DDLINK)	;003
+	BEQ	30$		;Zero entry, then we're done		;003
+	SUB	#TIC1,TTCAPB-DDLINK(R1) ;Count down			;003
+	BIT	#TIC1!TIC2!TIC3,TTCAPB-DDLINK(R1) ;Still counting down?	;003
+	BNE	20$		;Yes					;003
+	MOV	(R1),(R4)	;No, delink this one from the queue	;003
+	CLR	(R1)		; clear out the link word		;003
+	BR	10$		;  and try another entry		;003
+
+20$:	MOV	R1,R4		;Make the current entry previous	;003
+	BR	10$		; and try another entry			;003
+
+30$:	TST	AUTLST		;Anything remaining on the queue?	;003
+	BEQ	40$		;No, then there's no need to come back	;003
+	L3QSET	QKBTIC,WAIT2T	;Yes, tick away				;003
+40$:	JMPX	RTI3		;Exit level 3 processing		;003
+
+GLOBAL	<WAIT2T,KINAP5>							;003
+.DSABL	LSB
+
+.SBTTL	AUTO-BAUD CHARACTER AND SPEED TABLES			
+           
+AUTOCH:	.WORD	000015		;CARRIAGE RETURN 9600/600	
+	.WORD	000146		;'f'		 4800/300	
+	.WORD	020170		;'x' FRAMING ERR 2400/150	
+	.WORD	000140		;'`' 		 1800/110	
+	.WORD	177600		;END OF TABLE			
+
+	TMPORG	SPDCLR
+	.BLKW0	TTINTM		;Initialize clear table
+
+	TMPORG	SPDPTR
+	.BLKW0	TTINTM		;Initialize pointer table
+
+	UNORG
+
+	SPDTBL	DH,140077	;Set up speed table for DH11s
+
+	.WORD	033500		;9600				
+	.WORD	031400		;4800				
+	.WORD	027300		;2400				
+	.WORD	025200		;1800				
+	.WORD	021000		;600				
+	.WORD	016700		;300				
+	.WORD	012500		;150				
+	.WORD	006300		;110				
+	.WORD	023100		;1200				
+
+	SPDTBL	DZ,170377	;Set up speed table for DZ11s
+
+	.WORD	007000		;9600				
+	.WORD	006000		;4800				
+	.WORD	005000		;2400				
+	.WORD	004000		;1800				
+	.WORD	003000		;600				
+	.WORD	002400		;300				
+	.WORD	002000		;150				
+	.WORD	001000		;110				
+	.WORD	003400		;1200				
+
+	SPDTBL	VH,377		;Set up speed table for DHV11/DHU11/DHQ11
+
+	.WORD	156400		;9600			
+	.WORD	135400		;4800				
+	.WORD	125000		;2400				
+	.WORD	104000		;1800				
+	.WORD	063000		;600				
+	.WORD	052400		;300				
+	.WORD	042000		;150				
+	.WORD	021000		;110				
+	.WORD	073400		;1200					
+
+.END

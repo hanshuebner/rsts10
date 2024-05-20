@@ -1,0 +1,1350 @@
+1	SUB SUBMIT							      &
+\	MODULE$ = "SUBMIT"						      &
+\	ON ERROR GOTO 19000						      &
+\	SUBEXIT IF CC.FLG%						      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   t i t l e				      &
+	!								      &
+	!	  subprogram : SUBMIT					      &
+	!	     version : V10.1					      &
+	!	        edit : A					      &
+	!	   edit date : 10-MAY-91				      &
+	!	   author(s) : PRL/ACT/DBM				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!		  C O P Y R I G H T				      &
+	!								      &
+	!								      &
+	!		      Copyright (C) 1983, 1991 by		      &
+	!	Digital Equipment Corporation, Maynard, Mass.		      &
+	!								      &
+	!								      &
+	! This software is furnished under a license and may be used and      &
+	! copied  only  in accordance with the terms of such license and      &
+	! with the  inclusion  of  the  above  copyright  notice.   This      &
+	! software  or  any  other copies thereof may not be provided or      &
+	! otherwise made available to any other person.  No title to and      &
+	! ownership of the software is hereby transferred.		      &
+	!								      &
+	! The information in this software is subject to change  without      &
+	! notice  and should not be construed as a commitment by Digital      &
+	! Equipment Corporation.					      &
+	!								      &
+	! DIGITAL assumes no responsibility for the use  or  reliability      &
+	! of its software on equipment that is not supplied by DIGITAL.	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   c a l l   f o r m a t		      &
+	!								      &
+	!	CALL SUBMIT						      &
+	!								      &
+	!	Argument	I/O	Usage				      &
+	!	========	===	=====				      &
+	!	ERRSTS%		O	error status			      &
+	!				   0 = success			      &
+	!				   n = ERR value		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m o d i f i c a t i o n   h i s t o r y   l o g		      &
+	!								      &
+	! VER/ED	EDIT DATE	REASON				      &
+	! V9.0-03	30-Aug-83	(PRL) Create for V9.0		      &
+	! V9.0-07	05-Jul-84	(PRL) General cleanup		      &
+	! V9.0-08	05-Oct-84	(PRL) Add entry-spec overrides quals  &
+	! V9.0-10	14-Jan-85	(PRL) Add file-spec to error messages &
+	!		26-Jan-85	(PRL) Change /LOG_QUEUE default to    &
+	!				      /NOLOG_DELETE		      &
+	! V9.0-13	15-Mar-85	(PRL) Fix pointer bug in queue errors &
+	! =================================================================== &
+	! V9.1-03	03-Jun-85	(PRL) Fix bug allowing log file NL:   &
+	! V9.1-05	09-Aug-85	(PRL) Trim /PARAMETERS string	      &
+	! =================================================================== &
+	! V10.0-01	20-Jul-89	(PRL) Support /NOTIFY qualifier	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   d e s c r i p t i o n		      &
+	!								      &
+	!	This subprogram is called to  submit one or more file-specs   &
+	!	for processing by a batch processor.  The format of the	      &
+	!	SUBMIT command is					      &
+	!								      &
+	!		SUBMIT file-spec[,file-spec] [entry-spec]	      &
+	!								      &
+	!								      &
+	!	Command Qualifiers:					      &
+	!								      &
+	!		/AFTER=date:time				      &
+	!		/CPU_LIMIT=n					      &
+	!		/HOLD						      &
+	!		/[NO]LOG_DELETE					      &
+	!		/[NO]LOG_FILE=logfile-spec			      &
+	!		/[NO]LOG_QUEUE=queue-name			      &
+	!		/NAME=entry-name				      &
+	!		/OWNER=owner-ppn				      &
+	!		/[NO]PARAMETERS=(parm,...)			      &
+	!		/PRIORITY=n					      &
+	!		/QUEUE=queue-name[:]				      &
+	!		/TIME_LIMIT=n					      &
+	!								      &
+	!	File Qualifiers:					      &
+	!								      &
+	!		/[NO]DELETE					      &
+	!								      &
+	!	entry-spec:						      &
+	!								      &
+	!                queue-name:[proj,prog]entry-name		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	v a r i a b l e s  /  a r r a y s   u s e d		      &
+	!								      &
+	!	name			description			      &
+	!	====			===========			      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b r o u t i n e s   u s e d				      &
+	!								      &
+	!	line #/name		description			      &
+	!	===========		===========			      &
+	!	DISPLY			display error text at user's KB	      &
+	!	INIPKT			initialize send packet		      &
+	!	SEND			send packet to queue manager	      &
+	!	RECV			receive packet from queue manager     &
+	!	CHKQUE			check for valid queue name	      &
+	!	ENTSPC			parse job-spec fields		      &
+	!								      &
+	!	FET$CQ BY REF		fetch (CUI) command qualifier	      &
+	!	FET$PQ BY REF		fetch (CUI) parameter qualifier	      &
+	!	FET$A BY REF		fetch (CUI) argument		      &
+	!	FET$P BY REF		fetch (CUI) parameter		      &
+	!	FET$NP BY REF		fetch (CUI) next parameter	      &
+	!								      &
+	!	10000			process command qualifiers	      &
+	!	10100			  /PRIORITY			      &
+	!	10200			  /AFTER			      &
+	!	10300			  /HOLD				      &
+	!	10400			  /CPU_LIMIT			      &
+	!	10500			  /TIME_LIMIT			      &
+	!	10600			  /PARAMETERS			      &
+	!	11000			process file-specs		      &
+	!	11100			build complete file-spec	      &
+	!	11200			process file qualifiers		      &
+	!	12000			process entry-spec		      &
+	!	13000			send SUBMIT packet		      &
+	!	14000			process logfile qualifiers	      &
+	!	14100			  /LOG_FILE			      &
+	!	14200			  /LOG_QUEUE			      &
+	!	14300			  /LOG_DELETE			      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	f u n c t i o n s   u s e d				      &
+	!								      &
+	!	line #	name		description			      &
+	!	======	====		===========			      &
+	!	15000	FN.RAD$		convert rad-50 to ascii		      &
+	!	15100	FN.ACNT.EXIST%	check that account exists on SY:      &
+	!	15200	FN.GET.PRIV%	read acnt's auth priv mask	      &
+	!	15300	FN.TIME%	invert RSTS time integer	      &
+	!	15400	FN.UNSIGNED	convert unsigned integer to fl-pt     &
+	!	15500	FN.EVEN%	ensure integer offset is even	      &
+	!	15600	FN.PPN$		build PPN string "[proj,prog]"	      &
+	!	15700	FN.FILE.QUAL%	return file qualifier bit	      &
+	!	15800	FN.ACCESS%	lookup filespec, return r/w access    &
+	!	15900	FN.PRIV%	check if user has specified priv      &
+	!	16000	FN.AUTH.PRIV$	check/return acnt's auth priv mask    &
+	!	16100	FN.PPN%		convert PPN string to integer	      &
+	!	16200	FN.OVERFLOW%	check if block overflows packet	      &
+	!	16300	FN.GET.ACCESS%	return access flag for file	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m a p   d e c l a r a t i o n s				      &
+	!								      &
+	!	line #	name	description				      &
+	!	======	====	===========				      &
+	!	   700	PBSCMN	QUEUE common data (%INCLUDE PBSCMN.B2S)	      &
+	!	   710	PBSMAP	Send/Recv/Record fields (%INCLUDE PBSMAP.B2S) &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	c o m m o n   d e c l a r a t i o n s			      &
+	!								      &
+	!	line #	name	description				      &
+	!	======	====	===========				      &
+	!	   800	PBSKEY	CUI constants (%INCLUDE PBSKEY.B2S)	      &
+	!	   890	CUICMN	CUI common area (%INCLUDE CUICMN.B2S)	      &
+	!								      &
+	!******************************************************************** &
+
+700	!	i n c l u d e   r e q u i r e d   M A P s , C O M M O N s     &
+	!								      &
+	!								      &
+	%INCLUDE "SYSTEM:PBSCMN.B2S"		!include QUEUE data section   &
+	%INCLUDE "SYSTEM:PBSMAP.B2S"		!include QUEUE map sections   &
+	%INCLUDE "SYSTEM:PBSKEY.B2S"		!include CUI keywords	      &
+	%INCLUDE "CUI:CUICMN.B2S"		!include CUI data section     &
+
+1000	!	m a i n   s u b p r o g r a m   l o g i c		      &
+	!								      &
+	!								      &
+	Z$ = SYS (PRIV.ON$)			!enable privs		      &
+\	TODAY% = PEEK(512%)			!get todays's date word	      &
+\	Z$ = SYS (PRIV.OFF$)			!disable privs		      &
+\	END.DAY% = FN.TIME%(1%)			!end-of-day time (11:59 pm)   &
+						!			      &
+\	CALL INIPKT				!initialize send packet	      &
+\	SUBEXIT IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+\	PKT.LEN% = JB.LEN% - LEN(PKT.HDR$)	!init offset to variable area &
+						!			      &
+\	Z$ = SYS (CHR.6$+CHR$(28%))		!read user's priv mask	      &
+\	PRIV$ = SEG$(Z$,3%,10%)			!save user's priv mask	      &
+						!			      &
+\	GOSUB 12000				!process entry-spec	      &
+\	SUBEXIT IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+						!			      &
+\	GOSUB 10000				!process command qualifiers   &
+\	SUBEXIT IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+						!			      &
+\	GOSUB 11000				!process file-specs	      &
+\	SUBEXIT IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+						!			      &
+\	GOSUB 14000				!process log-file qualifiers  &
+\	SUBEXIT IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+						!			      &
+\	PKT.CMD$ = CHR$(JB.CMD%)		!load SUBMIT command code     &
+\	PKT.QUE$ = CHR$(BAT.TYP%)		!load batch queue type	      &
+\	PKT.RTQ$ = CHR$(AK.FLG%)		!load return-ACK flag	      &
+						!			      &
+\	PKT.QNL$ = CHR$(LEN(ES.QUE$))		!load queue name length	      &
+\	PKT.QNM$ = ES.QUE$			!load queue name	      &
+\	PKT.JB.PPN% = ES.PPN%			!load owner's PPN	      &
+\	PKT.JB.PRV$ = ES.PRV$			!load owner's priv mask	      &
+\	PKT.JB.NML$ = CHR$(LEN(ES.NAM$))	!load entry name length	      &
+\	PKT.JB.NAM$ = ES.NAM$			!load entry name	      &
+						!			      &
+\	GOSUB 13000				!send SUBMIT packet	      &
+\	SUBEXIT					!and exit		      &
+
+10000	!	p r o c e s s   c o m m a n d   q u a l i f i e r s	      &
+	!								      &
+	!								      &
+	GOSUB 10100				!process /PRIORITY qualifier  &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if any errors	      &
+						!			      &
+\	GOSUB 10200				!process /AFTER qualifier     &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if any errors	      &
+						!			      &
+\	GOSUB 10300				!process /HOLD qualifier      &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if any errors	      &
+						!			      &
+\	GOSUB 10400				!process /CPU_LIMIT qualifier &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+						!			      &
+\	GOSUB 10500				!process /TIME_LIMIT qual     &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+						!			      &
+\	GOSUB 10600				!process /PARAMETERS qual     &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+						!			      &
+\	GOSUB 10700				!process /NOTIFY qual	      &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+						!			      &
+\	RETURN					!exit			      &
+
+10100	!	p r o c e s s   / P R I O R I T Y   q u a l i f i e r	      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!init error status	      &
+\	PRI.POS% = 0%				!show no qual position	      &
+\	CALL FET$CQ BY REF (PRI.Q%)		!fetch /PRIORITY qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		CALL FET$A BY REF		!  fetch priority arg	      &
+\		PRI.POS% = U.POS%		!  save qual position	      &
+\		PKT.JB.PRI$ = CHR$(U.LOW%)	!  load priority value	      &
+\	END IF					!end if			      &
+\	RETURN					!exit			      &
+
+10200	!	p r o c e s s   / A F T E R   q u a l i f i e r		      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!init error status	      &
+\	AFT.POS% = 0%				!show no /AFTER qual	      &
+\	CALL FET$CQ BY REF (AFT.Q%)		!fetch /AFTER qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		PKT.JB.ADA% = TODAY%		!  load dflt date (today)     &
+\		PKT.JB.ATI% = END.DAY%		!  load dflt time (11:59pm)   &
+\		CALL FET$A BY REF		!  fetch the args	      &
+\		AFT.POS% = U.POS%		!  save qual position	      &
+\		PKT.JB.ADA% = U.DATE%		!  load specified date	      &
+			IF U.DATE% <> 0% 	!    if any		      &
+\		PKT.JB.ATI% = FN.TIME%(U.TIME%)	!  load specified time	      &
+			IF U.TIME% <> 0%	!    if any		      &
+\	END IF					!end if			      &
+\	RETURN					!exit			      &
+
+10300	!	p r o c e s s   / H O L D   q u a l i f i e r		      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!init error status	      &
+\	HLD.POS% = 0%				!show no /HOLD qual	      &
+\	CALL FET$CQ BY REF (HLD.Q%)		!fetch /HOLD qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		HLD.POS% = U.POS%		!  save qual position	      &
+\		PKT.FLG% = PKT.FLG% OR JBF.HLD%	!  set HOLD job flag	      &
+\	END IF					!end if			      &
+\	RETURN					!exit			      &
+
+10400	!	p r o c e s s   / C P U _ L I M I T   q u a l i f i e r	      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!init error status	      &
+\	CPU.POS% = 0%				!show no /CPU_LIMIT qual      &
+\	CALL FET$CQ BY REF (CPU.Q%)		!fetch /CPU_LIMIT qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		CPU.POS% = U.POS%		!  save qual position	      &
+\		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		PKT.JB.CPU% = U.LOW%		!    load value		      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+10500	!	p r o c e s s   / T I M E _ L I M I T   q u a l i f i e r     &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!init error status	      &
+\	TIM.POS% = 0%				!show no /TIME_LIMIT qual     &
+\	CALL FET$CQ BY REF (TIM.Q%)		!fetch /TIME_LIMIT qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		TIM.POS% = U.POS%		!  save qual position	      &
+\		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		PKT.JB.TIM% = U.LOW%		!    load value		      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+10600	!	p r o c e s s   / P A R A M E T E R S   q u a l i f i e r     &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!init error status	      &
+\	PAR.POS% = 0%				!show no /PARAMETER qual      &
+\	CALL FET$CQ BY REF (PAR.Q%)		!fetch /PARAMETERS qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		PAR.POS% = U.POS%		!  save qual position	      &
+\		PAR$ = ""			!  init parm string	      &
+\		Z% = 0%				!  init parm counter	      &
+\		CALL FET$A BY REF		!  fetch 1st arg	      &
+\		WHILE U.PRES%			!  while more args:	      &
+\			Z% = Z% + 1%		!    incr parm counter	      &
+\			IF Z% > 8% THEN		!    if more than 8 parms,    &
+				ERRSTS% = ERR.BADNAM%			      &
+						!      return BADNAM error    &
+\				CALL DISPLY ("?Too many parameters")	      &
+\						!      display error msg      &
+\				RETURN		!      and exit		      &
+\			END IF			!    end if		      &
+						!			      &
+\			PAR$ = PAR$ + SEG$(U.STR$,1%,U.LEN%) + " "	      &
+						!    append to parm string    &
+\			CALL FET$A BY REF	!    fetch next arg	      &
+\		NEXT				!  do for all parameters      &
+						!			      &
+\		PAR$ = EDIT$(PAR$,8%+16%+32%+128%+256%)			      &
+						!  trim resulting string:     &
+						!      8 = trim leading spcs  &
+						!     16 = compress spaces    &
+						!     32 = convert to upcase  &
+						!    128 = trim trailing spcs &
+						!    256 = leave quotes alone &
+\		RETURN IF FN.OVERFLOW% (1%+LEN(PAR$),PAR.POS%)		      &
+						!  exit if parm blk too big   &
+\		PKT.LEN% = FN.EVEN%(PKT.LEN%)	!  ensure block on even addr  &
+\		PKT.JB.PAR% = PKT.LEN%		!  load offset to parm block  &
+\		Z$ = CHR$(LEN(PAR$))		!  save length of string      &
+\		MOVE TO #PKT.CHNL%,		!  load parm block:	      &
+			FILL$ = PKT.LEN%,	!    offset to block	      &
+			Z$ = 1%, 		!    length of parm string    &
+			PAR$			!    parm string	      &
+						!			      &
+\		PKT.LEN% = PKT.LEN% + 1% + LEN(PAR$)			      &
+						!  compute new packet length  &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+10700	!	p r o c e s s   / [ N O ] N O T I F Y   q u a l i f i e r     &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!init error status	      &
+\	NTF.POS% = 0%				!show no /NOTIFY qual	      &
+\	CALL FET$CQ BY REF (NTF.Q%)		!fetch /NOTIFY qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		NTF.POS% = U.POS%		!  save qual position	      &
+\		PKT.FLG% = PKT.FLG% OR JBF.NTF%	!  set NOTIFY flag bit	      &
+			UNLESS U.NO%		!    unless /NONOTIFY (dflt)  &
+\	END IF					!end if			      &
+\	RETURN					!exit			      &
+
+11000	!	p r o c e s s	f i l e - s p e c s			      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	DFL.TYP$ = DFL.BTY$			!use default batch filetyp    &
+\	DFL.PPN% = PPN%				!use user's PPN as default    &
+\	FIL.OFF% = 0%				!show no offsets yet	      &
+						!			      &
+\	CALL FET$P BY REF (FIL.T%)		!fetch 1st file-spec	      &
+\	WHILE U.PRES%				!do for all file-specs:	      &
+\		FIL.POS% = U.POS%		!save position of file-spec   &
+\		FSPEC$ = SEG$(U.STR$,1%,U.LEN%) !  get file-spec	      &
+\		GOSUB 11100			!  build complete spec	      &
+\		Z% = FN.OVERFLOW% (2%+2%+2%+1%+LEN(FSPEC$),FIL.POS%)	      &
+			UNLESS ERRSTS%		!  check if no room for block &
+\		RETURN IF ERRSTS%		!  exit if any errors	      &
+						!			      &
+\		IF LEN(ES.NAM$) = 0% THEN	!  if no entry name yet,      &
+			CALL CHKNAM BY REF (FILNAM$,LEN(FILNAM$),0%)	      &
+						!    check if valid name      &
+						!    don't allow all-numeric  &
+\			ES.NAM$ = FILNAM$	!    use filename as name     &
+				UNLESS ERRSTS%	!      unless invalid	      &
+\		END IF				!  end if		      &
+						!			      &
+\		GOSUB 11200			!  process file qualifiers    &
+\		RETURN IF ERRSTS%		!  exit if any errors	      &
+						!			      &
+\		U.POS% = FIL.POS%		!  point to filespec in cmd   &
+\		FACC% = 1%			!  init mode as read access   &
+\		FACC% = 3%			!  use read/write access      &
+			IF FIL.FLG% AND FF.DEL%	!    if /DELETE specified     &
+\		RETURN UNLESS FN.ACCESS%(FSPEC$,FACC%,ES.PPN%,ES.PRV$)	      &
+						!  exit if no file access     &
+						!			      &
+\		PKT.LEN% = FN.EVEN%(PKT.LEN%)	!  ensure block on even addr  &
+\		IF FIL.OFF% THEN		!  if offset computed,	      &
+			MOVE TO #PKT.CHNL%,	!    load offset:	      &
+				FILL$= FIL.OFF%,!      skip to prev offset    &
+				PKT.LEN%	!      offset to this file    &
+		ELSE	PKT.JB.FIL% = PKT.LEN%	!    else load 1st offset     &
+\		END IF				!    end if		      &
+\		FIL.OFF% = PKT.LEN%		!  compute next offset	      &
+						!			      &
+\		Z% = 0%				!  build offset to next blk   &
+\		Z$ = CHR$(LEN(FSPEC$))		!  build length byte	      &
+\		MOVE TO #PKT.CHNL%,		!  load next file-spec:	      &
+			FILL$ = PKT.LEN%,	!    skip to this file	      &
+			Z%,			!    0-offset to next file    &
+			FIL.FLG%,		!    file flag word	      &
+			FIL.COP%,		!    no. file copies	      &
+			Z$=1%, 			!    length of file-spec      &
+			FSPEC$			!    file-spec		      &
+						!			      &
+\		PKT.LEN% = PKT.LEN% + 2% + 2% + 2% + 1% + LEN(FSPEC$)	      &
+						!  update offset to next file &
+\		CALL FET$NP BY REF 		!  get next file-spec	      &
+\	NEXT					!continue for all file-specs  &
+						!			      &
+\	IF LEN(ES.NAM$) = 0% THEN		!if still no entry name,      &
+		ES.NAM$ = EDIT$(DFL.BEN$,-2%)	!  use default batch name     &
+\	END IF					!end if			      &
+						!			      &
+\	ERRSTS% = 0%				!clear error status	      &
+\	RETURN					!and exit		      &
+
+11100	!	b u i l d   c o m p l e t e   f i l e - s p e c		      &
+	!								      &
+	!								      &
+	!inputs:	FSPEC$		-	file-spec string	      &
+	!		DFL.TYP$	-	default filetype to use	      &
+	!		DFL.PPN%	-	default PPN to use	      &
+	!								      &
+	!outputs:	ERRSTS%		-	error status		      &
+	!					   0 = no error		      &
+	!					   n = ERR value	      &
+	!		FSPEC$		-	complete file-spec string     &
+	!		DEV$		-	device name		      &
+	!		PPN$		-	PPN			      &
+	!		FILNAM$		-	filenam			      &
+	!		TYP$		-	type			      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!clear error status	      &
+\	CHANGE FSS$(FSPEC$,1%) TO FIRQB%	!FSS the file-spec	      &
+\	FLAG% = FIRQB%(29%) + SWAP%(FIRQB%(30%))!save flag word 2	      &
+						!			      &
+\	IF STATUS AND 255% THEN			!if not a disk file,	      &
+		CALL DISPLY ("?Device must be disk")!  display the error msg  &
+\		ERRSTS% = ERR.BADNAM%		!  set the error code	      &
+\		RETURN				!  exit			      &
+\	END IF					!end if			      &
+						!			      &
+\	IF (FLAG% AND 8192%) = 0% THEN		!if no device found,	      &
+		DEV$ = "_SY:"			!  use system disk	      &
+	ELSE	DEV$ = "_"+CHR$(FIRQB%(23%))+CHR$(FIRQB%(24%))		      &
+						!else use phys device name    &
+\		DEV$ = DEV$ + NUM1$(FIRQB%(25%))!    add unit no.	      &
+			IF FIRQB%(26%) <> 0%	!      if any given	      &
+\		DEV$ = DEV$ + ":"		!    add colon		      &
+\	END IF					!end if			      &
+						!			      &
+\	IF (FLAG% AND 128%) = 0% THEN		!if no PPN found,	      &
+		PPN$ = FN.PPN$(DFL.PPN%)	!  use default PPN	      &
+	ELSE	PPN$ = FN.PPN$(FIRQB%(5%)+SWAP%(FIRQB%(6%)))		      &
+						!else use PPN specified	      &
+\	END IF					!end if			      &
+						!			      &
+\	FILNAM$ = FN.RAD$(7%,4%)		!build filnam		      &
+\	IF (FLAG% AND 8%) = 0% THEN		!if no dot found,	      &
+		TYP$ = DFL.TYP$			!  use default print .typ     &
+	ELSE	TYP$ = "." + FN.RAD$(11%,2%)	!else use typ specified	      &
+\	END IF					!end if			      &
+						!			      &
+\	FSPEC$ = DEV$ + PPN$ + FILNAM$ + TYP$ 	!build the complete spec      &
+						!			      &
+\	RETURN					!exit with status set	      &
+
+11200	!	p r o c e s s   f i l e   q u a l i f i e r s		      &
+	!								      &
+	!								      &
+	!inputs:	None.						      &
+	!								      &
+	!outputs:	ERRSTS%		-	error status:		      &
+	!					   0 = no error		      &
+	!		FIL.FLG%	-	file flag word		      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	FIL.FLG% =	FN.FILE.QUAL%(DEL.Q%,FF.DEL%,DFL.DEL%)		      &
+						!  load /DELETE qualifier     &
+\	ERRSTS% = 0%				!clear error status	      &
+\	RETURN					!and exit		      &
+
+12000	!	p r o c e s s   e n t r y - s p e c			      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+						!			      &
+\	ES.SPC$ = ""				!init null entry-spec string  &
+\	ES.QUE$ = ""				!init default queue name      &
+\	ES.PPN% = PPN%				!init default (user's) PPN    &
+\	ES.NAM$ = ""				!init default entry name      &
+\	ES.PRV$ = PRIV$				!init default (user's) privs  &
+\	ES.FLG% = 1% + 4% + 16%			!allow nulls for each field   &
+						!(don't allow any wildcards)  &
+						!			      &
+\	QUE.POS%,OWN.POS%,NAM.POS% = 0%		!init pointers to parts	      &
+\	GOSUB 12100				!check for entry-spec quals   &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if error or CTRL/C      &
+						!			      &
+\	CALL FET$P BY REF (ENT.T%)		!fetch entry-spec parm	      &
+\	IF U.PRES% THEN				!if present,		      &
+		ES.SPC$ = SEG$(U.STR$,1%,U.LEN%)!  save it		      &
+\	END IF					!end if			      &
+						!			      &
+\	CALL ENTSPC (ES.SPC$,ES.FLG%,ES.QUE$,ES.PPN%,ES.NAM$)		      &
+						!validate entry-spec	      &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if error or CTRL/C      &
+						!			      &
+\	IF ES.PPN% <> PPN% THEN			!if PPN different than users, &
+		U.POS% = OWN.POS%		!  point to owner PPN in cmd  &
+\		ES.PRV$ = FN.AUTH.PRIV$(ES.PPN%)!  get acnt's auth priv mask  &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit with status set	      &
+
+12100	!	b u i l d   e n t r y - s p e c   f r o m   q u a l s	      &
+	!								      &
+	!								      &
+	CALL FET$CQ BY REF (QUE.Q%)		!fetch /QUEUE qualifier	      &
+\	IF U.PRES% THEN				!if present,		      &
+		CALL FET$A BY REF		!  fetch the argument	      &
+\		QUE.POS% = U.POS%		!  save position of the arg   &
+\		IF POS(U.STR$,":",U.LEN%) THEN	!  if last char of name is :, &
+			U.LEN% = U.LEN% - 1%	!    shorten name to strip it &
+\		END IF				!  end if		      &
+\		ES.QUE$ = SEG$(U.STR$,1%,U.LEN%)!  fetch the queue-name	      &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$CQ BY REF (OWN.Q%)		!fetch /OWNER qualifier	      &
+\	IF U.PRES% THEN				!if present,		      &
+		CALL FET$A BY REF		!   fetch the argument	      &
+\		OWN.POS% = U.POS%		!   save position of the arg  &
+\		ES.PPN% = U.LOW%		!   save PPN argument	      &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$CQ BY REF (NAM.Q%)		!fetch /NAME qualifier	      &
+\	IF U.PRES% THEN				!if present,		      &
+		CALL FET$A BY REF		!   fetch the argument	      &
+\		NAM.POS% = U.POS%		!   save position of the arg  &
+\		ES.NAM$ = SEG$(U.STR$,1%,U.LEN%)!   save entry-name argument  &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+13000	!	s e n d   S U B M I T   p a c k e t			      &
+	!								      &
+	!								      &
+	PKT.LEN% = PKT.LEN% + LEN(PKT.HDR$)	!add header len to pkt len    &
+\	CALL SEND (PKT.LEN%,SEND.RETRY%)	!send PRINT job packet	      &
+\	RETURN IF ERRSTS%			!exit if any errors	      &
+		  OR CC.FLG%			!  or CTRL/C		      &
+			OR NOSEND%		!    or NOSEND flag set	      &
+						!			      &
+\	CALL RECV (RECV.WAIT%)			!receive ACK packet	      &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+						!			      &
+\	IF ASCII(PKT.CMD$) = AK.CMD% THEN	!if ACK received,	      &
+		ES.QUE$ = SEG$(PKT.QNM$,1%,ASCII(PKT.QNL$))		      &
+						!  get returned queue name    &
+\		U.POS% = 0%			!  disable repainting of cmd  &
+\		CALL DISPLY ("Batch entry "+NUM1$(FN.UNSIGNED(PKT.SEQ%))+     &
+			" "+ES.QUE$+":"+FN.PPN$(ES.PPN%)+ES.NAM$+" created")  &
+						!  print ack msg	      &
+\		ERRSTS% = 0%			!  clear error status	      &
+						!			      &
+	ELSE					!else NACK received:	      &
+		ERRSTS% = PKT.STS%		!  return error status code   &
+\		SELECT ERRSTS%			!  select via error status:   &
+						!			      &
+\		CASE = RMS.RNF%			!  case = queue not found,    &
+\			U.POS% = QUE.POS%	!    point to queue name pos  &
+\			IF U.POS% THEN		!    if queue name specified, &
+				CALL DISPLY ("?Batch queue does not exist")   &
+						!      display not found msg  &
+			ELSE	CALL DISPLY ("?No default batch queue")	      &
+						!    else display no default  &
+\			END IF			!    end if		      &
+						!			      &
+\		CASE = RMS.DNR%			!  case = dev not ready,      &
+\			U.POS% = QUE.POS%	!    point to queue if any    &
+\			IF PKT.FLG% AND IQF.MDL% THEN			      &
+						!    if marked for deletion,  &
+				Z$ = "marked for deletion"		      &
+						!      use 'deleted' text     &
+			ELSE	Z$ = "closed"	!    else use 'stopped' text  &
+\			END IF			!    end if		      &
+\			CALL DISPLY ("?Queue is "+Z$)			      &
+						!    display error text	      &
+						!			      &
+\		CASE = RMS.IOP%			!  case = priority too big,   &
+\			U.POS% = PRI.POS%	!    point to priority arg    &
+\			CALL DISPLY ("?Priority exceeds queue's maximum")     &
+						!    display error text	      &
+						!			      &
+\		CASE = RMS.ISI%			!  case = CPU limit too big,  &
+\			U.POS% = CPU.POS%	!    point to page limit arg  &
+\			CALL DISPLY ("?CPU limit exceeds queue's maximum")    &
+						!    display error text	      &
+						!			      &
+\		CASE = RMS.IRC%			!  case = time limit too big, &
+\			U.POS% = TIM.POS%	!    point to page limit arg  &
+\			CALL DISPLY ("?Time limit exceeds queue's maximum")   &
+						!    display error text	      &
+						!			      &
+\		CASE = RMS.BOF%			!  case = log queue closed,   &
+\			U.POS% = LGF.POS%	!    point to logfile	      &
+\			CALL DISPLY ("?Log file print queue closed")	      &
+						!    display error text	      &
+						!			      &
+\		CASE = RMS.BKZ%			!  case = no dflt log queue,  &
+\			U.POS% = LGF.POS%	!    point to logfile	      &
+\			CALL DISPLY ("?No default print queue for log file")  &
+						!    display error text	      &
+						!			      &
+\		CASE = RMS.BKS%			!  case = no logfile queue,   &
+\			U.POS% = LGQ.POS%	!    point to logfile queue   &
+\			CALL DISPLY ("?Log file print queue does not exist")  &
+						!    display error text	      &
+						!			      &
+\		CASE = RMS.PRV%			!  case = priv violation,     &
+\			U.POS% = QUE.POS%	!    point to queue name      &
+\			CALL DISPLY ("?Queue is privileged")		      &
+						!    display error text	      &
+						!			      &
+\		CASE ELSE			!  case else,		      &
+\			FATAL% = TRUE%		!    set fatal error flag     &
+\			ERRNAM$ = MODULE$	!    set bad module name      &
+\		END SELECT			!  end select		      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!and exit		      &
+
+14000	!	p r o c e s s   l o g - f i l e   q u a l i f i e r s	      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	GOSUB 14100				!process /LOG_FILE qual	      &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if error or CTRL/C      &
+						!			      &
+\	IF LOG.FLG% THEN			!if any logfile,	      &
+		GOSUB 14200			!  process /LOG_QUEUE qual    &
+\		RETURN IF ERRSTS% OR CC.FLG%	!  exit if error or CTRL/C    &
+\		IF LG.FLG% AND FF.QLG% THEN	!  if queueing logfile,	      &
+			GOSUB 14300		!    process /LOG_DELETE qual &
+\			RETURN IF ERRSTS% OR CC.FLG%			      &
+						!    exit if error or CTRL/C  &
+\		END IF				!  end if		      &
+						!			      &
+\		PKT.LEN% = FN.EVEN%(PKT.LEN%)	!  ensure block on even addr  &
+\		PKT.JB.COP% = PKT.LEN% 		!  compute offset to log blk  &
+\		Z0$ = CHR$(LEN(LG.QUE$))	!  build queue length byte    &
+\		Z1$ = CHR$(LEN(FSPEC$))		!  build logfile len byte     &
+\		MOVE TO #PKT.CHNL%,		!  load logfile block:	      &
+			FILL$ = PKT.LEN%,	!    skip to logfile block    &
+			LG.FLG%,		!    log file flag word	      &
+			Z0$ = 1%,		!    length of queue-spec     &
+			LG.QUE$ = 9%,		!    queue-name		      &
+			Z1$ = 1%,		!    length of logfile-spec   &
+			FSPEC$			!    file-spec		      &
+						!			      &
+\		PKT.LEN% = PKT.LEN% + 2% + 1% + 9% + 1% + LEN(FSPEC$)	      &
+						!  update packet length	      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+14100	!	p r o c e s s   / L O G _ F I L E   q u a l i f i e r	      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!init error status	      &
+\	LGF.POS% = 0%				!show no /LOG_FILE qual	      &
+\	LOG.FLG% = TRUE%			!set logfile wanted flag      &
+\	FSPEC$ = ES.NAM$			!init default logfile	      &
+\	CALL FET$CQ BY REF (LGF.Q%)		!fetch /LOG_FILE qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		LGF.POS% = U.POS%		!  save qualifier position    &
+\		LOG.FLG% = NOT U.NO%		!  set/clear /LOGFILE flag    &
+\		IF LOG.FLG% THEN		!  if not /NOLOG_FILE,	      &
+			CALL FET$A BY REF	!    fetch the arg	      &
+\			IF U.PRES% THEN		!    if present,	      &
+				FSPEC$ = SEG$(U.STR$,1%,U.LEN%)		      &
+						!      save the logfile-spec  &
+\			END IF			!    end if		      &
+\		END IF				!  end if		      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN UNLESS LOG.FLG%			!exit unless logfile wanted   &
+						!			      &
+\	DFL.TYP$ = DFL.LTY$			!use default log filetyp      &
+\	DFL.PPN% = ES.PPN%			!use owner as default PPN     &
+\	GOSUB 11100				!build complete spec	      &
+\	Z% = FN.OVERFLOW% (2%+1%+9%+1%+LEN(FSPEC$),FIL.POS%)		      &
+		UNLESS ERRSTS%			!check if no room for block   &
+\	RETURN IF ERRSTS%			!exit if any errors	      &
+						!			      &
+\	LOG.PPN% = FN.PPN%(PPN$)		!build logfile's PPN	      &
+\	Z% = FN.GET.ACCESS% (LOG.PPN%,0%,ES.PPN%,ES.PRV$)		      &
+						!get access flg for logfile   &
+\	RETURN IF (Z% AND 1%)			!exit if create access	      &
+						!			      &
+\	IF (SWAP%(ES.PPN%) AND 255%) = (SWAP%(LOG.PPN%) AND 255%) THEN	      &
+						!if same group as logfile,    &
+		Z$ = "G"			!  use GWRITE privilege	      &
+	ELSE	Z$ = "W"			!else use WWRITE privilege    &
+\	END IF					!end if			      &
+						!			      &
+\	Z$ = Z$ + "WRITE privilege"		!append priv to message	      &
+\	Z$ = Z$ + " by owner"			!append 'by owner'	      &
+		IF ES.PPN% <> PPN%		!  if different owner,	      &
+						!			      &
+\	CALL DISPLY ("?Log file "+FSPEC$+" requires "+Z$)		      &
+						!display error msg	      &
+\	ERRSTS% = ERR.PRVIOL%			!return PRVIOL error	      &
+						!			      &
+\	RETURN					!exit with status	      &
+
+14200	!	p r o c e s s   / L O G _ Q U E U E   q u a l i f i e r	      &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!show no errors		      &
+\	LGQ.POS% = 0%				!show no /LOG_QUEUE qualifier &
+\	LG.QUE$ = ""				!init null queue spec	      &
+\	LG.FLG% = 0%				!clear flag word	      &
+						!			      &
+\	CALL FET$CQ BY REF (LGQ.Q%)		!fetch /LOG_QUEUE qualifier   &
+\	IF U.PRES% THEN				!if qual present,	      &
+		LGQ.POS% = U.POS%		!  save qual position	      &
+\		IF NOT U.NO% THEN		!  if not /NOLOG_QUEUE,	      &
+			LG.FLG% = FF.QLG%	!    set queue bit	      &
+\			CALL FET$A BY REF	!    fetch the arg	      &
+\			IF U.PRES% THEN		!    if present,	      &
+				LG.QUE$ = SEG$(U.STR$,1%,U.LEN%)	      &
+						!      get queue name	      &
+\				CALL CHKQUE (LG.QUE$,FALSE%)		      &
+						!      validate it	      &
+\			END IF			!    end if		      &
+\		END IF				!  end if		      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+14300	!	p r o c e s s   / L O G _ D E L E T E   q u a l i f i e r     &
+	!								      &
+	!								      &
+	RETURN IF CC.FLG%			!exit if CTRL/C		      &
+\	ERRSTS% = 0%				!show no errors		      &
+\	LGD.POS% = 0%				!show no /LOG_DELETE qual     &
+\	CALL FET$CQ BY REF (LGD.Q%)		!fetch /LOG_DELETE qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		LGD.POS% = U.POS%		!  save qual position	      &
+\		IF U.NO% THEN			!  if /NOLOG_DELETE,	      &
+			LG.FLG% = LG.FLG% AND NOT FF.DEL%		      &
+						!    clear delete bit	      &
+		ELSE	LG.FLG% = LG.FLG% OR FF.DEL%			      &
+						!  else set delete bit	      &
+\		END IF				!  end if		      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+15000	!	f n . r a d $ ( START% , LNGTH% )			      &
+	!								      &
+	!								      &
+	!inputs:	START%		-	position in FIRQB%() array    &
+	!					where rad-50 string starts    &
+	!		LNGTH%		-	no. bytes to convert	      &
+	!					(must be even)		      &
+	!								      &
+	!outputs:	FN.RAD$		-	converted rad50->ascii string &
+	!								      &
+	!								      &
+	DEF FN.RAD$(START%,LNGTH%)					      &
+\	Z$ = ""					!init work string	      &
+\	Z$ = Z$ + RAD$(FIRQB%(Z%)+SWAP%(FIRQB%(Z%+1%)))			      &
+						!convert next 2 bytes	      &
+		FOR Z% = START% TO START%+LNGTH%-1% STEP 2%		      &
+						!  for length specified	      &
+\	FN.RAD$ = EDIT$(Z$,-2%)			!return clean string	      &
+\	FNEND					!end FN.RAD$ function	      &
+
+15100	!	f n . a c n t . e x i s t % ( PPN% )			      &
+	!								      &
+	!								      &
+	!inputs:	PPN%		-	PPN of account to lookup      &
+	!								      &
+	!outputs:	FN.ACNT.EXIST%	-	account exists status:	      &
+	!					  TRUE%  -> account exists    &
+	!					  FALSE% -> account no exists &
+	!								      &
+	!		ERRSTS%		-	0 if account exists	      &
+	!					ERR.NOSUCH% if doesn't exist  &
+	!								      &
+	!uses:		FIRQB%()	-	sys call work array	      &
+	!		Z$		-	work string		      &
+	!								      &
+	!notes:								      &
+	!	This function ensures that the PPN% passed represents a valid &
+	!	account on the system disk.  It does so by trying to read the &
+	!	password attribute block of the account.  Note that all [0,*] &
+	!	PPNs are directories and not accounts.			      &
+	!								      &
+	!								      &
+	DEF FN.ACNT.EXIST% (PPN%)					      &
+\	ON ERROR GOTO 15120			!trap own errors	      &
+\	Z$ = SYS(PRIV.ON$)			!enable temp privs	      &
+\	IF (SWAP%(PPN%) AND 255%) THEN		!if non-zero proj,	      &
+		Z$ = SYS (			!  do read attribs SYS call:  &
+			CHR.6$ +		!    FIP function	      &
+			CHR$(-25%) +		!    read attributes function &
+			CHR$(-1%) +		!    read account subfun      &
+			CHR$(3%) +		!    read password block      &
+			CHR$(PPN%) +		!    programmer no.	      &
+			CHR$(SWAP%(PPN%))	!    programmer no.	      &
+			 )			!  end of SYS call	      &
+\		FN.ACNT.EXIST% = TRUE%		!  return TRUE fn value	      &
+\		ERRSTS% = 0%			!  return success status      &
+\		GOTO 15130			!  exit			      &
+
+15110	FN.ACNT.EXIST% = FALSE%			!return FALSE fn value	      &
+\	CALL DISPLY ("?Account does not exist")	!display no such acnt msg     &
+\	ERRSTS% = ERR.NOSUCH%			!return NOSUCH error	      &
+\	GOTO 15130				!exit			      &
+
+15120	RESUME 15110				!resume to display error msg  &
+
+15130	Z$ = SYS(PRIV.OFF$)			!disable privs		      &
+\	FNEND					!end FN.ACNT.EXIST% function  &
+
+15200	!	f n . g e t . p r i v $ ( PPN% )			      &
+	!								      &
+	!								      &
+	!inputs:	PPN%		-	PPN to read priv mask from    &
+	!								      &
+	!outputs:	FN.GET.PRIV$	-	authorized priv mask of PPN%  &
+	!					(null if PPN does not exist)  &
+	!		ERRSTS%		-	0 if success		      &
+	!					ERR if error in SYS call      &
+	!								      &
+	!uses:		FIRQB%()	-	sys call work array	      &
+	!		Z$		-	work string		      &
+	!								      &
+	!								      &
+	DEF FN.GET.PRIV$ (PPN%)						      &
+\	ON ERROR GOTO 15210			!trap own errors	      &
+						!			      &
+\	Z$ = SYS(PRIV.ON$)			!enable privs		      &
+\	Z$ = SYS (				!do read attributes SYS call: &
+		CHR.6$ +			!  FIP function		      &
+		CHR$(-25%) +			!  read attributes function   &
+		CHR$(-1%) +			!  read account subfun	      &
+		CHR$(2%) +			!  read auth priv mask code   &
+		CHR$(PPN%) +			!  programmer no.	      &
+		CHR$(SWAP%(PPN%))		!  programmer no.	      &
+		 )				!end of SYS call	      &
+\	FN.GET.PRIV$ = SEG$(Z$,9%,16%)		!return 8-byte priv mask      &
+\	GOTO 15220				!skip to exit		      &
+
+15210	FN.GET.PRIV$ = STRING$(8%,0%)		!return null mask	      &
+\	RESUME 15220				!resume to exit		      &
+
+15220	ERRSTS% = 0%				!return success status	      &
+\	Z$ = SYS(PRIV.OFF$)			!disable privs		      &
+\	FNEND					!end FN.GET.PRIV$ function    &
+
+15300	!	f n . t i m e % ( TIME.INT% )				      &
+	!								      &
+	!								      &
+	!inputs:	TIME.INT%	-	minutes until/since midnight  &
+	!								      &
+	!outputs:	FN.TIME%	-	inverted time integer	      &
+	!								      &
+	!uses:		none.						      &
+	!								      &
+	!notes:		The standard RSTS time integer is defined as minutes  &
+	!		until midnight.  However, time integers	are defined   &
+	!		in PBS as minutes since midnight.  This function will &
+	!		"invert" a time integer, allowing its use for both    &
+	!		encoding and decoding PBS/RSTS time integers.	      &
+	!								      &
+	!								      &
+	DEF FN.TIME% (TIME.INT%) =					      &
+		1440% - TIME.INT%		!invert time value	      &
+
+15400	!	f n . u n s i g n e d ( VALUE% )			      &
+	!								      &
+	!inputs:	VALUE%		-	16-bit unsigned integer	      &
+	!								      &
+	!outputs:	FN.UNSIGNED	-	corresponding FL-PT value     &
+	!								      &
+	!uses:		Z		-	work FL-PT		      &
+	!								      &
+	!								      &
+	DEF FN.UNSIGNED (VALUE%)					      &
+\	Z = VALUE%				!move to fl-pt variable	      &
+\	Z = Z + 65536.				!normalize to 0		      &
+		IF Z < 0.			!  if negative		      &
+\	FN.UNSIGNED = Z				!  return fl-pt value	      &
+\	FNEND					!end FN.UNSIGNED function     &
+
+15500	!	f n . e v e n % ( OFFSET% )				      &
+	!								      &
+	!								      &
+	!inputs:	OFFSET%		-	integer offset		      &
+	!								      &
+	!outputs:	FN.EVEN%	-	<OFFSET%> if OFFSET% is even  &
+	!					<OFFSET%+1> if OFFSET% is odd &
+	!								      &
+	!								      &
+	DEF FN.EVEN% (OFFSET%) = 		!return OFFSET%		      &
+		OFFSET% + (OFFSET% AND 1%) 	! [+1 if odd]		      &
+
+15600	!	f n . p p n $ ( PPN% )					      &
+	!								      &
+	!inputs:	PPN%		-	PPN word		      &
+	!								      &
+	!outputs:	FN.PPN$		-	PPN string "[proj,prog]"      &
+	!								      &
+	!uses:		Z%		-	work integer		      &
+	!		Z1$, Z2$	-	work strings		      &
+	!								      &
+	!								      &
+	DEF FN.PPN$ (PPN%)						      &
+\	Z1$, Z2$ = "*"				!init proj,prog strings	      &
+\	Z% = SWAP%(PPN%) AND 255%		!get project no.	      &
+\	Z1$ = NUM1$(Z%)				!build project string	      &
+		UNLESS Z% = 255%		!  unless wild		      &
+\	Z% = PPN% AND 255%			!get programmer no.	      &
+\	Z2$ = NUM1$(Z%)				!build programmer string      &
+		UNLESS Z% = 255%		!  unless wild		      &
+\	FN.PPN$ = "[" + Z1$ + "," + Z2$ + "]"	!return PPN string	      &
+\	FNEND					!end FN.PPN$ function	      &
+
+15700	!	f n . f i l e . q u a l % ( QL.TAG%, QL.BIT%, QL.DFL% )	      &
+	!								      &
+	!								      &
+	!inputs:	QL.TAG%		-	CUI qualifier tag	      &
+	!		QL.BIT%		-	qualifier bit value	      &
+	!		QL.DFL%		-	qualifier default	      &
+	!								      &
+	!outputs:	FN.FILE.QUAL%	-	file qualifier bit:	      &
+	!					   0 = not present or default &
+	!					   n = bit value (present)    &
+	!								      &
+	!uses:		None.						      &
+	!								      &
+	!								      &
+	DEF FN.FILE.QUAL% (QL.TAG%,QL.BIT%,QL.DFL%)			      &
+\	CALL FET$PQ BY REF (QL.TAG%)		!check for qualifier present  &
+\	IF U.PRES% THEN			 	!if qualifier present,	      &
+		FN.FILE.QUAL% = QL.BIT% AND NOT U.NO%			      &
+						!  set/clear qualifier bit    &
+	ELSE	FN.FILE.QUAL% = QL.DFL% 	!else return default value    &
+\	END IF					!end if			      &
+\	FNEND					!end FN.FILE.QUAL% function   &
+
+15800	!	f n . a c c e s s % ( FIL$ , ACC.MOD% , ACC.PPN% , ACC.PRV$ ) &
+	!								      &
+	!								      &
+	!inputs:	FIL$		-	file-spec to check	      &
+	!		ACC.MOD%	-	access mode:		      &
+	!					  1 = read		      &
+	!					  2 = write		      &
+	!					  3 = read/write	      &
+	!		ACC.PPN%	-	access PPN		      &
+	!		ACC.PRV$	-	access priv mask	      &
+	!								      &
+	!output:	FN.ACCESS%	-	access status:		      &
+	!					  TRUE  -> access ok	      &
+	!					  FALSE -> no access	      &
+	!		ERRSTS%		-	error status:		      &
+	!					  0 -> access ok	      &
+	!					  NOSUCH -> error in lookup   &
+	!								      &
+	!notes: This call will ensure that at least one file matching the     &
+	!	file-spec has the required access, using the PPN and privs    &
+	!	specified.						      &
+	!								      &
+	!	This function assumes a valid filespec (FIL$), valid access   &
+	!	mode 1-3 (ACC.MOD%), valid PPN (ACC.PPN%) and 8-byte priv     &
+	!	mask string (ACC.PRV$).					      &
+	!								      &
+	DEF FN.ACCESS% (FIL$,ACC.MOD%,ACC.PPN%,ACC.PRV$)		      &
+\	FN.ACCESS% = TRUE%			!assume TRUE fn value	      &
+\	ERRSTS% = 0%				!assume success		      &
+						!			      &
+\	Z$ = FSS$(FIL$,1%)			!FSS the file-spec	      &
+\	FL$ = SEG$(Z$,7%,12%)			!save filename+type field     &
+\	DV$ = SEG$(Z$,23%,26%)			!save device field	      &
+\	CHANGE Z$ TO FIRQB%			!convert fields to array      &
+\	PPN.0%,PPN.1% = FIRQB%(5%) + SWAP%(FIRQB%(6%))			      &
+						!save PPN of file-spec	      &
+\	Z% = FIRQB%(29%) + SWAP%(FIRQB%(30%))	!get flag word 2	      &
+\	Z0% = ((Z% AND 256%+512%) <> 0%)	!set/clr wildcard PPN flag    &
+\	Z1% = Z0% OR ((Z% AND 2%+4%+32%+64%) <> 0%)			      &
+						!set/clr any wildcards flag   &
+\	Z2% = TRUE%				!set 'no files found' flag    &
+\	PPN.IDX%, DIR.IDX% = -1%		!init lookup indexes	      &
+
+15810	IF Z0% THEN				!if wildcard PPN,	      &
+		PPN.IDX% = PPN.IDX% + 1%	!  incr lookup index	      &
+\		ON ERROR GOTO 15840		!  trap own errors now	      &
+\		CHANGE SYS (			!  do wildcard dir lookup     &
+			CHR.6$ +		!    FIP function	      &
+			CHR$(25%) +		!    PPN lookup function      &
+			CHR$(PPN.IDX%) +	!    lsb PPN index	      &
+			CHR$(SWAP%(PPN.IDX%)) +	!    msb PPN index	      &
+			CHR$(PPN.0%) +		!    prog no. field	      &
+			CHR$(SWAP%(PPN.0%)) +	!    proj no. field	      &
+			STRING$(16%,0%) +	!    reserved		      &
+			DV$			!    device field	      &
+			 ) TO FIRQB%		!  end of SYS call	      &
+\		ON ERROR GO BACK		!  restore standard trap      &
+\		PPN.1% = FIRQB%(5%) + SWAP%(FIRQB%(6%))			      &
+						!  build next PPN for lookup  &
+\		DIR.IDX% = -1%			!  reset directory index      &
+
+15820	DIR.IDX% = DIR.IDX% + 1%		!incr dir lookup index	      &
+\	ON ERROR GOTO 15840			!trap own errors now	      &
+\	CHANGE SYS (				!do dir lookup SYS call:      &
+		CHR.6$ +			!  FIP function		      &
+		CHR$(17%) +			!  dir lookup function	      &
+		CHR$(DIR.IDX%) +		!  lsb of dir index	      &
+		CHR$(SWAP%(DIR.IDX%)) +		!  msb of dir index	      &
+		CHR$(PPN.1%) +			!  prog no.		      &
+		CHR$(SWAP%(PPN.1%)) +		!  proj no.		      &
+		FL$ +				!  filenam+typ field	      &
+		STRING$(10%,0%) +		!  reserved		      &
+		DV$				!  device field		      &
+		 ) TO FIRQB%			!end of sys call	      &
+\	ON ERROR GO BACK			!restore standard trap	      &
+\	Z2% = FALSE%				!clear 'no files found' flag  &
+						!			      &
+\	Z0% = FIRQB%(15%)			!get file's prot code	      &
+\	Z% = FN.GET.ACCESS% (PPN.1%,Z0%,ACC.PPN%,ACC.PRV$)		      &
+						!get access flag bits	      &
+						!			      &
+\	SELECT ACC.MOD%				!select via access code:      &
+\	CASE = 1%				!case = read access needed,   &
+\		Z% = (Z% AND 2%)		!  get 'no read access' bit   &
+\	CASE = 2%				!case = write access needed,  &
+\		Z% = (Z% AND 4%)		!  get 'no write access' bit  &
+\	CASE = 3%				!case = r/w access needed:    &
+\		Z% = (Z% AND 2%+4%)		!  get 'no r/w access' bits   &
+\	END SELECT				!end select		      &
+\	IF Z% = 0% THEN				!if access,		      &
+		GOTO 15850			!  exit with success	      &
+	ELSE	IF Z1% THEN			!else if wildcards,	      &
+			GOTO 15820		!    try next file in dir     &
+
+15830	FN.ACCESS% = FALSE%			!return FALSE fn value	      &
+\	ERRSTS% = ERR.NOSUCH%			!return NOSUCH error	      &
+\	IF Z2% THEN				!if no files found,	      &
+		Z$ = "?File " + FIL$ + " does not exist"		      &
+						!  return nosuch text	      &
+						!			      &
+	ELSE	SELECT Z%			!else select via access bits  &
+\		CASE = 2%			!  case = no read,	      &
+\			Z1$ = "read"		!    return 'read' error      &
+\		CASE = 4%			!  case = no write,	      &
+\			Z1$ = "write"		!    return 'write' error     &
+\		CASE = 6%			!  case = no read, no write,  &
+\			Z1$ = "read or write"	!    return 'read/write' err  &
+\		END SELECT			!  end select		      &
+						!			      &
+\		IF ACC.PPN% = PPN% THEN		!  if user's ppn,	      &
+			Z$ = "?No "		!    use "no" prefix	      &
+		ELSE	Z$ = "?Owner does not have "			      &
+						!  else use "owner" prefix    &
+\		END IF				!  end if		      &
+						!			      &
+\		Z$ = Z$ + Z1$ + " access to file " + FIL$		      &
+						!  build full error message   &
+\	END IF					!end if			      &
+\	CALL DISPLY (Z$)			!display error text	      &
+\	GOTO 15850				!skip to exit		      &
+
+15840	RESUME 15810				!resume to next PPN	      &
+		IF ERL = 15820			!  if error in dir lookup     &
+			IF Z0%			!    if wildcard PPN	      &
+\	RESUME 15830				!else resume to display error &
+
+15850	ON ERROR GO BACK			!restore standard error trap  &
+\	Z$ = SYS (CHR.6$+CHR$(31%))		!restore own privs	      &
+		IF ACC.PPN% <> PPN%		!  if different PPN's	      &
+\	FNEND					!end FN.ACCESS% function      &
+
+15900	!	f n . p r i v % ( P R I V $ )				      &
+	!								      &
+	!								      &
+	!inputs:	PRIV$		-	priv name to check	      &
+	!								      &
+	!outputs:	FN.PRIV%	-	privilege status:	      &
+	!					  TRUE  -> priv on	      &
+	!					  FALSE -> priv off	      &
+	!								      &
+	!		ERRSTS%		-	0 if priv on		      &
+	!					ERR.PRVIOL if priv off	      &
+	!					ERR.BADNAM if invalid priv    &
+	!								      &
+	DEF FN.PRIV%(PRIV$)			!start definition	      &
+\	ON ERROR GO TO 15910			!local error routine	      &
+\	ERRSTS% = 0%				!clear ERRSTS		      &
+\	PRIV$ = EDIT$(PRIV$,-1%)		!trim the priv name string    &
+\	Z$ = SYS (				!do check priv SYS call:      &
+		CHR.6$ +			!  FIP call		      &
+		CHR$(32%) +			!  check access function      &
+		CHR$(1%) +			!  check priv name subfun     &
+		CHR.0$ +			!  reserved		      &
+		CHR.00$ +			!  reserved		      &
+		PRIV$				!  priv name to check	      &
+		 )				!end of sys call	      &
+\	Z% = ASCII(SEG$(Z$,3%,3%))		!save priv status	      &
+\	FN.PRIV% = (Z% = 0%)			!return fn value	      &
+\	IF Z% THEN				!if priv not enabled,	      &
+		CALL DISPLY ("?"+PRIV$+" privilege required")		      &
+						!  display error message      &
+\		ERRSTS% = ERR.PRVIOL%		!  and return PRVIOL error    &
+\	END IF					!end if			      &
+\	GOTO 15920				!skip to function exit	      &
+
+15910	ERRSTS% = ERR.BADNAM%			!set bad priv name	      &
+\	CALL DISPLY ("?Invalid privilege name")	!display error message	      &
+\	FN.PRIV% = FALSE%			!return priv disabled	      &
+\	RESUME 15920				!resume to function end	      &
+
+15920	FNEND					!end FN.PRIV% function	      &
+
+16000	!	f n . a u t h . p r i v $ ( ACNT.PPN% )			      &
+	!								      &
+	!inputs:	ACNT.PPN%	-	ppn of acnt to return privs   &
+	!		PPN% (G)	-	current user's PPN	      &
+	!								      &
+	!outputs:	FN.AUTH.PRIV$	-	priv mask as a 8-char string  &
+	!					(8 nulls if invalid ppn)      &
+	!		ERRSTS%		-	error status:		      &
+	!					   0 -> valid account	      &
+	!					   ERR -> invalid account     &
+	!								      &
+	!uses:		Z$		-	work string		      &
+	!								      &
+	!notes:	This function will return the authorized priv mask for the    &
+	!	PPN specified.  An error is returned if the PPN is invalid    &
+	!	or does not refer to a valid account on the system.  The      &
+	!	caller should set U.POS% to point to the PPN before calling   &
+	!	this function so that command repainting will occur if an     &
+	!	error is detected.					      &
+	!								      &
+	!								      &
+	DEF FN.AUTH.PRIV$ (ACNT.PPN%)					      &
+\	FN.AUTH.PRIV$ = STRING$(8%,0%)		!init null priv mask	      &
+						!			      &
+\	DISPLAY% = FALSE%			!disable message display      &
+\	Z% = FN.PRIV%("WACNT")			!save user's WACNT priv sts   &
+\	DISPLAY% = TRUE%			!enable message display	      &
+						!			      &
+\	IF NOT Z% THEN				!if user lacks WACNT priv,    &
+\		IF (SWAP%(ACNT.PPN%) AND 255%) = (SWAP%(PPN%) AND 255%) THEN  &
+						!  if same group,	      &
+			Z$ = "GACNT"		!    require GACNT priv	      &
+		ELSE	Z$ = "WACNT"		!  else require WACNT priv    &
+\		END IF				!  end if		      &
+\		FNEXIT UNLESS FN.PRIV%(Z$)	!  exit unless user has priv  &
+\	END IF					!end if			      &
+						!			      &
+\	IF FN.ACNT.EXIST%(ACNT.PPN%) THEN	!if account exists,	      &
+		FN.AUTH.PRIV$ = FN.GET.PRIV$(ACNT.PPN%)			      &
+						!  return acnt's auth privs   &
+\	END IF					!end if			      &
+						!			      &
+\	FNEND					!end FN.AUTH.PRIV$ function   &
+
+16100	!	f n . p p n % ( PPN$ )					      &
+	!								      &
+	!inputs:	PPN$		-	PPN string		      &
+	!								      &
+	!outputs:	FN.PPN%		-	PPN integer		      &
+	!								      &
+	!uses:		FIRQB%() array					      &
+	!								      &
+	!								      &
+	DEF FN.PPN% (PPN$)						      &
+\	CHANGE FSS$(PPN$,1%) TO FIRQB%		!FSS the PPN		      &
+\	FN.PPN% = FIRQB%(5%) + SWAP%(FIRQB%(6%))!return PPN as an integer     &
+\	FNEND					!end FN.PPN% function	      &
+
+16200	!	f n . o v e r f l o w % ( BLK.LEN% , CMD.POS% )		      &
+	!								      &
+	!								      &
+	!inputs:	BLK.LEN%	-	length of block to check      &
+	!		PKT.LEN% (G)	-	current length of packet      &
+	!		CMD.POS%	-	cmd pointer for repainting    &
+	!								      &
+	!outputs:	FN.OVERFLOW%	-	overflow status:	      &
+	!					  TRUE  -> packet overflow    &
+	!					  FALSE -> no pkt overflow    &
+	!		ERRSTS%		-	error status:		      &
+	!					  0 -> no overflow	      &
+	!					  BADNAM -> overflow	      &
+	!								      &
+	!uses:		None.						      &
+	!								      &
+	!notes:	This function checks that the specified block length does     &
+	!	not overflow the maximum packet length.  If so, an error is   &
+	!	reported, with U.POS% set to the specified cmd position.      &
+	!								      &
+	!								      &
+	DEF FN.OVERFLOW% (BLK.LEN%,CMD.POS%)				      &
+\	ERRSTS%,FN.OVERFLOW% = ((PKT.LEN% + BLK.LEN%) > LEN(PKT.DAT$))	      &
+						!return TRUE/FALSE	      &
+\	IF ERRSTS% THEN				!if block too big,	      &
+		U.POS% = CMD.POS%		!  point to supplied position &
+\		CALL DISPLY ("?Too many files or parameters")		      &
+						!  print error msg	      &
+\		ERRSTS% = ERR.BADNAM%		!  return BADNAM error	      &
+\	END IF					!end if			      &
+						!			      &
+\	FNEND					!end FN.OVERFLOW% function    &
+
+16300	!	f n . g e t . a c c e s s % ( FIL.PPN% , FIL.PROT%,	      &
+	!				      ACC.PPN% , ACC.PRV$ )	      &
+	!								      &
+	!								      &
+	!inputs:	FIL.PPN%	-	file's PPN		      &
+	!		FIL.PROT%	-	file's prot code	      &
+	!		ACC.PPN%	-	access PPN		      &
+	!		ACC.PRV$	-	access privilege mask	      &
+	!								      &
+	!outputs:	FN.GET.ACCESS%	-	access flag bits:	      &
+	!					  bit 0 -> owner access	      &
+	!					  bit 1 -> no read access     &
+	!					  bit 2 -> no write access    &
+	!								      &
+	!uses:		None.						      &
+	!								      &
+	!notes:	This function uses the "check access rights" SYS call to      &
+	!	return the access flag bits for a files PPN and protection    &
+	!	code.  If the access PPN is different than the user's PPN     &
+	!	(PPN%), then the 3PP SYS call is performed before the access  &
+	!	check is made. The user's privileges are restored after the   &
+	!	check access call is completed.				      &
+	!								      &
+	!								      &
+	DEF FN.GET.ACCESS% (FIL.PPN%,FIL.PROT%,ACC.PPN%,ACC.PRV$)	      &
+\	IF ACC.PPN% <> PPN% THEN		!if PPN not same as user's,   &
+		Z$ = SYS (PRIV.ON$)		!  raise privs to get acct's  &
+\		Z$ = SYS (			!  do 3PP SYS call:	      &
+			CHR.6$ +		!    FIP function	      &
+			CHR$(31%) +		!    3rd party privs function &
+			CHR.00$ +		!    reserved		      &
+			CHR$(ACC.PPN%) +	!    3rd party prog no.	      &
+			CHR$(SWAP%(ACC.PPN%)) +	!    3rd party proj no.	      &
+			ACC.PRV$		!    3rd party priv mask      &
+			 )			!  end of SYS call	      &
+\	END IF					!end if			      &
+						!			      &
+\	CHANGE SYS (				!do check access SYS call:    &
+		CHR.6$ +			!  FIP function		      &
+		CHR$(32%) +			!  check access function      &
+		CHR.00$ +			!  reserved		      &
+		CHR$(FIL.PPN%) +		!  file's prog no.	      &
+		CHR$(SWAP%(FIL.PPN%)) +		!  file's proj no.	      &
+		STRING$(15%,0%) +		!  reserved		      &
+		CHR$(FIL.PROT%)			!  file's prot code	      &
+		 ) TO FIRQB%			!end of SYS call	      &
+\	FN.GET.ACCESS% = FIRQB%(3%)		!return access flag	      &
+						!			      &
+\	IF ACC.PPN% <> PPN% THEN		!if different PPN's	      &
+		Z$ = SYS (CHR.6$+CHR$(31%))	!  restore own privs	      &
+\		Z$ = SYS (PRIV.OFF$)		!  and drop temporary privs   &
+\	END IF					!end if			      &
+						!			      &
+\	FNEND					!end FN.GET.ACCESS% function  &
+
+19000	!	s t a n d a r d   e r r o r   h a n d l i n g		      &
+	!								      &
+	!								      &
+	FATAL% = TRUE%				!set fatal error flag	      &
+\	ERRSTS% = ERR				!save error no.		      &
+\	ERRLIN% = ERL				!save error line no.	      &
+\	ERRNAM$ = ERN$				!save module name	      &
+\	RESUME 32767				!resume to exit		      &
+
+32767	!	e n d   o f   s u b p r o g r a m			      &
+	!								      &
+	!								      &
+	SUBEND

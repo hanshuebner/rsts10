@@ -1,0 +1,837 @@
+1	SUB SETQUE							      &
+\	MODULE$ = "SETQUE"						      &
+\	ON ERROR GOTO 19000						      &
+\	SUBEXIT IF CC.FLG%						      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   t i t l e				      &
+	!								      &
+	!	  subprogram : SETQUE.B2S				      &
+	!	     version : V10.1					      &
+	!	        edit : J					      &
+	!	   edit date : 27-MAR-92				      &
+	!	   author(s) : PRL					      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!		  C O P Y R I G H T				      &
+	!								      &
+	!								      &
+	!		      Copyright (C) 1983, 1992 by		      &
+	!	Digital Equipment Corporation, Maynard, Mass.		      &
+	!								      &
+	!								      &
+	! This software is furnished under a license and may be used and      &
+	! copied  only  in accordance with the terms of such license and      &
+	! with the  inclusion  of  the  above  copyright  notice.   This      &
+	! software  or  any  other copies thereof may not be provided or      &
+	! otherwise made available to any other person.  No title to and      &
+	! ownership of the software is hereby transferred.		      &
+	!								      &
+	! The information in this software is subject to change  without      &
+	! notice  and should not be construed as a commitment by Digital      &
+	! Equipment Corporation.					      &
+	!								      &
+	! DIGITAL assumes no responsibility for the use  or  reliability      &
+	! of its software on equipment that is not supplied by DIGITAL.	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   c a l l   f o r m a t		      &
+	!								      &
+	!	CALL SETQUE						      &
+	!								      &
+	!	Argument	I/O	Usage				      &
+	!	========	===	=====				      &
+	!	ERRSTS%		O	error status			      &
+	!				  0 = no error			      &
+	!				  n = ERR value n		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m o d i f i c a t i o n   h i s t o r y   l o g		      &
+	!								      &
+	! VER/ED	EDIT DATE	REASON				      &
+	! V9.0-02	08-Aug-84	(PRL) Creation for V9.0		      &
+	! V9.0-14	05-Apr-85	(PRL) Don't allow wildcard queue name &
+	!				      with /DEFAULT qualifier	      &
+	! =================================================================== &
+	! V10.1-J	19-Mar-92	(PRL) Support 'xxx*' wildcards	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   d e s c r i p t i o n		      &
+	!								      &
+	!	This subprogram is called to process the command	      &
+	!								      &
+	!		SET QUEUE queue-name[:]				      &
+	!								      &
+	!	Qualifiers for this command are:			      &
+	!								      &
+	!		/BATCH						      &
+	!		/CPU_LIMIT=(DEFAULT=n,MAXIMUM=n)		      &
+	!		/[NO]DEFAULT					      &
+	!		/PAGE_LIMIT=(DEFAULT=n,MAXIMUM=n)		      &
+	!		/PRINT						      &
+	!		/PRIORITY=(DEFAULT=n,MAXIMUM=n)			      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	v a r i a b l e s  /  a r r a y s   u s e d		      &
+	!								      &
+	!	name			description			      &
+	!	====			===========			      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b r o u t i n e s   u s e d				      &
+	!								      &
+	!	line #/name		description			      &
+	!	===========		===========			      &
+	!	DISPLY			display text at user's KB:	      &
+	!	INIPKT			initialize send packet		      &
+	!	SEND			send packet to queue manager	      &
+	!	RECV			receive packet from queue manager     &
+	!	CHKQUE			validate queue name		      &
+	!								      &
+	!	FET$P			(CUI) fetch parameter		      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m a p   d e c l a r a t i o n s				      &
+	!								      &
+	!	line #	name	description				      &
+	!	======	====	===========				      &
+	!	   700	PBSCMN	PBS common data (%INCLUDE PBSCMN.B2S)	      &
+	!	   700	PBSMAP	PBS map fields (%INCLUDE PBSMAP.B2S)	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	c o m m o n   d e c l a r a t i o n s			      &
+	!								      &
+	!	line #	name	description				      &
+	!	======	====	===========				      &
+	!	   700	PBSKEY	PBS CUI keywords (%INCLUDE PBSKEY.B2S)	      &
+	!	   700	CUICMN	CUI common data (%INCLUDE CUICMN.B2S)	      &
+	!								      &
+	!******************************************************************** &
+
+700	!	i n c l u d e   r e q u i r e d   M A P s , C O M M O N s     &
+	!								      &
+	!								      &
+	%INCLUDE "SYSTEM:PBSCMN.B2S"		!include QUEUE data section   &
+	%INCLUDE "SYSTEM:PBSMAP.B2S"		!include QUEUE map sections   &
+	%INCLUDE "SYSTEM:PBSKEY.B2S"		!include CUI keywords	      &
+	%INCLUDE "CUI:CUICMN.B2S"		!include CUI data section     &
+
+900	!	D I M E N S I O N   d e c l a r a t i o n s		      &
+	!								      &
+	!								      &
+	DIM	NAM.1%(10),			!table for FN.MATCH.NAME%     &
+		NAM.2%(10)			!table for FN.MATCH.NAME%     &
+
+1000	!	m a i n   s u b p r o g r a m   l o g i c		      &
+	!								      &
+	!								      &
+						!define SET bit values:	      &
+	MCP.BIT% = 1%				! maximum /CPU_LIMIT	      &
+\	DCP.BIT% = 2%				! default /CPU_LIMIT	      &
+\	DFL.BIT% = 4%				! /DEFAULT		      &
+\	NDF.BIT% = 8%				! /NODEFAULT		      &
+\	FRM.BIT% = 16%				! /FORMS		      &
+\	MPG.BIT% = 32%				! /PAGE_LIMIT maximum	      &
+\	DPG.BIT% = 64%				! /PAGE_LIMIT default	      &
+\	MPR.BIT% = 128%				! /PRIORITY maximum	      &
+\	DPR.BIT% = 256%				! /PRIORITY default	      &
+\	PRV.BIT% = 512%				! /PRIVILEGE		      &
+\	MTM.BIT% = 1024%			! /TIME_LIMIT maximum	      &
+\	DTM.BIT% = 2048%			! /TIME_LIMIT default	      &
+						!			      &
+\	EXC.MSG$ = "default exceeds maximum"	!build 'exceeds' warning msg  &
+						!			      &
+\	QTYP% = 0%				!select all queue types	      &
+\	QNAM$ = "*"				!select all queue names	      &
+\	QUE.POS% = 0%				!show no queue parameter      &
+\	SET.FLG% = 0%				!clear all SET bits	      &
+\	ANY.FLG% = FALSE%			!clear 'any queue type' flag  &
+						!			      &
+\	CALL FET$P BY REF (QUE.T%)		!fetch queue parameter	      &
+\	IF U.PRES% THEN				!if specified,		      &
+		QUE.POS% = U.POS%		!  save pos of queue in cmd   &
+\		QNAM$ = SEG$(U.STR$,1%,U.LEN%)	!  get queue name	      &
+\		CALL CHKQUE (QNAM$,TRUE%)	!  validate queue name	      &
+\		SUBEXIT IF ERRSTS% OR CC.FLG%	!  exit if invalid or CTRL/C  &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$CQ BY REF (DFL.Q%)		!fetch /[NO]DEFAULT qualifier &
+\	IF U.PRES% THEN				!if present,		      &
+		ANY.FLG% = TRUE%		!  set any-type qual flag     &
+\		GOSUB 10100			!  process qualifier	      &
+\		SUBEXIT IF ERRSTS% OR CC.FLG%	!  exit if error or CTRL/C    &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$CQ BY REF (PTY.Q%)		!fetch /PRIORITY qualifier    &
+\	IF U.PRES% THEN				!if present,		      &
+		ANY.FLG% = TRUE%		!  set any-type qual flag     &
+\		GOSUB 10400			!  process qualifier	      &
+\		SUBEXIT IF ERRSTS% OR CC.FLG%	!  exit if error or CTRL/C    &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$CQ BY REF (PRV.Q%)		!fetch /PRIVILEGES qualifier  &
+\	IF U.PRES% THEN				!if present,		      &
+		ANY.FLG% = TRUE%		!  set any-type qual flag     &
+\		GOSUB 10500			!  process qualifier	      &
+\		SUBEXIT IF ERRSTS% OR CC.FLG%	!  exit if error or CTRL/C    &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$CQ BY REF (FRM.Q%)		!fetch /FORMS qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		QTYP% = PRT.TYP%		!  select only print queues   &
+\		GOSUB 10200			!  process qualifier	      &
+\		SUBEXIT IF ERRSTS% OR CC.FLG%	!  exit if error or CTRL/C    &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$CQ BY REF (PGL.Q%)		!fetch /PAGE_LIMIT qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		QTYP% = PRT.TYP%		!  select only print queues   &
+\		GOSUB 10300			!  process qualifier	      &
+\		SUBEXIT IF ERRSTS% OR CC.FLG%	!  exit if error or CTRL/C    &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$CQ BY REF (CPU.Q%)		!fetch /CPU_LIMIT qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		QTYP% = BAT.TYP%		!  select only batch queues   &
+\		GOSUB 10000			!  process qualifier	      &
+\		SUBEXIT IF ERRSTS% OR CC.FLG%	!  exit if error or CTRL/C    &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$CQ BY REF (TIM.Q%)		!fetch /TIME_LIMIT qual	      &
+\	IF U.PRES% THEN				!if present,		      &
+		QTYP% = BAT.TYP%		!  select only batch queues   &
+\		GOSUB 10600			!  process qualifier	      &
+\		SUBEXIT IF ERRSTS% OR CC.FLG%	!  exit if error or CTRL/C    &
+\	END IF					!end if			      &
+						!			      &
+\	IF SET.FLG% = 0% THEN			!if no SET bits on,	      &
+		U.POS% = 1%			!  point to command	      &
+\		CALL DISPLY ("?Additional qualifier required")		      &
+						!  display no quals error     &
+\		ERRSTS% = ERR.NOSUCH%		!  return NOSUCH error	      &
+\		SUBEXIT				!  and exit		      &
+\	END IF					!end if			      &
+						!			      &
+\	IF ANY.FLG% THEN			!if any queue type qual,      &
+		QTYP% = 0%			!  select any queue type      &
+\		CALL FET$CQ BY REF (PRN.Q%)	!  fetch /PRINT qualifier     &
+\		IF U.PRES% THEN			!  if present,		      &
+			QTYP% = PRT.TYP%	!    select only print queues &
+\		END IF				!  end if		      &
+						!			      &
+\		CALL FET$CQ BY REF (BAT.Q%)	!  fetch /BATCH qualifier     &
+\		IF U.PRES% THEN			!  if present,		      &
+			QTYP% = BAT.TYP%	!    select only batch queues &
+\		END IF				!  end if		      &
+\	END IF					!end if			      &
+						!			      &
+\	QUE.CNT% = 0%				!show no queues seen yet      &
+\	Z% = FN.GET.QUEUE%(3%)			!get 1st queue rec	      &
+\	UNTIL ERRSTS% OR CC.FLG%		!do until error or CTRL/C:    &
+\		GOSUB 2000			!  SET current queue	      &
+\		Z% = FN.GET.QUEUE%(0%)		!  get next queue	      &
+			UNLESS ERRSTS%		!    unless pending error     &
+\	NEXT					!do for all queues specified  &
+						!			      &
+\	SUBEXIT IF CC.FLG% OR FATAL%		!exit if CTRL/C or fatal err  &
+						!			      &
+\	IF QUE.CNT% > 0% THEN			!if any queues selected,      &
+		ERRSTS% = 0%			!  show no error	      &
+	ELSE	ERRSTS% = ERR.NOTFND%		!else return not found status &
+\		Z$ = ""				!  init queue type text	      &
+\		Z$ = "print "			!  build 'print'	      &
+			IF QTYP% = PRT.TYP%	!    if print queues only     &
+\		Z$ = "batch "			!  build 'batch'	      &
+			IF QTYP% = BAT.TYP%	!    if batch queues only     &
+\		U.POS% = 0%			!  no repainting of cmd	      &
+\		CALL DISPLY ("%No "+Z$+"queue "+QNAM$+" found")		      &
+						!  display error msg	      &
+\	END IF					!end if			      &
+						!			      &
+\	SUBEXIT					!exit			      &
+
+2000	!	S E T   c u r r e n t   q u e u e			      &
+	!								      &
+	!								      &
+	QUE.CNT% = QUE.CNT% + 1%		!incr queue counter	      &
+\	U.POS% = 0%				!disable repainting cmd	      &
+						!			      &
+\	SELECT QUE.TYP%				!select via queue type:	      &
+\	CASE = PRT.TYP%				!case = print queue,	      &
+\		QUE$ = "Print q"		!  build 'print' text	      &
+\	CASE = BAT.TYP%				!case = batch queue,	      &
+\		QUE$ = "Batch q"		!  build 'batch' text	      &
+\	CASE ELSE				!case else,		      &
+\		QUE$ = "Q"			!  build null text	      &
+\	END SELECT				!end select		      &
+\	QUE$ = QUE$ + "ueue " + QUE.NAM$	!build complete queue name    &
+						!			      &
+\	GOSUB 3000				!go SET non-type fields	      &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if error or CTRL/C      &
+						!			      &
+\	IF QUE.TYP% = PRT.TYP% THEN		!if print queue,	      &
+		GOSUB 4000			!  go SET print fields	      &
+\		RETURN IF ERRSTS% OR CC.FLG%	!  exit if error or CTRL/C    &
+\	END IF					!end if			      &
+						!			      &
+\	IF QUE.TYP% = BAT.TYP% THEN		!if batch queue,	      &
+		GOSUB 5000			!  go SET batch fields	      &
+\		RETURN IF ERRSTS% OR CC.FLG%	!  exit if error or CTRL/C    &
+\	END IF					!end if			      &
+						!			      &
+\	PKT.FLG% = SET.FLG%			!load SET field flag bits     &
+\	PKT.HDR$ = STRING$(LEN(PKT.HDR$),0%)	!zero packet header fields    &
+\	PKT.VER$ = CHR$(PBS.VER%)		!load PBS version no.	      &
+\	PKT.CMD$ = CHR$(MQ.CMD%)		!load MODIFY QUEUE cmd code   &
+\	PKT.RTQ$ = CHR$(AK.FLG%)		!load ACK request flag	      &
+						!			      &
+\	CALL SEND (MQ.LEN%,SEND.RETRY%)		!send the MODIFY QUEUE pkt    &
+\	RETURN IF ERRSTS%			!exit if errors		      &
+		  OR CC.FLG%			!  or CTRL/C		      &
+			OR NOSEND%		!    or NOSEND flag set	      &
+						!			      &
+\	CALL RECV (RECV.WAIT%)			!wait for ACK/NACK	      &
+\	RETURN IF ERRSTS% OR CC.FLG%		!exit if errors or CTRL/C     &
+						!			      &
+\	IF ASCII(PKT.CMD$) = AK.CMD% THEN	!if ACK received,	      &
+		CALL DISPLY (QUE$+" modified")	!  display confirmation msg   &
+\		ERRSTS% = 0%			!  show success		      &
+\		RETURN				!  and exit		      &
+\	END IF					!end if			      &
+						!			      &
+						!NACK received:		      &
+\	Z0$ = "%" + QUE$ + " "			!init warning msg text	      &
+\	Z1$ = ""				!init null qual text	      &
+\	Z2$ = " default exceeds maximum"	!init exceeds error msg	      &
+						!			      &
+\	ERRSTS% = PKT.STS%			!get error code		      &
+\	SELECT ERRSTS%				!select on error code:	      &
+\	CASE = RMS.RNF%				!case = queue not found,      &
+\		ERRSTS% = 0%			!  treat as success	      &
+\		QUE.CNT% = QUE.CNT% - 1%	!  decr queue counter	      &
+\	CASE = RMS.IOP%				!case = dflt exceeds max,     &
+\		Z1$ = "- /PRIORITY"		!  build qual text	      &
+\	CASE = RMS.PLG%				!case = dflt exceeds max,     &
+\		Z1$ = "- /PAGE_LIMIT"		!  build qual text	      &
+\	CASE = RMS.ISI%				!case = dflt exceeds max,     &
+\		Z1$ = "- /CPU_LIMIT"		!  build qual text	      &
+\	CASE = RMS.IRC%				!case = dflt exceeds max,     &
+\		Z1$ = "- /TIME_LIMIT"		!  build qual text	      &
+\	CASE = RMS.DNR%				!case = queue marked for del, &
+\		Z1$ = "marked for deletion"	!  build marked for del text  &
+\		Z2$ = ""			!  null suffix text	      &
+\	CASE ELSE				!case else,		      &
+\		FATAL% = TRUE%			!  set fatal error flag	      &
+\		ERRNAM$ = MODULE$		!  return bad module name     &
+\	END SELECT				!end select		      &
+						!			      &
+\	IF ERRSTS% THEN				!if error,		      &
+		CALL DISPLY (Z0$+Z1$+Z2$)	!  display error message      &
+			UNLESS FATAL%		!    unless fatal error	      &
+\		ERRSTS% = 0%			!  clear error status	      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+3000	!	S E T   n o n - t y p e   f i e l d s			      &
+	!								      &
+	!								      &
+	IF SET.FLG% AND DPR.BIT% THEN		!if default changed,	      &
+		PKT.IQ.DPR$ = IQ.DPR$		!  use saved value	      &
+\	END IF					!end if			      &
+						!			      &
+\	IF SET.FLG% AND MPR.BIT% THEN		!if maximum changed,	      &
+		PKT.IQ.MPR$ = IQ.MPR$		!  use saved value	      &
+\	END IF					!end if			      &
+						!			      &
+\	IF SET.FLG% AND PRV.BIT% THEN		!if privilege mask changed,   &
+		PKT.IQ.PRV$ = IQ.PRV$		!  load privilege mask	      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+4000	!	S E T   p r i n t   t y p e   f i e l d s		      &
+	!								      &
+	!								      &
+	IF SET.FLG% AND DPG.BIT% THEN		!if default limit changed,    &
+		PKT.IQ.DP0% = IQ.DP0%		!  load saved default lsb     &
+\		PKT.IQ.DP1% = IQ.DP1%		!  load saved default msb     &
+\	END IF					!end if			      &
+						!			      &
+\	IF SET.FLG% AND MPG.BIT% THEN		!if max limit changed,	      &
+		PKT.IQ.MP0% = IQ.MP0%		!  get saved max lsb	      &
+\		PKT.IQ.MP1% = IQ.MP1%		!  get saved max msb	      &
+\	END IF					!end if			      &
+						!			      &
+\	IF SET.FLG% AND FRM.BIT% THEN		!if form fields changed,      &
+		PKT.IQ.FML$ = IQ.FML$		!  load form name length      &
+\		PKT.IQ.FRM$ = IQ.FRM$		!  load form name	      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+5000	!	S E T   b a t c h   t y p e   f i e l d s		      &
+	!								      &
+	!								      &
+	IF SET.FLG% AND DCP.BIT% THEN		!if default limit changed,    &
+		PKT.IQ.DCP% = IQ.DCP%		!  load saved default value   &
+\	END IF					!end if			      &
+						!			      &
+\	IF SET.FLG% AND MCP.BIT% THEN		!if max limit changed,	      &
+		PKT.IQ.MCP% = IQ.MCP%		!  load saved max value	      &
+\	END IF					!end if			      &
+						!			      &
+\	IF SET.FLG% AND DTM.BIT% THEN		!if default limit changed,    &
+		PKT.IQ.DTM% = IQ.DTM%		!  load saved default value   &
+\	END IF					!end if			      &
+						!			      &
+\	IF SET.FLG% AND MTM.BIT% THEN		!if max limit changed,	      &
+		PKT.IQ.MTM% = IQ.MTM%		!  load saved max value	      &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+10000	!	p r o c e s s   / C P U _ L I M I T   q u a l i f i e r	      &
+	!								      &
+	!								      &
+	CPU.POS% = U.POS%			!save qual position	      &
+\	KWD.FLG% = FALSE%			!show no keywords seen	      &
+						!			      &
+\	CALL FET$KA BY REF (MAX.K%)		!fetch MAXIMUM keyword	      &
+\	IF U.PRES% THEN				!if present,		      &
+		KWD.FLG% = TRUE%		!  show keyword seen	      &
+\		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.MCP% = U.LOW%		!  save value		      &
+\		SET.FLG% = SET.FLG% OR MCP.BIT%	!  set field changed bit      &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$KA BY REF (DFL.K%)		!fetch DEFAULT keyword	      &
+\	IF U.PRES% THEN				!if present,		      &
+		KWD.FLG% = TRUE%		!  show keyword seen	      &
+\		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.DCP% = U.LOW%		!  save value		      &
+\		SET.FLG% = SET.FLG% OR DCP.BIT%	!  set field changed bit      &
+\	END IF					!end if			      &
+						!			      &
+\	IF NOT KWD.FLG% THEN			!if no keywords found,	      &
+		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.MCP%,IQ.DCP% = U.LOW%	!  save max,default values    &
+\		SET.FLG% = SET.FLG% OR MCP.BIT% OR DCP.BIT%		      &
+						!  set field changed bits     &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+10100	!	p r o c e s s   / [ N O ] D E F A U L T   q u a l i f i e r   &
+	!								      &
+	!								      &
+	DFL.POS% = U.POS%			!save qual position	      &
+\	IF U.NO% THEN				!if NO prefix,		      &
+		Z% = NDF.BIT%			!  use NODEFAULT bit	      &
+	ELSE	Z% = DFL.BIT%			!else use DEFAULT bit	      &
+\		IF POS(QNAM$,"*",1%) OR POS(QNAM$,"?",1%) THEN		      &
+						!  if wildcard queue name,    &
+			C.POS% = QUE.POS%	!    set 2nd ptr to que name  &
+\			CALL DISPLY ("?Conflicting elements")		      &
+						!    display error message    &
+\			ERRSTS% = ERR.BADNAM%	!    return BADNAM error      &
+\		END IF				!  end if		      &
+\	END IF					!end if			      &
+						!			      &
+\	SET.FLG% = SET.FLG% OR Z%		!set field changed bit	      &
+\	RETURN					!exit			      &
+
+10200	!	p r o c e s s   / F O R M S   q u a l i f i e r		      &
+	!								      &
+	!								      &
+	FRM.POS% = U.POS%			!save qual position	      &
+						!			      &
+\	CALL FET$A BY REF			!fetch the argument	      &
+\	IQ.FRM$ = SEG$(U.STR$,1%,U.LEN%)  	!save the form name	      &
+\	CALL GETFRM (IQ.FRM$,"",FALSE%)		!lookup form name	      &
+\	SUBEXIT IF ERRSTS% OR CC.FLG%		!exit if invalid or CTRL/C    &
+\	IQ.FML$ = CHR$(LEN(IQ.FRM$))		!save form name length	      &
+\	SET.FLG% = SET.FLG% OR FRM.BIT%		!set field changed bit	      &
+						!			      &
+\	RETURN					!exit			      &
+
+10300	!	p r o c e s s   / P A G E _ L I M I T   q u a l i f i e r     &
+	!								      &
+	!								      &
+	PGL.POS% = U.POS%			!save qual position	      &
+\	KWD.FLG% = FALSE%			!show no keywords seen	      &
+						!			      &
+\	CALL FET$KA BY REF (MAX.K%)		!fetch MAXIMUM keyword	      &
+\	IF U.PRES% THEN				!if present,		      &
+		KWD.FLG% = TRUE%		!  show keyword seen	      &
+\		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW%,U.HIGH% = -1%	!    force values to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.MP0% = U.LOW%		!  save maximum lsb value     &
+\		IQ.MP1% = U.HIGH%		!  save maximum msb value     &
+\		SET.FLG% = SET.FLG% OR MPG.BIT%	!  set field changed bit      &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$KA BY REF (DFL.K%)		!fetch DEFAULT keyword	      &
+\	IF U.PRES% THEN				!if present,		      &
+		KWD.FLG% = TRUE%		!  show keyword seen	      &
+\		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW%,U.HIGH% = -1%	!    force values to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.DP0% = U.LOW%		!  save lsb default value     &
+\		IQ.DP1% = U.HIGH%		!  save msb default value     &
+\		SET.FLG% = SET.FLG% OR DPG.BIT%	!  set field changed bit      &
+\	END IF					!end if			      &
+						!			      &
+\	IF NOT KWD.FLG% THEN			!if no keywords found,	      &
+		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW%,U.HIGH% = -1%	!    force values to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.MP0%,IQ.DP0% = U.LOW%	!  save max,dflt lsb values   &
+\		IQ.MP1%,IQ.DP1% = U.HIGH%	!  save max,dflt msb values   &
+\		SET.FLG% = SET.FLG% OR MPG.BIT% OR DPG.BIT%		      &
+						!  set field changed bits     &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+10400	!	p r o c e s s   / P R I O R I T Y   q u a l i f i e r	      &
+	!								      &
+	!								      &
+	PRI.POS% = U.POS%			!save qual position	      &
+\	KWD.FLG% = FALSE%			!show no keywords seen	      &
+						!			      &
+\	CALL FET$KA BY REF (MAX.K%)		!fetch MAXIMUM keyword	      &
+\	IF U.PRES% THEN				!if present,		      &
+		KWD.FLG% = TRUE%		!  show keyword seen	      &
+\		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.MPR$ = CHR$(U.LOW%)		!  save value		      &
+\		SET.FLG% = SET.FLG% OR MPR.BIT%	!  set field changed bit      &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$KA BY REF (DFL.K%)		!fetch DEFAULT keyword	      &
+\	IF U.PRES% THEN				!if present,		      &
+		KWD.FLG% = TRUE%		!  show keyword seen	      &
+\		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.DPR$ = CHR$(U.LOW%)		!  save value		      &
+\		SET.FLG% = SET.FLG% OR DPR.BIT%	!  set field changed bit      &
+\	END IF					!end if			      &
+						!			      &
+\	IF NOT KWD.FLG% THEN			!if no keywords found,	      &
+		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.MPR$,IQ.DPR$ = CHR$(U.LOW%)	!  save max,default values    &
+\		SET.FLG% = SET.FLG% OR MPR.BIT% OR DPR.BIT%		      &
+						!  set field changed bits     &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+10500	!	p r o c e s s   / P R I V I L E G E   q u a l i f i e r	      &
+	!								      &
+	!								      &
+	PRV.POS% = U.POS%			!save qualifier position      &
+\	PRIV$ = STRING$(8%,0%)			!init null priv mask	      &
+\	CALL FET$A BY REF			!get the 1st argument	      &
+\	WHILE U.PRES%				!do for all privileges:	      &
+\		PNAM$ = SEG$(U.STR$,1%,U.LEN%)  !  save PRIVILEGE name	      &
+\		PRIV$ = FN.PRIV.MASK$(PRIV$,PNAM$)			      &
+						!  update priv mask	      &
+\		RETURN IF ERRSTS% OR CC.FLG%	!  exit if errors or CTRL/C   &
+\		CALL FET$A BY REF		!get next privilege	      &
+\	NEXT					!continue for all privs	      &
+						!			      &
+\	IQ.PRV$ = PRIV$				!save priv mask		      &
+\	SET.FLG% = SET.FLG% OR PRV.BIT%		!set field changed bit	      &
+\	RETURN					!exit			      &
+
+10600	!	p r o c e s s   / T I M E _ L I M I T   q u a l i f i e r     &
+	!								      &
+	!								      &
+	TIM.POS% = U.POS%			!save qual position	      &
+\	KWD.FLG% = FALSE%			!show no keywords seen	      &
+						!			      &
+\	CALL FET$KA BY REF (MAX.K%)		!fetch MAXIMUM keyword	      &
+\	IF U.PRES% THEN				!if present,		      &
+		KWD.FLG% = TRUE%		!  show keyword seen	      &
+\		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.MTM% = U.LOW%		!  save value		      &
+\		SET.FLG% = SET.FLG% OR MTM.BIT%	!  set field changed bit      &
+\	END IF					!end if			      &
+						!			      &
+\	CALL FET$KA BY REF (DFL.K%)		!fetch DEFAULT keyword	      &
+\	IF U.PRES% THEN				!if present,		      &
+		KWD.FLG% = TRUE%		!  show keyword seen	      &
+\		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.DTM% = U.LOW%		!  save value		      &
+\		SET.FLG% = SET.FLG% OR DTM.BIT%	!  set field changed bit      &
+\	END IF					!end if			      &
+						!			      &
+\	IF NOT KWD.FLG% THEN			!if no keywords found,	      &
+		CALL FET$KA BY REF (UNL.K%)	!  fetch UNLIMITED keyword    &
+\		IF U.PRES% THEN			!  if present,		      &
+			U.LOW% = -1%		!    force value to -1	      &
+		ELSE	CALL FET$A BY REF	!  else fetch the argument    &
+\		END IF				!  end if		      &
+\		IQ.MTM%,IQ.DTM% = U.LOW%	!  save max,default values    &
+\		SET.FLG% = SET.FLG% OR MTM.BIT% OR DTM.BIT%		      &
+						!  set field changed bits     &
+\	END IF					!end if			      &
+						!			      &
+\	RETURN					!exit			      &
+
+15000	!	f n . p r i v . m a s k $ ( PRV.MSK% , PRV.NAM$ )	      &
+	!								      &
+	!								      &
+	!inputs:	PRV.MSK$	-	privilege mask to update      &
+	!		PRV.NAM$	-	privilege name to add	      &
+	!								      &
+	!outputs:	FN.PRIV.MASK$	-	updated privilege mask	      &
+	!								      &
+	!uses:		PRV.1%()	-	8-byte work array	      &
+	!		PRV.2%()	-	8-byte work array	      &
+	!		Z%		-	work integer		      &
+	!		Z$		-	work string		      &
+	!								      &
+	!								      &
+	DEF FN.PRIV.MASK$ (PRV.MSK$,PRV.NAM$)				      &
+\	ERRSTS% = 0%				!show no error		      &
+\	ON ERROR GOTO 15050			!trap own errors	      &
+\	CHANGE PRV.MSK$ TO PRV.1%		!convert mask to array	      &
+\	PRV.NAM$ = EDIT$(PRV.NAM$,-2%)		!trim the priv name	      &
+									      &
+\	IF PRV.NAM$ = "NONE" THEN		!if "none",		      &
+		PRV.1%(Z%) = 0%			!  clear all priv bits	      &
+			FOR Z% = 1% TO 8%	!    for all bytes in mask    &
+\		GOTO 15090			!  and exit		      &
+\	END IF					!end if			      &
+						!			      &
+\	Z$ = SYS(				!cvt name to mask SYS call:   &
+			CHR.6$ +		!  FIP call		      &
+			CHR$(32%) +		!  check access		      &
+			CHR$(1%) +		!  cvt name to mask	      &
+			CHR.0$ +		!    reserved		      &
+			CHR.00$ +		!    reserved		      &
+			PRV.NAM$		!  priv name to convert	      &
+		)				!end of SYS call	      &
+						!			      &
+\	CHANGE SEG$(Z$,7%,14%) TO PRV.2%	!save returned mask	      &
+						!			      &
+\	PRV.1%(Z%) = PRV.1%(Z%) OR PRV.2%(Z%)	!OR the returned priv bit     &
+		FOR Z% = 1% TO 8%		!  into current mask	      &
+\	GOTO 15090				!skip to exit		      &
+
+15050	ERRSTS% = ERR				!return error code	      &
+\	RESUME 15090				!resume to exit		      &
+
+15090	CHANGE PRV.1% TO Z$			!convert mask array to string &
+\	FN.PRIV.MASK$ = Z$			!and return as fn value	      &
+\	CALL DISPLY ("?Invalid privilege name")	!display error message	      &
+		IF ERRSTS%			!  if error		      &
+\	FNEND					!end FN.PRIV.MASK$ function   &
+
+15200	!	f n . m a t c h . n a m e $ ( NAM.1$ , NAM.2$ )		      &
+	!								      &
+	!								      &
+	!inputs:	NAM.1$		-	queue name string	      &
+	!		NAM.2$		-	name string to match	      &
+	!								      &
+	!outputs:	FN.MATCH.NAME%	-	returned match status:	      &
+	!					   TRUE% = names match	      &
+	!					  FALSE% = names don't match  &
+	!								      &
+	!uses:		Z0%		-	loop index		      &
+	!		NAM.1%()	-	work table for queue name     &
+	!		NAM.2%()	-	work table for match name     &
+	!								      &
+	!notes:		This function compares a queue name string (NAM.1$)   &
+	!		against a match name string (NAM.2$). The match name  &
+	!		string may contain a '*' or multiple '?' wildcard     &
+	!		characters (always match).			      &
+	!								      &
+	!		If the match name string is null or *, then the	      &
+	!		function returns TRUE% (match), regardless of the     &
+	!		queue name string.				      &
+	!								      &
+	!		If the match string contains a trailing *, then	      &
+	!		the * is replaced with enough ?'s to fill the string  &
+	!		to a length of nine characters.			      &
+	!								      &
+	!								      &
+	DEF FN.MATCH.NAME% (NAM.1$,NAM.2$)				      &
+\	IF LEN(NAM.2$) = 0%			!if null match name	      &
+	   OR NAM.2$ = "*" THEN			! or wildcard match name,     &
+		FN.MATCH.NAME% = TRUE%		!  return match		      &
+\		FNEXIT				!  and exit		      &
+\	END IF					!end if			      &
+						!			      &
+\	Z0% = POS(NAM.2$,"*",LEN(NAM.2$))	!look for trailing * char     &
+\	IF Z0% > 0% THEN			!if any found,		      &
+		NAM.2$ = SEG$(NAM.2$,1%,Z0%-1%) +			      &
+			 STRING$(9%-Z0%+1%,ASCII("?"))			      &
+						!  replace * with ?'s	      &
+
+15210	CHANGE EDIT$(NAM.1$,2%+4%) TO NAM.1%	!move queue name into array   &
+\	CHANGE EDIT$(NAM.2$,2%+4%) TO NAM.2%	!move match name into array   &
+\	FN.MATCH.NAME% = FALSE%			!init fn value as no match    &
+						!			      &
+\	FNEXIT					!exit with no match	      &
+		IF NAM.1%(0%) > NAM.2%(0%)	!  if queue name is longer    &
+						!			      &
+\	FNEXIT					!exit with no match	      &
+		IF NAM.1%(Z0%) <> NAM.2%(Z0%)	!  if chars don't match	      &
+			IF NAM.2%(Z0%) <> ASCII("?")			      &
+						!    if not wildcard char     &
+				FOR Z0% = 1% TO NAM.1%(0%)		      &
+						!      for each char	      &
+						!			      &
+\	FNEXIT					!exit with no match	      &
+		IF NAM.2%(Z0%) <> ASCII("?")	!  if next char not wild      &
+			FOR Z0% = NAM.1%(0%)+1% TO NAM.2%(0%)		      &
+						!    for remaining chars      &
+						!			      &
+\	FN.MATCH.NAME% = TRUE%			!match if loops complete      &
+\	FNEND					!end FN.MATCH.NAME% function  &
+
+15800	!	f n . u n s i g n e d ( VALUE% )			      &
+	!								      &
+	!								      &
+	!inputs:	VALUE%		-	16-bit unsigned integer	      &
+	!								      &
+	!outputs:	FN.UNSIGNED	-	corresponding FL-PT value     &
+	!								      &
+	!uses:		Z		-	work FL-PT		      &
+	!								      &
+	!								      &
+	DEF FN.UNSIGNED (VALUE%)					      &
+\	Z = VALUE%				!move to fl-pt variable	      &
+\	Z = Z + 65536.				!normalize to 0		      &
+		IF Z < 0.			!  if negative		      &
+\	FN.UNSIGNED = Z				!  return fl-pt value	      &
+\	FNEND					!end FN.UNSIGNED function     &
+
+16200	!	f n . g e t . q u e u e % ( GET.MODE% )			      &
+	!								      &
+	!								      &
+	!inputs:	GET.MODE%	-	initial GET mode (0-3)	      &
+	!		QTYP%		-	queue type to select	      &
+	!		QNAM$		-	name of queue to select	      &
+	!								      &
+	!outputs:	FN.GET.QUEUE%	-	selected queue status:	      &
+	!					   TRUE% = queue selected     &
+	!					  FALSE% = no queue selected  &
+	!		ERRSTS%		-	error status:		      &
+	!					  0 = no error (rec found)    &
+	!					  n = error (rec not found)   &
+	!		QUE.TYP%	-	selected queue's type	      &
+	!		QUE.NAM$	-	selected queue's name	      &
+	!								      &
+	!uses:		Z%		-	work integer		      &
+	!		Z$		-	work string		      &
+	!								      &
+	!notes:								      &
+	!								      &
+	! This routine is called to return the next job definition record     &
+	! (JDR), based on the selection values specified above.  The value    &
+	! GET.MODE% (0-3) is used by this function in its initial call to     &
+	! GETREC, to allow the caller to decide how to get the initial queue  &
+	! record.  Mode 0 (GET NEXT) should be specified if at least one QDR  &
+	! has been read and no other non-QDRs have been read since the last   &
+	! call; otherwise, mode 3 (GET GT) should be specified, with QTYP%    &
+	! set accordingly.  Once the initial GET is performed, the record is  &
+	! tested to ensure that it is actually a QDR; if not the function     &
+	! exits with status ERR.NOTFND%.  Otherwise, a check is made to see   &
+	! if the QDR should be selected, based on the selection values.	      &
+	! If the QDR is selected, the function exits with success status (0); &
+	! otherwise, a GET NEXT is performed and the process repeats.	      &
+	!								      &
+	!								      &
+	DEF FN.GET.QUEUE% (GET.MODE%)					      &
+\	FNEXIT IF CC.FLG%			!exit if CTRL/C		      &
+\	Z$ = CHR$(QTYP% OR QUE.DEF%) + STRING$(5%,0%)			      &
+		IF GET.MODE%			!  build key except get-next  &
+\	FN.GET.QUEUE% = FALSE%			!set fn val = rec not found   &
+
+16210	CALL GETREC (GET.MODE%,1%,Z$)		!get initial queue record     &
+\	FNEXIT IF CC.FLG%			!exit if CTRL/C		      &
+\	QUE.TYP% = ASCII(PKT.QUE$)		!save queue type	      &
+\	ERRSTS% = ERR.NOTFND%			!return not-found error	      &
+		UNLESS (QUE.TYP% AND NOT 15%) = QUE.DEF%		      &
+						!  unless a queue def record  &
+			UNLESS ERRSTS%		!    unless a pending error   &
+\	FNEXIT IF ERRSTS%			!exit if any error	      &
+						!			      &
+\	GET.MODE% = 0%				!use GET NEXT mode now	      &
+\	QUE.TYP% = QUE.TYP% AND 15%		!return minor queue type      &
+						!			      &
+\	GOTO 16210				!skip this queue	      &
+		IF QUE.TYP% <> QTYP%		!  if not type selected	      &
+			IF QTYP%		!    if specific type	      &
+						!			      &
+\	QUE.NAM$ = SEG$(PKT.IQ.QNM$,1%,ASCII(PKT.IQ.QNL$))		      &
+						!extract queue name	      &
+\	GOTO 16210				!skip this queue	      &
+		UNLESS FN.MATCH.NAME%(QUE.NAM$,QNAM$)			      &
+						!  unless queue names match   &
+						!			      &
+\	FN.GET.QUEUE% = TRUE%			!set fn val = rec found	      &
+\	FNEND					!end FN.GET.QUEUE% function   &
+
+19000	!	s t a n d a r d   e r r o r   h a n d l i n g		      &
+	!								      &
+	!								      &
+	FATAL% = TRUE%				!set fatal error flag	      &
+\	ERRSTS% = ERR				!save error no.		      &
+\	ERRLIN% = ERL				!save error line no.	      &
+\	ERRNAM$ = ERN$				!save module name	      &
+\	RESUME 32767				!resume to exit		      &
+
+32767	!	e n d   o f   s u b p r o g r a m			      &
+	!								      &
+	!								      &
+	SUBEND

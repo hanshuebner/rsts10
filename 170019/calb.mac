@@ -1,0 +1,476 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+TITLE	CALB,<Call Using Argument Block>,0J,27-MAR-92,CEK/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR CALB
+;+
+;
+;  001	CEK  16-APR-82	Added edit history
+;  002	CEK  16-APR-82	Removed @# notation
+;  003	CEK  16-APR-82	Set C bit if R0<>0
+;  004	CEK  16-APR-82	Save registers
+;  005	CEK  11-NOV-82	Changed symbol names, comments.
+;  006	JFM  10-MAY-83	Changed comments.
+;  007	KPH  12-MAR-84	Added ARGBYT to CALB macro
+;  008	KPH  30-AUG-84	Clear slot before doing a MOVB in CALB macro
+;
+;			[RSTS/E V10.1]
+;  009	JFM  20-Mar-92	Improve performance by eliminating TST R0/BNE/SEC
+;			Replace RTS PC with the standard RETURN statement.
+;-
+
+	.ENABL	LC
+	.PSECT	RSTSLB,RO,CON
+	.LIST	MEB
+
+.SBTTL	How to Use CALB
+;+
+; CALB	subrname,<arg1,arg2,...> --
+;	call subroutine, using argument block
+;
+; CALBX subrname,<arg1,arg2,...> --
+;	call external subroutine, using argument block
+;
+;	subrname
+;		The address of the subroutine.  This is an address expression
+;		referring to the first instruction of the subroutine;
+;		it has the same form you would use with the JSR instruction.
+;		For example, PARS or @R1.  The address expression must not
+;		refer to SP;  for example, (SP)+ is invalid.
+;
+;		If subrname is a usual relative address expression, 
+;		such as PARS, CALB and CALBX treat it as an absolute address.
+;		(This limits their usefulness in writing PIC code.)  The
+;		expansion of CALB and CALBX is generally more compact with
+;		this common type of subroutine address.
+;		
+;	arg1,arg2,...
+;		Arguments to the subroutine. These arguments are
+;		address expressions; that is, their values are interpreted at
+;		run time. The args must not refer to SP;  for example,
+;		(SP)+ is invalid.  A maximum of 255 (decimal)
+;		arguments is allowed.
+;
+;	The subroutine is called with R5 pointing to an argument block of
+;	the following form.
+;
+;	                           offset
+;	+-----------+-----------+
+;	! UNDEFINED ! NUMBER OF !    0
+;	!           ! ARGUMENTS !
+;	+-----------+-----------+
+;	!     VALUE OF arg1     !    2
+;	+-----------------------+
+;	!     VALUE OF arg2     !    4
+;	+-----------------------+    .
+;	!         . . .         !    .
+;	+-----------------------+    .
+;	!     VALUE OF argn     !   2*n
+;	+-----------------------+
+;
+;	The subroutine must return with RTS PC (or RETURN).  The subroutine
+;	should not alter the contents of the argument block.  However, it
+;	may alter locations pointed to by arguments in the argument block.
+;	(This is called argument passing by reference.) The subroutine can also
+;	pass data (such as a return status) back in R0.
+;
+;	The subroutine cannot pass back any data in the other condition codes.
+;	It can pass data back in R1 through R5 
+;	by modifying the saved values on the stack.  These are referenced
+;	as TOS.R1(SP) through TOS.R5(SP).  
+;
+;	CALB allocates the argument block on the top of the SP stack.  It
+;	saves R1 through R5 onto the stack, 
+;	pushes the arguments on in reverse order,
+;	clears R0, and then calls the subroutine. 
+;	After the subroutine returns, CALB restores
+;	R1 through R5 from the stack, pops the
+;	arguments off the stack and discards them, 
+;	and sets the C bit to 1 if R0<>0, otherwise to 0.
+;
+;	The calling sequence is superset-compatible with the BP2 CALL BY REF
+;	calling sequence.  That is, subroutines written to be callable from BP2
+;	can also be called from MACRO using CALB and CALBX.
+;	But note that a subroutine that is callable from BP2 cannot pass back
+;	information in the registers.  Refer to the BP2 manual for
+;	the calling conventions.
+;
+;	//If all of the arguments being passed are immediate arguments, CALB
+;	could generate a more compact calling sequence.//
+;
+;	//CALB should not clear R0 on the way into the subroutine.//
+;
+; SUBR  <argnam1,argnam2, ...> [,CHECK]
+;	define symbolic names for subroutine arguments
+;
+;	This macro defines symbolic names for offsets into the argument block
+;	expected by a subroutine. SUBR assumes the same R5 calling convention
+;	as does the CALB macro, and may be used in conjunction with that macro.
+;	The first argument to the subroutine may be referenced as argnam1(R5),
+;	the second as argnam2(r5), etc.  This macro is generally used as the
+;	first instruction in a subroutine.
+;
+;	If you use the SUBR macro, you should define your PSECTs with the ORG
+;	macro, rather than using the .PSECT directive.
+;
+;	Each argument name is permanently equated to a particular offset.  If
+;	you use the same argument name in two different subroutines, they must
+;	occur at the same offset within the argument block.  Otherwise the
+;	error code M will appear in the listing.
+;
+;	If you use the CHECK keyword, and if the symbol $DEBUG is defined,
+;	then SUBR will check the number of arguments passed at run time,
+;	and will execute a BPT instruction if the number of arguments
+;	does not equal the number of argument names on the SUBR line.
+;	SUBR also equates the symbol ARGMAX to the number of argument names
+;	given in the argument list.
+;
+; EXAMPLE
+;
+;	.MCALL	SUBR,CALB,RETURN
+;
+;	BUFFER:	.BLKB	256.			;Allocate a buffer for
+;						;something.
+;
+;	START::
+;		(Move data into buffer, and
+;		 move byte count for data into R3.)
+;
+;		CALB	PRIN,<R3,#BUFFER>
+;			.
+;			.
+;			.
+;	PRIN:	SUBR	<NUMBYT,BUFAD>
+;		CMPB	(R5),#ARGMAX		;Are all arguments present?
+;		BNE	ERROR			;No;abort.
+;
+;		(Byte count is in NUMBYT(R5).
+;		 Buffer address is in BUFAD(R5).)
+;
+;		RETURN
+;-
+
+.SBTTL	MACROs
+
+; $$$N is number of args.
+; $$$I is index to arg.
+; S.ALLI is 1 if all arguments are immediate mode (i.e. leading #, no
+;	trailing -) and SUBRNAME is relative;else 0.
+; The C.RELI macro sets $$$TYP to 1 if EXPR has a trailing -, else to 0.
+
+.MACRO	CALBX	SUBRNAME,ARGLIST
+	.MCALL	CALB
+	CALB	SUBRNAME,<ARGLIST>
+	.GLOBL	SUBRNAME
+	.ENDM	CALBX
+
+.MACRO	CALB	SUBRNAME,ARGLIST
+	.DSABL	CRF
+
+
+.MACRO	$$$DOARG ARG,ARGBYT
+	.IF	B <ARG>
+	 CLR	-(SP)
+	.IFF
+	.NTYPE	$$$TYP,ARG
+	.IIF	EQ <$$$TYP & ^O7 - ^O6>	.ERROR	;ARG REFERS TO SP.
+	.ENABL	CRF
+	.IF	B	ARGBYT
+	 MOV	ARG,-(SP)
+	.IFF		
+	CLR	-(SP)	
+	MOVB	ARG,(SP)
+	.ENDC		
+	.DSABL	CRF
+	.ENDC
+	.ENDM	$$$DOARG
+
+;;.MACRO	$$$DOARG ARG
+;;	.IF	B <ARG>
+;;	 CLR	-(SP)
+;;	.IFF
+;;	.NTYPE	$$$TYP,ARG
+;;	.IIF	EQ <$$$TYP & ^O7 - ^O6>	.ERROR	;ARG REFERS TO SP.
+;;	.ENABL	CRF
+;;	 MOV	ARG,-(SP)
+;;	.DSABL	CRF
+;;	.ENDC
+;;	.ENDM	$$$DOARG
+
+$$$N	=	0
+	.IRP	ARG,<ARGLIST>
+$$$N	=	$$$N + 1
+	.ENDR
+
+$$$I	=	$$$N
+	.REPT	$$$N
+$$$J	=	0
+	.IRP	ARG,<ARGLIST>
+$$$J	=	$$$J + 1
+	.IIF	EQ <$$$J-$$$I>	$$$DOARG ARG
+	.ENDR
+$$$I	=	$$$I - 1
+	.ENDR
+
+	.NTYPE	$$$TYP,SUBRNAME
+	.IIF	EQ <<$$$TYP & ^O7> - ^O6> .ERROR	;SUBRNAME refers to SP.
+	.IF	EQ <$$$TYP - ^O67>
+	.IF	EQ $$$N-0
+	.ENABL	CRF
+	 JSR	R5,$$CAL0
+	 .WORD	SUBRNAME
+	.DSABL	CRF
+	.GLOBL	$$CAL0
+	.IFF
+	.IF	EQ $$$N-1
+	.ENABL	CRF
+	 JSR	R5,$$CAL1
+	 .WORD	SUBRNAME
+	.DSABL	CRF
+	.GLOBL	$$CAL1
+	.IFF
+	.IF	EQ $$$N-2.
+	.ENABL	CRF
+	 JSR	R5,$$CAL2
+	 .WORD	SUBRNAME
+	.DSABL	CRF
+	.GLOBL	$$CAL2
+	.IFF
+	.ENABL	CRF
+	 JSR	R5,$$CALB
+	 .WORD	$$$N
+	 .WORD	SUBRNAME
+	.DSABL	CRF
+	.GLOBL	$$CALB
+	.ENDC
+	.ENDC
+	.ENDC
+	.IFF
+	.ENABL	CRF
+	 JSR	R5,$$PCAL
+	 .WORD	$$$N
+	 JSR	PC,SUBRNAME
+	 JSR	PC,$$CCAL
+	.DSABL	CRF
+	.GLOBL	$$PCAL
+	.GLOBL	$$CCAL
+	.ENDC
+	.ENABL	CRF
+	.ENDM	CALB
+
+.MACRO	SUBR ARGLIST,CHK
+	.DSABL	CRF
+ARGMAX	=	0
+	.IRP	ARG,<ARGLIST>
+ARGMAX	=	ARGMAX + 1
+ARG	=	ARGMAX*2
+	.ENDR
+TOS.R1	=	4.
+TOS.R2	=	6.
+TOS.R3	=	8.
+TOS.R4	=	10.
+TOS.R5	=	12.
+	.IIF	DF TOS.R0	TOS.R0	=	1
+	.IIF	DF TOS.RA	TOS.RA	=	1
+	.IF	DF $DEBUG
+	.IF	IDN <CHK>,<CHECK>
+	 CMPB	(R5),#ARGMAX
+	 BEQ	.+4.
+	 BPT
+	.ENDC
+	.ENDC
+	.ENABL	CRF
+	.ENDM	SUBR
+
+.SBTTL	Support routines
+;+
+; $$CALB--support routine for CALB macro
+;
+; INPUTS:
+;	arg1, ..., argn -- already pushed onto stack (in reverse order)
+;	SP -- pointing at first arg
+;	n -- inline argument:  number of args
+;	subrname -- inline argument:  address of subroutine.
+;
+; CALLING SEQUENCE:
+;
+;	JSR	R5,$$CALB
+;	 .WORD	n
+;	 .WORD	subrname
+;
+; OUTPUT: Subroutine is called with R5 pointing at arg block, with R0=0 
+;	and all other registers as passed by caller.
+;	When subroutine
+;	returns, all args are popped off of stack.  R1-R5 are restored to their
+;	initial values.  The carry bit is set iff R0<>0.
+;	Other condition codes are random.
+;-
+
+;+
+; $$CAL0 -- Support routine for call with zero arguments
+; $$CAL1 -- Support routine for call with one argument
+; $$CAL2 -- Support routine for call with two arguments
+;
+; CALLING SEQUENCES:
+;	JSR	R5,$$CAL0
+;	 .WORD	subroutine address
+;
+;	MOV	arg,-(SP)
+;	JSR	R5,$$CAL1
+;	 .WORD	subroutine address
+;
+;	MOV	arg2,-(SP)
+;	MOV	arg1,-(SP)
+;	JSR	R5,$$CAL2
+;	 .WORD	subroutine address
+;-
+
+;+
+; $$PCAL and $$CCAL - prepare for and clean up after subroutine call.
+; 
+; INPUTS:
+;	arg1, ..., argn -- already pushed onto stack (in reverse order)
+;	SP -- pointing at first arg
+;	n -- inline argument:  number of args
+;
+; CALLING SEQUENCE:
+;	JSR	R5,$$PCAL
+;	 .WORD	n
+;	JSR	PC,SUBRNAME
+;	JSR	PC,$$CCAL
+;
+; OUTPUT: Subroutine is called with R5 pointing at arg block, with R0=0
+;	and all other registers as passed by caller.
+;	When subroutine
+;	returns, all args are popped off of stack.  R1-R5 are restored to their
+;	initial values. The carry bit is set iff R0<>0; other condition
+; 	codes are random.
+;-
+
+;
+; The following illustrates the SP stack.
+;
+;	+--------+
+;	!	 !  slot A (subroutine address)
+;	+--------+
+;	!	 !  slot B (return address)
+;	+--------+
+;	!	 !  saved R1
+;	+--------+
+;	!	 !  saved R2
+;	+--------+
+;	!	 !  saved R3
+;	+--------+
+;	!	 !  saved R4
+;	+--------+
+;	!	 !  slot C (saved R5)
+;	+--------+
+;	!	 !  slot D (arg count)
+;	+--------+
+;	!  arg1  !
+;	+--------+
+;	!  arg2  !
+;	+--------+
+;	!   .	 !
+;	    .
+;	!   .	 !
+;	+--------+
+;	!  argn-1!  slot X
+;	+--------+
+;	!  argn  !  slot Y
+;	+--------+
+;
+; To allow for interrupts, this routine leaves no data on the
+; stack below the stack pointer at any time.
+
+.ENABL	LSB
+
+$$PCAL::			;We are called with JSR R5.  Therefore, slot
+				;D now contains saved R5.
+	MOV	(SP),-(SP)	;Put saved R5 in slot C.
+	MOV	(R5)+,2(SP)	;Put arg count in slot D.
+	MOV	R4,-(SP)	;Save R1-R4.
+	MOV	R3,-(SP)
+	MOV	R2,-(SP)
+	MOV	R1,-(SP)
+	CLR	R0		;Pre-clear R0.
+	MOV	R5,-(SP)	;Put return address in slot B.
+	MOV	SP,R5		;Point R5 at slot B.
+	ADD	#6*2,R5		;Point R5 at slot D (arg count).
+	RTS	PC		;Go back to caller, who will call subroutine.
+
+$$CALB::			;We are called with JSR R5.  Therefore, slot
+				;D now contains saved R5.
+	MOV	(SP),-(SP)	;Put saved R5 in slot C.
+	MOV	(R5)+,2(SP)	;Put arg count in slot D.
+	BR	10$
+
+$$CAL2::			;We are called with JSR R5.  Therefore, slot
+				;D now contains saved R5.
+	MOV	(SP),-(SP)	;Put saved R5 in slot C.
+	MOV	#2,2(SP)	;Arg count (slot D) is two.
+	BR	10$
+
+$$CAL1::			;We are called with JSR R5.  Therefore, slot
+				;D now contains saved R5.
+	MOV	(SP),-(SP)	;Put saved R5 in slot C.
+	MOV	#1,2(SP)	;Arg count (slot D) is one.
+	BR	10$
+
+$$CAL0::			;We are called with JSR R5.  Therefore, slot
+				;D now contains saved R5.
+	MOV	(SP),-(SP)	;Put saved R5 in slot C.
+	CLR	2(SP)		;Arg count (slot D) is zero.
+10$:	MOV	R4,-(SP)	;Save R1-R4.
+	MOV	R3,-(SP)
+	MOV	R2,-(SP)
+	MOV	R1,-(SP)
+	CLR	R0		;Pre-clear R0.
+	TST	(R5)+		;Compute return address.
+	MOV	R5,-(SP)	;Put return address in slot B.
+	MOV	-(R5),-(SP)	;Put address of subroutine in slot A.
+	MOV	SP,R5		;Point R5 at slot A.
+	ADD	#7*2,R5		;Point R5 at slot D (arg count).
+	JSR	PC,@(SP)+	;Call subroutine.
+
+; SP now points at slot B (return address).
+
+$$CCAL::MOV	SP,R5		;Point R5 at slot B.
+	TST	(R5)+		;Point R5 at saved R1.
+	MOV	(R5)+,R1	;Restore R1-R4.
+	MOV	(R5)+,R2
+	MOV	(R5)+,R3
+	MOV	(R5)+,R4
+	TST	(R5)+		;Point R5 at slot D (arg count).
+	ASL	(R5)		;Double arg count.
+	ADD	(R5),R5		;Point R5 at slot Y.
+	MOV	(SP),(R5)	;Move return address from slot B to slot Y.
+	MOV	5*2(SP),-(R5)	;Move saved R5 from slot C to slot X.
+				;(If there are zero args, this will be an
+				;in-place move.)
+	MOV	R5,SP		;Point SP at slot X.
+	MOV	(SP)+,R5	;Restore R5.
+	CMP	#0,R0		;Check for error (return C=1 if R0 <>0)	;009
+	RETURN			;All done				;009
+
+.DSABL	LSB
+.END

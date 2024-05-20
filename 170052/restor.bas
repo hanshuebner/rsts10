@@ -1,0 +1,2306 @@
+2!		PROGRAM		: RESTOR.BAS
+5!		VERSION		: V10.1
+6!		EDIT		: A
+7!		EDIT DATE	: 10-MAY-91
+10	EXTEND
+11	! &
+	&
+	&
+	!		  C O P Y R I G H T &
+	&
+	&
+  !		      Copyright (C) 1974, 1991 by &
+  !	        Digital Equipment Corporation, Maynard, Mass. &
+  !	&
+  !	&
+  !	This software is furnished under a license and may be used and &
+  !	copied  only  in accordance with the terms of such license and &
+  !	with the  inclusion  of  the  above  copyright  notice.   This &
+  !	software  or  any  other copies thereof may not be provided or &
+  !	otherwise made available to any other person.  No title to and &
+  !	ownership of the software is hereby transferred. &
+  !	&
+  !	The information in this software is subject to change  without &
+  !	notice  and should not be construed as a commitment by Digital &
+  !	Equipment Corporation. &
+  !	&
+  !	DIGITAL assumes no responsibility for the use  or  reliability &
+  !	of its software on equipment that is not supplied by DIGITAL. &
+  !	&
+  !******************************************************************* &
+	&
+
+20	! &
+	&
+	&
+	!	M O D I F I C A T I O N    H I S T O R Y &
+	&
+	&
+	&
+	! VER/ED	EDIT DATE	REASON &
+	! &
+
+100	! &
+	&
+	&
+	!	G E N E R A L    D E S C R I P T I O N &
+	&
+	&
+	&
+!	THIS MODULE IS THE COMMAND DECODE MODULE OF THE RESTOR PACKAGE. &
+!	THIS MODULE IS CALLED THROUGH THE RUN OR CCL ENTRY TO INITIATE A &
+!	BACKUP OR RESTORE RUN.  ITS PURPOSE IS TO INITIALIZE THE WORK &
+!	FILE FROM WHICH THE REMAINDER OF THE PACKAGE DERIVES CONTROL. &
+!	IT ACCOMPLISHES THIS BY PROCESSING THE USER DIALOGUE. &
+
+300	! &
+	&
+	&
+	!	I / O    C H A N N E L S &
+	&
+	&
+	&
+!	CHANNEL #		USED FOR &
+!	   1			WORK FILE. &
+!	   3			WORK FILE (BLOCK I/O). &
+!	   8			HELP FILE. &
+!	   9			TEST OPENS. &
+
+400	! &
+	&
+	&
+	!	V A R I A B L E    D E F I N I T I O N S &
+	&
+	&
+	&
+!	NAME		USED FOR &
+!	A$		ACCOUNT NUMBER STRING. &
+!	A%		ACCOUNT NUMBER. &
+!	B0%		FREE LIST POINTER. &
+!	B1%		BIT MASK FOR PRW. &
+!	C$		GENERAL DECODE COMMAND STRING. &
+!	C0$		COMMAND FILE NAME STRING. &
+!	C1%		CHANNEL NUMBER. &
+!	D$		DEFAULT STRING. &
+!	D%		DESTROY LIST FLAG. &
+!	D%()		DAYS IN MONTH ARRAY. &
+!	D1$		MONTH STRING. &
+!	E$		ERROR STRING. &
+!	E%		ERROR VARIABLE. &
+!	E0%		ENTRY TYPE. &
+!	F%		SUCCESS FLAG. &
+!	F0%		FIELD PROHIBIT WORD. &
+!	F1%		DEVICE PROHIBIT WORD. &
+!	F2%		SWITCH PROHIBIT WORD. &
+!	F3%		STICKY FIELD WORD. &
+!	I$		VERSION-EDIT. &
+!	I%()		HELP TEXT INDEX ARRAY. &
+!	J$		JOB NUMBER STRING. &
+!	J%		JOB NUMBER. &
+!	L%		TEMPORARY LIST POINTER. &
+!	L1%		PERMANENT LIST POINTER. &
+!	M%		SWITCH SPECIFICATION MASK. &
+!	N$		NULL REPLACE STRING. &
+!	PRIV.OFF$	SYS(PRIV.OFF$) WILL DROP PRIV'S (TEMP). &
+!	PRIV.ON$	SYS(PRIV.ON$) WILL REGAIN PRIV'S. &
+!	P$()		PROMPT/DEFAULT STRING ARRAY. &
+!	P%		STRING POSITION POINTER. &
+!	P%()		PARAMETER ARRAY. &
+!	P0$		PROMPT. &
+!	P0%		CURRENT RECORD POINTER. &
+!	P1%		RECORD POINTER. &
+!	P2$		LAST RESPONSE. &
+!	P2%		QUESTION CHARACTERISTICS WORD. &
+!	Q%		QUESTION NUMBER. &
+!	Q0%		QUESTIONS TO BE ASKED WORD. &
+!	Q1%		QUESTIONS ASKED WORD. &
+!	R%		RIGHT PARENTHESES POINTER. &
+!	S$		VALID SWITCH STRING. &
+!	S$()		STRING STACK. &
+!	S%		STACK POINTER. &
+!	S%()		STACK. &
+!	S1%		SWITCHES VALID WORD. &
+!	S2%		SWITCH SPECIFIED WORD. &
+!	S9%		STRING STACK POINTER. &
+!	T$()		HELP TEXT ARRAY. &
+!	T%		TIME VALID FLAG. &
+!	U%		UNIT NUMBER. &
+!	U1%		DEVCNT FROM MONITOR TABLES. &
+!	W$		WORK FILE NAME. &
+!	X%-X0%		TRANFERS VARIABLES FOR CHANGE IN WORK FILE NAME. &
+!	Y%		PROMPT CHARACTERISTICS WORD. &
+!	ALL Z'S		TEMPORARY LOCAL WORK VARIABLES. &
+
+800	! &
+	&
+	&
+	!	F U N C T I O N / S U B R O U T I N E    D E S C . &
+	&
+	&
+!	NAME		LINE	USE &
+	&
+!	10000			GET A FILE DESCRIPTOR RECORD. &
+!	10200			SWITCH PROCESSOR. &
+!	10400			GET A FILE DESCRIPTOR LIST. &
+!	10500			INITIALIZE WORK FILE ROUTINE. &
+!	10800			DIALOGUE DRIVER ROUTINE. &
+!	11000			GET/RETURN A RESPONSE ROUTINE. &
+!	11100			BACKUP OR RESTORE? &
+!	11200			INDIRECT FILE NAME? &
+!	11300			WORK FILE NAME? &
+!	11400			LISTING FILE? &
+!	11500			FROM DISK? &
+!	11700			INDEX FILE? &
+!	11800			FROM FILE ? &
+!	11900			TO DEVICE? &
+!	12100			BEGIN AT? &
+!	12200			ENTER ACCOUNTS? &
+!	12300			DELETE,SUPERSEDE,COMPARE? &
+!	FND%		15200	GET A DATE ROUTINE. &
+
+830	! &
+	&
+	!	P A C K A G E    S U B R O U T I N E S &
+	&
+	! Name			Lines		Use &
+	! OPEN THE LISTING FILE	22500-22540	Ensure an open listing &
+	!					file &
+	! PROCESS ANY ERROR ON LIST FILE &
+	!			22550-22580	Process errors and &
+	!					minimize effect on &
+	!					program &
+	! PREPARE FOR DETACH	22600-22690	Do checks and manipulate &
+	!					flags preliminary to &
+	!					DETACH. &
+	! PRINT A LINE TO LIST FILE &
+	!			22700-22770	Print a line and trap &
+	!					errors. &
+	! CHECK FOR ATTACHED	22800-22830	Check KB: DDB for &
+	!					ATTACHed state &
+	! STATUS		22900-22990	Create a status report &
+	!					string. &
+	! LOG ERROR		23000-23090	Log an error on a record &
+	!					in the work-file. &
+	! ISSUE A MESSAGE	23100-23190	Issue a message to KB: &
+	!					or to OPSER. &
+	! GET/DECODE RESPONSE OR INTERRUPT COMMAND &
+	!			23200-23390	Get a (KB:) line or a &
+	!					(Send/Receive) message; &
+	!					Call the decoder; &
+	!					Process internal &
+	!					commands. &
+	! DECODE A LINE		23400-23490	Do a table-driven decode &
+	! PROCESS REQUESTS	23499-23790	A set of routines which &
+	!					perform additional &
+	!					parsing and processing &
+	!					of commands. &
+
+840	! &
+	&
+	!	P A C K A G E    F U N C T I O N S &
+	&
+	! Name			Lines		Use &
+	! FNN$(A%)		25000		Return the unsigned &
+	!					value of A% as a string. &
+	! FNN(A%)		25010		Return the unsigned &
+	!					value of A% as a &
+	!					floating point value. &
+	! FNE$(E%,D%,P3%,P0%,E1%) &
+	!			25100-25140	Create an error message &
+	!					string from parameters. &
+	! FNR%(S$,L%)		25200-25250	Match a  keyword. &
+	! FNC1%(V0%,V1%,C%)	25300		Check for any flags &
+	!					indicating a request &
+	!					outstanding in the &
+	!					PRW/PCW combination &
+	!					given by V0%,V1%. &
+	! FNF0%(P0%,N$,D$)	25500-25690	Apply null default or &
+	!					default string to a File &
+	!					Descriptor Record. &
+	! FNP%(P0%,P%,S$,Y0%,Y1%) &
+	!			25800-25890	Turn a filename string &
+	!					into a File Descriptor &
+	!					Record. &
+	! FNU$(P0%,C$,Z%,Z0%)	25900-25970	Turn a File Descriptor &
+	!					Record into a filename &
+	!					string, with switches. &
+	! FNU0$(L%)		25980-25990	Return the NUM1$ of the &
+	!					low byte of L%, or &
+	!					'*', if the low byte is &
+	!					255. &
+	! FNO%(P0%,A0%,C0%)	26000-26090	Open the file described &
+	!					in (work-file) record &
+	!					P0% - drops and regains &
+	!					temporary privs. &
+	! FNA%			26100-26130 	Get the next free-list &
+	!					record. &
+	! FNA0%(P0%)		26200-26230	Put record P0% back &
+	!					into the free-list. &
+	! FNP0%(B%,L%,D%)	26300-26320	Set up a list for &
+	!					processing. &
+	! FNP1%()		26450-26470	Restore a list using the &
+	!					data on the stack. &
+	&
+	&
+
+900	! &
+	&
+	&
+	!	D I M E N S I O N    S T A T E M E N T S &
+	&
+	&
+
+901	DIM #1%, Z0%(32767%,31%) &
+		! WORK FILE VIRTUL CORE ARRAY. &
+
+902	DIM D%(12%) &
+		!DAYS IN MONTH ARRAY. &
+
+910	DIM #8%,	I%(255%),T$(1024%)=16% &
+		! HELP TEXT VIRTUAL CORE ARRAY. I%() IS THE INDEX, T$() &
+		! IS THE TEXT ITSELF. &
+
+915	DIM S%(30%) &
+		! STACK. &
+
+916	DIM S$(10%) &
+		! STRING STACK. &
+
+920	DIM #4%,P$(15%,1%)=64%,P%(15%,15%) &
+		! THIS IS THE PROMPT TABLE AND SPECIAL PARAMETERS ARRAY. &
+
+950	! STANDARD ROUTINE DIMENSION STATEMENTS &
+
+951	DIM Z%(30%) &
+		! USED BY FNP%() FOR RETURN OF DATA &
+
+952	DIM Z1%(30%) &
+		! USED IN FNP%() FOR TEMPORARY STORAGE. &
+	&
+
+999	! &
+	&
+	&
+	!	M A I N    C O D I N G    A R E A &
+	&
+	&
+
+1000	ON ERROR GOTO 19000 &
+	\ Z$=SYS(CHR$(6%)+CHR$(-21%)+CHR$(255%)) &
+		! STANDARD ERROR HANDLER. &
+
+1010	I$="RESTOR	V10.1-A" &
+		! SET UP PART OF HEADER FOR RUN ENTRY. &
+
+1020	IF (E0% AND 7%)=0% THEN &
+		PRINT I$;CHR$(9%);RIGHT(SYS(CHR$(6%)+ &
+			CHR$(9%)+CHR$(0%)),3%) &
+	\	PRINT &
+		! PRINT HEADER. &
+
+1030	! &
+	! DROP TEMPORARY PRIVS AND CHECK IF USER IS PRIVILEGED &
+	! &
+	PRIV.OFF$=CHR$(6%)+CHR$(-21%)+CHR$(255%) &
+	\ A$ = SYS(CHR$(6%)+CHR$(-21%)+CHR$(255%)) &
+	\ PRVCHK% = FNPRV%("WACNT") &
+	\ IF PRVCHK%=0% THEN &
+		PRINT &
+	\	PRINT "?WACNT privilege required" &
+	\	GOTO 32767 &
+
+1032	PRVCHK% = FNPRV%("WREAD") &
+	\ IF PRVCHK%=0% THEN &
+		PRINT &
+	\	PRINT "?WREAD privilege required" &
+	\	GOTO 32767 &
+
+1034	PRVCHK% = FNPRV%("WWRITE") &
+	\ IF PRVCHK%=0% THEN &
+		PRINT &
+	\	PRINT "?WWRITE privilege required" &
+	\	GOTO 32767 &
+	!USER MUST HAV WACNT, WREAD, AND WWRITE PRIVS TO RUN RESTOR &
+
+1035	S9%,S%=0% &
+	\ D1$="-JAN-FEB-MAR-APR-MAY-JUN"+ &
+		"-JUL-AUG-SEP-OCT-NOV-DEC" &
+	\ PRIV.ON$=CHR$(6%)+CHR$(-21%)+CHR$(0%) &
+	\ RESTORE &
+	\ READ D%(Z%) FOR Z%=1% TO 12% &
+	\ S$="ACCESS"+STRING$(2%,0%)+":"+"CREATION"+":"+ &
+		"CHANGED"+CHR$(0%)+CHR$(0%)+"EXCEPT"+STRING$(2%,0%)+":" &
+		! SET UP STACK POINTERS. &
+		! MONTH DECODE STRING. &
+		! READ IN THE DAYS IN THE MONTHS. &
+		! SET UP THE SWITCH DECODE STRING. &
+
+1040	CHANGE SYS(CHR$(12%)) TO Z% &
+	\ D5$=":["+NUM1$(Z%(6%))+","+NUM1$(Z%(5%))+"]" &
+	\ D5$="_"+CHR$(Z%(23%))+CHR$(Z%(24%))+NUM1$(Z%(25%))+D5$ &
+			IF Z%(26%) AND 1% &
+	\ IF Z%(3%)+SWAP%(Z%(4%))<>15%*2% THEN &
+		PRINT "?RESTOR must be compiled" &
+	\	GOTO 32767 &
+		! SET UP THE NAME OF THE DEVICE AND THE ACCOUNT FROM WHICH WE &
+		! WERE RUN. &
+		! NOTE : THE BOTTOM TWO BITS OF BYTE 26 OF THE RETURNED STRING &
+		! ARE CODED AS : &
+		!	BIT 0 = 0 => SOURCE DEVICE IS PUBLIC &
+		!		1 => SOURCE DEVICE IS PRIVATE &
+		!	BIT 1 = 0 => GENERAL SPECIFICATION (IE, SY:) &
+		!		1 => SPECIFIC SPECIFICATION (EG, SY0:, DK0:) &
+		! ILLEGAL ENTRY IF WE DIDN'T COME FROM A COMPILED FILE. &
+
+1050	Z$=SYS(PRIV.ON$) &
+	\ OPEN D5$+"BACKUP.PRM" FOR INPUT AS FILE 4% &
+	\ Z$=SYS(PRIV.OFF$) &
+	\ GOSUB 10500 &
+	\ P1$="CONT>"+CHR$(9%) &
+	\ E0%=E0% OR 32% &
+	\ GOSUB 20000 &
+	\ GOSUB 10800 &
+		! INITIALIZE THE WORK FILE. &
+		! INITIALIZE THE CONTINUATION PROMPT &
+		! INITIALIZE THE COMMAND FILE. &
+		! DO THE DIALOGUE. &
+
+1070	IF E%<>0% THEN GOSUB 13000 &
+			\ GOTO 19000 IF E%<>0% &
+			\ IF (E0% AND 7%)<>0% OR Q%=0% THEN GOTO 32767 &
+			ELSE CLOSE Z% FOR Z%=1% TO 12% &
+				\ PRINT "RESTART" &
+				\ Z$=SYS(PRIV.ON$) &
+				\ CHAIN D5$+"RESTOR" LINE 1000 &
+		! IF THERE WAS AN ERROR IN THE INDIRECT COMMAND FILE, &
+		! THEN WE WILL EXIT IF THE ENTRY WAS OTHER THAN RUN, &
+		! OTHERWISE WE WILL RESTART. &
+	&
+
+9000	!	CLOSING OPERATIONS. &
+
+9010	Z0%(0%,0%)=B0% &
+	\ Z0%(0%,26%)=-16384% &
+	\ CLOSE Z% FOR Z%=1% TO 12% &
+	\ W$=STRING$(2%,0%)+W$ &
+	\ Z$=SYS(CHR$(8%)+W$) &
+	\ Z$=SYS(PRIV.ON$) &
+	\ CHAIN D5$+"BACCON" LINE 31000 &
+		! SET UP FREE LIST POINTER &
+		! SET UP CORE COMMON FOR NEXT PROGRAM. &
+		! CHAIN TO "BACLST". &
+	&
+
+9500	! &
+	&
+	&
+	!	D A T A    S T A T E M E N T S &
+	&
+	&
+
+9501	DATA	31,28,31,30,31,30,31,31,30,31,30,31 &
+
+9502	! THESE ARE THE DAYS IN THE MONTHS. &
+	&
+
+9999!	GET A FILE DESCRIPTOR RECORD &
+
+10000	F%=0% &
+	\ S%=S%+1%\S%(S%)=P1% &
+	\ S%=S%+1%\S%(S%)=P% &
+	\ P1%=FNA% &
+		! SET THE FOUND FLAG TO 0, PUSH THE PRE-CALL STATUS &
+		! GET A FREE LIST RECORD INTO P1% &
+
+10010	IF R%<>0% THEN P%=FNP%(P1%,P%,LEFT(C$,R%),F0%,F1%) &
+	ELSE P%=FNP%(P1%,P%,C$,F0%,F1%) &
+		! HANDLE THE STRING ONLY UP TO THE RIGHT PAREN IF THERE &
+		! IS ONE. &
+
+10015	GOTO 10060 IF E%<>0% &
+	\  Z%=FNF0%(P1%,N$,D$) &
+		\ GOTO 10060 IF E%<>0% &
+		\ F%=-1% &
+		\ GOTO 10050 IF S1%=0% &
+		! APPLY THE DEFAULTS OR NULL REPLACEMENTS, IF THERE IS &
+		! AN ERROR RETURN WITH PRE-CALL STATUS. &
+		! WE HAVE AT LEAST FOUND A FILE SPEC, IF THERE ARE NO &
+		! SWITCHES WE WILL RETURN. &
+
+10030	S%(S%)=P% &
+	\ GOTO 10050 IF FNR%("/",1%)=0% &
+	\ GOSUB 10200 &
+	\ GOTO 10060 IF E%<>0% &
+	\ GOTO 10030 IF F%<>0% &
+	\ P%=S%(S%) &
+	\ F%=-1% &
+		! STACK THE POINTER IN CASE WE KICK OUT BECAUSE WE &
+		! DIDN'T FIND A SWITCH. LOOK FOR A SLASH, LOOK FOR THE &
+		! SWITCH. IF WE FIND ONE, GO LOOK FOR ANOTHER. &
+		! IF WE EXPECTED A SWITCH AND DIDN'T FIND ONE, WE MUST &
+		! POINT BACK IN FROMT OF THE SLASH. &
+
+10050	Z0%(S%(S%-1%),1%)=P1% &
+	\ S%=S%-2% &
+	\ GOTO 10070 &
+		! POP TWO OFF THE STACK, SET LAST ENTERED POINTER, &
+		! LINK THE NEW RECORD INTO THE PREVIOUS ONE. &
+
+10060	Z%=FNA0%(P1%) &
+	\ P1%=S%(S%-1%)\S%=S%-2% &
+		! THIS IS WHERE THE ERRORS COME. WE MUST RELEASE &
+		! THE RECORD WE ALLOCATED, AND POP P1%. P% WILL &
+		! POINT TO THE LAST SUCCESSFULLY SCANNED CHARACTER. &
+
+10070	RETURN &
+	&
+
+10199	!	SWITCH PROCESSOR &
+
+10200	F%=0% &
+	\ S9%=S9%+1%\S$(S9%)=D$ &
+	\ D$=FNU$(P1%,"",-1%,-1%) &
+	\ S%=S%+1%\S%(S%)=F3% &
+	\ F3%=-1% &
+	\ S2%=0% &
+	\ M%=2% &
+	\ M1%=1% &
+	\ WHILE FNR%(MID(S$,M1%,8%),M%)=0% AND M1%<LEN(S$) &
+		\ S2%=S2%+1% &
+		\ M%=3% IF S2%=3% &
+		\ M1%=M1%+9% &
+	\ NEXT &
+	\ IF M1%>LEN(S$) GOTO 10390 &
+		! SCAN FOR THE SWITCH. IF WE GET PAST THIS &
+		! STATEMENT, SOMETHING WAS FOUND. &
+
+10210	M1%=M1%+8% &
+	\ GOTO 10250 IF FNR%(MID(S$,M1%,1%),1%)=0% AND S2%<>2% &
+	\ S2%=14% IF S2%=2% &
+	\ S2%=15% IF S2%=3% &
+	\ IF (2%^S2% AND F2%)<>0% THEN E%=512%+36% &
+				\ GOTO 10390 &
+		! CHECK TO SEE IF WE HAVE A COLON WHERE NEEDED. &
+		! CHECK TO SEE IF THIS SWITCH HAS BEEN PROHIBITED. &
+
+10220	IF S2%<14% THEN M%=7%*(8%^(S2% XOR 1%)) &
+	ELSE M%=2%^S2% &
+		! SET UP THE SWITCH SPECIFICATION MASK. &
+
+10225	IF (M% AND Z0%(P1%,15%))<>0% THEN E%=512%+7% &
+				\GOTO 10390 &
+		! CHECK FOR A DUPLICATE SWITCH &
+
+10230	GOTO 10270 IF S2%=15% &
+	\ IF S2%=14% THEN Z0%(P1%,15%)=Z0%(P1%,15%) OR M% &
+			\F%=-1% &
+			\GOTO 10390 &
+		! BRANCH TO EXCEPT ROUTINE IF NECESSARY. &
+		! MASK IN " CHANGED" BIT, SET FOUND AND RETURN. &
+
+10240	M1%=21% IF S2%=1% &
+	\ M1%=20% IF S2%=0% &
+	\ M%=M% AND (1%*(8%^(S2% XOR 1%))) IF FNR%("BEFORE",3%)<>0% &
+	\ M%=M% AND (4%*(8%^(S2% XOR 1%))) IF FNR%("AFTER",3%)<>0% &
+	\ GOTO 10260 UNLESS (M% AND 18%)<>0% &
+		! SET THE SELECTION MASKS FOR BEFORE OR AFTER. ERROR &
+		! OTHERWISE. &
+
+10250	E%=512%+50% &
+	\ GOTO 10390 &
+		!  IF THERE IS NO BER OR AFT AFTER AC OR CR, OR IF THERE &
+		! IS NO DATE FOLLOWING BEF OR AFT, ITS AN ERROR. &
+
+10260	GOTO 10250 IF FNR%(":",1%)=0% &
+	\ IF S2%=1% THEN S2%=FND%(P1%,-1%,M1%,M1%+1%) &
+		ELSE S2%=FND%(P1%,0%,M1%,0%) &
+		! CHECK TO SEE IF A DATE HAS BEEN SPECIFIED AFTER DEF OR &
+		! AFT. INSERT THE DATE AND TIME WORDS WITH THE PROPER &
+		! DATE FUNCTION. &
+
+10265	GOTO 10390 IF E%<>0% &
+	\ Z0%(P1%,15%)=Z0%(P1%,15%) OR M% &
+		\ GOTO 10390 &
+		! IF DATE HAD IMPROPER SYNTAX THEN RETURN. &
+		! OTHERWISE MASK IN THE SELECTION BIT, FOUND WILL BE &
+		! SET, AND RETURN. &
+
+10270	R%=0% &
+	\ S%=S%+1%\S%(S%)=L% &
+	\ L%=2% &
+	\ S9%=S9%+1%\S$(S9%)=C$ &
+	\ S%=S%+1%\S%(S%)=P% &
+	\ C$=CVT$$(C$,64%) &
+	\ GOTO 10320 IF FNR%("(",1%)=0% &
+	\ Z%=FNN% &
+	\ GOTO 10320 IF (F% AND FNR%(",",1%))<>0% &
+		! SAVE THE LIST WE ARE WORKING ON, AND SET UP THE EXCEPT &
+		! LIST. SAVE THE ORIGINAL STRING AS WE ARE GOING TO EDIT &
+		! IT TO MAKE IT EASIER TO MATCH PARENS. PUSH THE OLD CHAR &
+		! POINTER. SEE IF THERE IS AN OPENING PAREN. IF NOT &
+		! THEN WE HAVE ONLY ONE FILE SPEC. &
+		! CHECK TO SEE IF PAREN WAS FOR (PROJ,PROG). &
+
+10290	S%(S%)=P% &
+	\ M1%=1% &
+	\ WHILE M1%>0% &
+		\ M6%=INSTR(P%+1%,C$,"(") &
+		\ M7%=INSTR(P%+1%,C$,")") &
+		\ M1%=M1%+1% IF M6%>0% AND (M6%<M7% OR M7%=0%) &
+		\ M1%=M1%-1% IF M7%>0% AND (M7%<M6% OR M6%=0%) &
+		\ GOTO 10310 IF M6%=0% AND M7%=0% &
+		\ P%=M6% IF M6%>0% AND (M6%<M7% OR M7%=0%) &
+		\ P%=M7% IF M7%>0% AND (M7%<M6% OR M6%=0%) &
+	\ NEXT &
+	\ R%=M7% &
+		! SEARCH FOR THE MATCHING RIGHT PAREN. &
+
+10310	IF R%=0% THEN E%=512%+53% &
+			\ C$=S$(S9%)\S9%=S9%-1% &
+			\ P%=S%(S%)\S%=S%-1% &
+			\ L%=S%(S%)\S%=S%-1% &
+			\ GOTO 10390 &
+		! IF WE DIDN'T FIND THE MATCHING PAREN, THE STUFF WILL &
+		! BE RESTORED FROM THE STACK AND WE WILL RETURN AN ERROR. &
+
+10320	C$=S$(S9%)\S9%=S9%-1% &
+	\ P%=S%(S%)\S%=S%-1% &
+	\ S%=S%+1%\S%(S%)=F2% &
+	\ F2%=2%^15% IF R%<>0% &
+	\ F2%=-1% IF R%=0% &
+	\ S%=S%+1%\S%(S%)=P0% &
+	\ S%=S%+1% IF R%<>0% &
+	\ S%(S%)=M% IF R%<>0% &
+	\ D%=-1% &
+	\ P0%=P1% &
+	\ R%=R%-1% IF R%<>0% &
+	\ GOSUB 10400 &
+		! PUSH THE SWITCH PROHIBIT WORD AND THE MAIN RECORD #. &
+		! SET THE NEW SWITCH PROHIBIT WORD, THE DESTRUCT FLAG &
+		! THE RIGHT PAREN POINTER, AND GO GET THE EXCEPT LIST. &
+
+10330	P%=R%+1% IF E%=0% AND R%<>0% &
+	\ M%=S%(S%) IF R%<>0% &
+	\ S%=S%-1% IF R%<>0% &
+	\ R%=0% &
+	\ P1%=P0% &
+	\ P0%=S%(S%)\S%=S%-1% &
+	\ F2%=S%(S%)\S%=S%-1% &
+	\ L%=S%(S%)\S%=S%-1% &
+	\ GOTO 10390 IF E%<>0% &
+		\ GOTO 10390 &
+		! RESTORE OUR STATUS, IF NO EXCEPT LIST WAS FOUND, RETURN &
+		! WITH F%=0% &
+
+10340	Z0%(P1%,15%)=Z0%(P1%,15%) OR M% &
+		! MASK IN THE MASK AND RETURN SUCCESSFULLY. &
+
+10390	F3%=S%(S%)\S%=S%-1% &
+	\ D$=S$(S9%)\S9%=S9%-1% &
+	\ S2%=0% &
+	\ RETURN &
+		! MAKE SURE THE RIGHT PARENS POINTER IS ZERO AND RETURN. &
+	&
+
+10399	!	GET A FILE DESCRIPTOR LIST &
+
+10400	Z%=FNP0%(P0%,L%,D%) &
+	\ GOSUB 10000 &
+	\ GOTO 10490 IF E%<>0% &
+		! SET UP THE LIST. &
+		! GET THE FIRST RECORD. &
+		! EXIT IF ITS AN ERROR. &
+
+10420	F%=-1% &
+	\ GOTO 10490 IF S2%>1% AND R%=0% &
+	\ GOTO 10490 IF FNR%(",",1%)=0% &
+	\ S9%=S9%+1%\S$(S9%)=D$ &
+	\ D$=FNU$(P1%,"",F3%,0%)+"*.*" UNLESS F3%=0% OR R%<>0% &
+	\ N$=D$ &
+	\ GOSUB 10000 &
+	\ D$=S$(S9%)\S9%=S9%-1% &
+	\ GOTO 10490 IF E%<>0% &
+	\ GOTO 10420 &
+		! WE HAVE FOUND A RECORD. FINISH OFF IF THERE IS NO &
+		! COMMA. IF THERE IS, STACK THE DEFAULT STRING, CHANGE &
+		! IT IF THESE RECORDS ARE STICKY AND THIS IS NOT AN &
+		! EXCEPT LIST. GET THE NEXT RECORD. IF THERE IS NO ERROR &
+		! TRY FOR ANOTHER. &
+
+10490	Z%=FNP1% &
+	\ RETURN &
+		! RESTORE THE LIST AND RETURN. &
+	&
+
+10499	!	INITIALIZ WORKFILE ROUTINE. &
+
+10500	B0%=-1% &
+	\ Z$=SYS(PRIV.ON$) &
+	\ A%=PEEK(PEEK(PEEK(520%)+8%)+24%) &
+	\ J%=(PEEK(518%) AND 255%)/2% &
+	\ Z$=SYS(PRIV.OFF$) &
+	\ A$=NUM1$(SWAP%(A%) AND 255%) &
+	\ W$=NUM1$(A% AND 255%) &
+	\ A%=256%	! Force to [1,0] &
+	\ A$="["+RIGHT("  "+A$,LEN(A$))+","+ &
+		RIGHT("  "+W$,LEN(W$))+"]" &
+	\ J$=RIGHT(NUM1$(100%+J%),2%) &
+	\ Z$=DATE$(0%) &
+	\ Z%=INSTR(1%,Z$,"-") &
+	\ Z$=LEFT(Z$,2%)+CVT$$(MID(Z$,4%,3%),32%) IF Z% &
+	\ Z$=MID(Z$,2%,1%)+MID(Z$,4%,2%)+MID(Z$,7%,2%) UNLESS Z% &
+	\ W$="_SY:"+A$+"B"+Z$+".J"+J$ &
+	\ IF Z% THEN D7$=LEFT(Z$,2%) &
+		ELSE D7$=MID(Z$,7%,2%) &
+		! SET UP FREE LIST POINTER TO INITIALIZE THE WORK FILE. &
+		! SET UP THE PROJ,PROG IN BINARY AND IN CHARACTER STRING &
+		! FORMAT. SET UP THE JOBNAME(WORK-FILE) NAME AND THE &
+		! DAY OF THE MONTH VARIABLE. &
+
+10510	OPEN W$ FOR OUTPUT AS FILE 1% &
+	\ Z0%(0%,Z%)=0% FOR Z%=0% TO 31% &
+	\ Z0%(0%,16%)=14964% &
+	\ Z0%(0%,17%)=8960% &
+	\ S1%=0% &
+	\ S9%=S9%+1% \ S$(S9%)=C$ &
+	\ C$=W$ &
+	\ P0%=0% &
+	\ L%=12% &
+	\ D%=-1% &
+	\ GOSUB 10400 &
+		! OPEN THE WORKFILE. ZERO THE FIRST RECORD. &
+		! SET UP AN FR RECORD FOR THE WORK-FILE ITSELF (THIS &
+		! PROCESS INITIALIZES THE FREE LIST). &
+
+10520	C$="_SY:"+A$+"BIND"+J$+".TMP" &
+	\ P%=0% &
+	\ L%=18% &
+	\ GOSUB 10400 &
+	\ C$=S$(S9%) \ S9%=S9%-1% &
+	\ RETURN &
+		! SETUP AND INSTALL TEMPORARY INDEX LOAD FILE NAME &
+		! AND RETURN. &
+
+10799	!	DIALOG DRIVER ROUTINE. &
+
+10800	Q%,Q1%=0% &
+	\ Q0%=1% &
+		! SET UP TO GET THE FIRST QUESTION ASKED. &
+
+10810	Z%=(Q0% XOR Q1%) AND Q0% &
+	\ GOTO 10895 IF Z%=0% &
+	\ GOTO 10860 IF ((2%^Q%) AND Z%)=0% &
+	\ GOTO 10860 IF (P%(Q%,1%) AND 4%)<>0% AND (SWAP%(A%) AND 255%)<>1% &
+	\ P%=0% &
+	\ GOTO 11100 IF Q%=0% AND (E0% AND 7%)<>0% &
+	\ Y%=Y% AND (256% XOR -1%) &
+	\ P%=0% &
+	\ C$="" &
+		! ARE THERE ANY MORE Q'S TO BE ASKED. &
+		! DOES THIS ONE HAVE TO BE ASKED? IS IT PRIVILEGED? &
+		! IS THE USER? &
+		! GOTO TO QUESTION 0 RIGHT AWAY IF ITS A CCL ENTRY. &
+		! INITIALIZE FOR THE FIRST TRY AT GETTING A LINE. &
+
+10820	D$=P$(Q%,1%) &
+	\ D$=A$+D$ IF Q%=7% &
+	\ D$=W$ IF Q%=2% &
+	\ D$="_SY:"+A$+"BIND"+D7$+".IND" IF Q%=15% &
+	\ D$=LEFT(D$,4%)+A$+F$+".CMD" IF Q%=1% &
+	\ GOSUB 11000 &
+	\ GOTO 10895 IF E%<>0% &
+			\  L%=15% &
+			\ B1%=P%(Q%,4%) &
+			\ C1%=P%(Q%,5%) &
+			\ D%=P%(Q%,6%) &
+			\ F0%=P%(Q%,7%) &
+			\ F1%=P%(Q%,8%) &
+			\ F2%=P%(Q%,9%) &
+			\ F3%=P%(Q%,10%) &
+			\ L1%=P%(Q%,11%) &
+			\ P0%=P%(Q%,12%) &
+			\ S1%=P%(Q%,13%) &
+			\ N$="" &
+			\ ON Q%+1% GOSUB 11100,11200,11300,11400, &
+				11500,11600,11405,11800, &
+				11900,11405,12100,12200, &
+				12300,12300,12300,12400 &
+		\ E%=512%+49% IF P%<LEN(C$) AND E%=0% &
+		! DISPATCH TO THE QUESTION ROUTINES AFTER GETTINGA &
+		! COMMAND LINE. IF THERE IS TOO MUCH DATA ITS AN ERROR. &
+
+10840	ON Q%+1% GOSUB	10895,10895,11350,11450, &
+				11550,11650,11950,12350, &
+				11950,12000,11550,12250, &
+				12350,12350,12350,12450 &
+		UNLESS E%<>0% &
+	\IF E%<>0% THEN  GOSUB 13000 &
+			\ Y%=Y% OR 256% &
+			\GOTO 10820 &
+		! DISPATCH TO THE FINAL QUESTION ROUTINES, IF THERE WAS NO ERROR. &
+		! IF THERE WAS AN ERROR OR IF THERE IS ONE IN THE FINAL ROUTINE, &
+		! WE WILL RETRY, AFTER PRINTING THE ERROR. &
+
+10850	GOTO 10860 IF (Q0% AND 2%)=0% OR Q%=0% OR Q%=1% &
+	\P2$="" &
+	\IF LEN(C$)>250% THEN P2$=RIGHT(C$,251%) &
+			\C$=LEFT(C$,250%)+"-" &
+		! IF WE ARE NOT CREATING AN INDIRECT, WE SKIP THIS SECTION. &
+		! IF THE LINE IS LONG, WE ARE GOING TO PUT IT INTO THE INDIRECT &
+		! FILE IN CHUNKS. &
+
+10855	PRINT #11%,C$ &
+	\C$=P2$ &
+	\IF C$<>"" GOTO 10850 &
+		! PRINT LINE(OR PART OF IT) TO INDIRECT FILE. &
+
+10860	Q1%=Q1% OR 2%^Q% &
+	\Q%=Q%+1% &
+	\IF Q%<=15% GOTO 10810 &
+		! GET SET FOR NEXT QUESTION. &
+
+10895	RETURN &
+	&
+
+10999!	GET/RETURN A RESPONSE ROUTINE. &
+
+11000	P0$=CHR$(13%)+CHR$(10%) &
+	\ IF P%<>0% THEN P2$=LEFT(C$,P%) &
+			\ Y%=Y% OR 256% &
+			\ P0$=P0$+"?" &
+		! SET UP FOR PROMPT OR RETRY PROMPT. &
+
+11010	P0$=P0$+P$(Q%,0%) &
+	\ P0$=P0$+"<"+D$+">" UNLESS D$="" &
+	\ P0$=P0$+" ? " &
+	\ Y%=Y% OR P%(Q%,0%) &
+		! SET UP THE PROMPT AND DEFAULT PROMPT(IF ANY). &
+
+11020	GOSUB 20100 &
+	\ GOTO 11060 IF E%<>0% &
+	\  IF C$="?" THEN PRINT P0$;P2$; &
+				\ P2$="" &
+				\ GOTO 11000 &
+		! GET A COMMAND LINE. IF THERE IS AN ERROR, GET OUT. &
+		! CHECK FOR A "?" AS A RESPONSE. &
+
+11030	P2%=FNR%("/HELP",3%) &
+	\ IF (P2%=LEN(C$) AND LEN(C$)<>0%) THEN GOSUB 14000 &
+					\ GOTO 11020 &
+		! DOES /HE WANT HELP? &
+
+11040	P2%=0% &
+	\ IF LEN(C$)=0% THEN &
+	  IF (P%(Q%,1%) AND 1%)<>0% THEN P2%=P%(Q%,1%) AND 8% &
+	   ELSE PRINT "?NO DEFAULT"; &
+		\ Y%=Y% OR 256% &
+		\ GOTO 11020 &
+		! CHECK TO SEE IF IT WAS A NULL RESPONSE AND IF THAT IS &
+		! VALID. &
+
+11050	 P2$="" &
+	\ IF P2%=8% THEN C$=D$ &
+		! WE HAVE GOT A COMMAND. SET POINTER TO BEGINNING, &
+		! THE LAST LINE IS NOW DEAD. &
+
+11060	RETURN &
+	&
+
+11099	! Q0 - BAC[KUP OR RES[TORE &
+
+11100	IF FNR%("RESTORE",3%)<>0% THEN GOTO 11112 &
+	ELSE IF FNR%("LOADINDEX",3%)<>0% THEN GOTO 11114 &
+	ELSE IF FNR%("LIST",3%)<>0% THEN GOTO 11116 &
+		ELSE E%=512%+50% &
+			\ GOTO 30010 IF (E0% AND 1%)<>0% &
+			\ GOTO 11130 &
+		! CHECK FOR THE TWO LEGAL RESPONSES. SET UP QUESTION &
+		! MASKS. &
+
+11112	R9%=2% &
+	\ Q0%=28396% &
+	\ Z0%(0%,31%)=1084% &
+	\ F$="RESTOR" &
+	\ GOTO 11118 &
+	! A RESTORE RUN. &
+
+11114	R9%=4% &
+	\ Q0%=-32692% &
+	\ Z0%(0%,31%)=12% &
+	\ F$="LOADIN" &
+	\ GOTO 11118 &
+	! A LOADINDEX RUN. &
+
+11116	R9%=8% &
+	\ Q0%=44% &
+	\ Z0%(0%,31%)=28% &
+	\ F$="LIST  " &
+	! A LIST RUN. &
+
+11118	Z0%(0%,28%)=R9% &
+	\ IF FNR%("/SAVE",3%)<>0% THEN Q0%=Q0% OR 2% &
+				\ GOTO 11125 &
+		! SEE IF YOU WANT TO CREATE AN INDIRECT COMMAND FILE. &
+
+11120	IF FNR%("@",1%)<>0% THEN C0$="_SY:"+A$+".CMD" &
+			\ GOSUB 20350 &
+			\ GOTO 10840 IF (E0% AND 7%)<>0% &
+			\ GOTO 11130 &
+		! CHECK FOR INDIRECT. &
+		! RETURN TO THE APPROPRIATE PLACE IF ITS A CCL ENTRY. &
+
+11125	IF (E0% AND 7%)<>0% THEN &
+		C$="_KB:"+F$+".CMD" &
+		\ C0$="_SY:"+A$+".CMD" &
+		\ P%=0% &
+		\ GOSUB 20350 &
+		\ GOTO 10840 &
+		! HANDLE CCL ENTRY. &
+
+11130	RETURN &
+	&
+
+11199	! Q1 - INDIRECT FILE NAME. &
+
+11200	CLOSE 11% &
+	\ P0%=FNA% &
+	\ N$=D$ &
+	\ P%=FNP%(P0%,0%,C$,0%,F1%) &
+	\ GOTO 11220 IF E%<>0% &
+	\ Z%=FNF0%(P0%,N$,D$) &
+	\ Z%=FNO%(P0%,2%,11%) &
+		! CHECK THE SYNTAX, SEE IF YOU CAN OPEN THE FILE. &
+
+11220	P0%=FNA0%(P0%) &
+	\ RETURN &
+		! E% SET IS GROUNDS FOR RETRY. &
+	&
+
+11299	! Q2 - WORK FILE NAME. &
+
+11300	GOTO 11320 IF C$="" &
+	\ P0%=FNA% UNLESS P0%<>0% &
+	\ Z0%(P0%,Z%)=0% FOR Z%=0% TO 31% &
+		\ C$="_SY:"+C$ IF INSTR(1%,C$,":")=0% &
+	\ N$=D$ &
+	\ P%=FNP%(P0%,0%,C$,0%,F1%) &
+	\ GOTO 11320 IF E%<>0% &
+	\ Z%=FNF0%(P0%,N$,D$) &
+		! IF RESPONSE WAS NULL WE WANT TO KEEP DEFAULT. &
+		! CHECK FOR SYNTAX ONLY. &
+
+11320	RETURN &
+		! E% SET WILL WARRANT A RETRY. &
+
+11350	GOTO 11390 UNLESS C$<>"" &
+	\ S9%=S9%+1% \ S$(S9%)=W$ &
+	\ ON ERROR GOTO 11395 &
+	\ NAME W$ AS "BTMP"+J$+".TMP" &
+
+11355	ON ERROR  GOTO 19000 &
+	\ W$="BTMP"+J$+".TMP" &
+	\ Z%=FNO%(P0%,2%,2%) &
+	\ GOTO 11390 IF E%<>0% &
+	\ X0%=B0% &
+	\ WHILE X0%>0% &
+		\X0%=Z0%(X0%,1%) &
+	\ NEXT &
+		! SEE IF THE FILE NAME SPECIFIED IS VALID. &
+		! FIND THE EXTENT OF THE WORK FILE. &
+
+11360	Z%=Z0%(-X0%,1%) &
+	\ Z%=-X0%/8% &
+	\ CLOSE 1% &
+	\ OPEN W$ FOR INPUT AS FILE 3% &
+	\ FIELD #3%, 512% AS D$ &
+	\ FIELD #2%, 512% AS N$ &
+	\ FOR X%=1% TO Z% &
+		\ GET #3%, RECORD X% &
+		\ LSET N$=D$ &
+		\ PUT #2% &
+	\ NEXT X% &
+	\ CLOSE 2%,3% &
+	\ OPEN W$ FOR INPUT AS FILE 1% &
+		! FIND THE EXTENT OF THE WORK FILE IN BLOCKS. &
+		! TRANSFER THE OLD WORK FILE TO THE NEW ONE. &
+		! WORK FILE MUST BE OPENED ON CHANNEL OTHER THAN &
+		! VIRTUAL ARRAY CHANNEL FOR BLOCK I/O. &
+
+11380	Z%=FNO%(P0%,3%,1%) &
+	\ IF E%=0% THEN KILL W$ &
+		\ Z0%(Z0%(0%,12%),Z%)=Z0%(P0%,Z%) FOR Z%=0% TO 31% &
+		\ W$=FNU$(P0%,"",-1%,-1%) &
+		\ P0%=FNA0%(P0%) &
+		! OPEN THE NEW WORK-FILE, KILL THE OLD ONE. &
+		! LINK THE NEW WORK FILE FR RECORD IN AND PLACE &
+		! ITS NAME IN W$. RELEASE THE RECORD TO THE FREE LIST. &
+
+11390	W$=S$(S9%) IF E%<>0% &
+	\ NAME "BTMP"+J$+".TMP" AS W$ IF E%<>0% &
+	\ S9%=S9%-1% &
+	\ RETURN &
+
+11395	RESUME 19000 IF ERR<>16% &
+	\ RESUME 11355 &
+		! ERROR IN SETTING UP THE TEMP FILE. &
+	&
+
+11399	! Q3 - LISTING FILE. &
+
+11400	D$="_SY:"+A$+F$+".LST" &
+		! SET UP FOR AND GET THE LISTING FILE 'LIST' &
+
+11405	GOSUB 10400 &
+		! GET THE LIST. &
+
+11410	E%=512%+49% UNLESS Z0%(Z0%(0%,15%),1%)=0% OR E%<>0% &
+	\ E%=512%+6% IF Z0%(Z0%(0%,15%),14%)<0% IF Q%=5% UNLESS E% &
+	\ RETURN &
+		! CHECK TO SEE IF THERE WAS MORE THAN ONE ITEM IN THE LIST. &
+
+11450	Z%=FNO%(Z0%(0%,15%),6%,C1%) &
+	\ E%=2048%+128%+1% IF FNU$(Z0%(0%,L%),"",-1%,0%)=W$ &
+	\ GOTO 11460 IF E%<>0% &
+	\ CHANGE SYS(CHR$(6)+CHR$(-23%)+FNU$(Z0%(0%,L%),"",-1%,-1%)) &
+				TO Z% &
+	\ Z%(1%)=6% \ Z%(2%)=10% \ Z%(7%),Z%(8%)=0% &
+	\ CHANGE Z% TO Z$ &
+	\ Z$=SYS(Z$) &
+	\ CLOSE C1% &
+	\ Z0%(0%,L1%)=Z0%(0%,L%) &
+	\ Z0%(0%,L%)=0% &
+		! TRY TO OPEN THE FILE, IF THERE WAS AN ERROR, RETURN. &
+		! TRY TO ASSIGN THE FILE, IF YOU CAN'T ITS AN ERROR. &
+		! IF YOU CAN, MAKE THE REAL LIST THE DUMMY LIST, CLEAR &
+		! THE DUMMY LIST POINTER. &
+
+11460	RETURN &
+	&
+
+11499	! Q4 - FROM DISK. &
+
+11500	D$="_SY:[0,1]SATT.SYS" &
+	\ GOTO 11405 &
+		! SET UP FOR AND GET THE FROM DISK 'LIST' &
+
+11550	Z%=FNO%(Z0%(0%,L%),-32767%,C1%) UNLESS Q%=10% &
+	\ CLOSE C1% &
+	\ IF E%=0% THEN Z0%(0%,L1%)=Z0%(0%,L%) &
+			\ Z0%(0%,L%)=0% &
+			\ GOTO 11560 IF Q%<>4% &
+			\ D$=RAD$(Z0%(Z0%(0%,L1%),6%)) &
+			\ U%=ASCII(RIGHT(D$,3%))-48% \ D$=LEFT(D$,2%) &
+			\ IF D$<>"SY" THEN &
+				U%=0% IF U%<0% &
+			\ Z$=SYS(CHR$(6%)+CHR$(-3%)) &
+			\ U%=U%*2%+SWAP%(CVT$%(RIGHT(Z$,19%))) &
+			\ U1%=SWAP%(CVT$%(RIGHT(Z$,5%))) &
+			\ Z$=SYS(CHR$(6%)+CHR$(-12%)) &
+			\ Z%=SWAP%(CVT$%(RIGHT(Z$,5%))) &
+			\ Z$=SYS(PRIV.ON$) &
+			\ WHILE D$<>CVT%$(SWAP%(PEEK(Z%))) &
+				\ U%=U%+(PEEK(U1%)+1%)*2% &
+					UNLESS PEEK(U1%)=-1% &
+				\ U1%=U1%+2% &
+				\ Z%=Z%+2% &
+			\ NEXT &
+			\ U%=PEEK(U%) &
+			\ Z$=SYS(PRIV.OFF$) &
+			\ Z0%(Z0%(0%,L1%),20%)=(U% AND 1024%)<>0% &
+		! IF YOU CAN OPEN AND CLOSE THE DISK, MAKE THE DUMMY &
+		! LIST THE REAL LIST. RESET THE DUMMY LIST POINTER AND SET &
+		! THE LOOKUP REQUIRED AND TRANSFER REQUESTED BITS IN THE &
+		! PRW. &
+
+11560	RETURN &
+	&
+
+11599	! Q5 - INDEX FILE. &
+
+11600	IF LEN(C$)=0% THEN Z0%(0%,29%)=Z0%(0%,29%) OR 8% &
+		\ Q0%=Q0% OR 64% &
+		\ GOTO 11630 &
+		! NULL RESPONSE MEANS THE INDEX FILE WILL COME FROM THE &
+		! BACKUP SET ITSELF. &
+
+11610	D$=A$ &
+	\ GOSUB 10400 &
+		! SET UP FOR AND GET THE INDEX FILE LIST. &
+
+11620	E%=512%+49% UNLESS Z0%(Z0%(0%,L%),1%)=0% OR E%<>0% &
+		! CHECK FOR LIST OF MORE THAN ONE ELEMENT. &
+
+11630	RETURN &
+
+11650	GOTO 11660 UNLESS LEN(C$)<>0% &
+	\ Z%=FNO%(Z0%(0%,L%),1%,9%) &
+	\ CLOSE 9% &
+	\ IF E%=0% THEN Z0%(0%,29%)=Z0%(0%,29%) OR 4% &
+			\ Z0%(0%,L1%)=Z0%(0%,L%) &
+			\ Z0%(0%,L%)=0% &
+		! SET THE DO SELECT BIT AND THE INDEX LOAD BIT, AS THIS &
+		! IS A RESTORE. &
+		! CHECK FOR ERROR IN OPENING THEN INDEX FILE. IF NONE &
+		! SET "LOAD AUXILIARY" BIT IN IPW. RETURN IF NULL RESPONSE. &
+		! LINK THE REAL LIST IN. &
+
+11660 RETURN &
+	&
+
+11699	! Q6 - FROM DEVICE(GOTO 11405) &
+	&
+
+11799	! Q7 - FROM FILES. &
+
+11800	N$=D$ &
+	\ GOSUB 10400 &
+	\ RETURN &
+		! SET UP FOR AND GET THE FROM FILES LIST. &
+	&
+
+11899	! Q8 - TO DEVICE. &
+
+11900	GOSUB 10400 &
+		! SET UP FOR AND GET THE 'TO DEVICE' SPECIFICATION. &
+
+11910	E%=512%+49% UNLESS Z0%(Z0%(0%,L%),1%)=0% OR E%<>0% &
+	\ E%=512%+48% IF (Z0%(Z0%(0%,L%),13%) AND 16384%)<>0% &
+	\ E%=512%+6% IF Z0%(Z0%(0%,L%),14%)<0% UNLESS E% &
+	\ RETURN &
+		! CHECK FOR TOO MUCH DATA ERROR DUE TO A LIST OF MORE &
+		! THAN ONE. CHECK FOR ABSOLUTE UNIT NUMBER. &
+		! CHECK FOR LOGICAL DEVICE NAME. &
+
+11950	Z0%(0%,L1%)=Z0%(0%,L%) &
+	\ Z0%(0%,L%)=0% &
+	\ Z0%(Z0%(0%,L1%),31%)=Z0%(Z0%(0%,L1%),31%) OR &
+			B1%+(4% AND (Z0%(0%,29%) AND 8%)<>0%) &
+	\ RETURN &
+		! LINK THE REAL LIST. SET PROPER BITS IN VR AND FHR PRW'S. &
+	&
+
+11999	! Q9 - TO DISK(GOTO 11405). &
+	&
+	&
+	&
+	&
+	&
+	&
+	&
+	&
+	&
+
+12000	S%=S%+1% \ S%(S%)=Z0%(Z0%(0%,L%),8%) &
+	\ Z0%(Z0%(0%,L%),8%)=1% &
+	\ GOSUB 11550 &
+	\ Z0%(Z0%(0%,L1%),8%)=S%(S%) \ S%=S%-1% &
+	\ Z0%(Z0%(0%,L1%),8%)=A% IF ((SWAP%(A%) AND 255%)<>1%) &
+	\ RETURN &
+		! AFTER WE KMOW THAT THERE ARE NO ERRORS &
+		!  LINK THE DUMMY LIST INTO THE REAL LIST. &
+		! THIS IS A CLOSING SUBROUTINE . &
+	&
+
+12099	! Q10 - BEGIN AT. &
+
+12100	IF C$="" THEN RETURN ELSE GOTO 11405 &
+		! IF THE RESPONSE WAS NULL, WE DON'T WANT A LIST. &
+	&
+
+12199	! Q11 - ENTER ACCOUNTS. &
+
+12200	IF FNR%("YES",1%)=0% THEN &
+	IF FNR%("NO",1%)=0% THEN E%=512%+50% &
+				ELSE Z0%(0%,31%)=Z0%(0%,31%) OR 256% &
+		! CHECK FOR A VALID RESPONSE. &
+
+12210	RETURN &
+
+12250	Z0%(0%,31%)=Z0%(0%,31%) XOR 256% &
+	\ RETURN &
+		! SET THE ENTER ACCOUNTS BIT IN THE FHR PRW. &
+	&
+
+12299	! Q12-13-14 - DELETE,SUPERSEDE,COMPARE. &
+
+12300	IF LEN(C$)=0% THEN GOTO 12330 &
+		! NULL RESPONSE IS VALID. &
+
+12310	D$="_SY:[*,*]*.*" &
+	\ GOSUB 10400 &
+		! SET UP FOR AND GET THE LIST &
+
+12330	RETURN &
+
+12350	GOTO 12380 IF LEN(C$)=0% &
+	\ Z%=FNP0%(0%,L1%,0%) &
+	\ Z1%,Z0%(P1%,1%)=Z0%(0%,15%) &
+	\ Z0%(0%,15%)=0% &
+	\ Z%=FNP1% &
+		! LINK THE DUMMY LIST INTO THE REAL LIST. &
+
+12370	Z0%(0%,31%)=Z0%(0%,31%) OR B1% &
+	\ WHILE Z1%<>0% &
+		\Z0%(Z1%,31%)=Z0%(Z1%,31%) OR B1% &
+		\ Z1%=Z0%(Z1%,1%) &
+	\ NEXT &
+		! SET THE BITS IN THE PRW'S OF THE FHR AND ALL THE FDR'S. &
+
+12380	RETURN &
+		! GET OUT. &
+	&
+
+12399	! Q15 - TO FILE. &
+
+12400	N$=D$ &
+	\ GOSUB 11405 &
+
+12410	RETURN &
+
+12450	Z%=FNO%(Z0%(0%,L%),2%,C1%) &
+	\ CLOSE C1% &
+	\ IF E%=0% THEN &
+		Z0%(0%,L1%)=Z0%(0%,L%) &
+		\ Z0%(0%,L%)=0% &
+		\ Z0%(0%,29%)=Z0%(0%,29%) OR 8% &
+		\ Z0%(Z0%(0%,2%),31%)=Z0%(Z0%(0%,2%),31%) OR 4% &
+		! ATTEMPT OPENING THE SPECIFIED FILE. &
+		! IF OK, LINK IN REAL RECORD. &
+		! SET PRIMARY LOAD IN PROCESS AND INDEX LOAD &
+		! REQUESTED ON INPUT VOLUME. &
+
+12460	RETURN &
+	&
+
+12999	! ERROR PRINTER. &
+
+13000	E$="" &
+	\ PRINT &
+	\ IF E%=256%+1% THEN E$="BAD DIRECTORY FOR DEVICE" &
+	  ELSE IF E%=256%+5% THEN E$="CAN'T FIND FILE OR ACCOUNT" &
+	  ELSE IF E%=256%+8% THEN E$="DEVICE NOT AVAILABLE" &
+	  ELSE IF E%=256%+10% THEN E$="PROTECTION VIOLATION" &
+	  ELSE IF E%=256%+14% THEN E$="DEVICE HUNG OR WRITE LOCKED" &
+	  ELSE IF E%=256%+16% THEN E$="INVALID CCL ENTRY" &
+	  ELSE IF E%=256%+17% THEN E$="TOO MANY FILES OPEN ON UNIT" &
+	  ELSE IF E%=256%+46% THEN E$="ILLEGAL I/O CHANNEL" &
+	  ELSE IF E%=11% THEN E$="INCOMPLETE COMMAND FILE" &
+	  ELSE IF E%=512%+7% THEN E$="DUPLICATE SWITCH" &
+	  ELSE IF E%=512%+36% THEN E$="ILLEGAL EXCEPT NESTING" &
+	  ELSE IF E%=512%+48% THEN E$="UNIT NUMBER NOT VALID" &
+	  ELSE IF E%=512%+49% THEN E$="TOO MUCH DATA" &
+	  ELSE IF E%=512%+50% THEN E$="ILLEGAL KEYWORD" &
+	  ELSE IF E%=512%+52% THEN E$="NUMBER TOO BIG" &
+	  ELSE IF E%=512%+53% THEN E$="ILLEGAL OPERAND" &
+	  ELSE IF (E% AND 1024%)<>0% THEN E$=RIGHT(SYS(CHR$(6%)+ &
+				CHR$(9%)+CHR$(E% AND 127%)),3%) &
+	  ELSE IF E%=2% THEN E$="ILLEGAL FILENAME" &
+	  ELSE IF (E% AND 6%)=2% THEN E$="ILLEGAL FIELD" &
+	  ELSE IF (E% AND 6%)=6% THEN E$="NOT A VALID DEVICE" &
+		! SET UP THE ERROR TEXT. &
+	ELSE IF E%=2048%+128%+1% THEN E$="SAME NAME AS WORK FILE" &
+
+13005	IF (E% AND 128%)<>0% THEN E$=E$+"(PROHIBITED)" &
+		! SEE IF ERROR WAS BECAUSE OF A PROHIBITED FIELD OR DEVICE &
+
+13010	IF E$<>"" THEN PRINT"?COMMAND ERROR - ";E$ &
+			\ E%=0% &
+		! PRINT THE PROPER MESSAGE IF ANY. &
+
+13020	RETURN &
+		! IF THE ERROR WAS OTHER THAN THOSE ABOVE, E% REMAINS SET. &
+	&
+
+13999	! HELP TEXT HANDLER. &
+
+14000	ON ERROR GOTO 14010 &
+	\ Z$=SYS(PRIV.ON$) &
+	\ OPEN D5$+"BACKUP.HLP" FOR INPUT AS FILE 8% &
+	\ Z$=SYS(PRIV.OFF$) &
+	\ PRINT T$(Z%); FOR Z%=I%(0%+Q%) TO I%(255%-Q%) UNLESS I%(0%+Q%)=-1% &
+	\ GOTO 14020 &
+		! SET UP AN ERROR TRAP AND PRINT THE EXTENT OF THE HELP &
+		! TEXT FOR THIS QUESTION. &
+
+14010	Z$=SYS(PRIV.OFF$) &
+	\ PRINT &
+	\ PRINT " HELP TEXT FILE CORRUPT" &
+	\ RESUME 14020 &
+		! SOMETHING WRONG WITH THE HELP TEXT FILE. &
+
+14020	ON ERROR GOTO 19000 &
+	\ CLOSE 8% &
+	\ RETURN &
+		! RESET ERROR HANDLER AND RETURN. &
+	&
+
+15000	DEF* FNR%(S$,L%) &
+	\ FNR%,Z1%=0% &
+	\ Z0%=P% &
+	! FUNCTION:	KEYWORD MATCHING ROUTINE. MATCHES A STRING IN &
+	!		THE COMMAND STRING C$ STARTING AT POSITION P%+1% &
+	!		TO THE DUMMY STRING S$. A MATCH IS MADE WHEN THE &
+	!		MINIMUM NUMBER OF CHARACTERS ARE MATCHED. THIS &
+	!		MINIMUM NUMBER IS HELD IN THE DUMMY VARIABLE &
+	!		L%. &
+	! PARAMETERS:	S$	STRING TO MATCH TO. &
+	!		L%	MINIMUM LENGTH OF MATCH. &
+	! GLOBAL &
+	! VARIABLES &
+	! AFFECTED:	P%	POSITION POINTER POINTS TO THE LAST CHAR- &
+	!			ACTER MATCHED SUCCESSFULLY. &
+	! LOCAL &
+	! VARIABLES &
+	! USED:		Z%	TEMPORARY CHARACTER POINTER. &
+	!		Z$	CHARACTER MATCHING VARIABLE FOR PROCESS- &
+	!			ING BEYOND THE MINIMUM LENGTH. &
+	! RETURNS:	THE NUMBER OF CHARACTERS SUCCESSFULLY MATCHED. &
+	! ERRORS:	NONE EXPECTED. &
+
+15010	Z%=ASCII(RIGHT(C$,P%+1%)) &
+	\ IF Z%=32% OR Z%=9% THEN P%=P%+1% &
+				\ GOTO 15010 &
+		! SKIP PAST BLANKS AND TABS. &
+
+15020	IF MID (S$,1%,L%)=MID(C$,P%+1%,L%) THEN Z%=L% &
+	ELSE GOTO 15050 &
+		! SEARCH FOR MINIMUM MATCH. &
+
+15030	Z$=MID(C$,P%+Z%+1%,1%) &
+	\ GOTO 15040 IF Z$<>MID(S$,Z%+1%,1%) &
+	\ Z%=Z%+1% UNLESS Z$="" &
+	\ GOTO 15030 UNLESS Z$="" &
+		! SEARCH FOR MORE MATCHING CHARACTERS. &
+
+15040	P%=P%+Z% &
+	\ FNR%,Z1%=Z% &
+		! RETURN WITH P% POINTING TO THE LAST SUCCESSFULLY &
+		! MATCHED CHARACTER. FUNCTION WILL RETURN AS THE NUMBER &
+		! OF CHARACTERS MATCHED. &
+
+15050	P%=Z0% IF Z1%=0% &
+	\ FNEND &
+	&
+
+15100	DEF* FNN% &
+	\ FNN%,F%=0% &
+	! FUNCTION:	RETURN A NUMBER ROUTINE. &
+	! PARAMETERS:	NONE &
+	! GLOBAL &
+	! VARIABLES &
+	! AFFECTED:	P%	CHARACTERS POSITION POINTER. &
+	!		F%	FOUND FLAG. &
+	! LOCAL &
+	! VARIABLES &
+	! USED:		Z%	TEMPORARY POSITION POINTER. &
+	!		Z0%	ASCII CHARACTER REPRESENTATION. &
+	! RETURNS:	VALUE OF NUMERIC DIGITS FOLLOWING POSITION P% &
+	!		IN THE STRING C$. IF NONE ARE FOUND THE FOUND FLAG &
+	!		IS RETURNED AS ZERO. &
+	! ERRORS:	NONE EXPECTED. &
+
+15110	ON ERROR GOTO 15140 &
+	\ Z%=P%-1% &
+	\ Z0%=-1% &
+		! SET LOCAL ERROR HANDLER. &
+		! SET LOCAL CHARACTER POINTER. &
+		! INITIALIZE ASCII DIGIT FLAG. &
+
+15120	WHILE (Z0%>=48% AND Z0%<=57%) OR Z0%=-1% &
+		\ Z%=Z%+1% &
+		\ Z0%=ASCII(RIGHT(C$,Z%+1%)) &
+	\ NEXT &
+		! CHECK FOR DIGITS, AND EXIT HERE WITH Z%=P% OR Z% &
+		! POINTING TO THE LAST DIGIT FOUND. &
+
+15130	IF Z%<>P% THEN FNN%=VAL(MID(C$,P%+1%,Z%-P%)) &
+				\ P%=Z% &
+				\ F%=-1% &
+		! WE HAVE FOUND A NUMBER. SET THE FUNCTION VALUE TO &
+		! THE VALUE OF THE NUMBER FOUND AND SET THE FOUND FLAG. &
+
+15140	RESUME 15150 &
+		! ERROR IN THE VAL FUNCTION IS TRAPPED HERE. &
+
+15150	ON ERROR GOTO 19000 &
+	\ E%=512%+52% IF ERR/10%=5% &
+	\ FNN%=0% IF E%<>0% &
+	\ FNEND &
+		! RESET THE ERROR HANDLER. &
+		! CHECK TO SEE IF THERE WAS AN ERROR. &
+		! RETURN. &
+	&
+
+15200	DEF* FND%(P1%,T%,M1%,M2%) &
+	\ F%,FND%=0% &
+	! FUNCTION:	GET A DATE AND, OPTIONALLY, A TIME. &
+	! PARAMETERS:	P1%	WORK FILE RECORD TO PLACE THE TIME OR DATE &
+	!		IN. &
+	!		T%	LOOK FOR TIME FLAG. IF <>0%, LOOK FOR TIME &
+	! 		M1%	WORD IN WORK-FILE RECORD INTO WHICH THE &
+	!			DATE WILL BE PLACED. &
+	!		M2%	WORD IN WORK-FILE INTO WHICH THE TIME &
+	!			WILL BE PLACED. &
+	! GLOBAL &
+	! VARIABLES &
+	! AFFECTED:	Z0%()	WORK-FILE. &
+	!		P%	POSITION POINTER. &
+	!		F%	FOUND FLAG. &
+	!		S%,S%()	STACK POINTER,STACK. &
+	!		D%(0%)	DAYS IN MONTH SPECIFIED. &
+	!		D%()	DAYS IN MONTH TABLE. &
+	!		D1$	MONTHS DECODE STRING. &
+	! LOCAL &
+	! VARIABLES &
+	! USED:		Z2%	DATE WORD ACCUMULATOR. &
+	!		Z1%,Z3%	UTILITY VARIABLES. &
+	! RETURNS:	FOUND FLAG SET IF DATE IS FOUND. &
+	!		DATE RETURNED AS FUNCTION VALUE. &
+	!		WORK-FILE UPDATED WITH DATE AND TIME WORDS. &
+	! ERRORS:	ILLEGAL OPERAND &
+
+15210	S%=S%+1%\S%(S%)=P% &
+	\ Z9%=1% &
+	\ Z2%=0% &
+		! PUSH THE OLD CHARACTER POINTER. &
+		! INITIALIZE THE MONTHS STRING DECODE POINTER. &
+		! INITIALIZE THE DAY COUNTER. &
+
+15220	D%(0%)=FNN% &
+	\ WHILE Z9%<49% AND FNR%(MID(D1$,Z9%,4%)+CHR$(255%),4%)=0% &
+		\ Z9%=Z9%+4% &
+		\ Z2%=Z2%+D%((Z9%-1%)/4%) &
+	\NEXT &
+		! GET THE DAY AND SEARCH FOR THE MONTH ADDING IN THE &
+		! DAYS OF EACH MONTH AS WE GO ALONG. &
+
+15230	GOTO 15270 IF Z9%=49% &
+	\ S%(S%)=P% &
+	\ Z3%=FNR%("-",1%) &
+	\ IF Z3%<>0% THEN Z3%=FNN% &
+	  ELSE	Z$=SYS(PRIV.ON$) &
+	\	Z3%=PEEK(512%)/1000%+70% &
+	\	Z$=SYS(PRIV.OFF$) &
+		! IF WE DIDN'T FIND A MONTH NO USE GOING ON. CHECK FOR &
+		! YEAR AND GET IT ONE WAY OR ANOTHER. WE MUST SAVE THE &
+		! CHARACTER POINTER BEFORE DOING THE YEAR CHECK. &
+
+15240	F%=0% &
+	\ GOTO 15270 IF Z3%<70% OR Z3%>99% &
+	\ IF (Z3% AND 3%)=0%  THEN D%(2%)=D%(2%)+1% &
+				\ Z2%=Z2%+1% IF Z9%>5% &
+		! CHECK IF WE FOUND A VALID YEAR AND THEN HANDLE &
+		! LEAP YEAR PROPERLY. &
+
+15250	GOTO 15270 IF D%(0%)>D%(Z1%/4%+1%) OR D%(0%)<=0% &
+	\ F%=-1% &
+	\ FND%,Z2%=(Z3%-70%)*1000%+Z2%+D%(0%) &
+	\ Z3%=0% &
+	\ Z1%=0% &
+		! IF THE DAY FOR THE MONTH SPECIFIED IS VALID THEN SET &
+		! THE FOUND FLAG AND SET THE VALUE OF THE FUNCTION. &
+
+15260	IF P%=S%(S%) OR T%<>0% THEN Z1$=",/:" &
+				\ Z3%=1% &
+			\ S%=S%+1%\S%(S%)=P% &
+			\WHILE FNR%(MID(Z1$,Z3%,1%),1%)=0% AND Z3%<=4% &
+					\ Z3%=Z3%+1% &
+			\ NEXT &
+			\ P%=S%(S%)\S%=S%-1% &
+			\ IF ((Z3%>4%) AND (P%=S%(S%))) OR &
+					((T%=0%) AND (Z3%=3%)) THEN &
+						F%,FND%=0% &
+		! THIS IS THE SPECIAL TERMINATOR CHECK. &
+		! IF WE FOUND THE MINIMUM MONTH, BUT SOMETHING NON &
+		! STANDARD FOLLOWED IT, WE FAIL. WE ALSO MAKE THIS CHECK &
+		! IF TIME IS POSSIBLE. &
+
+15265	IF T%<>0% AND Z3%=3% THEN &
+		P%=P%+1% &
+ 		\ W1%=FNN% &
+		\ IF W1%<0% OR W1%>23% THEN F%,FND%=0% &
+		  ELSE IF FNR%(":",1%)=0% THEN F%,FND%=0% &
+			ELSE Z3%=FNN% &
+				\ IF Z3%<0% OR Z3%>59% THEN F%,FND%=0% &
+					ELSE Z1%=1440%-W1%*60%-Z3% &
+		! PUT THE TIME INTO Z1% IF IT IS VALID. &
+
+15270	IF F%=0% THEN P%=S%(S%) &
+			\ E%=512%+53% &
+			\ GOTO 15280 &
+		! IF ITS AN ERROR, RETURN THE OLD CHAR POINTER, SET THE &
+		! ERROR NUMBER AND RETURN. &
+
+15275	Z0%(P1%,M1%)=Z2% &
+	\ Z0%(P1%,M2%)=Z1% &
+		! ASSIGN THE DATE AND TIME TO THEIR PROPER PLACES. &
+		! FUNCTION RETURNS AS DATE. &
+
+15280	D%(2%)=28% &
+	\ S%=S%-1% &
+	\ FNEND &
+		! RESTORE THE STACK AND RETURN. &
+	&
+
+19000	! STANDARD ERROR HANDLER. &
+	! IF AN ERROR GETS TO THIS POINT, THEN WE DON'T KNOW WHY IT &
+	! HAPPENED. THUSLY, WE WILL DIE. &
+
+19010	Z$=SYS(PRIV.OFF$) IF LEN(PRIV.OFF$) &
+
+19020	IF ERR=5 AND ERL=1050 THEN &
+		PRINT "?Cann't find BACKUP.PRM - RESTORE terminating" &
+\		RESUME 32767 &
+
+19100	PRINT "ERROR #";ERR;" AT LINE #";ERL;" :"; &
+		RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(ERR)),3%); &
+	\ PRINT &
+	\ RESUME 32767 &
+		! PRINT THE ERROR NUMBER THE LINE AT WHICH IT HAPPENED &
+		! AND THE ERROR MESSAGE. THEN END THE PROGRAM. &
+	&
+
+20000	&
+	&
+	&
+	!	I N I T    G C M L &
+
+20010	S9%=S9%+1% \ S$(S9%)=C$ &
+	\ C$="@_KB:" &
+	\ C0$="_KB:COMMND.CMD"+A$ &
+	\ GOSUB 20350 &
+	\ C$=S$(S9%) \ S9%=S9%-1% &
+		! SET UP AN INDIRECT COMMAND FILE NAME AND SAVE THE &
+		! ORIGINAL COMMAND. &
+
+20020	Y%=0% &
+	\ Y%=Y% OR 64% IF (E0% AND 7%)<>0% &
+	\ Y%=Y% OR 16% IF (E0% AND 2%)<>0% &
+	\ Y%=Y% OR ((E0% AND 56%)/8%) &
+	\ Z0%(Z0%(0%,11%),31%)=Y% &
+		! SET UP THE FLAG WORD FOR GCML; &
+		! PUT IT INTO THE APPROPRIATE FR. &
+
+20030	RETURN &
+		! AND EXIT. &
+	&
+	&
+	&
+
+20100	&
+	&
+	&
+	!	G E T    C O M M A N D    L I N E &
+	!		( G C M L ) &
+	&
+
+20110	GOTO 20610 IF (Y% AND 256%)<>0% IF (Y0% AND 2%)=0% &
+	\ GOTO 20620 IF (Y% AND 64%)<>0% IF Y1%<>0% &
+	\ Y%=(Y% AND 511%) &
+			OR &
+		(512% AND (Y0% AND 2%)=2% AND (Y% AND 64%)=0%) &
+			OR &
+		(4096% AND (Y0% AND 2%)=2%) &
+			OR &
+		(2048% AND (Y% AND 64%)=0%) &
+			OR &
+		(8192% AND (Y% AND 8%)=0%) &
+			OR &
+		(16384% AND (Y% AND 16%)=0%) &
+			OR &
+		(NOT 32767% AND (Y% AND 32%)=0%) &
+	\ Z0$=C$ &
+	\ C$="" &
+		! CHECK FOR :	1. ILLEGAL RETRY; &
+		!		2. SECOND LINE ATTEMPTED ILLEGALLY. &
+		! SET 'THIS LINE' VALUES IN Y% : &
+		!	1. IF KB: AND NOT SINGLE-LINE ONLY, &
+		!		PRINT PRIMARY PROMPT; &
+		!	2. IF KB:, RETURN MARGIN; &
+		!	3. IF NOT SINGLE-LINE ONLY, ASK FOR INPUT; &
+		!	4. IF COMMENT SCAN IS LEGAL, REQUEST IT; &
+		!	5. IF CONTINUATION LEGAL, REQUEST IT; &
+		!	6. IF INDIRECT LEGAL, REQUEST IT. &
+		! INIT RETURNED STRING TO NULL. &
+
+20120	PRINT #12%,P0$; IF (Y% AND 512%)<>0% &
+	\ PRINT #12%,P1$; IF (Y% AND 1024%)<>0% &
+	\ ON ERROR GOTO 20160 &
+	\ INPUT LINE #12%,Z0$ IF (Y% AND 2048%)<>0% &
+	\ PRINT #12% IF (CCPOS(12%)<>0%) IF (Y% AND 4096%)<>0% &
+	\ Y1%=Y1%+1% &
+		! PROCESS AS INSTRUCTED BY Y% : &
+		!	PRIMARY PROMPT; &
+		!	SECONDARY PROMPT; &
+		!	INPUT DATA; &
+		!	RETURN CARRIAGE TO LEFT MARGIN; &
+		!	ALWAYS INCREMENT LINE COUNTER. &
+
+20130	Z0$=CVT$$(Z0$,1%+4%+16%+32%+128%) &
+	\ GOSUB 20500 IF (Y% AND 8192%)<>0% &
+	\ IF (Y% AND 16384%)<>0% THEN &
+		IF RIGHT(Z0$,LEN(Z0$))="-" THEN &
+			C$=C$+LEFT(Z0$,LEN(Z0$)-1%) &
+	\		Y%=(Y% AND -513%) OR 2048% &
+				OR (1024% AND (Y0% AND 2%)=2%) &
+	\		GOTO 20120 &
+		! TRIM PARITY, TERMINATORS & JUNK, REDUCE SPACES &
+		! AND TABS TO ONE SPACE, CONVERT LOWER &
+		! CASE TO UPPER CASE, AND DISCARD TRAILING SPACES &
+		! AND TABS. &
+		! DO COMMENT SCAN, IF REQUESTED; &
+		! DO CONTINUATION, IF REQUESTED, INCLUDING PRINTING &
+		! SECONDARY PROMPT IF DEVICE IS KB:. &
+
+20140	C$=CVT$$(C$,8%)+Z0$ &
+	\ IF Y%<0% THEN &
+		IF LEFT(C$,1%)="@" THEN &
+			P%=1% &
+			 \GOSUB 20300 &
+	\		IF E%=0% THEN 20100 ELSE 20190 &
+		! CONSTRUCT THE FINAL STRING, DISCARDING LEADING SPACES; &
+		! IF INDIRECT CHECK IS REQUESTED AND FIRST CHARACTER &
+		! IS '@' (THE INDIRECT INDICATOR), THEN CALL INDIRECT &
+		! SET UP AND LOOP FOR MORE. &
+
+20150	GOTO 20630 &
+		! SKIP TO END OF ROUTINE. &
+	&
+	&
+
+20160	&
+	!	ERROR TRAPPED ON INPUT LINE &
+
+20170	E%=ERR \ RESUME 20180 &
+		! SET UP ERROR FLAG AND RESUME AT DISPATCHER. &
+
+20180	&
+	!	DISPATCHER &
+
+20190	IF E%=11% THEN 20200 &
+	ELSE	E%=256% OR E% &
+	\	GOTO 20630 &
+		! IF IT'S AN EOF, LOOK FOR NEXT COMMAND FILE; &
+		! OTHERWISE, SET ERROR AND RETURN. &
+	&
+	&
+
+20200	&
+	&
+	&
+	!	REMOVE CURRENT COMMAND FILE FROM INDIRECT LIST &
+
+20210	Z%=Z0%(0%,11%) &
+	\ Z0%=Z0%(Z%,1%) &
+	\ Z0%(Z%,1%)=0% &
+	\ Z0%(0%,11%)=Z0% &
+	\ Z%=FNA0%(Z%) &
+		! DE-LINK CURRENT COMMAND FILE. &
+
+20220	GOTO 20630 IF Z0%(0%,11%)=0% &
+	\ E%=0% \ GOSUB 20400 \ E%=11% IF E%=5% &
+	\ GOTO 20180 IF E%<>0% &
+	\ GOTO 20100 &
+		! CALL RE-OPEN; &
+		! IF NO ERROR, GET NEXT LINE OUT OF NEW COMMAND FILE. &
+	&
+	&
+	&
+	&
+
+20300	&
+	&
+	&
+	!	CLOSE OUT CURRENT COMMAND FILE AND OPEN &
+	!	AN INDIRECT &
+
+20310	Z0%=Z0%(0%,11%) &
+	\ Z0%(Z0%,13%)=Y0% &
+	\ Z0%(Z0%,27%)=Y1% &
+	\ Z0%(Z0%,31%)=Y% &
+		! SET UP CURRENT VALUES FOR NEXT TIME THIS &
+		! ONE IS OPENED. &
+	&
+
+20350	&
+	&
+	&
+	!	SET UP AN INDIRECT &
+
+20360	Y0%=Z0%(0%,11%) \ Y1%=FNA% &
+	\ P%=FNP%(Y1%,P%,C$,-31898%,16376%) &
+	\ GOTO 20650 IF E%<>0% &
+	\ Z%=FNF0%(Y1%,"_KB:COMMND.CMD"+A$,C0$) &
+	\ Z0%(Y1%,1%)=Y0% &
+	\ Z0%(Y1%,31%)=(Y% AND 7%) OR (Y% AND 7%)*8% &
+	\ Z0%(0%,11%)=Y1% &
+		! SET UP NEW COMMAND FILE FR; &
+		! SET UP ITS FLAG WORD; &
+		! LINK IT INTO INDIRECT LIST. &
+	&
+
+20400	&
+	&
+	&
+	!	CLOSE CURRENT COMMAND FILE - OPEN/RE-OPEN PREVIOUS &
+
+20410	ON ERROR GOTO 20440 &
+	\ CLOSE 12% &
+		! SET UP ERROR TRAP FOR WHOLE ROUTINE; &
+		! CLOSE CURRENT COMMAND FILE. &
+
+20420	Y0%=Z0%(0%,11%) &
+	\ Y1%=Z0%(Y0%,27%) &
+	\ Y%=Z0%(Y0%,31%) &
+		! GET THE CRUCIAL INFORMATION FROM THE OLD COMMAND FILE: &
+		!	Y1% - LINE COUNT &
+		!	Y%  - GCML FLAG WORD &
+
+20430	Z%=FNO%(Y0%,1%,12%) &
+	\ GOTO 20450 IF E%<>0% &
+	\ Y0%=Z0%(Y0%,13%) &
+	\ INPUT LINE #12%,Z0$ FOR Z%=1% TO Y1% UNLESS (Y0% AND 2%)<>0% &
+	\ GOTO 20450 &
+		! OPEN NEW COMMAND FILE; &
+		! RESET THE DHI WORD BASED ON ACTUAL DEVICE; &
+		! SPACE FORWARD TO CURRENT LINE UNLESS IT'S A KB:. &
+
+20440	E%=ERR \ RESUME 20450 &
+		! ERROR ON CLOSE, OPEN, OR FORWARD SPACE. &
+
+20450	ON ERROR GOTO 19000 &
+		! RESET ERROR TRAP. &
+
+20460	RETURN &
+		! AND EXIT. &
+	&
+
+20500	&
+	&
+	&
+	!	DO COMMENT SCAN &
+
+20510	IF (INSTR(1%,Z0$,"'") OR INSTR(1%,Z0$,'"'))=0% THEN 20580 &
+		! IF NO QUOTES IN THE COMMAND STRING, SKIP THE QUOTE &
+		! PROCESSING, BUT STILL LOOK FOR EXCLAMATION POINT. &
+
+20520	Z0%=0% &
+	\ Z1%=LEN(Z0$) &
+	\ Z$="" &
+		! SET UP FOR SCAN : &
+		!	SET QUOTE HOLDER (Z0%) TO 0; &
+		!	SET POSITION TO CHANGE (Z3%) TO FIRST CHARACTER; &
+		!	SET END OF STRING (Z1%) TO LENGTH OF STRING; &
+		!	SET RESULT STRING (Z$) TO NULL. &
+
+20540	FOR Z3%=1% TO Z1% STEP 30% &
+	\	CHANGE MID(Z0$,Z3%,30%) TO Z% &
+	\	FOR Z%=1% TO Z%(0%) &
+	\		Z2%=Z%(Z%) &
+		! FOR EACH 30 BYTE SECTION OF THE STRING, CHANGE IT TO &
+		! THE WORK ARRAY; &
+		!	FOR EACH CHARACTER IN THE CHANGED STRING, HOLD &
+		!	THE CHARACTER. &
+
+20550			IF Z0%=0% THEN &
+				IF Z2%=ASCII("'") OR Z2%=ASCII('"') THEN &
+					Z0%=Z2% &
+				ELSE	Z0%=0% &
+			ELSE	IF Z0%<>Z2% THEN &
+					Z%(Z%)=Z%(Z%) OR 128% &
+				ELSE	Z2%=-1% &
+				! IF WE'RE NOT WITHIN QUOTES, THEN: &
+				!	IF THIS IS A QUOTE, THEN &
+				!		STORE THE QUOTE &
+				!	ELSE	Z0%=0% AGAIN (NOP); &
+				! IF WE'RE NOT WITHIN QUOTES, THEN: &
+				!	IF THIS IS NOT THE MATCHING &
+				!	QUOTE, THEN SET PARITY BIT ON &
+				!		THE CHARACTER; &
+				!	ELSE	SET END OF QUOTE FLAG. &
+
+20560			Z%(Z%)=0% IF Z0%=Z2% OR Z2%=-1% &
+	\		Z0%=0% IF Z2%=-1% &
+	\	NEXT Z% &
+	\	CHANGE Z% TO Z1$ &
+	\	Z$=Z$+Z1$ &
+	\ NEXT Z3% &
+	\ Z0$=Z$ &
+				! CLEAR THIS CHARACTER IF IT'S A &
+				! MATCHING QUOTE; &
+			! LOOK AT NEXT CHARACTER; &
+			! CHANGE THE STRING BACK TO A STRING AND UPDATE &
+			! THE CURRENT OUTPUT STRING; &
+		! DO NEXT SEGMENT OF THE INPUT STRING; &
+		! SET ORIGINAL STRING TO NEW STRING. &
+
+20580	Z%=INSTR(1%,Z0$,"!") &
+	\ Z0$=LEFT(Z0$,Z%-1%) IF Z%<>0% &
+	\ Z0$=CVT$$(Z0$,1%+4%+128%) &
+	\ RETURN &
+		! ANY "Excl. pt." IN QUOTES NOW HAS THE PARITY BIT SET, &
+		! SO THE INSTRING WILL FIND ONLY THOSE NOT IN QUOTES; IF &
+		! ONE IS FOUND, THE REST MUST BE A COMMENT, SO TAKE IT OUT; &
+		! RESET PARITY BITS AND REMOVE GARBAGE CHARACTERS; &
+		! AND EXIT. &
+	&
+
+20600	&
+	&
+	&
+	!	ERROR PROCESSING FOR GCML &
+
+20610	E%=256%+46% \ GOTO 20630 &
+		! RETRY REQUESTED ON AN UNRETRIABLE DEVICE. &
+
+20620	E%=11% \ GOTO 20630 &
+		! SECOND LINE REQUESTED ON A SINGLE LINE DEVICE &
+		! (IE, CHAIN, CCL, OR LOGGED OUT ENTRY). &
+
+20630	&
+	&
+	&
+	!	EXIT ROUTINE &
+
+20640	IF E%<>0% THEN &
+		Z%=FNA0%(Z0%(0%,11%)) &
+	\	Z0%(0%,11%)=0% &
+		! IF AN ERROR IS BEING RETURNED, THEN CLEAR THE &
+		! COMMAND FILE LIST. &
+
+20650	P%=0% &
+	\ ON ERROR GOTO 19000 &
+		! RESET ERROR TRAP. &
+
+20660	RETURN &
+		! AND EXIT. &
+	&
+	&
+
+25500	DEF* FNF0%(P0%,N$,D$) &
+	! FUNCTION:	FNF0%	APPLY 'NULL REPLACE' AND 'DEFAULTS' &
+	!			TO ENTRY IN SUBSCRIPT P0%. &
+	! PARAMETERS:	P0%	SUBSCRIPT OF ENTRY TO BE AFFECTED &
+	!		N$	NULL REPLACE STRING &
+	!		D$	DEFAULT STRING &
+	! RETURNS:	FNF0%	????? &
+	!		Z0%(P0%,X) &
+	!			RECORD WITH NULL REPLACE OR DEFAULTS &
+	!			APPLIED &
+
+25510	Z0%=0% &
+	\ Z0%=Z0% OR Z0%(P0%,Z%) FOR Z%=13% TO 19% &
+	\ IF Z0%=0% THEN &
+		Z%=FNP%(P0%,0%,N$,0%,0%) &
+	\	Z0%=Z0%(P0%,14%) &
+	\	GOTO 25680 &
+		! IF NOTHING IN THE RECORD, APPLY 'NULL REPLACE'. &
+
+25520	Z%=FNP%(-1%,0%,D$,0%,0%) &
+	\ Z%=Z%(14%) &
+	\ GOTO 25680 IF Z%=0% &
+		! HOLD FW2 OF RECORD TO BE EFFECTED IN Z0%; &
+		! DO FSS CALL ON THE 'DEFAULT STRING'; &
+		! HOLD FW2 OF 'DEFAULT STRING' IN Z%; &
+		! SKIP REPLACE IF DEFAULT STRING IS NULL. &
+
+25530	&
+	&
+	&
+	!	A P P L Y    D E F A U L T S &
+
+25540	Z0%=Z0%(P0%,14%) &
+	\ IF (Z0% AND 4096%)=0% THEN &
+		Z0%(P0%,13%)=(Z%(13%) AND 32767%) OR &
+			(Z0%(P0%,13%) AND NOT (32767%) AND &
+			((STATUS AND 256%)=0%)) &
+	\	Z0%(P0%,Z3%)=Z%(Z3%) FOR Z3%=6% TO 7% &
+	\	Z0%=Z0% OR (Z% AND -4096%) &
+		! DEFAULT THE DEVICE AND DHI FLAG WORD. &
+
+25550	IF (Z0% AND 128%)=0% THEN &
+		Z0%(P0%,8%)=Z%(8%) &
+	\	Z0%(P0%,25%)=Z%(25%) &
+	\	Z0%=Z0% OR (Z% AND 896%) &
+		! DEFAULT THE PPN. &
+
+25560	IF (Z0% AND 1%)=0% THEN &
+		Z0%(P0%,Z3%)=Z%(Z3%) FOR Z3%=9% TO 10% &
+	\	Z0%=Z0% OR (Z% AND 7%) &
+		! DEFAULT THE FILENAME. &
+
+25570	IF (Z0% AND 8%)=0% THEN &
+		Z0%(P0%,11%)=Z%(11%) &
+	\	Z0%=Z0% OR (Z% AND 120%) &
+		! DEFAULT THE EXTENSION. &
+
+25580	IF (Z0% AND 1024%)=0% THEN &
+		Z0%(P0%,12%)=Z%(12%) &
+	\	Z0%=Z0% OR (Z% AND 3072%) &
+		! DEFAULT THE PROT/STATUS. &
+
+25590	!	THE LINE NUMBERS FROM 25590 TO 25670, &
+	!	INCLUSIVE, ARE RESERVED FOR CLUSTERSIZE,
+25670	!	FILESIZE, AND MODE TRANSFERS. &
+
+25680	FNF0%,Z0%(P0%,14%)=Z0% &
+		! SET RETURNED VALUE. &
+
+25690	FNEND &
+		! AND EXIT. &
+	&
+	&
+	&
+	&
+
+25800	DEF* FNP%(P0%,P%,S$,Y0%,Y1%) &
+	! FUNCTION:	FNP%	DO (NEW) FSS ON STRING S$, STARTING FROM &
+	!			POSITION P%,AND RETURN THE DATA IN ARRAY &
+	!			Z0%(P0%,X%), AND THE NEW CHARACTER POSITION &
+	!			IN THE FUNCTION'S VALUE. &
+	! PARAMETERS:	P0%	RECORD NUMBER IN Z0%(?,?) IN WHICH TO RETURN &
+	!			THE DATA &
+	!		P%	CHARACTER POSITION AFTER WHICH TO START THE &
+	!			SCAN. &
+	!		S$	STRING TO SCAN &
+	!		Y0%	FIELD PROHIBIT WORD - SAME LAYOUT AS THAT &
+	!			OF FLAG WORD 2 OF THE FSS SYS() CALL - &
+	!			ANY BIT SET IN THIS WORD WHOSE CORRESPONDING &
+	!			BIT IS SET IN THE FW2 RETURNED BY THE SYS() &
+	!			CALL WILL RETURN E%=130%. &
+	!		Y1%	DEVICE PROHIBIT/EXTRA FLAG/EXTRA SWITCH PROHIBIT &
+	!			WORD - IF ANY BIT IS SET IN THIS WORD AND THE &
+	!			CORRESPONDING BIT IS SET IN THE DEVICE HANDLER &
+	!			INDEX (BITS 0-13) OF THIS WORD, E%=134% &
+	!			IS RETURNED; IF ANY SUCH &
+	!			CONDITION OCCURS IN THE TOP TWO BITS, &
+	!			E% IS RETURNED AS 130%. &
+	! GLOBAL VARIABLES EFFECTED: &
+	!		E%	ERROR VALUE, IF ANY. &
+	!		Z0%(P0%,X%) &
+	!			THIS IS THE ULTIMATE PURPOSE OF THIS FUNCTION - &
+	!			THIS WILL BE RETURNED AS AN INDEX-FILE FORMAT &
+	!			REPRESENTATION OF THE SCANNED STRING. &
+	!		Z%(30%)	USED FOR FSS FORMATTED STRING INTERMEDIATE &
+	!			STORAGE; RETURNED IN THE SAME FORMAT AS THE &
+	!			Z0%(P0%,X) ENTRY. &
+	! LOCAL VARIABLES USED: &
+	!		Z%	FOR LOOP COUNTER AND VARIOUS OTHER TEMPORARY &
+	!			PURPOSES &
+	!		Z1%(30%) &
+	!			AS INTERMEDIATE STORAGE FOR THE STRING &
+	!			RETURNED BY THE FSS CALL. &
+	! RETURNS:	FNP%	POSITION OF THE CHARACTER AFTER THE LAST ONE &
+	!			SCANNED.  IF ERROR (E%<>0%), THIS IS THE &
+	!			SAME AS THE BEGIN POSITION ON ENTRY TO &
+	!			THE FUNCTION (IE, P%, ABOVE). &
+	! ERRORS EXPECTED: &
+	!	E%=2	ILLEGAL FILENAME &
+	!			IF THE FILENAME SPECIFIED DOES NOT &
+	!			CONSTITUTE A VALID RSTS/E FILE SPEC. &
+	!	E%=6	NOT A VALID DEVICE &
+	!			IF THE DEVICE SPECIFIED IS INVALID. &
+	!	E%=130	ILLEGAL FILENAME+ &
+	!			IF SOME PROHIBITED FIELD, INCLUDING &
+	!			ABSOLUTE DEVICE UNIT OR ANOTHER PPN, &
+	!			WHEN PROHIBITED, WAS SPECIFIED. &
+	!	E%=134	NOT A VALID DEVICE+ &
+	!			WHEN A PROHIBITED DEVICE IS SPECIFIED. &
+
+25810	ON ERROR GOTO 25880 &
+	\ CHANGE SYS(CHR$(6%)+CHR$(-23%)+RIGHT(S$,P%+1%)) TO Z1% &
+	\ Z1%(Z%)=Z1%(Z%)+SWAP%(Z1%(Z%+1%)) FOR Z%=1% TO 29% STEP 2% &
+	\ FNP%=LEN(S$)-RECOUNT &
+	\ IF (Z1%(29%) AND 2048%) THEN &
+		Z1%(29%)=Z1%(29%) AND NOT 3072% &
+	\	Z1%(21%)=0% &
+		! SET UP ERROR TRAP; DO THE SYS() CALL FOR FSS; &
+		! PACK THE RETURNED DATA INTO THE ODD WORDS IN THE TEMP &
+		! ARRAY; AND UPDATE CURRENT POSITION IN THE SOURCE &
+		! STRING. &
+		! IF THE PROTECTION CODE FOUND WAS ONLY THE JOB DEFAULT &
+		! PROTECTION CODE, THEN IGNORE IT. &
+
+25820	IF (Z1%(29%) AND -28672%)=4096% THEN &
+		S$=CVT%$(SWAP%(Z1%(23%))) &
+	\	S$=S$+FNU0$(Z1%(25%)) IF Z1%(25%)<0% &
+	\	S$=MID(SYS(CHR$(6%)+CHR$(-10%)+S$+":"+S$),7%,4%) &
+	\	Z1%(23%)=SWAP%(CVT$%(S$)) &
+	\	Z1%(25%)=SWAP%(CVT$%(RIGHT(S$,3%))) &
+		! IF DEVICE NAME EXISTS AND IS NOT LOGICAL (IE, ALREADY IN &
+		! RAD50 FORM), THEN CONVERT IT TO RAD50 FORM USING THE &
+		! FSS SYS() CALL. &
+
+25830	Z%=(STATUS AND 255%)/2% &
+	\ Z%=(2%^Z%) AND (Z1%(29%)>0%) AND 16383% &
+	\ Z%=Z% OR NOT(32767%) IF &
+		A%<>Z1%(5%) AND (A% AND -512%)<>0% &
+		AND (Z1%(29%) AND 896%)=128% &
+	\ Z%=Z% OR 16384% IF Z1%(26%)=255% AND (Z1%(29%)>0%) &
+	\ Z1%(14%)=Z% &
+		! SET UP FLAGS:	Z1%(14%) &
+		!		LOW ORDER 14 BITS USED FOR BIT-ENCODED DHI; &
+		!		TOP 2 BITS USED FOR FLAGS AS FOLLOWS: &
+		!			-32768	ACCOUNT DOESN'T MATCH A% &
+		!				AND A% IS NOT PRIV'D &
+		!			16384	SPECIFIC DEVICE UNIT REQUESTED &
+	&
+
+25835	E%=130% IF (Y0% AND Z1%(29%))<>0% &
+	\ E%=134% IF (Y1% AND Z1%(14%) AND 32767%)<>0% &
+	\ E%=130% IF (Y1% AND Z1%(14%))<0% AND (STATUS AND 256%)=0% &
+	\ GOTO 25890 IF E%<>0% &
+		! CHECK FOR PROHIBITED SWITCHES, PROHIBITED DEVICES. &
+
+25840	Z%(Z%)=0% FOR Z%=0% TO 30% &
+	\ Z%(6%)=Z1%(23%) \ Z%(7%)=Z1%(25%) &
+	\ Z%(8%)=Z1%(5%) &
+	\ Z%(9%)=Z1%(7%) \ Z%(10%)=Z1%(9%) &
+	\ Z%(11%)=Z1%(11%) &
+	\ Z%(12%)=Z1%(21%) &
+	\ Z%(13%)=Z1%(14%) &
+	\ Z%(14%)=Z1%(29%) &
+	\ Z%(16%)=Z1%(17%) AND 32767% &
+	\ Z%(18%)=Z1%(15%) &
+	\ Z%(19%)=Z1%(13%) &
+	\ Z%(15%)=(Z1%(27%) AND 7%)*2048% &
+	\ Z%=Z%(8%) &
+	\ Z%(25%)=(255% AND (Z% AND 255%)<>255%) OR (-256% AND &
+		(Z% AND -256%)<>-256%) &
+		! SET UP ARRAY TO RETURN: &
+		!	DEVICE NAME, &
+		!	ACCOUNT, &
+		!	FILENAME (2 WORDS), &
+		!	EXTENSION, &
+		!	PROT/STATUS, &
+		!	DHI AND FLAGS, &
+		!	FLAG WORD 2. &
+		! SET UP ACCOUNT SELECTION WORD FOR FUNNY ALGORITHM &
+		! FOR ACCOUNT SELECTION. &
+
+25850	IF P0%>-1% THEN &
+		Z0%(P0%,Z%)=Z%(Z%) FOR Z%=6% TO 19% &
+	\	Z0%(P0%,25%)=Z%(25%) &
+		! PUT THE RESULT IN THE WORK-FILE UNLESS INSTRUCTED &
+		! OTHERWISE (IE, UNLESS P0%<0%). &
+
+25860	ON ERROR GOTO 19000 &
+		! RESET ERROR TRAP. &
+
+25870	FNEND &
+		! AND WE'RE DONE. &
+	&
+
+25880	E%=ERR &
+		! SOME FILENAME ERROR. &
+
+25890	Z0%(P0%,0%)=0% UNLESS P0%<0% &
+	\ FNP%=P% &
+	\ RESUME 25860 &
+		! SET UP ERROR NUMBER AND BEGIN POSITION OF STRING IN &
+		! ERROR. &
+	&
+	&
+	&
+	&
+
+25900	DEF* FNU$(P0%,C$,Z%,Z0%) &
+	! TURN AN FNS STRING INTO A REAL OPEN-ABLE FILENAME. &
+
+25910	Z%=Z% AND Z0%(P0%,14%) &
+	\ Z%=Z% AND -3201% IF (Z0%(P0%,13%) AND 1914%)<>0% &
+		IF Z0%(P0%,14%)>0% &
+	\ C$="" &
+		! CREATE A WORD (Z%) WHICH HAS BITS SET FOR A FIELD ONLY &
+		! IF THAT FIELD IS BOTH REQUESTED AND PRESENT IN THE &
+		! DATA; &
+		! IF DEVICE IS NOT DISK, DT, MT, OR LOGICAL, DO NOT &
+		! RETURN FILENAME, EXTENSION; &
+		! INITIALIZE THE STRING TO NULL. &
+	&
+
+25920	C$="_"+RAD$(Z0%(P0%,6%))+RAD$(Z0%(P0%,7%))+":" IF (Z% AND 4096%)<>0% &
+	\ C$=C$+"["+FNU0$(SWAP%(Z0%(P0%,8%)))+","+FNU0$(Z0%(P0%,8%))+ &
+		"]" IF (Z% AND 128%)<>0% &
+	\ C$=C$+RAD$(Z0%(P0%,9%))+RAD$(Z0%(P0%,10%)) IF (Z% AND 1%)<>0% &
+	\ C$=C$+"."+RAD$(Z0%(P0%,11%)) IF (Z% AND 8%)<>0% &
+	\ C$=C$+"<"+FNU0$(SWAP%(Z0%(P0%,12%)))+">" IF (Z% AND 3072%)<>0% &
+		! SET UP Z% AS BITS SET IN BOTH THE REQUESTED ENTRY &
+		! WORD AND THOSE SET IN THE ACTUAL FILENAME STRING. &
+		! IF DEV: REQ/EXSTS, MAKE IT; &
+		! IF [PPN] REQ/EXSTS, MAKE IT; &
+		! IF FILENAME REQ/EXSTS, MAKE IT; &
+		! IF .EXT REQ/EXSTS, MAKE IT; &
+		! IF <PROT> REQ/EXSTS, MAKE IT. &
+
+25930	Z0%=Z0% AND Z0%(P0%,15%) AND 14336% &
+	\ IF Z0%<>0% THEN &
+		C$=C$+"/CL:"+NUM1$(Z0%(P0%,18%)) IF (Z0% AND 2048%)<>0% &
+	\	C$=C$+"/MO:"+NUM1$(Z0%(P0%,16%)) IF (Z0% AND 4096%)<>0% &
+	\	C$=C$+"/FI:"+NUM1$(Z0%(P0%,19%)) IF (Z0% AND 8192%)<>0% &
+		! SET UP Z0% TO HOLD ONLY THE FLAGS SET BOTH IN THE &
+		! OPEERAND IN THE CALL AND IN THE RECORD POINTED TO; &
+		! PUT THE "/SWITCH:OPERAND" STRINGS INTO THE RETURNED &
+		! STRING IN THE ORDER: &
+		!	2048	CLUSTERSIZE &
+		!	4096	MODE &
+		!	8192	FILESIZE &
+
+25960	FNU$=C$ &
+		! SET FUNCTION VALUE. &
+
+25970	FNEND &
+
+25980	DEF* FNU0$(L%) &
+	\ L%=L% AND 255% &
+	\ IF L%=255% THEN FNU0$="*" ELSE FNU0$=NUM1$(L%) &
+		! TAKE THE LOW BYTE OF L%; &
+		! IF THAT BYTE IS 255, THEN &
+		!	RETURN '*'; &
+		! ELSE	RETURN NUM1$ OF BYTE. &
+
+25990	FNEND &
+	&
+	&
+	&
+
+26000	DEF* FNO%(P0%,A0%,C0%) &
+	\ FNO%=0% &
+		! FUNCTION :	OPEN THE FILE WHOSE NAME IS IN RECORD &
+		!		P0% OF THE WORK-FILE, ACCESS TYPE A0%, &
+		!		ON CHANNEL C0%, USING SPECIFIED &
+		!		CLUSTERSIZE, MODE, FILESIZE, AND &
+		!		RECORDSIZE VALUES. &
+		! &
+		! PARAMETERS : &
+		!	P0%	RECORD # OF FILE RECORD IN WORK-FILE &
+		!	A0%	ACCESS TYPE : &
+		!			1 - READ ONLY &
+		!			2 - WRITE ONLY (SUPERSEDE) &
+		!			3 - READ/WRITE &
+		!			4 - \ PROTECTION &
+		!			5 - \ VIOLATION &
+		!			6 - OPEN, WRITE-ONLY, FOR EXTEND &
+		!			7 - OPEN, READ/WRITE, FOR EXTEND &
+		!	C0%	CHANNEL ON WHICH TO OPEN IT. &
+
+26010	E%=10% IF ((A0% AND 3%)=2% AND Z0%(P0%,13%)<0%) OR &
+			((A0% AND 3%)<2% AND (A0% AND 4%)<>0%) &
+	\ GOTO 26090 IF E%<>0% &
+	\ IF (A0% AND 4%)<>0% THEN &
+		IF (Z0%(P0%,13%) AND (1%+8%+128%))<>0% THEN &
+			Z0%(P0%,15%)=Z0%(P0%,15%) OR 4096% &
+	\		Z0%=Z0%(P0%,13%) &
+	\		Z%=2% IF (Z0% AND 1%)<>0% &
+	\		Z%=4096%+512%+1% IF (Z0% AND 8%)<>0% &
+	\		Z%=128% IF (Z0% AND 128%)<>0% &
+	\		Z0%(P0%,16%)=Z% &
+		! IF THIS IS AN ATTEMPT TO SUPERSEDE A FILE ON ANOTHER &
+		! ACCOUNT BY A NON-PRIVILEGED USER, GIVE HIM AN ERROR. &
+		! THIS CHECK IS NECESSARY TO PREVENT A NON-PRIVILEGED &
+		! USER FROM DESTROYING FILES ON OTHER ACCOUNTS TO WHICH &
+		! HE HAS WRITE ACCESS. &
+
+26020	ON ERROR GOTO 26070 &
+	\ Z$=SYS(PRIV.ON$) IF A0% AND NOT 32767% &
+	\ Z$=FNU$(P0%,"",-1%,-1%) &
+	\ Z%=(Z0%(P0%,17%) AND (Z0%(P0%,15%) AND 1024%)<>0%) &
+	\ OPEN Z$ FOR INPUT AS FILE C0%, RECORDSIZE Z% IF (A0% AND 3%)=1% &
+	\ OPEN Z$ FOR OUTPUT AS FILE C0%, RECORDSIZE Z% IF (A0% AND 3%)=2% &
+	\ OPEN Z$ AS FILE C0%, RECORDSIZE Z% IF (A0% AND 3%)=3% &
+		! SET UP TO TRAP AN OPEN ERROR; &
+		! DROP PRIVILEGES, SET UP FILE NAME WITH SWITCHES, SET &
+		! UP RECORDSIZE; &
+		! GIVE HIM THE KIND OF OPEN HE ASKED FOR: &
+		!	READ ONLY	OPEN FOR INPUT &
+		!	WRITE ONLY	OPEN FOR OUTPUT &
+		!	READ/WRITE	OPEN &
+
+26050	Z$=SYS(PRIV.OFF$) IF A0% AND NOT 32767% &
+	\ ON ERROR GOTO 19000 &
+		! RECOVER PRIVILEGES; &
+		! RESET ERROR TRAP. &
+
+26060	FNEND &
+		! AND EXIT. &
+
+26070	&
+	!	ERROR HANDLER &
+
+26080	E%=ERR \ RESUME 26090 &
+		! THIS IS FOR ERRORS TRAPPED IN THE OPEN. &
+
+26090	E%=E% OR 1024% \ GOTO 26050 &
+		! SET THE FLAG BIT SAYING 'ON OPEN', AND EXIT. &
+	&
+	&
+
+26100	DEF* FNA% &
+	! FUNCTION:	GET A RECORD FROM THE FREE LIST. &
+	! PARAMETERS:	NONE. &
+	! GLOBAL &
+	! VARIABLES &
+	! AFFECTED:	B0%	"CACHE" VARIABLE FOR THE FREE LIST &
+	!			POINTER Z0%(0%,0%). &
+	! LOCAL &
+	! VARIABLES &
+	! USED:		Z0%	USED FOR HOLDING THE NEXT RECORD NUMBER &
+	!			FROM THE FREE LIST. &
+	!		Z%	LOOP COUNTER AND INDEX VARIABLE. &
+	! RETURNS:	THE RECORD NUMBER IN THE WORK FILE OF THE FIRST &
+	! 		RECORD IN THE FREE LIST. UPDATES THE FREE LIST &
+	!		POINTER TO POINT TO THE NEXT FREE RECORD. &
+	!		UPON RETURN, GUARANTEES THAT THE RETURNED RECORD &
+	!		IS RESIDENT IN THE VIRTUAL CORE BUFFER AND HAS BEEN &
+	!		ZEROED. &
+	! ERRORS:	NONE EXPECTED. &
+
+26110	B0%=Z0%(0%,0%) IF B0%=0% &
+	\ Z0%=B0% &
+	\ IF Z0%<0% THEN &
+		Z0%=-Z0% &
+		\ Z0%(Z%,1%)=Z%+1% FOR Z%=Z0% TO ((Z0%/8%)*8%+7%) &
+		\ Z0%(Z%,1%)=-(Z%+1%) &
+		! EXTEND IF NECESSARY AND MAKE LAST POINTER NEGATIVE. &
+
+26120	B0%=Z0%(Z0%,1%) &
+	\ Z0%(Z0%,Z%)=0% FOR Z%=0% TO 31% &
+	\ FNA%=Z0% &
+		! UPDATE THE FREE LIST POINTER, ZERO THE "GOTTEN" &
+		! RECORD, AND SET THE FUNCTION RETURN VALUE. &
+
+26130	FNEND &
+		! RETURN. &
+	&
+
+26200	DEF* FNA0%(P0%) &
+	! FUNCTION:	RETURN A WORK-FILE RECORD(AND ALL ITS LISTS &
+	!		AND SUBLISTS) TO THE FREE LIST. &
+	! PARAMETERS:	P0%	NUMBER OF RECORD TO RETURN. &
+	! GLOBAL &
+	! VARIABLES &
+	! AFFECTED:	B0%	"CACHE" VARIABLE FOR FREE LIST POINTER. &
+	! RETURNS:	ALWAYS ZERO &
+	! ERRORS.	NONE EXPECTED. &
+
+26210	Z0%,Z2%=P0% &
+	\ Z0%=Z0%(Z0%,1%) WHILE Z0%(Z0%,1%)<>0% &
+	\ FOR Z%=2% TO 5% &
+	\	Z2%=P0% &
+	\	WHILE Z2%<>0% &
+	\		IF Z0%(Z2%,Z%)<>0% THEN &
+				Z3%=Z0%(Z2%,Z%) &
+	\			Z0%(Z2%,Z%)=0% &
+	\			Z0%,Z0%(Z0%,1%)=Z3% &
+	\			Z0%=Z0%(Z0%,1%) WHILE Z0%(Z0%,1%)<>0% &
+
+26220			Z2%=Z0%(Z2%,1%) &
+	\	NEXT &
+	\ NEXT Z% &
+	\ Z0%(Z0%,1%)=B0% &
+	\ B0%=P0% &
+	\ FNA0%=0% &
+
+26230	FNEND &
+	&
+
+26300	DEF* FNP0%(B%,L%,D%) &
+	! FUNCTION:	PUSH CURRENT LIST AND SET UP LIST FROM &
+	!		Z0%(B%,L%). CLEAR LIST IF D%<>0%. &
+	! PARAMETERS:	B%	RECORD NUMBER WHOSE LIST IS TO BE SET UP. &
+	!		L%	ENTRY NUMBER OF LIST TO SET UP. &
+	!		D%	DESTRUCT/NODESTRUCT FLAG. &
+	! GLOBAL &
+	! VARIABLES &
+	! AFFECTED:	S%,S%()	STACK POINTER AND STACK. &
+	!		P1%	POINTS TO LAST ELEMENT IN LIST. &
+	! LOCAL &
+	! VARIABLES &
+	! USED:		NONE. &
+	! RETURNS:	RETURNS P1% POINTING TO LAST RECORD IN LIST, &
+	!		OR LIST HEADER IF THERE IS NO LIST OR IF THE LIST &
+	!		WAS DESTROYED. &
+	! ERRORS:	STACK OVERFLOW POSSSIBLE IF LIST IS TO BE DESTROYED. &
+
+26310	S%=S%+1%\S%(S%)=P1% &
+	\ S%=S%+1%\S%(S%)=Z0%(B%,1%) &
+	\ S%=S%+1%\S%(S%)=L% &
+	\ S%=S%+1%\S%(S%)=B% &
+	\ P1%=Z0%(B%,L%) &
+	\ P1%=FNA0%(P1%) IF P1%<>0% AND D%<>0% &
+	\ Z0%(B%,1%)=P1% &
+	\ P1%=B% &
+	\ P1%=Z0%(P1%,1%) WHILE Z0%(P1%,1%)<>0% &
+	\ FNP0%=B% &
+		! PUSH CURRENT LIST, LIST NUMBER TO SET UP, AND CURRENT BASE. &
+		! CLEAR LIST IF D%<>0%, AND THEN SET UP LIST. SET UP &
+		! END OF LIST POINTER. &
+
+26320	FNEND &
+		! RETURN. &
+	&
+	&
+	&
+	&
+
+26400	DEF* FNP1% &
+	! FUNCTION:	RESTORE ORIGINAL LIST FROM DATA ON STACK. &
+	! PARAMETERS:	NONE. &
+	! GLOBAL &
+	! VARIABLES &
+	! AFFECTED:	P1%	RETURNED TO FORMER STATE. &
+	!		S%,S%()	STACK RESTORED TO FORMER STATE. &
+	! LOCAL &
+	! VARIABLES &
+	! USED:		Z%	USED TO HOLD OLD BASE RECORD. &
+	! RETURNS:	OLD BASE RECORD NUMBER. &
+	! ERRORS:	NONE EXPECTED. &
+
+26410	Z%=S%(S%)\S%=S%-1% &
+	\ Z0%(Z%,S%(S%))=Z0%(Z%,1%) &
+	\ Z0%(Z%,1%)=S%(S%-1%) UNLESS S%(S%)=1% &
+	\ P1%=S%(S%-2%) &
+	\ S%=S%-3% &
+	\ FNP1%=Z% &
+		! PUT NEW LIST WHERE IT BELONGS, RESTORE OLD MAINPOINTER, &
+		! POP ALL THE VALUES OFF THE STACK, SET FUNCTION VALUE &
+		! TO OLD BASE RECORD NUMBER. &
+
+26420	FNEND &
+		! RETURN. &
+	&
+
+26500	DEF* FNPRV%(PRIV$) &
+	! &
+	! CHECK PRIVILEGE SPECIFIED &
+	! &
+	\ CHANGE SYS(CHR$(6%)+CHR$(32%)+CHR$(1%)+STRING$(3%,0%)+ &
+		PRIV$) TO Z% &
+	\ FNPRV% = (Z%(3%)=0%) &
+	\ FNEND &
+	! Check to see if job currently has privilege named &
+	! If privileged then return -1% &
+	! Else return 0% &
+	&
+
+30000	E0%=1% &
+	\ C$=SYS(CHR$(7%)) &
+	\ GOTO 1000 &
+		!  CCL ENTRY SETUP. &
+		!  SET E0% TO INDICATE A CCL ENTRY. &
+		!  GET THE CORE COMMON STRING. &
+		!  GO 'RUN' THE PROGRAM. &
+
+30010	PRINT "?INVALID CCL ENTRY" &
+	\ GOTO 32767 &
+		! ANYTHING BUT BACKUP OR RESTORE. &
+
+31000	PRINT "?CHAIN ENTRY INVALID" &
+	\ GOTO 32767 &
+		! CHAIN ENTRY. &
+
+32000	PRINT "?LOGGED OUT ENTRY INVALID" &
+	\ GOTO 32767 &
+		! LOGGED OUT ENTRY. &
+
+32767	END

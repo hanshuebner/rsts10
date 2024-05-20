@@ -1,0 +1,415 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+TITLE	JQSTAT,<JOB/QUEUE STATISTICS>,0A,10-MAY-91,MHB/ABC/TG/SJM/MND/MNB/KPH/WRM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR JQSTAT
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	TG   29-Dec-80	Updated to work with V7.1
+;  002	SJM  08-Jul-81	Added support for I&D
+;  003	MND  06-Aug-81	Untied stats and auto-restart use of Switch register
+;  004	SJM  12-Aug-81	Fix to work with I&D
+;  005	JTC  05-Oct-81	Added new FIP structure
+;  006	JTC  10-Oct-81	Symbolic Switch register usage, OVRBUF for overlays
+;
+;			[Version 9.0]
+;  007  MNB  22-Feb-84  Asynch I/O changes in M.CTRL byte
+;  008	KPH  20-Mar-84	Histogram enhancements: Improved overlay statistics,
+;			fixed FIP handling, fixed resident overlays, added
+;			new monitor phases, changed to resident library,
+;			I&D split code.
+;  009	KPH  26-Jun-84	Determine FIP mode from FIPLSB and FIPMSB
+;  010	KPH  09-Jul-84	Add RSX phase
+;  011	KPH  19-Jul-84	Fix problems zeroing histogram table
+;  012	KPH  21-Sep-84	Add magtape phase
+;
+;			[RSTS/E V9.3]
+;  013  KPH  22-Feb-86	Change RSTS phase pointer to use RSTAP5
+;  014  KPH  06-Jun-86	Add new phases
+;
+;			[RSTS/E V9.6]
+;  015  KPH  24-Feb-88	Make statistics settable online
+;			Add new phases
+;			Remove queue depth stuff (it doesn't work anyway!)
+;
+;			[RSTS/E V10.0]
+;  016  WRM  26-Jul-90	fix time billing of supervisor mode to user run time
+;-
+
+.SBTTL	TIMING ORIENTED STATISTICS
+
+                                
+	DEFORG	JQSTAT
+
+.SBTTL	JOB STATISTICS
+                
+;+
+; DOSTAT - Collect monitor statistics
+;
+;	SP -> Return to mapping code, Saved DPAR5, Saved IPAR5, clock
+;		return, PC, PS, ...
+;
+;	Priority is PR6 (clock interrupt priority)
+;
+; This routine is used to monitor statistics about the RSTS/E system.
+; We are entered by the clock interrupt service when the JSTATS vector
+; cell is set to point to the statistics dispatcher. JSTATS can either point
+; to the statistics dispatcher or a return instruction, depending on whether
+; statistics are desired or not.
+;-
+                         
+	TMPORG	GRDDSP,2						;015
+	 .WORD	DOSTAT							;015
+	UNORG								;015
+
+DOSTAT:	MOV	R1,-(SP)	;;Get work registers			;015
+	MOV	R3,-(SP)	;; ...					;015
+	MOV	R4,-(SP)	;; ...                                  ;015
+	MOV	#JSTCTL+2,R1	;;GET POINTER TO JOB STAT AREA		;015
+	MOV	#1,R3		;;GET A HANDY CONSTANT (FOR CARRYING)
+	ADD	R3,(R1)+	;;KEEP UPTIME COUNT
+	ADC	(R1)+		;;(DOUBLE)
+	CMP	(R1)+,FREES+2	;;IS OUR FREE COUNT LOWEST?
+	BLOS	10$		;;YES, SO KEEP IT
+	MOV	@#FREES+2,-2(R1) ;;NO, SO GET NEW LOWER COUNT
+10$:	BIT	#40000,10*2(SP)	;;interrupt from user or super mode?	;016
+	BNE	30$		;;yes- bill it as user run-time		;016
+	TSTB	@#JOB		;;JOB RUNNING NOW?
+	BNE	20$		;;YES => LEVEL 3 ACCOUNTED
+	CMP	(R1)+,(R1)+	;;NO, SKIP
+	TSTB	@#NEXT		;;NO JOB, BUT ONE TO RUN SOON?
+	BNE	20$		;;YES => LOST TIME
+	CMP	(R1)+,(R1)+	;;NO, SKIP
+	CMPB	10*2(SP),#PR3	;;NOTHING, NULL JOB?			;015
+	BHIS	20$		;;NO => LEVEL 3 UNACCOUNTED
+	CMP	(R1)+,(R1)+	;;YES => NULL TIME
+20$:	ADD	R3,(R1)+	;;KEEP THE TICK COUNTER
+	ADC	(R1)+		;;(DOUBLE)
+
+GLOBAL	<FREES,JSTCTL>							;015
+
+30$:	CLR	R4		;;Guess that FIP is not in use		;008
+	TST	@#FIQUE		;;IS FIP NEEDED?
+	BEQ	40$		;;NOPE
+	INC	R4		;;Set FIP state to FIP running (code = 1) ;008
+	ADD	R3,JSTATN	;;YES, KEEP COUNT
+	ADC	JSTATN+2	;;(DOUBLE)
+40$:	CMP	SP,#SYSTAK+<8.*2> ;;SYSTEM MODE?
+	BHI	60$		;;NO, FIP MODE
+	MOV	#JSTATW,R1	;;YES, GET ANOTHER TABLE POINTER
+	ADD	R3,(R1)+	;;AND SAY SYSTEM MODE TICK
+	ADC	(R1)+		;;(DOUBLE)    
+	TST	@#FIQUE		;;SYSTEM MODE AND FIP NEEDED?
+	BEQ	60$		;;NO, PURE SYSTEM MODE
+	ADD	R3,(R1)+	;;YES, SO FIP WAITING
+	ADC	(R1)+		;;(DOUBLE)                                  
+	INC	R4		;;Guess at overlay waiting (code=2)	;008
+	TSTB	FIPMSB		;;WAITING FOR AN OVERLAY INTO OVRBUF?	;009
+	BNE	50$		;;MUST BE, IT'S A BIG MEMORY ADDRESS
+	CMP	FIPLSB,#120000	;;OUTSIDE THE ROOT (THEREFORE OVRBUF)?	;009
+       	BHIS	50$		;;YES
+	CMP	(R1)+,(R1)+	;;NO, SKIP
+	INC	R4		;;Guess at FIBUF waiting (code = 3)	;008
+	CMP	FIPLSB,#FIBUF	;;WAITING FOR DISK INFO?		;009
+	BEQ	50$		;;YES
+	CMP	(R1)+,(R1)+	;;NO, SKIP
+	INC	R4		;;Guess at SATBUF waiting (code = 4)	;008
+	CMP	FIPLSB,#SATBUF	;;WAITING FOR SAT DATA?			;009
+	BEQ	50$		;;YES
+	CMP	(R1)+,(R1)+	;;NO, MUST BE OTHER TYPE WAIT
+	INC	R4		;;And set "other" waiting (code = 5)	;008
+50$:	ADD	R3,(R1)+	;;TICK COUNT                                
+	ADC	(R1)+		;;(DOUBLE)
+60$:	MOV	10*2(SP),R1	;;GET INTERRUPTED PS			;015
+	BIC	#^C<7*40>,R1	;;AND ISOLATE THE PRIORITY
+	CMP	R1,#5*40	;;IS PRIORITY > PR5 ?
+	BLOS	70$		;;NOPE
+	MOV	#5*40,R1	;;YEP, LOWER IT TO PR5
+	INC	JSTATH		;;AND COUNT THAT HIGH PRIORITY
+70$:	ASH	#-5+2,R1	;;MAKE INTO DOUBLE WORD INDEX
+	ADD	R3,JSTATP(R1)	;;KEEP PRIORITY COUNTER
+	ADC	JSTATP+2(R1)	;;(DOUBLE)
+	ADD	CHETIC,JSTATC(R1) ;;KEEP CACHE TIME COUNTER
+	ADC	JSTATC+2(R1)	;;(DOUBLE)                                  
+   	CALL	DOHIST		;;Try to do the histogram		;015
+	MOV	(SP)+,R4	;;Restore one work register		;015
+	MOV	(SP)+,R3	;;Now the next				;015
+	MOV	(SP)+,R1	;;And finally the next			;015
+	RETURN			;;And we're done			;015
+
+GLOBAL	<FIQUE,SYSTAK,FIPLSB,FIPMSB,FIBUF,SATBUF,CHETIC>		;009
+GLOBAL	<JSTATN,JSTATW,JSTATF,JSTATP,JSTATC,JSTATH,JSTATD>		;015
+
+;+
+; DOHIST - Update the histogram table
+;      
+;	R1 = Priority at time of interrupt * 4
+;	R4 = Current FIP mode                                               
+;		0 = Not using FIP
+;		1 = FIP is running
+;		2 = Waiting for code
+;		3 = Waiting for read into FIBUF
+;      		4 = Waiting for read into SATBUF                            
+;		5 = Undefined wait
+;
+;	SP -> Mainline stats return, Saved R4, Saved R3, Saved R1, 
+;			mapping return, Saved DPAR5, Saved IPAR5,
+;			clock return, PC, PS, ...
+;
+; First 4K of histogram area is mapped through DPAR6.
+;-
+                     
+DOHIST:	SUB	#3*4,R1		;;Is priority PR3 - PR5?		;015
+	BLO	60$		;;No, nothing to do			;015
+	MOV	@#KISAR6,R1	;;Pick up current I-space APR6 mappping ;015
+	CALL	CHKHIS		;;Check to see if we should do this	;015
+	 BR	60$		;;Nope, get out				;015
+	DEC	R4   		;;Make FIP mode be zero-based		;008
+	BMI	20$		;;Not in a FIP mode, nothing to do	;008
+	MOV	@DPAR6,R3	;;R3 = APR value for base of region	;015
+	ASH	#12.-6,R4	;;Now R4 has MMU offset for overlay table ;008
+	ADD	R4,@DPAR6	;;Now map the correct offset		;008
+       	MOV	FIPOVR,R4	;;R4 = Current overlay * 4		;008
+	ADD	#1,140000+7000(R4) ;;Count this overlay			;008
+	ADC	140000+7000+2(R4) ;;Double precision			;008
+	ADD	#<10*100>,@DPAR6 ;;Now map function FIP state table	;008
+	ADD	#1,140000+7000(R4) ;;Increment count for this state	;008
+	ADC	140000+7000+2(R4) ;;Double precision			;008
+	MAP	R3,APR=6,DATA	;;And map the beginning of the area	;008
+	CMP	11*2(SP),#140000 ;;Were we executing code in APR6?	;015
+       	BLO	20$		;;No, not this time			;015
+	CMP	R1,FIPAP6	;;Yes, were we in FIP?			;015
+	BEQ	10$		;;Yes, count that			;015
+	CMP	R1,TERAP6	;;No, how about the terminal driver	;015
+	BNE	20$		;;No, something else, look at APR 5	;015
+	MOV	#TERAPR+2,R1	;;Set up for class driver stats		;015
+	BR	50$		;;And join up				;015
+
+10$:	MOV	#FIPAPR+2,R1	;;Set up for FIP stats			;015
+	BR	50$		;;And join up				;015
+
+20$:	MOV	7*2(SP),R3	;;Pick up current APR5 mapping		;015
+	BEQ	40$		;;Zero, so call this "other" phase	;008
+	MOV	#HISAPR,R1	;;START HERE PLEASE			;008
+30$:	CMP	R3,@(R1)+	;;Was it this phase?			;008
+	BEQ	50$		;;Yes, it sure is			;008
+	CMP	R1,#TBLEND	;;No, are we done yet?			;008
+	BNE	30$		;;No, so loop for all the phase values	;008
+40$:	MOV	#OTHAPR+2,R1	;;Update code for unknown phase + 2	;008
+        
+50$:	SUB	#HISAPR+2,R1	;;GET SUBCODE *2 NOW
+	ASH	#11.-6,R1	;;FORM MMU ADDITION			;008
+	ADD	R1,@DPAR6	;;AND ADD IT IN
+	MOV	11*2(SP),R1	;;GET THE INTERRUPTED PC		;015
+	ASH	#-4,R1		;;DIVIDE PC BY 20(8)
+	BIC	#^C<007774>,R1	;;AND TRIM TO ONLY 10. BITS (/100)
+	ADD	#1,140000(R1)	;;NOW COUNT IN THE HISTOGRAM
+	ADC	140000+2(R1)	;;(DOUBLE)                                  
+	MAP	POP,APR=6,DATA	;;RESTORE PAR6
+60$:	RETURN			;;All done here				;015
+
+GLOBAL	<FIPAP6,TERAP6,DPAR6,SYSTAK,FIPOVR,OVRBUF,FIQUE,FIPFUN>		;015
+
+;+
+; CHKHIS - Check for a histogram region
+;
+;	CALL	CHKHIS
+;                 
+;	First exit if no histogram
+;
+;	R3 = Undefined
+;
+;	Second exit if histogram
+;                                                                           
+;	R3 = Undefined
+;               
+;	SP -> Old DPAR6 value, ...
+;
+; First 4K of histogram region mapped through DPAR6
+;
+; The histogram library must pass the following checks:
+;
+;	Must be at least 32K words large.
+;	Must have PF.EMT set (a meaningless bit in libraries)
+;	Must be the first library in LIBLST
+;-
+
+CHKHIS:	MOV	LIBLST,R3	;;Pick up first library in LIBLST	;008
+	BEQ	10$		;;NONE, TAKE 1ST EXIT (NO HISTOGRAM)
+	BIT	#PF.EMT,R.FLAG(R3) ;;Is this the histogram library?	;008
+	BEQ	10$		;;No, it doesn't have the magic bit set	;008
+	CMPB	R.MCTL+M.SIZE(R3),#HISSIZ ;;Is it large enough?		;008
+	BLO    	10$		;;NOPE, SKIP HISTOGRAM			;008
+	BITB	#^C<LCK>,R.MCTL+M.CTRL(R3) ;;Is it in memory?		;008
+	BNE	10$		;;No, so don't try to write to it	;008
+	MOV	(SP),-(SP)	;;YEP, REPLICATE RETURN ADDRESS
+	ADD	#2,(SP)		;;AND TAKE THE 2ND EXIT
+	MOV	@DPAR6,2(SP)	;;SAVE PAR6
+	MAP	R.MCTL+M.PHYA(R3),APR=6,DATA ;;Now map the library
+10$:	RETURN			;;EXIT
+
+GLOBAL	<LIBLST,DPAR6>
+
+.SBTTL	HISTOGRAM LAYOUT
+
+;+                                                                          
+; The histogram region contains data about PC content, as well as overlay
+; usage. Each phase (defined below) has 2K words allocated to track the
+; value of the program counter. The reason that each phase has a counter
+; is so that it is possible to track which phase makes extensive use
+; of routines in the RSTS phase. The PC is divided by 100(8) to yield
+; the proper offset into the phase counter. Each PC counter cell is
+; a double-word counter.
+;
+; Layout of PC histogram area:
+;
+;	MMM MMM XXX XXX XXX X00
+;
+;	M = Phase
+;	        000000 => RSTS
+;		000001 => GEN
+;		000010 => EMT                                                
+;		000011 => EM2
+;		000100 => FIP
+;		000101 => TER
+;		000110 => DSK
+;		000111 => FMS
+;		001000 => SES                                                
+;		001001 => NSP
+;		001010 => TRN
+;		001011 => XVR
+;		001100 => MCP
+;		001101 => BBR
+;		001110 => OPN
+;		001111 => RSX
+;		010000 => MVR (Magtape)
+;		010001 => KVR (KMC driver)
+;		010010 => RDM phase                                          
+;		010011 => EVL phase
+;		010100 => UNA phase
+;		010101 => QNA phase
+;		010110 => DMP phase
+;		010111 => NOD phase
+;		011000 => GRD phase
+;		011001 => KIN phase
+;		011010 => PKPORT phase
+;		011011 => DLPORT phase
+;		011100 => DHPORT phase
+;		011101 => DZPORT phase
+;		011110 => VHPORT phase
+;		011111 => TERCLS phase
+;		100000 => LAT phase
+;	  	100001 => Other phases
+;
+;	X = PC/100
+;
+;	WORST CASE IS: M=100001, X=1111111111
+;	      100 001 111 111 111 100
+;		4   1   7   7   7   4
+;
+;	Which is 68K. This is the required size of our resident library.
+;
+; In addition to PC histogram information, the monitor keeps track of
+; additional special statistics about the file processor. These additional  
+; statistics use the parts of the histogram table which would correspond
+; to the PC in the APR7 range (160000-177777).
+;
+; The FIP statistics are organized into "statistic types". The following are
+; defined FIP statistic types:
+;
+;		000 => FIP running                                          
+;		001 => FIP waiting for overlay code
+;		010 => FIP waiting for FIBUF
+;		011 => FIP waiting for SATT
+;		100 => FIP wait can't be determined
+;
+; These statistic types are referred to as "S" in the information below:
+; 
+; The monitor keeps statistics about FIP on a per-overlay basis. The following
+; is the usage of the histogram area for overlay statistics.
+;
+;	00 SSS 111 NNN NNN N00
+;
+;	S = FIP state
+;
+;	N = Overlay block number (this field occupies 7 bits, which
+;		is the current defined maximum for FIP overlays)
+;
+; The monitor keeps FIP statistics about the currently executing FIP
+; function. The following is the usage of the histogram area for overlay
+; statistics:
+;
+;	01 SSS 111 FFF FFF F00
+;
+;	S = FIP state
+;
+;	F = Currently executing FIP function / 2
+;-
+                         
+HISAPR:	.WORD	RSTAP5		;RSTS PHASE				;013
+	.WORD	GENAP5		;GEN PHASE
+	.WORD	EMTAP5		;EMT PHASE
+	.WORD	EM2AP5		;EM2 PHASE				;008
+FIPAPR:	.WORD	FIPAP6		;FIP PHASE				;008
+	.WORD	KBDAP5		;KBD PHASE				;015
+	.WORD	DSKAP5		;DISK PHASE
+	.WORD	FMSAP5		;FMS PHASE
+	.WORD	SESAP5		;SES PHASE				;008
+	.WORD	NSPAP5		;NSP PHASE				;008
+	.WORD	TRNAP5		;TRN PHASE				;008
+	.WORD	XMDAP5		;XVR PHASE				;008
+	.WORD	MCPAP5		;MCP PHASE				;008
+	.WORD	BBRAP5		;BBR PHASE				;008
+	.WORD	OPNAP5		;OPN PHASE				;008
+	.WORD	RSXAP5	 	;RSX PHASE				;010
+	.WORD	MVRAP5		;MVR (magtape) phase			;012
+	.WORD	XKDAP5		;KVR (KMC driver) phase			;014
+	.WORD	RDMAP5		;RDM phase				;014
+	.WORD	EVLAP5		;EVL phase				;014
+	.WORD	XEDAP5		;UNA phase				;014
+	.WORD	XHDAP5		;QNA phase				;014
+	.WORD	XDDAP5		;DMP phase				;014
+	.WORD	NODAP5		;NOD phase				;015
+	.WORD	GRDAP5		;GRD phase				;015
+	.WORD	KINAP5		;KIN phase				;015
+	.WORD	PKDAP5		;PKPORT phase				;015
+	.WORD	DLPAP5		;DLPORT phase				;015
+	.WORD	DHPAP5		;DHPORT phase				;015
+	.WORD	DZPAP5		;DZPORT phase				;015
+	.WORD	VHPAP5		;VHPORT phase				;015
+TERAPR:	.WORD	TERAP6		;TERCLS phase				;015
+	.WORD	LATAP5		;LAT phase				;015
+
+OTHAPR:				;Fake value for "Other" phases		;008
+TBLEND:				;End of phase table			;008
+HISSIZ	==:	<.+2-HISAPR>	;Size of histogram area in K-words	;014
+                         
+GLOBAL	<RSTAP5,DSKAP5,KBDAP5,EMTAP5,FIPAP6,RSXAP5>			;010
+GLOBAL	<GENAP5,FMSAP5,OPNAP5,EM2AP5,MCPAP5,BBRAP5>			;008
+GLOBAL	<SESAP5,NSPAP5,TRNAP5,RDMAP5,EVLAP5,XEDAP5,XHDAP5>		;014
+GLOBAL	<NODAP5,GRDAP5,KINAP5,PKDAP5,DLPAP5,DHPAP5,DZPAP5,VHPAP5>	;015
+GLOBAL	<TERAP6,LATAP5>							;015
+.WEAK	XMDAP5,MVRAP5,XKDAP5,XDDAP5					;014
+
+.END

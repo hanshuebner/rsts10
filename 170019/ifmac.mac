@@ -1,0 +1,352 @@
+TITLE	IFMAC,<Structured MACRO Definitions>,0A,10-MAY-91,CEK
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR IFMAC
+;+
+;
+;  001	CEK  16-APR-82	Added edit history
+;
+;-
+
+;+
+; IFMAC.MAC -- structured macro definitions
+;-
+;+
+; This file contains macros to support mildly structured macro 
+; programming.  They offer a low-level compromise between SUPERMAC
+; and raw macro.
+;
+; For information about the usage of these macros, refer to IFMAC.DOC.
+;
+; These macros assume the program is in radix 8.
+;
+; The IFMAC macro defines all the others.  Before you use any
+; of the other macros in your source file, call the IFMAC macro.
+; If is in the RSTSLB.MLB macro library.  To include it,
+; specify RSTSLB/ML on the input side of the MAC or MACRO command line,
+; and include the following directives near the beginning of your program.
+;	.MCALL	IFMAC
+;	IFMAC
+;
+; I.DEP is the current nesting depth.
+; I.RAD is the program radix established by the caller.  (The macros 
+;   temporarily change the radix to 10., and then restore it.)
+; I.EL<nn> is 1 if an "else" has occurred that corresponds to the most 
+;   recent "if" at depth nn, else 0.
+; I.AD<nn> is the address of the most recent "if" statement to occur at 
+;   depth nn.
+; An IFcond statement sets aside a local symbol number for its corresponding
+;   ELSE or ENDIF.  An ELSE statement sets aside a local symbol number for its
+;   corresponding ENDIF.  I.SY<nn>, where nn is an integer, is the number
+;   or the local symbol set aside by the most recent IFcond or ELSE at
+;   depth nn.
+; These macros rely on the SYMMAC macro to generate the local symbols.  
+;-
+
+
+.MACRO	IFMAC			;All of the following macros are nested 
+				;inside of IFMAC.
+
+; Initialization
+
+I.DEP	=	0		;Current nesting depth
+
+	.MCALL	SYMMAC
+	SYMMAC
+
+	.MACRO	IFMAC		;Destroy self.
+I.DEP	=	0		;Except we'd better initialize again.
+	SYMMAC
+	.ENDM
+
+; Private macros (not for use by users)
+;+
+; I.IF dep,nocond -- Expand an IF statement.  Save its statement ID and 
+;       address.  Generate the branch instruction.
+;
+;	dep is the new nesting depth of this "if" statement, as a numeric 
+;	  string.
+;	nocond is the opposite of the "if" condition.  It is NE, EQ, PL, MI,
+;         MI, VC, VS, CC, CS, GE, LT, GT, LE, HI, LOS, HIS, or LO.  For the
+;         meanings of these, see below.
+;-
+
+.MACRO	I.IF DEP,NOCOND
+	.IF	GT,<DEP-99.>	;If too deep then ...
+	.ERROR	;Too deeply nested.  Maximum depth is 99.
+	.IFF			;Else ...
+
+	I.AD'DEP = .		;  Save the statement's address.
+	GET.SYM	I.SY'DEP	;  Get a symbol number for the ELSE or ENDIF.
+
+	.RADIX	10.
+	.IRP	S,<\I.SY'DEP>	;  Make the conditional branch instruction.
+	 B'NOCOND	S'$
+	.ENDR
+	.RADIX	8.
+I.EL'DEP =	0		;  Haven't seen an ELSE for this IF yet.
+	.ENDC		
+	.ENDM
+;+
+; I.ELSE dep -- Expand an ELSE statement.  
+;
+;	dep is the current nesting depth.
+;-
+.MACRO	I.ELSE DEP
+	.IF	LE DEP		;If ELSE is unmatched then ...
+	.ERROR	;Unmatched ELSE.
+I.DEP	=	1		;  Try to fix the error.
+
+	.IFF			;Else ...
+	.IF	NZ I.EL'DEP 	;  If we've already seen an ELSE since the
+				;    most recent ENDIF then ...
+	.ERROR	;Unmatched ELSE.
+	.ENDC
+	.ENDC	
+
+I.EL'DEP =	1		;Flag that we've seen the ELSE now.
+	GET.SYM	$$$SY		;Get a symbol number for the ENDIF.
+	.RADIX	10.
+	.IRP	S,<\$$$SY>	;Make the branch to the ENDIF.
+	 BR	S'$
+	.ENDR
+	.IRP	S,\I.SY'DEP	;Make the local symbol for the ELSE.
+	.LIST
+	 S'$:
+	.NLIST
+	.ENDR
+	.RADIX	8.
+I.SY'DEP =	$$$SY	;Save the symbol number of the ENDIF.
+	.ENDM	I.ELSE
+	
+;+
+; I.END dep sym -- Expand an ENDIF statement.
+;
+;	dep is the current nesting depth.
+;	sym is the optional symbol given as a parameter of the ENDIF statement.
+;-
+.MACRO	I.END DEP SYM
+	.IF	NB <SYM>	;If the label parameter was given then ...
+	.IF	NE <<SYM>-<I.AD'DEP>>
+				;  If its value is not equal to the 
+				;   address of the corresponding IF then ...
+	.ERROR ;Label parameter doesn't match IF.
+	.ENDC
+	.ENDC
+
+	.RADIX	10.
+	.IRP	S,<\I.SY'DEP>		;Make the local label for the ENDIF.
+	.LIST
+	 S'$:
+	.NLIST
+	.ENDR
+	.RADIX	8.
+	.ENDM
+
+
+;User macros.
+
+.MACRO	IFNE
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,EQ
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFNE
+
+.MACRO	IFNZ		;"If not zero"
+	.DSABL	CRF
+	IFNE
+	.ENABL	CRF
+	.ENDM
+
+.MACRO	IFEQ
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,NE
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFEQ
+
+.MACRO	IFZE		;"If zero"
+	.DSABL	CRF
+	IFEQ
+	.ENABL	CRF
+	.ENDM	IFZE
+
+.MACRO	IFPL
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,MI
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFPL
+
+.MACRO	IFMI
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,PL
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFMI
+
+.MACRO	IFVC
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,VS
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFVC
+
+.MACRO	IFVS
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,VC
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFVS
+
+.MACRO	IFCC
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,CS
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFCC
+
+.MACRO	IFCS
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,CC
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFCS
+
+.MACRO	IFGE
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,LT
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFGE
+
+.MACRO	IFLT
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,GE
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFLT
+
+.MACRO	IFGT
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,LE
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFGT
+
+.MACRO	IFLE
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,GT
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFLE
+
+.MACRO	IFHI
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,LOS
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFHI
+
+.MACRO	IFLOS
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,HI
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFLOS
+
+.MACRO	IFHIS
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,LO
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFHIS
+
+.MACRO	IFLO
+	.DSABL	CRF
+	.RADIX	10.
+	I.DEP = I.DEP + 1
+	I.IF	\I.DEP,HIS
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	IFLO
+
+.MACRO	ELSE 
+	.DSABL	CRF
+	.RADIX	10.
+		 		;Make the branch around the ELSE section,
+	I.ELSE	\I.DEP		; and make the ELSE label.
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	ELSE
+
+.MACRO	ENDIF SYM
+	.DSABL	CRF
+	.RADIX	10.
+	.IF	LE I.DEP	;If I.DEP <= 0 then ...
+	.ERROR	;Unmatched ENDIF.
+	.IFF			;Otherwise ...
+	I.END	\I.DEP,SYM	;  Make the ENDIF label.
+	I.DEP = I.DEP - 1
+	.ENDC
+	.RADIX	8.		;Restore radix.
+	.ENABL	CRF
+	.ENDM	ENDIF
+
+.MACRO	BZE	LBL
+	 BEQ	LBL
+	.ENDM	BZE
+
+.MACRO	BNZ	LBL
+	 BNE	LBL
+	.ENDM	BNZ
+	.ENDM	IFMAC

@@ -1,0 +1,1732 @@
+.SBTTL	EMT Dispatcher
+
+;+
+; CP.EMT - field EMT's from user programs, dispatch to emulator routine
+;
+; For RT-11 V1 EMTs, in which there are arguments on the stack,
+;	the arguments are copied into the impure area and the
+;	stack is cleaned.  This makes the return easy.
+;
+; The EMT service is entered via 'JSR PC' with:
+;
+;	R0 =  first argument to EMT (from R0 or EMT 375 block)
+;	R1 -> the rest of the args (block or R/W area copy)
+;	R2 =  0
+;	R3 =  channel # * 2 (unmodified: routine must call mapper)
+;	R4 =  EMT code (0 to EMTMAX)
+;	R5 -> R/W area
+;	SP -> return address, user R0, R1, ..., R5, PC, PS (C-bit=0)
+;
+; The EMT returns with 'RTS PC', or uses 'EMTER n' to post error n
+;	(EMTER macro must be used only if SP is as above!)
+;
+; History
+;     004 BGN Allow for DU disks with unit numbers greater than 9
+;     01w WRM Allow .LOGS to search for user logicals
+;-
+
+CP.EMT:	CLRB	ERRBYT		; Say there is no error (yet)
+	CALL	SAVREG,R5	; Save all registers
+	MOV	R0,R2		; Copy user argument pointer/value
+	MOV	SYSPTR,R5	; Point to R/W area
+	MOV	SP,R1		; Get pointer to user PC
+	ADD	#6*2,R1		; Which is below 6 regs on the stack
+	MOV	(R1)+,R4	; Get return PC
+	BIC	#1,(R1)+	; Turn off C-bit in PS, point to args
+	MOV	-(R4),R4	; Get the EMT which called us
+	CMPB	R4,#374		; Is it a new style EMT?
+	BHIS	40$		; Yes, go decode it
+	MOV	R4,R3		; Copy the EMT code
+	BIC	#^C<17>,R3	; Isolate channel #
+	BIC	#^C<360>,R4	; Isolate EMT type code (* 20)
+	ASH	#-4,R4		; Shift to get code * 1
+	MOVB	NUMARG(R4),R2	; # of args on stack depends on the EMT
+	BPL	10$		; Go if positive (EMT 16 gives -1)
+	MOVB	NUMA16(R3),R2	; Get count for EMT 16 subcode type
+10$:	BEQ	70$		; 0 arguments is easily done
+	MOV	R5,R0		; Point R0 at temporary area
+	ADD	#ARGWRK,R0	; In R/W area
+	MOV	R0,ARGPTR(R5)	; Remember where the arguments are
+	MOV	R1,-(SP)	; Save location on stack above PC/PS
+20$:	MOV	(R1)+,(R0)+	; Copy the arguments into the R/W area
+	SOB	R2,20$
+	MOV	(SP)+,R0	; Place above saved regs/PC/PS
+30$:	MOV	-(R0),-(R1)	; Close up the argument hole in the stack
+	CMP	R0,SP		; Done yet?
+	BHI	30$		; Loop until no good
+	MOV	R1,SP		; Reset the stack
+	BR	70$		; Merge with common code
+
+; Come here for EMT 374-377
+
+40$:	BNE	50$		; Not EMT 374
+	MOV	R0,R4		; EMT 374: copy code and channel
+	ADD	#E375MX*400,R4	; Add bias into the dispatch table
+	BR	60$		; No arguments, so merge with new EMT code
+
+50$:	CMPB	R4,#376		; Sort out EMT's 375, 376, 377
+	BHI	EMTEXT		; Ignore EMT 377
+	BEQ	EMT376		; Special error EMT (internal)
+	MOV	(R0)+,R4	; EMT 375: get code/channel from argument blk
+	MOV	(R0)+,(SP)	; Replace R0 (on stack) with real 1st arg
+	MOV	R0,ARGPTR(R5)	; Save a pointer to the rest of the arguments
+60$:	CLR	R3		; Separate the channel from the code
+	BISB	R4,R3		; Isolate channel number from even byte
+	CLRB	R4		; Clear out channel number
+	SWAB	R4		; Isolate EMT code from odd byte
+	CMPB	R4,#EMTMAX	; Is the code too big?
+	BHIS	ILLEMT		; Yup, that's a baddie
+
+; All EMT forms merge here
+
+70$:	MOV	(SP),R0		; Restore user R0 argument or first argument
+	ASL	R3		; Double channel number
+	MOV	ARGPTR(R5),R1	; Set a pointer to the rest of the arguments
+	ASL	R4		; Double the code
+	CLR	R2		; A handy clear register
+	CALL	@EMTTBL(R4)	; Dispatch to function
+EMTEXT:	CALL	RESREG,R5	; Restore the registers
+	RTI			; Back to the user
+
+EMT16:	JMP	@E16TBL(R3)	; Subdispatch
+
+EMT17:	JMP	@E17TBL(R3)	; User issued RSTS-only call
+
+EMT376:	MONERR	<Ovly err>
+
+ILLEMT:	MONERR	<Ill EMT>
+
+.SBTTL	Dispatch Tables
+
+	ORG	TBLS
+
+EMTTBL:				; Dispatch addresses for EMT's
+	+	D$LETE		; 0 Delete
+	+	L$OOK		; 1 Lookup
+	+	E$NTER		; 2 Enter
+	+	T$RPST		; 3 Set 4/10 traps
+	+	R$NAME		; 4 Rename
+	+	S$AVST		; 5 Savestatus
+	+	R$OPEN		; 6 Reopen
+	+	C$LOSE		; 7 Close
+	+	R$EAD		; 10 Read
+	+	W$RITE		; 11 Write
+	+	W$AIT		; 12 Wait
+	+	EMTNUL		; 13 CHCOPY (F/B only)
+	+	EMTNUL		; 14 Set special devices (F/B only)
+	+	ERROR0		; 15 Channel define
+	+	EMT16		; 16 Sub-dispatch on EMT
+	+	EMT17		; 17 Internal error EMT
+	+	G$TJB		; 20 Get job parameters
+	+	G$TIM		; 21 Get time of day
+	+	EMTNUL		; 22 Mark time (F/B only)
+	+	EMTNUL		; 23 Cancel mark time (F/B only)
+	+	T$WAIT		; 24 Timed wait
+	+	EMTNUL		; 25 Send data (F/B only)
+	+	EMTNUL		; 26 Receive data (F/B only)
+	+	EMTNUL		; 27 Channel status (F/B only)
+	+	S$FPA		; 30 Set FPP exception address
+	+	EMTNUL		; 31 Protect vectors (F/B only)
+	+	S$PFUN		; 32 Special function on device
+	+	EMTNUL		; 33 Context switch
+	+	G$VAL		; 34 Get offset value
+	+	S$CCA		; 35 Set ^C AST word
+	+	EMTNUL		; 36 KT11 support
+
+E375MX	= <.-EMTTBL>/2		; Number of defined EMT375 codes
+
+EMT374:				; Dispatch table for EMT 374
+	+	W$AIT		; 0 Wait
+	+	EMTNUL		; 1 Suspend (F/B only)
+	+	EMTNUL		; 2 Resume (F/B only)
+	+	P$URGE		; 3 Purge channel
+	+	EMTNUL		; 4 Soft error mode
+	+	EMTNUL		; 5 Hard error mode
+	+	C$LOSE		; 6 Close
+	+	EMTNUL		; 7 Test and lock
+	+	C$HAIN		; 10 Chain
+	+	EMTNUL		; 11 Message wait (F/B only)
+	+	D$ATE		; 12 Date
+
+E374MX	= <.-EMT374>/2		; Number of defined EMT374 codes
+EMTMAX	= <.-EMTTBL>/2		; Maximum legal EMT code
+
+E16TBL:				; Dispatch table for EMT16 subcodes
+	+	T$TIN		; 0 TTYIN
+	+	T$TOUT		; 1 TTYOUT
+	+	D$STAT		; 2 Device status
+	+	F$ETCH		; 3 Fetch device handler
+	+	C$SIGN		; 4 CSI general mode
+	+	C$SISP		; 5 CSI special mode
+	+	EMTNUL		; 6 Lock USR in core
+	+	EMTNUL		; 7 Unlock USR from core
+	+	E$XIT		; 10 Exit to KMON
+	+	P$RINT		; 11 Print string
+	+	S$RSET		; 12 Soft reset of channels
+	+	Q$SET		; 13 Set I/O queue
+	+	S$ETOP		; 14 Set top of user area
+	+	R$CTLO		; 15 Reset ctrl/O
+	+	EMTNUL		; 16 ---
+	+	H$RSET		; 17 Hard reset of channels
+
+E17TBL:				; Dispatch table for EMT17 subcodes
+	+	F$IRQB		; 0 Set up the FIRQB
+	+	D$ATTM		; 1 Convert date or time to string
+	+	C$TRLC		; 2 Set ^C trap location
+	+	R$UN		; 3 Do a .RUN (with logicals restored)
+	+	P$ERR		; 4 print RSTS/E error
+	+	F$SS		; 5 Do file string scan
+	+	C$ORE		; 6 Expand core
+	+	C$CL		; 7 Execute a CCL command
+	+	CLRFQB		; 10 Clear the user's FIRQB
+	+	CLRXRB		; 11 Clear the user's XRB
+	+	EMTNUL		; 12
+	+	EMTNUL		; 13
+;	+	EMTNUL		;14 (EMT 374 is special)
+;	+	EMTNUL		;15 (EMT 375 is special)
+;	+	EMTNUL		;16 (EMT 376 is error call)
+;	+	EMTNUL		;17 (EMT 377 is ignored)
+
+; Number of arguments on stack for v1 EMT's
+
+.NLIST	BEX
+
+; Code is:	00 01 02 03 04 05 06 07 10 11 12 13 14 15 16 17
+NUMARG:	.BYTE	 0, 0, 1, 0, 0, 0, 0, 0, 3, 3, 0, 0, 0, 0,-1, 0
+NUMA16:	.BYTE	 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0
+
+.LIST	BEX
+
+	ORG	RT11
+
+.SBTTL	Monitor Errors
+
+;+
+; MONERR - Print fatal monitor error
+;
+;	SP -> Saved R0, R1, ..., R5, PC, PS
+;
+;	CALL	MONERR,R2,<text address (text ends with <200>)>
+;
+;	Prints the full error "?M-Text at user PC nnnnnn"
+;	The text may be in the FIRQB, and leading '?' is deleted
+;	The user PC is deleted if SP = USRSP-<6*2> (e.g. B.PRTY, B.SWAP, etc.)
+;	MONERR exits to the KMON
+;-
+
+MONERR:	TST	(SP)+		; Dump old R2
+	.PRIV,	.TTRST
+	MOV	#P$RINT,R3	; Get a handy address
+	MOV	#MQUES,R0	; Point to ?M-
+	CALL	(R3)		;  and print it
+	MOV	(R2),R0		; Point to error text
+	CALL	(R3)		;  and print it
+	CMP	SP,#USRSP-<6*2>	; Was stack reset prior to this entry?
+	BEQ	E$XIT		; Yes, don't print the key as the user PC
+	MOV	#ATPC,R0	; Get the separator
+	CALL	(R3)	
+	MOV	6*2(SP),R2	; Get the errant PC
+	CALL	OPRINT		; Print an octal number
+	MOV	SYSPTR,R5	; Address R/W area
+	CMPB	(SP),CCLTAG(R5)	; Have we been here recently?
+	BNE	E$XIT		; No - exit to KMON
+	JSR	PC,TTCRLF	; Yes (ouch) - return the carriage,
+	JMP	RWCLOB 		; and assume R/W area was clobbered
+
+	TMPORG	TEXT
+MQUES:	.ASCII	"?M-"<200>
+ATPC:	.ASCII	" at user PC "<200>
+	UNORG
+
+.ENABL	LSB
+
+EMTDEF	C$HAIN,<CHAIN TO NEW PROGRAM>
+	TST	(R5)		; Is there any CHAIN PPN?
+	BEQ	10$		; None, retain PPN of program now running
+	MOV	(R5),CHNPPN(R5)	; Reset account for RT-11 style CHAINs
+	CLR	(R5)		;  for sanity
+10$:	BIS	#CHAIN$,JSW	; Set a flag
+	BR	50$		; Do an exit, which will sort out CHAINs later
+
+; Come here after core reinitialized from deadly error
+
+RECOVR:	MOVB	KEY,R1		; Get the incoming error code
+	BEQ	20$		; None (??)
+	CALL	PRTERR		; Print the error
+	CALL	TTCRLF		; New line
+20$:	SETERR	FUCORE,R1,WORD	; Error is 'Program lost-sorry'
+	CALL	PRTERR		; Print it
+
+.SBTTL	New User Entry (part 2)
+
+CPNEW2:	CALL	@(SP)+		; Reenable ^C trapping
+	MOV	#FIRQB+FQFIL,R1	; Point to the FIRQB
+	MOVB	(R1),R2		; Save possible creating job number
+	CLR	(R1)+		; Set to zap all channels
+	CALL	DOFIP,R0,RSTFQ	; Zap all channels (and refresh key)
+	CLR	R0		; Clear R0 in case we exit (hard)
+	BIT	#JFNOPR,KEY	; Are we logged out?
+	BEQ	E$XIT		; No, just do an exit
+	TST	(R1)		; First logged out entry. Incoming PPN zero?
+	BNE	30$		; If PPN in FIRQB, this is a SPAWN entry
+	CALL	DOTRUN,R0	; If 1st logged out entry no spawn, run login
+	 .RAD50	"LOGIN "
+
+30$:	MOV	#CORCMN,R0	; Point to core common
+	MOV	#11.,R3		; Count of ultimate length
+	MOVB	R3,(R0)+	; Set length
+40$:	MOVB	FIRQB+16-<CORCMN+1>(R0),(R0)+ ; Move parameter data
+	SOB	R3,40$			      ;  into core common
+	MOVB	R2,-(R0)	; Set creating job number
+	BR	SPAWN		; Go SPAWN a job
+
+DOTRUN:	.CLRFQB			; Clear out the FIRQB
+	MOV	#FIRQB+FQPPN,R1	; Point to FIRQB
+	MOV	LIBPPN(R5),(R1)+ ; Run from system library
+	MOV	(R0)+,(R1)+	; Program specified
+	MOV	(R0)+,(R1)+
+	COM	(R1)+		; Auto-search extension is -1
+SPAWN:	CALL	RUNDOT		; Get logs and try to run it
+	CALL	ERRIOS		; Get error, print it
+	.BR	E$XIT		; Get out of here
+
+;				"Better is the end of speech than
+;				 its beginning."
+;
+;				 - Ecclesiastes 7:8
+
+EMTDEF	E$XIT,<EXIT TO KMON>
+	CLRB	KEY		; Clear the key
+	BIC	#CHAIN$,JSW	; Make sure chainer is clear
+	MOV	SYSPTR,R5	; Set R/W area pointer just in case
+	CLRB	CCLTAG(R5)	; No more CCL
+50$:	CALL	KSTACK,R1	; Set up the KMON stack
+	JMP	KMON		; Enter the KMON
+
+.DSABL	LSB
+
+	TMPORG	TEXT
+.NLIST	BEX
+HELLO:	.ASCII	<CR><LF>"RT-11SJ V3-"
+	.BYTE	RT1VEL&177,<RT1VEL/400>&177
+	.ASCII	"; RSTS/E V"
+	.BYTE	SYSVEL/400&177,SYSVEE&177,SYSVEE/400&177,0
+.LIST	BEX
+	UNORG
+
+EMTDEF	P$URGE,<PURGE CHANNEL>
+
+.ENABL	LSB
+
+	MOV	R3,R2		; Copy channel number to purge
+	MOV	#1,R4		; Only one channel to do
+	BR	10$		; Merge with reset code
+
+EMTDEF	S$RSET,<RESET CHANNELS>
+EMTDEF	H$RSET,<RESET CHANNELS>
+	;CLR	R2		; Start with channel 0 (R2=0 from caller)
+	MOV	#20,R4		; 16. channels to do
+	BIT	#OVLY$,JSW	; Is this program overlaid?
+	BEQ	10$		; No, do them all
+	DEC	R4		; Yes, stop short of ch. 17
+10$:	ADD	R5,R2		; Relocate channel #
+	ADD	#CHNMAP,R2	; Point to channel pointer table
+20$:	MOV	(R2)+,R3	; Point to channel to reset
+	BEQ	30$		; No channel
+	MOVB	CH$CHN(R3),FIRQB+FQFIL ; Set up RSTS number of ch to reset
+	CALL	ZOTCHN,R0,RSTFQ	; Zot the channel with a reset
+30$:	SOB	R4,20$		; Any more?
+EMTNUL:	RETURN			; Back to the shadows, again
+
+.DSABL	LSB
+
+EMTDEF	S$ETOP,<SET TOP OF USER AREA>
+	CMP	R0,R5		; Trying to go above R/W area?
+	BLO	10$		; No, AOK
+	MOV	R5,R0		; Yes, lower him
+	TST	-(R0)		;  to just before R/W area
+10$:	MOV	R0,USERTOP	; Set it up in monitor
+	BR	USERR0		; Return it to him in R0
+
+.ENABL	LSB
+
+EMTDEF	T$TIN,<TELETYPE INPUT>
+	CALL	GETCHR		; Call the character getter
+	BCS	120$		; No character, go return C-bit
+	CMPB	R0,#'Z-100	; Getting ^Z on TTYIN is an exit
+	BNE	USERR0		; Not so, go give him his character
+	TST	CCADDR(R5)	; Does he have magic enabled?
+	BEQ	E$XIT		; No, ctrl/Z causes an exit
+	MOV	#'C-100,R0	; Yes, return ctrl/C byte
+USERR0:	MOV	R0,2(SP)	; Return a value to the user in R0
+	RETURN
+
+;+
+; GETCHR - Get a character from the terminal
+;
+;	CALL	GETCHR
+;
+;	R0 = Character gotten
+;
+;	The terminal buffer at TTIBUF in the R/W area is used
+;	CTRLCM is used for XRTIME (this is <0 for KMON read)
+;	If TCBIT$ is on in the JSW, then a no-stall request is made
+;		and GETCHR returns C=1 if no character is ready
+;	If TTSPC$ is on in the JSW, ODT mode input is done with no echo
+;	^Z is returned normally (no error)
+;	lower -> UPPER case translation is done if TTLC$ is on in JSW
+;-
+
+GETCHR:	MOV	R4,-(SP)	; Save a register
+	MOV	SYSPTR,R4	; Copy pointer to R/W area
+	ADD	#TTICNT,R4	; Point to number of characters left
+10$:	TST	(R4)+		; Anything in the buffer?
+	BNE	70$		; Yes, use it up
+20$:	.CLRXRB			; Clear the XRB to prepare for read
+	MOV	#XRB+XRLEN,R0	; Point to the XRB
+	MOV	#TTIBFL,(R0)	; Set buffer length
+	MOV	R4,XRLOC(R0)	; Point to our buffer
+	BIT	#TCBIT$,JSW	; Does he really want that C-Bit?
+	BEQ	30$		; No, RSTS will stall us until got some
+	MOV	#20000,XRMOD(R0) ; Yes, ask for no-stall input
+30$:	ADD	#CTRLCM-TTIBUF,R4 ; Point to the wait time
+	MOV	(R4),XRTIME(R0)	; Set the wait time (-1 if in KMON)
+	CLR	(R4)+		; No waiting next time
+	MOV	#TTSPC$,-(SP)	; Get a handy mask
+	BIT	(SP),JSW	; Does he want a character at a time?
+	BEQ	40$		; No
+	.PRIV,	.TTDDT		; Yes, condition RSTS thereto
+	BIT	(SP)+,(R4)	; Are we already not echoing?
+	BNE	50$		; Yup, avoid redundant monitor call
+	.PRIV,	.TTNCH		; No, turn off echoing
+	BR	50$
+
+40$:	BIT	(SP)+,(R4)	; Not single character mode. Echo on?
+	BEQ	50$		; Yes, avoid redundant call
+	.PRIV,	.TTECH		; No, turn on the echo
+
+50$:	MOV	JSW,(R4)+	; Remember our current mode
+	.PRIV,	.READ		; Do the read (this read is for TTY inpt only)
+TIWAIT:	CALL	IOCHEK,R0	; Check it - tag for CTRL/C AST recognition
+	 GENERR	EOF		; End of file
+	 .WORD	60$		;  is ignored
+	 .WORD	90$		; Other errors post carry for failure
+60$:	CLR	(R4)+		; String starts at offset 0
+	MOV	XRB+XRBC,(R4)+	; Save number of bytes gotten
+	BEQ	20$		; Got zip, so try again
+70$:	MOV	R4,R0		; Point to start of buffer
+	DEC	-(R4)		; Drop the number of bytes remaining
+	ADD	-(R4),R0	; Add buffer offset to buffer pointer
+	MOVB	(R0),R0		; Get a character
+	INC	(R4)+		;  and advance the buffer offset
+	BIC	#^C<377>,R0	; Clear sign extend			;001
+	BEQ	10$		; Eliminate nulls
+	BIT	#TTLC$,JSW	; Does he want lower case?
+	BNE	80$		; If so, do no translation
+	CMP	R0,#'A+40	; Is this a lower case character?
+	BLO	80$		; No
+	CMP	R0,#'Z+40	; Maybe...
+	BHI	80$		; Nope
+	BIC	#40,R0		; Make lower case into upper case
+80$:	TST	(PC)+		; Clear the carry, return
+90$:	SEC			; Set the carry, return
+	MOV	(SP)+,R4	; Restore working register
+100$:	RETURN
+
+EMTDEF	D$ATE,<RETURN CURRENT DATE>
+	CALL	SETDAT		; Refresh the date from RSTS
+	MOV	R1,R0		; Return it in R0
+	BR	USERR0		; Done
+
+EMTDEF	G$VAL,<GET OFFSET VALUE FROM MONITOR>
+	ADD	R5,R0		; Compute offset
+	MOV	(R0),R0		; Get it
+	BR	USERR0		; Return it
+
+EMTDEF	C$ORE,<EXPAND USER CORE>
+	.PRIV,	.STAT		; Find current memory size
+	CMP	R0,XRB		; Is he trying to shrink?
+	BLO	110$		; Yes, we will not allow it
+	CALL	NEWSIZ		; No, try to grow for him
+	BCC	100$		; Success, just exit
+110$:	CALL	IOBCME		; Set up IOSTS with bad core message
+120$:	EMTER	0		; And error him
+
+.DSABL	LSB
+
+KMCMD	VERSION,<VE\RSION>,<TYPE IDENTIFICATION>
+	MOV	#HELLO,R0	; Point to text
+	BR	P$RINT		; And print it
+
+;+
+; TTCRLF - Print <cr><lf> on the terminal
+;
+;	CALL	TTCRLF
+;
+;	Destroys R0
+;-
+
+TTCRLF:	MOV	#CRLF,R0	; Point to a <cr><lf>
+EMTDEF	P$RINT,<PRINT STRING>
+	MOV	R4,-(SP)	; Save a register
+	.CLRXRB			; Clear out the XRB
+	MOV	#XRB+XRLOC,R4	; Point to XRB @ XRLOC
+	MOV	R0,(R4)		; Buffer address is the string
+10$:	BITB	#177,(R0)+	; Scan for end-of-string
+	BNE	10$		;  of either 0 or 200
+	DEC	R0		; Point to null or 200 byte
+	MOV	R0,-(R4)	; Move ending pointer into XRBC
+	SUB	2(R4),(R4)	; Subtract starting address to give byte count
+	MOV	(R4),-(R4)	; Count is also buffer length
+	BEQ	20$		; Nothing to print!
+	WRITE.			; Write to RSTS channel 0		;PRL001
+20$:	MOV	(SP)+,R4	; Restore register
+	TSTB	(R0)		; Was it a write with CRLF?
+	BEQ	TTCRLF		; Yes, go do the CRLF
+	RETURN			; No, return to caller
+
+	TMPORG	TEXT
+CRLF:	.BYTE	CR,LF,200	; CR, LF, no fill after
+	UNORG
+
+TTYRST:	BIC	#TTLC$!TTSPC$!TCBIT$,JSW ; Reset TTY special modes
+EMTDEF	R$CTLO,<RESET CTRL/O>
+	.PRIV,	.TTRST		; Turn off ctrl/O in RSTS
+	MOV	JSW,TTSTUS(R5)	; Refresh TTSTUS
+	BIT	#TTSPC$,JSW	; Single character mode?
+	BNE	10$		;  yes
+	.PRIV,	.TTECH		; For non-ODT mode, turn on echo
+	RETURN
+
+10$:	.PRIV,	.TTNCH		; For ODT mode, turn off echo
+	RETURN
+
+;+
+; T$TOUT - Print a character on the terminal
+;
+;	R0 =  Character
+;
+;	CALL	T$TOUT
+;
+;	Clobbers XRB, of course
+;	Doesn't print '*' if CCLTAG<0
+;-
+
+EMTDEF	T$TOUT,<TELETYPE OUTPUT>
+	MOV	R0,-(SP)	; Preserve the character
+	CMPB	R0,#'*		; Is it an asterisk?
+	BNE	10$		; Nope, nothing special
+	MOV	SYSPTR,R0	; Yes, point to R/W area
+	TSTB	CCLTAG(R0)	; Are we in CCL mode?
+	BMI	20$		; Yup, don't output an asterisk
+10$:	.CLRXRB			; Clear out the XRB
+	MOV	#XRB+XRLEN,R0	; Point to XRB
+	MOV	#1,(R0)		; 1-byte buffer
+	MOV	(R0)+,(R0)+	; 1-byte xfer
+	MOV	SP,(R0)+	; Point to the data
+	WRITE.			; Issue the RSTS write			;PRL001
+20$:	MOV	(SP)+,R0	; Restore character register
+	RETURN
+
+EMTDEF	S$CCA,<SET USER RT-11 CTRL/C INTERCEPT>
+	TST	(R2)+		; Bump pointer
+.ASSUME	CCADDR	EQ	TRAPAD+2; Neccessary condition
+
+EMTDEF	T$RPST,<SET TRAPS TO 4 & 10>
+	TST	(R2)+		; Bump pointer
+.ASSUME	TRAPAD	EQ	FPADDR+2; Neccessary condition
+
+EMTDEF	S$FPA,<SET FLOATING POINT TRAP>
+	TST	(R2)+		; Bump pointer
+.ASSUME	FPADDR	EQ	USERCC+2; Neccessary condition
+
+EMTDEF	C$TRLC,<SET USER ^C INTERCEPT>
+	ADD	R5,R2		; Relocate into R/W area
+	MOV	R0,USERCC(R2)	; Set his address for traps
+	RETURN
+
+EMTDEF	G$TIM,<GET TIME OF DAY>
+	.PRIV,	.DATE		; Get the true time
+	MOV	#60.,-(SP)	; Get a handy constant
+	MOV	#XRB+XRBC,R4	; Point to returned data
+	MOV	#24.*60.,R2	; R2 = # minutes in a day
+	SUB	(R4)+,R2	; R2 = minutes past midnight
+	MUL	#60.*60.,R2	; R2/r3 = ticks past midnight
+	MOVB	(R4)+,R1	; R1 = seconds to next minute
+	NEG	R1
+	ADD	(SP),R1		; R1 = seconds since last minute
+	MUL	(SP),R1		; R1 = ticks  since last minute
+	MOVB	(R4)+,R4	; R4 = ticks to next second
+	NEG	R4
+	ADD	(SP)+,R4	; R4 = ticks since last second
+	ADD	R4,R1		; R1 = ticks since last minute
+	ADD	R1,R3		; Add into ticks since midnight
+	ADC	R2		;  and carry on
+	MOV	R2,(R0)+	; Move the time into the area
+	MOV	R3,(R0)+	; Low order time is second
+	RETURN			; Back to the user
+
+EMTDEF	T$WAIT,<SLEEP FOR A WHILE>
+	MOV	(R0)+,R2	; Get MSB time
+	MOV	(R0)+,R3	;  and LSB time
+	DIV	#60.,R2		; Convert to seconds from ticks
+	BVC	10$		; OK if no overflow
+	MOV	#-1,R2		; Else set maximum sleep
+10$:	MOV	R2,XRB		; Set sleep time in seconds
+	.PRIV,	.SLEEP		; Zzzzzzzzzzzzzzz
+	RETURN
+
+.ENABL	LSB
+
+EMTDEF	G$TJB,<GET JOB PARAMETERS>
+	CLR	(R0)+		; Clear most
+	MOV	R5,(R0)+	; Return his high limit
+	CLR	(R0)+
+	CLR	(R0)+
+10$:	RETURN
+
+EMTDEF	W$AIT,<WAIT FOR CHANNEL>
+	CALL	MAPCHN,R0	; Map the channel
+	 .WORD	ERROR0		; If no map, not open => error
+	BMI	10$		; Open is OK (RSTS is synchronous)
+	SETERR	NOTOPN		; Say that the problem is closed channel
+	EMTER	0		;  and give error 0
+
+EMTDEF	R$OPEN,<REOPEN CHANNEL>
+	CALL	SETFQB		; Set up the FIRQB with the name
+	CALL	DTACHK		; Check for free DT buffer if DT
+	MOV	(R0)+,FIRQB+FQPPN ; Put in the right PPN
+	CALL	MAPCHN,R0	; Find a RSTS channel for the RT channel
+	 .WORD	CHOVER		; Too many channels
+	BMI	ALROPN		; RT channel already open
+	MOVB	#OPNFQ,-(R1)	; Set up the open EMT
+	BR	LOOKEN		; Merge with common code
+
+.DSABL	LSB
+
+EMTDEF	L$OOK,<LOOKUP FILE>
+
+.ENABL	LSB
+
+	CALL	SETFQ1		; Setup the FIRQB with the name
+	CALL	DTACHK		; Check for free DT buffer if DT
+	CALL	MAPCHN,R0	; Find a RSTS channel for this RT channel
+	 .WORD	CHOVER		; Too many channels
+	BMI	ALROPN		; RT channel already open
+	MOV	#OPNFQ*400,-(R1) ; Set the open function in FQFUN
+	CMP	(R1)+,(R1)+	; Point to FQPPN
+.ASSUME	FQFUN+3	EQ	FQPPN
+	CALL	40$		; Disable ^C, try to open
+	TST	(R1)		; Can't find file. Explicit PPN?
+	BNE	60$		;  yes, post an error
+	MOV	DEFPPN(R5),(R1)	; No, so try his stated default
+	BEQ	10$		;  unless there is none
+	CALL	40$		; Try to open it, return if nosuch
+10$:	MOV	LIBPPN(R5),(R1)	; Try the system library
+	BEQ	60$		; If any
+
+.SBTTL	LOOKUP/ENTER/REOPEN Common Code
+
+LOOKEN:	CALL	DSCTLC		; No ^C while trying the open
+	.PRIV,	CALFIP		; Try opening the channel
+	TSTB	FIRQB		; Was there an error?
+	BNE	50$		; Yes, enable ^C and die
+20$:	MOVB	(R3),R0		; OK, get the RT-11 channel number
+	BIC	#^C<RTCHAN>,R0	;  and isolate it as channel * 2
+	ADD	R5,R0		; Add offset into R/W area
+	MOV	R3,CHNMAP(R0)	; Point the channel map at the RSTS ch blk
+	MOV	R3,R1		; Remember channel pointer
+	BISB	R2,1(R3)	; Set up the handler index
+	BIS	#CS$OPN,(R3)+	; Mark the channel open
+	MOV	4(SP),R0	; Point to user's file name
+	MOV	(R0)+,(R3)+	; Copy DEV
+	MOV	(R0)+,(R3)+	; Copy FILE
+	MOV	(R0)+,(R3)+	;          NAME
+	MOV	(R0)+,(R3)+	; Copy         .EXT
+	MOV	FIRQB+FQPPN,(R3) ; Copy PPN actually used
+	MOV	SCRAT1(R5),R2	; Get file structured DECtape buffer pointer
+	BEQ	30$		; If none, then not f.s. DECtape
+	MOV	R2,(R3)		; Save buffer pointer instead of PPN
+	CMP	R2,R5		; Ours or his?
+	BLO	30$		; If not in R/W area, it's his buffer
+	MOV	R1,DTAOWN(R5)	; Set ownership of our DECtape buffer
+30$:	MOV	FIRQB+FQFLAG,CH$STS-CH$PPN(R3) ; Save flag word
+	MOV	FIRQB+FQSIZ,4(SP) ; Return size to user in R0
+RTSPC:	RETURN
+
+40$:	CALL	DSCTLC		; Disable ^C for lookup critical seq.
+	.PRIV,	CALFIP		; Try the lookup
+	CHKERR	NOSUCH		; Can't find file or account?
+	BEQ	RTSPC		; Yup, re-enable ^C and return for retry
+	MOV	(SP)+,(SP)	; On success or error, dump return to caller
+	TSTB	FIRQB		; Success?
+	BEQ	20$		; Yes, continue with ctrl/C disabled
+50$:	CALL	@(SP)+		; On failure, honor any pending ^C
+60$:	CALL	IOCHK2,R0	; Post the error and return code 1
+	 .WORD	ERROR1
+
+ALROPN:	SETERR	NOTCLS		; Set up already open error
+	EMTER	0
+
+.DSABL	LSB
+
+EMTDEF	E$NTER,<ENTER A FILE>
+
+.ENABL	LSB
+
+	MOV	(R1),R4		; Save requested size
+	CALL	SETFQ1		; Set up the FIRQB with names
+	CALL	DTACHK		; Check for free DT buffer if needed
+;  The following allows a filesize specification containing 65535 in
+;  the least-significant word to be passed on to RSTS.  (The emulator
+;  must normally translate "-1" to "0", since real RT11 programs may
+;  use -1 to mean "use largest available space", which isn't useful
+;  in RSTS.)  The "don't-translate" bit is the high-order bit of
+;  FQSIZM.  This facility is here primarily for PIP.SAV; it may or
+;  may not be appropriate to document it for general use, as rewriting
+;  PIP.SAV could otherwise enable this facility to be removed.
+	TSTB	FIRQB+FQSIZM	; Is the "size is real" bit set?
+	BMI	10$		; Yes: bypass RT translation of -1
+	INC	R4		; Did he request largest (-1) ?
+	BEQ	10$		; Yes, leave request 0 (i.e. punt)
+	DEC	R4		; No, fix request
+10$:	MOV	R4,FIRQB+FQSIZ	; Set up the size request
+	BICB	#200,FIRQB+FQSIZM ; Insure "size is real" bit is clear
+	CALL	MAPCHN,R0	; Map to a RSTS channel
+	 .WORD	CHOVER		; Too many channels
+	BMI	ALROPN		; Oops, RT channel already open
+	BIS	#CS$ENT,(R3)	; Mark status as entered
+	MOVB	#CREFQ,-(R1)	; Set up to create a file
+	TSTB	XRB+6		; Disk file enter?
+	BNE	LOOKEN		; No, ready to zoom off
+	TST	FIRQB+FQNAM1	; Is it a non-file structured request?
+	BEQ	LOOKEN		; Yes, simple open is enough
+	BIS	#100040,FIRQB+FQMODE ; Disk open, set tentative file open
+	BITB	#64.,FIRQB+FQPROT ; Does he explicitly want compiled file?
+	BNE	20$		; Yes, give him one
+	CMP	FIRQB+FQEXT,P.DEXT ; Otherwise, if it is not a SAV file
+	BNE	30$		; Then use 'CREFQ'
+20$:	MOVB	#CRBFQ,(R1)	; On request or for .SAV, create a binary file
+30$:	BR	LOOKEN		; Merge to the common code
+
+.DSABL	LSB
+
+EMTDEF	C$LOSE,<CLOSE CHANNEL>
+	CALL	MAPCHN,R0,RTSPC	; Map to a RSTS channel, return if none
+	BPL	RTSPC		; Nothing open, this is easy
+	CMPB	CH$STS(R3),#DTAHND ; Is this DECtape?
+	BNE	10$		; No
+	TSTB	(R3)		; Yes, open for output?
+.ASSUME	CS$ENT	EQ	200
+	BPL	10$		; No, no need to purge buffer
+	.CLRXRB			; Clear out the XRB
+	MOV	#XRB+XRBC,R4	; Point to buffer length
+	MOV	CH$DTB(R3),R0	; DECtape but not file structured, no flush
+	MOV	(R0),(R4)+	; Point XRBC at end of data in buffer
+	MOV	R0,(R4)		; Point XRLOC at top of buffer
+	SUB	#510.,(R4)+	; Correct XRLOC to start of buffer
+	MOV	R0,(R0)		; Next time (if any), do not write
+	MOVB	FIRQB+FQFIL,(R4) ; Set up the channel (from MAPCHN)
+	SUB	-(R4),-(R4)	; Convert EOD pointer to byte count
+	BEQ	10$		; 0 => no data to write
+	MOV	#510.,-(R4)	; The buffer is 510 bytes long
+	CMP	(R4)+,(R4)	; But data of 510 means empty buffer, too
+	BEQ	10$		; So don't do anything
+	CALL	IOWRIT,R0	; Do the write
+	 GENERR	NOROOM
+	 .WORD	ERROR0		; Error 0 if no room
+	 .WORD	ERROR1
+10$:	CALL	ZOTCHN,R0,CLSFQ	; Zot the channel with a close
+	MOV	R3,R0		; Point to channel
+	RETURN			; And return
+
+ERROR0:	EMTER	0
+
+.ENABL	LSB
+
+EMTDEF	R$NAME,<RENAME A FILE>
+	CALL	SETFQ1		; Set up the FIRQB
+RENAM1:	MOV	#FIRQB+FQSIZ,R1 ; Point to place for new name
+	MOV	#-1,(R1)+	; Tell RSTS to delete, not give FIEXST
+	TST	(R0)+		; Skip over the new device
+	MOV	(R0)+,(R1)+	; Put in new filnam
+	MOV	(R0)+,(R1)+
+	MOV	(R0)+,(R1)+	; Put in new ext
+	CALL	DOFIP,R0,RENFQ	; Do the RENAME FIP function
+10$:	CALL	IOCHK1,R0,ERROR1 ; Check the I/O, any error dies
+	RETURN			; Successful rename, go away
+
+EMTDEF	D$LETE,<DELETE FILE>
+	CALL	SETFQ1		; Set up the FIRQB
+	CALL	DOFIP,R0,DLNFQ	; Call FIP to delete by name
+	BR	10$		; Go check the I/O
+
+EMTDEF	F$ETCH,<FETCH HANDLER>
+	CALL	LK4DEV		; Fetch just checks the device name
+	BCS	ERROR0		; Invalid device name
+EMTDEF	Q$SET,<SET I/O QUEUE>
+	MOV	(R1),2(SP)	; Set top of area=start (null stuff)
+	RETURN
+
+.DSABL	LSB
+
+EMTDEF	D$STAT,<GET DEVICE STATUS>
+	CALL	LK4DEV		; Find the device
+	BCS	ERROR0		; Invalid name
+	MOV	(R1),R0		; Point to return area
+	ASR	R2		; Make device index * 1
+	MOVB	RTNDX(R2),(R0)+	; Set up handler index a la RT11
+	MOVB	XRB+7,R4	; Get the device characteristics
+	BIC	#^C<7>,R4	; Isolate status bits wanted
+	MOVB	RTSTS(R4),(R0)+	;  and translate to an RT-11 status byte
+	CLR	(R0)+		; Handler has no size
+	MOV	#160000,(R0)+	; Dummy entry point (but always res)
+	CLR	(R0)+		; Give dummy device size
+	BR	Q$SET		; Return pointer to area in R0
+
+	TMPORG	TEXT
+RTNDX:				; Mapping RSTS handler index to rt11
+	.BYTE	0		; DK
+	.BYTE	4		; KB
+	.BYTE	1		; DT
+	.BYTE	3		; LP
+	.BYTE	7		; PR
+	.BYTE	10		; PP
+	.BYTE	14		; CR
+	.BYTE	11		; MT
+
+RTSTS:				; Mapping RSTS status to RT11
+.BYTE	FILST$/400		; -DDWLO -DDRLO -DDNFS = FILST
+.BYTE	0			; -DDWLO -DDRLO +DDNFS =-FILST
+.BYTE	WONLY$+FILST$/400	; -DDWLO +DDRLO -DDNFS = FILST+WO
+.BYTE	WONLY$/400		; -DDWLO +DDRLO +DDNFS = WO
+.BYTE	RONLY$+FILST$/400	; +DDWLO -DDRLO -DDNFS = FILST+RO
+.BYTE	RONLY$/400		; +DDWLO -DDRLO +DDNFS = RO
+.BYTE	RONLY$+WONLY$+FILST$/400; +DDWLO +DDRLO -DDNFS = FILST+RO+WO ?
+.BYTE	RONLY$+WONLY$/400	; +DDWLO +DDRLO +DDNFS = RO+WO ?
+	UNORG
+
+EMTDEF	S$AVST,<SAVE STATUS OF CHANNEL>
+	CLR	(R0)		; Assume we will save closed status
+	CALL	MAPCHN,R0,20$	; Map to the RSTS channel, save closed if none
+	BPL	20$		; Not open, so save closed status
+	TSTB	(R3)		; Is the channel open for output?
+	BMI	ERROR1		; Yes, save stat is not allowed
+.ASSUME	CS$ENT	EQ	200
+	CALL	ZOTCHN,R0,CLSFQ	; Zot the channel with a close
+	CLR	(R3)+		; Mark the channel closed
+	MOV	#5,R1		; 5 words to copy
+10$:	MOV	(R3)+,(R0)+	; Copy the full dev:filnam.ext[p,pn]
+	SOB	R1,10$
+20$:	RETURN			; Return
+
+IOER1:	MOV	(SP)+,R0	; Purge stack
+ERROR1:	EMTER	1
+
+.SBTTL	SETFQB - Set Up FIRQB From User Parameters
+
+;+
+; SETFQB - Set up FIRQB for user, no CSI checking
+; SETFQ1 - Set up FIRQB for user, scanning for previous CSI call
+;
+;	R0 -> dev:filnam.ext as 4 words of RAD50
+;	R5 -> R/W area
+;	SP -> Dispatch return, user R0, R1, ...
+;	First 4 words of R/W area contain user parameters
+;
+;	CALL	SETFQ1
+;
+;	R0 -> Word after ext
+;	R1 -> FIRQB @ FQFIL (for doing FIP call)
+;	R2 =  RT-11 style handler index
+;	FIRQB set up for spec, logical assignments done
+;	Parameters set in R/W area from CSI call if none supplied
+;	Assignable protection code used
+;-
+
+.ENABL	LSB
+
+EMTDEF	F$IRQB,<SET UP THE FIRQB>
+	MOV	#RTSPC,-(SP)	; Stack level is important
+SETFQ1:	CLR	XRB+10		; Assume no
+	CLR	XRB+12		;  flags
+	MOV	R2,-(SP)	; Get a working register
+	CLR	-(SP)		; Set size of 0
+	MOV	#9.,R2		; Check out 9 channels
+	MOV	R5,R1		; Point to the CSI table
+	ADD	#CSITBL,R1	;  in the R/W area
+10$:	CMP	R0,(R1)+	; Is it this file?
+	BEQ	20$		; Yes
+	ADD	#CSIPBS-2,R1	; No, advance to next parameter block
+	SOB	R2,10$		; Try again
+	BR	50$		; No match
+
+20$:	MOV	#6,R2		; Six parameters to move over
+30$:	TST	(R5)		; Is there a user parameter there?
+	BNE	40$		; If so, leave it be
+	MOV	(R1),(R5)	; Otherwise, move in the FSS value
+40$:	CMP	(R1)+,(R5)+	; Bump pointers
+	SOB	R2,30$		; Loop
+	MOV	(R1)+,(SP)	; Set up the size from .FSS
+	MOV	(R1)+,XRB+10	; Set up the scan
+	MOV	(R1)+,XRB+12	;  flags
+	MOV	SYSPTR,R5	; Restore R/W area pointer
+50$:	MOV	(SP)+,R1	; Get the file size
+	MOV	(SP)+,R2	; Restore working register
+	TST	(R5)+		; Point to protection code
+	TSTB	(R5)		; Is it real?
+	BNE	60$		; If so, don't touch it
+	BIC	#^C<64.*400>,(R5) ; If not, retain 'create compiled file' flag
+	BIS	DEFPRO-PROTEC(R5),(R5) ; And use default code
+60$:	TST	-(R5)		; Fix R/W pointer
+	BR	70$
+
+SETFQB:	CLR	R1		; Use size of 0
+70$:	.CLRFQB			; Clean out the FIRQB
+	MOV	R1,FIRQB+FQSIZ	; Set up passed size
+	MOV	(R5)+,FIRQB+FQPPN ; Put in the PPN,
+	MOV	(R5)+,FIRQB+FQPROT-1 ; Protection code,
+	MOV	(R5)+,FIRQB+FQMODE ;    and mode
+	ASL	(R5)		; Cluster was parsed with top bit on as flag
+	ASR	(R5)		;  so turn off flag bit, leave sign if < 0
+	MOV	(R5)+,FIRQB+FQCLUS ; Set up clustersize
+	MOV	(R5)+,FIRQB+FQNENT ; Set up position
+	MOVB	(R5)+,FIRQB+FQSIZM ; Set up MSB of size
+	INC	R5		; Bump the R5 pointer
+	CALL	CLRSP1		; Clear out parameter words in R/W area
+	MOV	#XRB+10,R1	; Point to .FSS parse flags
+	MOV	(R1)+,-(SP)	; Preserve flag words
+	MOV	(R1)+,-(SP)	;  for a moment
+	CALL	LK4DEV		; Parse the device name
+	MOV	(SP)+,-(R1)	; Restore XRB
+	MOV	(SP)+,-(R1)	;  flag words
+	BCS	IOER1		; Give error if we got an error from LK4DEV
+	MOV	#FIRQB+FQNAM1,R1 ; Point to name in FIRQB
+	MOV	(R0)+,(R1)+	; Set up user's
+	MOV	(R0)+,(R1)	;  file name
+	MOV	(R0)+,2(R1)	; Set up user's extension
+	TST	-(R1)		; Is there a null name first word?
+	BNE	80$		; No, leave it alone
+	MOV	(R1)+,(R1)	; Yes, completely wipe the name
+80$:	MOV	#FIRQB+FQFIL,R1	; Return with a handy pointer set
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	MAPCHN - Map an RT11 Channel onto a RSTS Channel
+
+;+
+; MAPCHN - Map RT-11 channel to RSTS/E channel
+;
+;	R3 =  RT11 channel number
+;
+;	CALL	MAPCHN,R0,<location if no channel available>
+;
+;	R3 -> Internal channel block
+;	R4 destroyed
+;	Condition codes set for first word of channel
+;
+; RT channel 17 always maps to RSTS channel 17
+; If a new RSTS channel is allocated, the RT11 channel # is placed in
+;	the first byte of the channel, but it is not entered into
+;	the map.
+;-
+
+MAPCHN:	TST	(R0)+		; Bump over error return
+	MOV	R3,R4		; Copy the rt channel # * 2
+	ADD	R5,R3		; Relocate it relative to impure area
+	MOV	CHNMAP(R3),R3	; Get pointer to RSTS internal channel
+	BNE	50$		; Hokay, got it
+	MOV	R5,R3		; None allocated. search for a free one
+	ADD	#CHANNL,R3	; Point to first channel block
+	MOV	R4,-(SP)	; Save RT channel * 2
+	MOV	#16,R4		; We have channels 1-14. to examine
+	CMP	(SP),#17*2	; Is this RT-11 channel 17?
+	BEQ	30$		; Yup
+10$:	TST	(R3)		; Is this one free?
+	BPL	40$		; Yes, use it
+	ADD	#CHANSZ,R3	; No, bump to next one
+	SOB	R4,10$		; And continue
+20$:	MOV	(SP)+,R4	; Restore R4 to clean up stack
+	MOV	-(R0),R0	; Switch to error return
+	RETURN	R0
+
+30$:	ADD	#CHANSZ*<17-1>,R3 ; Use RSTS channel 17 for RT channel 17
+	TST	(R3)		; Better not be allocated
+	BMI	20$		; Oops
+	CLR	R4		; Force computation of 17 for RSTS ch
+40$:	MOV	(SP)+,(R3)	; Put RT channel * 2 into block
+	COM	R4		; Compute actual RSTS channel
+	BIC	#^C<17>,R4	;  from 1 to 17
+	ASL	R4		; Times 2, of course
+	MOVB	R4,CH$CHN(R3)	; And save it in channel
+50$:	MOVB	CH$CHN(R3),FIRQB+FQFIL ; Set RSTS channel # into FQFIL
+	TST	(R3)		; Check its status
+	RETURN	R0
+
+.SBTTL	DOFIP - Do a FIP Function
+
+;+
+; DOFIP - Do a FIP call
+;
+;	CALL	DOFIP,R0,CODEFQ
+;
+;	CALFIP call done with code in FQFUN
+;-
+
+DOFIP:	MOVB	(R0)+,FIRQB+FQFUN ; Set up the code
+	INC	R0		; Even out the return
+	.PRIV,	CALFIP		; Do the FIP call
+	RETURN	R0
+
+.SBTTL	ZOTCHN - Remove a Channel from the Map
+
+;+
+; ZOTCHN - Unmap a channel
+;
+;	R3 -> Internal channel block
+;
+;	CALL	ZOTCHN,R0,CODEFQ
+;
+;	CODEFQ is the file processor call to execute (i.e. CLSFQ or RSTFQ)
+;	Channel deactivated, DT buffer freed if in use
+;	R1 clobbered
+;-
+
+ZOTCHN:	MOVB	(R0),FIRQB+FQFUN; Set the function code to execute
+	CALL	DSCTLC		; Disable ^C so RSTS and RT11 don't conflict
+	MOVB	(R3),R1		; Get the RT11 channel #
+	BIC	#^C<RTCHAN>,R1	; Isolate the number
+	ADD	R5,R1		; Relocate it
+	CLR	CHNMAP(R1)	; Turn it off in the map
+	BIC	#CS$OPN,(R3)	; And deactivate the channel
+	CMP	R3,DTAOWN(R5)	; Are we the owner of the DT buff?
+	BNE	10$		; No
+	CLR	DTAOWN(R5)	; Yes, disown it
+10$:	.PRIV,	CALFIP		; Close the channel
+	CALL	@(SP)+		; Re-enable control-C
+	TST	(R0)+		; Did we execute a CLSFQ or RSTFQ?
+	BNE	20$		; It was an RSTFQ, don't do error processing
+.ASSUME	CLSFQ	EQ	0
+	CALL	IOCHK1,R0,IOER1	; Check for any errors and trap
+20$:	RETURN	R0		; Return to the caller
+
+;+
+; Cvtdvf - Convert RSTS device name to one word RAD50 for RT11
+;
+;	R2 -> RSTS name (2 character ascii, unit, unit flag)
+;
+;	CALL	CVTDEV
+;
+;		or
+;
+;	CALL	CVTDVF		to convert the name in the FIRQB
+;
+;	R1 =  Converted name
+;	R2 unchanged if CVTDEV, R2 -> FIRQB @ FQDEV if CVTDVF
+;
+;	Note - the null name (2 bytes of 0) maps to ' SY'
+;-
+
+CVTDVF:	MOV	#FIRQB+FQDEV,R2	; Convert from the FIRQB
+CVTDEV:	MOV	#^R SY,R1	; If device is null, use unassignable SY:
+	TST	(R2)		; Is it null?
+	BEQ	20$		; Yes, use the default
+	MOVB	(R2)+,R1	; Get a device byte
+	MUL	#50,R1		;  and shift for RAD50
+	CLR	-(SP)		; Make room for byte
+	MOVB	(R2)+,(SP)	; Get next character
+	ADD	(SP),R1		; Add into name
+	SUB	#'A-1*50+'A-1,R1 ; Unbias radix 50 characters
+	MUL	#50,R1		; Shift
+	MOVB	(R2)+,(SP)	; Get unit number
+	TSTB	(R2)+		; Is it real?
+	BEQ	10$		; No
+	ADD	#^R  0,(SP)	; Yes, make it number in RAD50
+	ADD	(SP),R1		; And add unit number to name
+10$:	CMP	-(R2),-(R2)	; Back up the pointer
+	TST	(SP)+		; Purge stack
+20$:	RETURN
+
+EMTDEF	CLRFQB,<CLEAR OUT THE USER FIRQB>
+
+	CALL	CLEARW,R0	; Call clearing routine
+	  .WORD	FIRQB		; Start at FIRQB
+	  .WORD	FQBSIZ/2	;   and do this many words
+	RETURN
+
+EMTDEF	CLRXRB,<CLEAR OUT THE USER XRB>
+
+	CALL	CLEARW,R0	; Call clearing routine
+	  .WORD	XRB		; Starting here
+	  .WORD	XRBSIZ/2	;  doing this many words
+	RETURN
+
+.SBTTL	General Purpose Clear Memory Routine
+
+;+
+; Clearw - Clear words of memory
+;
+;	CALL	CLEARW,R0,<START,WORD_COUNT>
+;
+;	R1 =  PTR + WORD_COUNT*2
+;	R2 =  0
+;-	   
+
+CLEARW:	MOV	(R0)+,R1	; Get the starting location
+	MOV	(R0)+,R2	; And the number of words to clear
+10$:	CLR	(R1)+		;  clear a word
+	SOB	R2,10$		; Recurse
+	RETURN	R0		;  and return
+
+.ENABL	LSB
+
+.SBTTL	Issue Special Function to Device
+
+SPCFUN:	MOVB	1(R1),R1	; Get special function code
+	ADD	#2,ARGPTR(R5)	; Fix pointer to find completion rtn
+	ADD	#100000+XXWRIT-XXREAD,R2 ; Compute handler index + write bias
+	CMPB	CH$STS(R3),#MTAHND ; Is this magtape?
+	BNE	10$		; No
+	CMPB	R1,#372		; Is this an RT-11 magtape special function
+	BLO	10$		; No
+	MOVB	MTSPTB(R1),R1	; Yes, translate it to the RSTS code
+	BMI	30$		; Write with extended record gap is just write
+10$:	MOV	R1,-(R4)	; Set up RSTS code (leave count alone)
+	MOVB	CH$STS(R3),XRB+XRCI+1 ; Set up handler index
+	.PRIV,	.SPEC		; Do special function
+	CALL	IOCHK1,R0,RWER1	; Check the I/O, give error 1 if bad
+	BR	50$		; Done. Check for completion rtn
+
+	TMPORG	TEXT
+	.BYTE	MT.RUN		; Rewind and unload (372; -6)
+	.BYTE	MT.REW		; Rewind (373; -5)
+	.BYTE	-1		; Write ERG (374; -4)
+	.BYTE	MT.BSR		; Backspace (375; -3)
+	.BYTE	MT.FSR		; Forward space (376; -2)
+	.BYTE	MT.WEF		; Write EOF (377; -1)
+MTSPTB:
+	UNORG
+
+EMTDEF	S$PFUN,<SPECIAL FUNCTION TO DEVICE>
+	MOV	#100000-XXWRIT+XXREAD,R2 ; Flag word is 100000
+EMTDEF	W$RITE,<WRITE TO OUPUT>
+	ADD	#XXWRIT-XXREAD,R2 ; Indicate use of the write handler
+EMTDEF	R$EAD,<READ FROM INPUT>
+	;CLR	R2		; Indicate read handler (R2=0 from call)
+	CLR	2(SP)		; No words read yet
+	CALL	MAPCHN,R0,70$	; Map to RSTS channel. If none, not open
+	BPL	70$		; If not yet open, then error
+	MOVB	1(R3),R4	; Get the handler index
+	BIC	#177741,R4	;  and isolate it
+	ADD	R4,R2		; Add offset in case of write
+	MOV	#XRB+XRMOD,R4	; Point to the XRB
+	MOV	(R5)+,(R4)	; Set modifiers from R/W+0
+	BIT	#FLGMOD,CH$STS(R3) ; Does device accept modifiers?
+	BNE	20$		; Yes, so they're set
+	CLR	(R4)		; No, no modifiers here
+20$:	CLR	-(R4)		; No waiting time
+	MOV	R0,-(R4)	; Set block number
+	MOVB	(R5),-(R4)	; Set block number MSB from R/W+2
+	MOVB	CH$CHN(R3),-(R4) ; Set actual RSTS channel # (*2)
+	CLR	(R5)		; Clear block # MSB
+	CLR	-(R5)		; Clear modifiers and restore R/W pointer
+	MOV	(R1)+,-(R4)	; Set buffer address
+	MOV	(R1)+,-(R4)	; Set word count
+	TST	R2		; Is it special function?
+	BMI	SPCFUN		; Yes, go do it
+
+30$:	MOV	(R3),R1		; Save EOF indication
+	TST	R0		; Request for block 0?
+	BNE	40$		; No
+	BIC	#CS$EOF,(R3)	; Yes, no EOF pending any more
+40$:	BIT	#CS$EOF,(R3)	; Is there an EOF pending?
+	BNE	60$		;  yes, give him end o' file
+	ASL	(R4)		; Change RT11 word count to RSTS bytes
+	MOV	(R4),-(R4)	;  and put it in buffer length, too
+	BEQ	50$		; Seeks are simply not done
+	CLR	SCRACH(R5)	; Clear scratch word
+	MOV	XXREAD(R2),-(SP); Get device driver address
+	MOV	(R4)+,R2	; Get buffer size, point to XRBC
+	TST	CH$FN1(R3)	; Set condition codes for nfs channel
+	CALL	@(SP)+		; Call device handler for read/write
+50$:	MOV	ARGPTR(R5),R2	; Retrieve completion function
+	MOV	4(R2),R2	;  from the argument block
+	CMP	R2,#1		; Is there a completion routine?
+	BLOS	100$		; No, exit quickly
+	MOV	(R3),R0		; Give him the CSW
+	MOV	(R3),R1		; Give him the channel number in R1
+	BIC	#^C<RTCHAN>,R1	; Isolate it
+	ASR	R1		; Make it *1
+	CALLR	(R2)		; Call completion routine
+
+60$:	BIC	#CS$EOF,(R3)	; No EOF pending any more
+	SETERR	EOF		; Set up EOF error code
+	EMTER	0		; Give an error
+
+70$:	CLR	(R5)		; Clear out the modifier word
+	SETERR	NOTOPN		; Set up the error code
+	EMTER	2		; Error him
+
+.SBTTL	Read/Write Dispatch Tables
+
+.MACRO	XX$$XX	Z
+Z'.IRP	DEV,<DK,KB,DT,LP,PR,PP,CR,MT>
+.ENDM
+
+	TMPORG	TBLS
+
+XXREAD:	XX$$XX
+	+	DEV'READ
+.ENDM
+
+XXWRIT:	XX$$XX
+	+	DEV'WRIT
+.ENDM
+
+	UNORG
+
+.SBTTL	I/O Support Routines
+
+;+
+; IOCHEK - Check FIRQB for errors, post any unexpected ones
+;
+;	CALL	IOCHEK,R0,<errcode,address if IOSTS=errcode,
+;			   address if any other non-zero error code>
+;	Normal return
+;
+;	Call at IOREAD to do a RSTS .READ first
+;	Call at IOWRIT to do a RSTS .WRITE first
+;
+;	If FIRQB<>0 and <> errcode, it is posted in laster in R/W area
+;-
+
+IOWRIT:	WRITE.			; Do a write, then check it		;PRL001
+	BR	IOCHEK
+
+IOREAD:	.PRIV,	.READ		; Do a read, then check it
+IOCHEK:	MOV	(R0)+,-(SP)	; Get code to check against
+	TST	(R0)+		; Advance over first alternate
+	CMPB	(SP)+,FIRQB	; Is it an expected error?
+	BEQ	80$		; Yes, return at first alternate
+
+;+
+; IOCHK1 - Check for any error, post it if present
+;
+;	CALL	IOCHK1,R0,<address if FIRQB<>0>
+;-
+
+IOCHK1:	TST	(R0)+		; Advance over true error return
+	TSTB	FIRQB		; Was there any error at all?
+	BEQ	90$		; No
+IOCHK3:	MOVB	FIRQB,LASTER(R5); Save the error code for posting
+80$:	MOV	-(R0),R0	; Switch to alternate return
+90$:	RETURN	R0
+
+;+
+; IOCHK2 - Post an error and jump
+;
+;	CALL	IOCHK2,R0,<return address>
+;-
+
+IOCHK2:	TST	(R0)+
+	BR	IOCHK3
+
+;+
+; INCNFS - Increment XRB @ XRBLK if channel is not nfs
+;
+;	R3 -> channel
+;
+;	CALL	INCNFS
+;-
+
+INCNFS:	MOVB	CH$STS+1(R3),-(SP) ; Get flag byte from channel
+.ASSUME	DDNFS	EQ	400
+	INC	(SP)		; Invert the sense of the nfs bit
+	ROR	(SP)+		; Get nfs bit in carry
+	ADC	XRB+XRBLK	; If file structured, bump block for RSTS
+	ADCB	XRB+XRBLKM	; And carry on
+100$:	RETURN
+
+;+
+; DTACHK - Check for the DECtape buffer
+;
+;	FIRQB set up with device and file name to check
+;
+;	CALL	DTACHK
+;
+;	Returns if the buffer is free or not needed
+;	Error if required and in use
+;-
+
+DTACHK:	CLR	SCRAT1(R5)	; No DECtape buffer yet
+	CMP	FIRQB+FQDEV,#"DT ; Is the device DECtape?
+	BNE	120$		; No
+	CLR	FIRQB+FQPPN	; No PPN on DECtape
+	TST	FIRQB+FQNAM1	; Is it a file structured request?
+	BEQ	120$		; No, don't need a buffer
+	MOV	FIRQB+FQCLUS,-(SP) ; Get user auxiliary buffer address
+	CMP	(SP),#256.	; Is it valid?
+	BGT	110$		; Yes, use his buffer
+	TST	DTAOWN(R5)	; Is our buffer free?
+	BNE	130$		; Nope, error him
+	MOV	R5,(SP)		; Yes, compute pointer
+	ADD	#DTBUFP,(SP)	;  to top of buffer
+110$:	MOV	(SP),SCRAT1(R5)	; Save buffer pointer
+	MOV	(SP),@(SP)+	; Link to self to indicate no data yet
+120$:	RETURN
+
+130$:	CMP	(SP)+,(SP)+	; Purge the call to DTACHK and the stack word
+CHOVER:	TST	(SP)+		; Purge the call to the EMT
+	CALL	MONERC		; Too many open files
+	 GENERR	DTOOOF
+
+.DSABL	LSB
+
+.SBTTL	Do a File String Scan
+
+CLRFSS:	.CLRFQB			; At this entry, clear the FIRQB first
+DOFSS:	MOV	R0,-(SP)	; Save return address
+	.CLRXRB			; Clear out the XRB
+	MOV	#XRB+12,R0	; Set up the XRB
+	MOV	R5,(R0)		; Point to logical table
+	ADD	#LOGTBL,(R0)	;  in the R/W area
+	MOV	#LOGSIZ,-(R0)	; Set length of table
+	CLR	-(R0)		; Skip XRB+6
+	MOV	R4,-(R0)	; Point to string
+10$:	TSTB	(R4)+		; Find the
+	BNE	10$		;  zero byte
+	MOV	R4,-(R0)	; Set end of string
+	MOV	2(R0),R4	; Restore string pointer
+	SUB	R4,(R0)		; Compute length of string
+	MOV	(R0),-(R0)	; Set length in XRLEN
+	MOV	(SP)+,R0	; Restore return address
+	.PRIV,	.FSS		; Do the scan
+	CALL	IOCHK1,R0,IOCHK2 ; If error, go to 1st return
+	CMP	(R0)+,(R0)+	; Skip error returns
+	MOV	XRB+10,(SP)	; Get flag word
+	MOV	(SP),-(SP)	; Copy it
+	BIC	(R0)+,(SP)	; Remove uninteresting bits
+	CMP	(R0)+,(SP)+	; It is OK?
+	BNE	20$		; No, 2nd error return
+	TST	XRB+XRBC	; Set CC on length left
+	RETURN	R0
+
+20$:	SETERR	BADNAM		; Set up error code
+	CMP	-(R0),-(R0)	; Back up return pointer
+	BR	IOCHK3		; Post the error and return
+
+EMTDEF	F$SS,<DO FILE STRING SCAN>
+	MOV	R0,R4		; Set string pointer
+	CALL	CLRFSS,R0,<ERROR0,ERROR0,-1,0>
+	RETURN			; No error
+
+.SBTTL	LK4DEV - Look up a Device Name
+
+;+
+; LK4DEV - Look for a device name, applying logical mapping
+;
+;	R0 -> Device name in RAD50
+;
+;	CALL	LK4DEV
+;
+;	R0 -> Just past device name (i.e. bumped by 2)
+;	R2 =  RT-11 device index
+;	XRB set up from .LOGS call
+;
+;	C=1 if bad name (error already posted)
+;-
+
+LK4DEV:	MOV	R1,-(SP)	; Save regs
+	MOV	R3,-(SP)
+	SETERR	NODEVC		; Preset the error if any
+	MOV	(R0)+,R1	; Get the device name
+	BEQ	60$		; Oops, null name is error
+	CMP	R1,(PC)+	; Is this the MACRO CREF file?
+	 .RAD50	/CF /
+	BEQ	5$		; Yup, do the system wide logical
+	CMP	R1,(PC)+	; Is this the macro work file?
+	 .RAD50	/WF /
+	BNE	7$		; Nope, so don't do system wide logicals
+5$:	MOV	R1,XRB		; Set up XRB with logical
+	CLR	XRB+2		; Clear the second part
+	CLRB	FIRQB+FQFUN	; clear the user logical flag		;01w
+	MOV	#-1,FIRQB+FQDEV	; Set an impossibly bad device name
+	.PRIV,	.LOGS		; Do a system wide logical translation
+	TST	XRB+4		; Did we get a logical
+	BMI	65$		; Yes, so XRB is already set up for us, nice!
+7$:	MOV	R1,XRB		; now get set to check for a user logical ;01w
+	CLR	XRB+2		; clear out the next part		;01w
+	MOV	#-2,FIRQB+FQDEV	; set the user logical flag		;01w
+	.PRIV,	.LOGS		; and go do it				;01w
+	TST	XRB+4		; Did we get a user logical?		;01w
+	BMI	65$		;  YES!!!				;01w
+	MOV	#FIRQB+FQDEV+4,R2 ; Point to device name area
+	CLR	-(R2)		; Assuming ' SY', clear out the name
+	CLR	-(R2)		; To use no name
+	CMP	R1,#^R SY	; Is it system structure?
+	BEQ	50$		; Yes, use structure
+	MOV	R0,-(SP)	; Save a register
+	CLR	R0		; Clear for divide
+	DIV	#50*50,R0	; Get top character
+	ADD	#100,R0		; Make it ascii
+	MOVB	R0,(R2)+	; Set first character
+	CLR	R0		; Clear for divide
+	DIV	#50,R0		; Get second letter
+	ADD	#100+1,R0	; Make it ascii and bias upward by 1
+	MOVB	R0,(R2)+	; Put in second character of name
+	MOV	(SP)+,R0	; Restore register
+	SUB	#^R  0,R1	; Bias downward for unit number
+40$:	DECB	-1(R2)		; Make the device name lower
+	CLR	(R2)		; Assume no unit
+	TST	R1		; Is there a unit?
+	BMI	50$		; No
+	COM	(R2)		; Set -1 in high byte for real unit
+	MOVB	R1,(R2)		; Set unit number
+
+50$:	CLR	XRB		; Get status with no logical mapping
+	.PRIV,	.LOGS		; Do it!
+	TSTB	FIRQB		; Any error?
+	BEQ	65$		; No, we got it
+55$:	ADD	#50,R1		; Try higher unit number and lower name
+	CMP	R1,#128.	; Is the unit out of range?
+	BLO	40$		; Not yet
+60$:	CALL	IOCHK2,R0,90$	; Set up the error and exit
+65$:	CMP	FIRQB+FQDEV,#"DV; Is the device a virtual disk? ;004
+	BNE	70$		; No, continue			;004
+	TST	R1		; Don't believe it.		;004
+	BNE	55$		; Try again if unit invalid	;004
+70$:	MOV	XRB+6,R2	; Get device index
+	CMPB	R2,#MTAHND	; Do we know about it?
+	BLOS	80$		; Yes
+	ASH	#-14.,R2	; No, isolate FLGRND in bit 1, FLGFRC in C
+	BIC	#^C<2>,R2
+	ADC	R2		; Merge to index 0-3
+	MOVB	DEVMAP(R2),R2	; Get mapped device
+80$:	BIC	#177400,R2	; Isolate index number
+	TST	(PC)+		; Ensure C=0
+90$:	SEC			; Set C=1 on errors
+	MOV	(SP)+,R3	; Restore registers
+	MOV	(SP)+,R1
+	RETURN
+
+	TMPORG	TEXT
+DEVMAP:	.BYTE	MTAHND,PTRHND,DSKHND,LPTHND
+	UNORG
+
+.SBTTL	Disk Read Handler
+
+.ENABL	LSB
+
+DKREAD:	CALL	INCNFS		; Bump block number if file structured
+	CLR	(R4)		; Zap the byte count
+	CALL	IOREAD,R0	; Read & check returned status
+	 GENERR	EOF		; If it is end of file,
+	 +	RWER0P		; Then return code 0
+	 +	RWER1P		;  else return code 1
+	BR	20$		; Make bytes into words, return on stack
+
+.SBTTL	Pseudo-Keyboard Write Handler
+.SBTTL	Teletype Write Handler
+.SBTTL	Punch Write Handler
+.SBTTL	Line Printer Write Handler
+
+PRWRIT:
+CRWRIT:
+KBWRIT:
+LPWRIT:
+PPWRIT:	INC	R0		; Special request?
+	BNE	10$		; No
+	;CLC			;C=0 from incoming 'TST' instruction
+	ROR	-(R4)		; Fix to be byte count
+	MOV	(R4)+,(R4)	;  and put into XRBc
+10$:	WRITE.			; W$RITE set up the XRB, so do it	;PRL001
+	CALL	IOCHK1,R0,RWER1P ; Check the outcome, all errors fatal
+	TST	R0		; Special request?
+	BEQ	30$		; Yes, return byte count
+20$:	ROR	(R4)		; Shift for word count
+30$:	MOV	(R4),4(SP)	; Set it
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	Disk Write Handler
+
+.ENABL	LSB
+
+DKWRIT:	CALL	INCNFS		; Bump block number if file structured
+	BIC	#777,(R4)	; Round down to block multiple
+	MOV	(R4),-(R4)	; Copy to buffer size
+	BEQ	10$		; Skip writing if only a partial request
+	WRITE.			; Do a RSTS write			;PRL001
+	ADD	2(R4),4(SP)	; Tell him the amount written (was 0, C=0)
+	;CLC			; C=0 from 'ADD' above
+	ROR	4(SP)		; Count is in words
+	CALL	IOCHEK,R0	; Check the return status
+	 GENERR	NOROOM		; If no room for user on device
+	 +	RWER0P		;  then give an attempt to write past EOF
+	 +	RWER1P		;   else it's a hardware error
+10$:	BIC	(R4)+,R2	; Compute residual byte count
+	BEQ	40$		; An exact request is easy
+	ADD	(R4)+,(R4)	; Residual addr (in XRB)=count+address
+	MOV	-(R4),R1	; Get count written so far
+	SWAB	R1		; Compute # of blocks read
+	ROR	R1
+	ADD	R1,XRB+XRBLK	; And update block to be written
+	ADCB	XRB+XRBLKM	;  carrying on
+WRTBLK:	MOV	R5,R1		; Point to R/W area
+	ADD	#DSKBUF,R1	; Point to our buffer
+	TST	(R4)+		; R4 -> buffer address
+	MOV	(R4),R0		; R0 -> his partial block of data
+	MOV	R1,(R4)		; Point XRB to our buffer
+	ROR	R2		; Make R2 into a word count
+	MOV	R2,-(SP)	; Save the residual count
+20$:	MOV	(R0)+,(R1)+	; Move the data to our buffer
+	SOB	R2,20$
+	MOV	(SP),R2		; Get the count
+30$:	CLR	(R1)+		; And clear the rest
+	INC	R2
+	TSTB	R2
+	BNE	30$
+	MOV	(SP)+,R2	; Get the count again
+	MOV	#1000,-(R4)	; Set a one-block write
+	MOV	(R4),-(R4)	;  and a one-block buffer
+	CALL	IOWRIT,R0	; Write & check returned status
+	 GENERR	NOROOM		; If no room for user on device
+	 +	RWER0P		; Then give attempt to write too far
+	 +	RWER1P		; Else give device error
+	ADD	R2,4(SP)	; Tell him we wrote it all
+40$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	Magtape Write Handler
+
+.ENABL	LSB
+
+MTWRIT:	BEQ	20$		; Not file structured, write one chunk
+10$:	MOV	#1000,(R4)	; Yes, write in chunks of 1000 bytes
+20$:	CMP	R2,(R4)		; Smaller than chunk size?
+	BLO	WRTBLK		; Yes, buffer it and write a chunk
+	CALL	IOWRIT,R0	; Write & check it
+	 GENERR	NOROOM
+	 +	RWER0P
+	 +	RWER1P
+	TST	CH$STS(R3)	; Does the device take block numbers?
+	BPL	30$		; No (or they are special)
+	INC	XRB+XRBLK	; Yes, bump to next one
+30$:	ADD	(R4)+,(R4)	; Bump address by chunk size
+	ROR	-(R4)		; Convert bytes to words
+	ADD	(R4),4(SP)	; Bump amount written by chunk size
+	ASL	(R4)		; Back to bytes
+	SUB	(R4),-2(R4)	; Reduce amount to be written
+	BNE	20$		; More to come
+	RETURN			; Exact chunks, so go away
+
+.SBTTL	DECtape Write Handler
+
+DTWRIT:	BEQ	10$		; Not file structured, write chunks of 1000(8)
+	ROR	R2		; Yes, convert byte count to words
+	MOV	#510.,-(R4)	; Set up buffer length of 510. bytes
+	MOV	(R4)+,(R4)+	; And set up same amount to write
+	MOV	(R4),R0		; R0 -> user's buffer
+	MOV	CH$DTB(R3),R1	; R1 -> internal DT buffer pointer
+	MOV	R1,(R4)		; Preset XRB to point to our buffer
+	SUB	#510.,(R4)	; (the beginning of it)
+	CMP	R1,(R1)		; End of buffer <= current buffer ptr?
+	BLOS	50$		; Yes, the buffer is empty
+40$:	DEC	R2		; Another word available?
+	BMI	80$		; No, return to him
+	MOV	(R0)+,@(R1)+	; Move a word into the buffer
+	ADD	#2,-(R1)	; Bump buffer pointer
+	INC	4(SP)		; Tell user another word gone
+	CMP	R1,(R1)		; End of buffer yet?
+	BHI	40$		; No, end still > current
+	CALL	IOWRIT,R0	; Write it
+	 GENERR	NOROOM
+	 +	RWER0P
+	 +	RWER1P
+50$:	MOV	(R4),(R1)	; Empty the internal buffer (point to start)
+60$:	TST	R2		; Any words left in user's area?
+	BEQ	70$		; No, empty the internal buffer and exit
+	CMP	R2,#255.	; Less than a single block?
+	BLO	40$		; Yes, move it into the buffer (never write)
+	MOV	R0,(R4)		; No, write directly from user area
+	MOV	#510.,-(R4)	; 510 bytes to write
+	CALL	IOWRIT,R0	; Do the write and check it
+	 GENERR	NOROOM
+	 +	RWER0P
+	 +	RWER1P
+	ADD	(R4),R0		; Bump user pointer by length written
+	ROR	(R4)		; Convert that to words
+	ADD	(R4),4(SP)	; Tell user he got it out
+	SUB	(R4)+,R2	; And decrease number of words left
+	BR	60$		; Try for more
+
+70$:	MOV	R1,(R1)		; We ended by writing, buffer is empty
+80$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	DECtape Read Handler
+
+.ENABL	LSB
+
+DTREAD:	BEQ	DTRD1		; If not file structured, it's easy
+10$:	MOV	(R4)+,R0	; Get bytes left in request
+	MOV	CH$DTB(R3),R1	; Point to DT buffer pointer
+	MOV	(R1),R2		; Point to next byte in buffer
+20$:	CMP	R1,R2		; Are we at end of buffer yet?
+	BLOS	30$		; Yes, must read more from tape
+	MOVB	(R2)+,@(R4)+	; No, put a byte in user's buffer
+	INC	-(R4)		;  and advance his pointer
+	DEC	R0		; One less byte in request
+	BNE	20$		;  but more request is coming
+	MOV	R2,(R1)		; Done. Save buffer pointer
+	ROR	-(R4)		; Halve the original request for words
+	ADD	(R4),4(SP)	; Add words to total passed
+DTRTS:	RETURN			; Return to reader
+
+30$:	MOV	R2,(R1)		; Save empty status of buffer
+	SUB	R0,-(R4)	; Request-residual=amount already gotten
+	MOV	#510.,-(SP)	; Reader will return if request<510.
+	CALL	READER		; Call reader to read whole chunks
+	MOV	R0,6(SP)	; Return to him total amount gotten
+	ROR	6(SP)		;  as a word count
+	SUB	(SP)+,R2	; R2 now -> start of DT buffer
+	MOV	-(R4),-(SP)	; Save residual request on stack
+				; Note: 1 <= residual < 510.
+	MOV	#510.,(R4)+	; Put in request to read buffer of 510
+	CLR	(R4)+		; Clear for read
+	MOV	(R4),R1		; Remember the residual address
+	MOV	R2,(R4)		; Read into internal buffer
+	MOV	(SP),R2		; R2 = residual count in case of EOF
+	MOV	(R4),-(SP)	; Save pointer to internal buffer
+				; (and ensure 2 words for filler to pop)
+	CALL	IOREAD,R0	; Read & check the residual read
+	 GENERR	EOF		; If EOF here, buffer still empty
+	 +	FILLER		; R0=amount so far, R2=residual count
+				; R1 -> residual addr
+	 +	RWER1Q		; Error: pop 3 words (call to DT, count)
+	MOV	(SP)+,@CH$DTB(R3) ; Set internal buffer to full
+	MOV	R1,(R4)		; Point XRLOC at user's residual addr
+	MOV	(SP)+,-(R4)	; And set residual count in XRBC
+	BR	10$		; Enter move loop
+				; Note: move will not read any more
+
+.DSABL	LSB
+
+.SBTTL	Pseudo-Keyboard Read
+.SBTTL	Teletype Read Handler
+.SBTTL	Paper Tape Reader Handler
+.SBTTL	Card Reader Handler
+
+.ENABL	LSB
+
+LPREAD:
+PPREAD:
+KBREAD:
+PRREAD:
+CRREAD:	INC	R0		; Was the block number -1?
+	BNE	DTRD1		; No, it's a normal request
+	DEC	SCRACH(R5)	; Yes, set flag for stopper
+	TST	-(R4)		; Point to XRBC
+	;CLC			; Don't sign extend
+	ROR	(R4)+		; Fix for byte count
+DTRD1:	CLR	(R4)		; Clear XRBC for read
+	CLR	-(SP)		; Reader will never return
+	CLR	-(SP)		; So this is a dummy
+	;BR	READER		; Do multiple reads until done or EOF
+
+READER:
+
+; READER does multiple RSTS reads until the RT-11 request is satisfied.
+; On entry, R4 -> XRB+XRBC, which contains the amount already read
+; (e.g. moved from internal DT buffer),
+; XRB+XRLEN contains the original request size, and
+; XRB+XRLOC -> user buffer, corrected for amount already read, if any
+
+READER:	MOV	(R4),R0		; Accumulate amount read in R0
+10$:	SUB	(R4),-(R4)	; Adjust buffer size by amount read
+	BEQ	60$		; Nothing left. Tell the user what he got
+	CMP	2(SP),(R4)+	; Is there less than enough to read
+	BHI	DTRTS		; Yes, return to user (with C=0)
+	CLR	(R4)		; Clear XRBC for read
+	CALL	IOREAD,R0	; Do & check the I/O
+	 GENERR	EOF		; If EOF
+	 +	20$		;  ignore returned data
+	 +	80$		; Else go check for magtape record length
+	BR	30$		; No error, all is well
+
+20$:	CLR	(R4)		; If EOF, discard returned data
+30$:	ADD	(R4)+,(R4)	; Add amount read to buffer address
+	MOV	(R4),R1		; Remember residual address
+	ADD	-(R4),R0	; And accumulate total amount gotten
+	TST	CH$STS(R3)	; Does the device take block numbers?
+	BPL	40$		; No
+	INC	XRB+XRBLK	;  yes, next block
+	ADCB	XRB+XRBLKM	;  increment MSB if a carry
+40$:	TST	SCRACH(R5)	; Did he want only 1 read?
+	BGT	60$		; Yes, but give him a word count
+	BLT	70$		; Yes, but give him a byte count
+	CHKERR	EOF		; No, did we get end of file?
+	BNE	10$		; No, try another read
+
+	MOV	-(R4),R2	; R2 = residual byte count for clearing
+	BEQ	50$		; None, how lucky
+FILLER:	BIT	R0,#777		; Clear up to a block boundary
+	BEQ	50$		; Got it
+	CLRB	(R1)+		; Clear a byte
+	INC	R0		; Count it for him
+	SOB	R2,FILLER	; One good byte deserves another
+50$:	BIS	#CS$EOF,(R3)	; Indicate eof next time around
+60$:	CLC
+	ROR	R0		; Change byte count to words
+70$:	CMP	(SP)+,(SP)+	; Purge call and parameter
+	MOV	R0,4(SP)	; Tell him how much (check for anything)
+	BNE	DTRTS		; Yes, return with short word count
+RWER0P:	TST	(SP)+		; Pop return to monitor
+RWER0:	EMTER	0		; Give error zero
+
+80$:	CHKERR	MAGRLE		; Magtape record length error?
+	BEQ	30$		; Yes, ignore it (it has been posted)
+RWER1Q:	CMP	(SP)+,(SP)+	; Pop another 2 words
+RWER1P:	TST	(SP)+		; Pop a word before giving error
+RWER1:	EMTER	1		; Give error 1
+
+.DSABL	LSB
+
+.SBTTL	Magtape Read Handler
+
+MTREAD:	BNE	10$		; If file structured, check for block 0
+	INC	SCRACH(R5)	; If non-file structured, do a single read
+	BR	50$		; Go do the read
+
+10$:	TST	R0		; Want block 0?
+	BNE	50$		; No
+	BIT	#CS$IOD,(R3)	; Has i/o ever been done here?
+	BEQ	50$		; No, we point at block 0
+20$:	MOV	R1,R0		; Copy indicator saying past EOF
+	CLR	R1		; Next time, backspace over data
+	MOV	#77777,(R4)	; Backspace a lot
+	MOV	#MT.BSR,-(R4)	; Set backspace code
+	MOVB	CH$STS(R3),XRB+XRCI+1 ; Set up handler index
+	.PRIV,	.SPEC
+	MOV	#MT.STS,(R4)	; Set up to get status
+	.PRIV,	.SPEC
+	MOV	#MT.FSR,(R4)+	; Prepare to skip forward
+	BIT	#400,(R4)	; Does status say BOT?
+	BNE	40$		; Yes, skip over 1 DOS label
+	TSTB	(R4)		; Did that backspace find an EOF?
+	BPL	20$		; No, that's a looooong file
+	BIT	R0,#CS$EOF	; Were we already past EOF?
+	BNE	20$		; Yes, go back to skip over data
+30$:	MOV	#1,(R4)		; Yes, skip forward over the EOF mark
+	.PRIV,	.SPEC
+40$:	MOV	#1,(R4)		; Skip over 1 DOS label
+	.PRIV,	.SPEC
+	MOV	R2,-2(R4)	; Restore buffer length in XRB
+50$:	BIS	#CS$IOD,(R3)	; We won't be at block 0 for long
+	BR	KBREAD		; Go read
+
+

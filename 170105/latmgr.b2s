@@ -1,0 +1,2033 @@
+1	!
+	!	p r o g r a m   t i t l e
+	!
+	!	   program : LATMGR.B2S
+	!	   version : V10.1
+	!	      edit : A
+	!	 edit date : 10-MAY-91
+	!	 author(s) : JFM,BTK,BTB,SEL
+	!
+	!********************************************************************
+	!
+	!		  C O P Y R I G H T
+	!
+	!
+	!		      Copyright (C) 1990, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.
+	!
+	!
+	! This software is furnished under a license and may be used and
+	! copied  only  in accordance with the terms of such license and
+	! with the  inclusion  of  the  above  copyright  notice.   This
+	! software  or  any  other copies thereof may not be provided or
+	! otherwise made available to any other person.  No title to and
+	! ownership of the software is hereby transferred.
+	!
+	! The information in this software is subject to change  without
+	! notice  and should not be construed as a commitment by Digital
+	! Equipment Corporation.
+	!
+	! DIGITAL assumes no responsibility for the use  or  reliability
+	! of its software on equipment that is not supplied by DIGITAL.
+	!
+	!********************************************************************
+	!
+	!	m o d i f i c a t i o n   h i s t o r y   l o g
+	!
+	!
+	! VER/ED	EDIT DATE	REASON
+	!
+	! V9.6-01	24-Sep-87	(JFM) Creation
+	! V9.6-08	28-JAN-88	(BTK) Modified to use approved
+	!				      DCL syntax
+	! V9.6-09	07-APR-88	(BTK) Cleaned up outputs
+	! V9.6-10	11-APR-88	(BTK) Forced uppercase service name
+	!				      (CREATE/SERVICE/LAT)
+	! V9.6-11	06-MAY-88	(BTK) Check for NOTOPN - char's not set
+	!				      (SHOW COUNTERS/LAT/NODE)
+	! 		25-MAY-88	(BTK) Param optional for STOP/LAT
+	!				      Check for NOTOPN - LAT not started
+	!				      (SHOW COUNTERS/LAT/NODE)
+	! 		03-JUN-88	(BTK) Specify Server name in error msgs
+	! 		07-JUN-88	(BTK) Correct "Service name too long"
+	!				      error message (SHOW SERVICE/LAT)
+	! 		24-JUN-88	(BTK) "DECnet not started" not fatal
+	! 		28-FEB-89	(BTB) Corrected/removed DELETE errors
+	! V9.7-08	27-APR-89	(JFM) Added /ACCESS_DEFAULT=arg qual
+	! 		24-MAY-89	(JFM,DBM) Fix longword compare
+	!				      against 0 in UNSIGNED.LONG
+	! V10.0-D	05-OCT-89	(SEL) Updated /OUTPUT logic to support
+	!					NO prefix and trap errors.
+	! V10.0-E	27-Oct-89	(SEL) Add outbound lat commands:      
+	!					CREATE PORT, SET PORT,        
+	!					SHOW PORT and DELETE PORT.    
+	! V10.0-J	30-MAR-90	(SEL) Add error trap for /ACCESS qual
+	!					and use DISPLY for errmsgs. 
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	p r o g r a m   d e s c r i p t i o n
+	!
+	!	LATMGR.B2S allows a user, typically the system manager,
+	!	to manage the LAT host software.  It uses the Common
+	!	User Interface (CUI) as its command parser.
+	!
+	!********************************************************************
+	!
+	!	c h a n n e l   a s s i g n m e n t s
+	!
+	!	channel #	file-spec	  description
+	!	=========	=========	  ===========
+	!	  0		  KB:		user keyboard (BP2 default)
+	!	  1		  NL:		mapped to buffer for data 
+	!					transfer
+	!	  2		  NL:		mapped to buffer for data 
+	!					transfer
+	!	  3	      user-specified	SHOW command /[NO]OUTPUT
+	!
+	!********************************************************************
+	!
+	!	v a r i a b l e s  /  a r r a y s   u s e d
+	!
+	!	 name			description
+	!	 ====			===========
+	!
+	!	ARG%			Qualifier Argument
+	!	CR%			ASCII <CR>
+	!	CR.LF%			ASCII <CR><LF>
+	!	DISALL%			Keyword argument to /DISABLE
+	!	DISPOS%			Position of /DISABLE
+	!	ENAALL%			Keyword argument to /ENABLE
+	!	ENAPOS%			Position of /ENABLE
+	!	ENT.TY%			Entry point
+	!	ERR%			Error code
+	!	FILLNUM			Number of bytes to skip on REMAP
+	!	HDNG%			program heading
+	!	I%			FOR loop Index
+	!	J%			FOR loop Index
+	!	JUNK%			Temp 
+	!	LENGTH%			String or buffer length
+	!	MASTER%			KB number
+	!
+	!
+	!	DROP.PRIVS$,		SYS call parameter
+	!	CALLBUF$,		String variable for SYS call
+	!	JUNK$,			Temp string variable
+	!	REGAIN.PRIVS$,		SYS call parameter
+	!	REV$,			LATMGR revision number
+	!	VER$,			LATMGR version number
+	!	Z$			Temp string variable
+	!
+	!
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	s u b r o u t i n e s   u s e d
+	!
+	!	name			description
+	!	====			===========
+	!	FET$P BY REF		fetch a parameter
+	!	FET$CQ BY REF		fetch command qualifier
+	!	FET$A BY REF		fetch a non-keyword argument
+	!	FET$KA BY REF		fetch a keyword argument
+	!	U.INI BY REF		initialize CUI tables
+	!	U.DIA BY REF		get user command via CUI
+	!	DISPLY			display the syntax errors
+	!
+	!
+	!
+	!
+	!********************************************************************
+	!
+	!	f u n c t i o n s   u s e d
+	!
+	!	line #	name		description
+	!	======	====		===========
+	!		CNVTIM		convert time to HH:MM:SS
+	!
+	!********************************************************************
+	!
+	!	m a p   d e c l a r a t i o n s
+	!
+	!	 name		  description
+	!	 ====		  ===========
+	!	SHOBUF		  SHOW BUFFER -	used to receive data from 
+	!					Show Node and Lines SYS calls.
+	!
+	!	LATBUF		  LAT BUFFER -	used to send and receive data 
+	!					from other SYS calls.
+	!
+	!
+	!********************************************************************
+	!
+	!	c o m m o n   d e c l a r a t i o n s
+	!
+	!	 name		  description
+	!	 ====		  ===========
+	!	CUICMN		CUI Common interface
+	!	LATKEY		Keyword definitions
+	!
+	!
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	I N C L U D E   r e q u i r e d   M A P s , C O M M O N s
+	!
+	!********************************************************************
+
+	%INCLUDE "CUI:CUICMN.B2S"		! Include CUI data section
+	%INCLUDE "SYSTEM:LATKEY.B2S"		! Include CUI common data
+
+	!********************************************************************
+	!
+	!		M A P   S t a t e m e n t s
+	!
+	!********************************************************************
+	!
+	! Show Node Buffer
+	!
+	MAP (SHOBUF)	STRING	  SHNO.FILL=116%	! Define Buffer size
+
+	MAP DYNAMIC (SHOBUF) BYTE SHNO.MULTICAST,	! Multicast Timer    &
+				  SHNO.RESERVED,	! Reserved byte	     &
+				  SHNO.BITMASK(31%),	! Bitmask	     &
+				  SHNO.LENGTH,		! String Length	     &
+			STRING	  SHNO.STRING		! String
+
+	!
+	! Show Lines Buffer
+	!
+	MAP (SHOBUF)	BYTE	  SHLI.NUMLINES,	! Num of lines enabled &
+				  SHLI.RESERVED		! Reserved byte
+
+	MAP DYNAMIC (SHOBUF) STRING SHLI.DEVNAME,	! Device name	       &
+			BYTE	    SHLI.DEVUNIT,	! Device unit number   &
+				    SHLI.UNITFLAG	! Unit number flag
+	!
+	! Set Node Buffer
+	!
+	MAP (LATBUF)	STRING	WHOLE.BUFF = 102%	! Map the whole buffer
+
+	MAP (LATBUF)	BYTE	SENO.TYPE1,		! Data Type Code     &
+				SENO.MULTICAST,		! Multicast Timer    &
+				SENO.FILL(99%)		! Max rest of buffer 
+ 
+	MAP DYNAMIC (LATBUF) BYTE SENO.TYPE2,		! Data Type Code     &
+				  SENO.RESERVED,	! Reserved Byte      &
+				  SENO.BITMASK(31%),	! Group Code Bitmask &
+				  SENO.TYPE3,		! Data Type Code     &
+				  SENO.STRLENGTH,	! String Length	     &
+			STRING	  SENO.IDSTRING		! ID String
+
+
+	!
+	! Show Services Buffer
+	!
+	MAP (LATBUF)	BYTE	  SHSC.SERVCRATING,	! Service Rating      &
+				  SHSC.BITMASK,		! Srvc Rating Bitmask &
+				  SHSC.NAMELENGTH,	! Service Name Length &
+			STRING	  SHSC.NAME=16%,	! Service Name	      &
+				  SHSC.FILL=65%		! Max rest of buffer
+
+	MAP DYNAMIC (LATBUF) BYTE SHSC.IDLENGTH,	! ID String Length    &
+			STRING	  SHSC.IDSTRING		! ID String
+
+	!
+	! Show Counters/Node Buffer
+	!
+	MAP (LATBUF)	WORD	SHCN.CDATE,	! Current Date		    &
+				SHCN.CTIME,	! Current Time		    &
+				SHCN.ZDATE,	! Date last zeroed	    &
+				SHCN.ZTIME,	! Time last zeroed	    &
+			LONG	SHCN.MSGOUT,	! Messages transmitted	    &
+				SHCN.BYTOUT,	! Bytes transmitted	    &
+				SHCN.MSGIN,	! Messages received	    &
+				SHCN.BYTIN,	! Bytes received	    &
+				SHCN.MSGRETRY,	! Messages retransmitted    &
+				SHCN.MSGOOS,	! Msgs rcvd out of sequence &
+				SHCN.INVMSG,	! Invalid messages received &
+				SHCN.INVSLOT,	! Invalid slots received    &
+				SHCN.ILLMSG,	! Illegal messages received &
+				SHCN.ILLSLOT,	! Illegal slots received    &
+				SHCN.ALLOC,	! Resource allocation errs  &
+				SHCN.TRANS,	! Transmit errors	    &
+				SHCN.TIMEOUTS	! Circuit timeouts
+
+	!
+	! Show Counters/Device Buffer
+	!
+	MAP (LATBUF)	WORD	SHCD.CDATE,	! Current Date		    &
+				SHCD.CTIME,	! Current Time		    &
+				SHCD.ZDATE,	! Date last zeroed	    &
+				SHCD.ZTIME,	! Time last zeroed	    &
+			LONG	SHCD.BYTIN,	! Bytes received	    &
+				SHCD.BYTOUT,	! Bytes sent		    &
+				SHCD.PCKTIN,	! Packets received	    &
+				SHCD.PCKTOUT,	! Packets sent		    &
+				SHCD.NOBUF	! User buffer unavailable
+
+	!
+	! Show Counters/Terminal_servers Buffer
+	!
+	MAP (LATBUF)	WORD	SHCT.CDATE,	! Current Date		    &
+				SHCT.CTIME,	! Current Time		    &
+				SHCT.ZDATE,	! Date last zeroed	    &
+				SHCT.ZTIME,	! Time last zeroed	    &
+			LONG	SHCT.MSGOUT,	! Messages transmitted	    &
+				SHCT.BYTOUT,	! Bytes transmitted	    &
+				SHCT.MSGIN,	! Messages received	    &
+				SHCT.BYTIN,	! Bytes received	    &
+				SHCT.MSGRETRY,	! Messages retransmitted    &
+				SHCT.MSGOOS,	! Msgs rcvd out of sequence &
+				SHCT.INVMSG,	! Invalid messages received &
+				SHCT.INVSLOT	! Invalid slots received
+
+	!
+	! Show Terminal_Servers Buffer
+	!
+	MAP (LATBUF)	BYTE	SHTE.ENETADDR(5%),	! Ethernet address   &
+				SHTE.PROTLEVEL,		! LAT Protocol level &
+				SHTE.ECOLEVEL,		! Protocol ECO level &
+			WORD	SHTE.SESSIONS,		! Session count	     &
+				SHTE.TIMER,		! Keep-alive Timer   &
+				SHTE.BUFFSIZE		! Max data buff size
+
+	!
+	! Show Sessions Buffer
+	!
+	MAP (LATBUF)	BYTE	  SHSS.KBN,		! Keyboard Number    &
+				  SHSS.BITMASK,		! Port Bitmask	     &
+				  SHSS.PNAMELENGTH,	! Port Name Length   &
+			STRING	  SHSS.PORTNAME=51%	! Port Name+rest of buf
+
+	MAP DYNAMIC (LATBUF) BYTE SHSS.NAMELENGTH,	! Name Length	     &
+			STRING	  SHSS.NAME		! Name
+
+	!
+	! Service Functions Buffer
+	!
+	MAP (LATBUF)	BYTE	SERV.TYPE1,		! Data Type Code     &
+				SERV.RESERVED,		! Reserved Byte      &
+				SERV.RATING,		! Service Rating     &
+				SERV.BITMASK,		! Srvc Rating Bitmask&
+				SERV.FILL(64%)		! Max rest of buffer 
+ 
+	MAP DYNAMIC (LATBUF) BYTE SERV.TYPE2,		! Data Type Code     &
+				  SERV.STRLENGTH,	! String Length	     &
+			STRING	  SERV.IDSTRING		! ID String
+
+
+	MAP (LNGBUF)	LONG	LNGWRD
+	MAP (LNGBUF)	WORD	LNGLSB, LNGMSB
+
+	!********************************************************************
+	!
+	!	D E F I N E   C O N S T A N T S
+	!
+	!********************************************************************
+	!
+	! Error codes
+	!
+	DECLARE BYTE CONSTANT BADNAM = 2%
+	DECLARE BYTE CONSTANT NOROOM = 4%
+	DECLARE BYTE CONSTANT NOSUCH = 5%
+	DECLARE BYTE CONSTANT NODEVC = 6%
+	DECLARE BYTE CONSTANT NOTAVL = 8%
+	DECLARE BYTE CONSTANT NOTOPN = 9%
+	DECLARE BYTE CONSTANT PRVIOL = 10%
+	DECLARE BYTE CONSTANT HNGDEV = 14%
+	DECLARE BYTE CONSTANT FIEXST = 16%
+	DECLARE BYTE CONSTANT DTOOOF = 17%
+	DECLARE BYTE CONSTANT BADFUO = 18%
+	DECLARE BYTE CONSTANT INTLCK = 19%
+	DECLARE BYTE CONSTANT CTRLCE = 28%
+	DECLARE BYTE CONSTANT EXPERR = 49%
+	DECLARE BYTE CONSTANT NORTS  = 62%
+	DECLARE BYTE CONSTANT ERRERR = 66%
+	DECLARE BYTE CONSTANT TLNOFN = 97%
+	!
+	! Other Constants
+	!
+	DECLARE DOUBLE CONSTANT MAX.LONG = 4294967296
+	DECLARE BYTE ONEBIT(7%)
+
+	!********************************************************************
+	!
+	!	D E C L A R E   F U N C T I O N S
+	!
+	!********************************************************************
+
+	DECLARE STRING FUNCTION SECDIF(WORD, LONG, WORD, LONG)
+	DECLARE STRING FUNCTION TIME.CONVERT(WORD)
+	DECLARE STRING FUNCTION UNSIGNED.LONG(LONG)
+	DECLARE STRING FUNCTION UNSIGNED.BYTE(BYTE)
+	DECLARE BYTE FUNCTION WORD.TO.BYTE(WORD)
+
+	!********************************************************************
+	!
+	!	D E C L A R E   V A R I A B L E S
+	!
+	!********************************************************************
+
+	DECLARE DOUBLE	SEC
+	DECLARE LONG	CURR.TIME,				&
+			ZERO.TIME
+	DECLARE STRING	SAVENAME(4%)
+	DECLARE	WORD	SAVBUF(40%),				&
+			CALLBUF(40%),				&
+		BYTE	SAVEUNIT(4%),				&
+			SAVEUFLAG(4%),				&
+			DEVCOUNT,				&
+			RATING,					&
+			FILLNUM
+
+
+ MAIN:	!
+	!
+	!	M A I N    C O D I N G    A R E A
+	!
+	ON ERROR GOTO STANDARD_ERR		! Set up standard error trap
+	JUNK% = CTRLC				! Enable CTRL/C trapping
+	GOSUB INIT				! Initialize constants
+	IF ENT.TY% =0% THEN			! If this is a RUN entry then &
+	  PRINT "LATMGR"+CHR$(32%)+VER$+CHR$(9%)+REV$ !   Print banner
+	END IF					! End if
+	CALL U.INI BY REF (U.CMN%,ENT.TY%)	! Initialize CUI tables
+
+ GET_COMMAND:
+	!	P E R F O R M   C O M M A N D   P R O C E S S I N G
+	!
+	!
+	PRINT IF CCPOS(0%)			! Print to get to left margin
+	JUNK$ = SYS(DROP.PRIV$)			! Drop tmp privs temporarily
+	CALL U.DIA BY REF			! Get user command
+	IF U.STAT% <> 0% THEN			! If an error occured then    &
+		GOTO WRAP_UP IF U.STAT%=11%	!   Exit program if CTRL/Z
+		GOTO GET_COMMAND		!   Reprompt;CUI prints error
+	END IF					! End if
+	!
+	!
+	!	P A R S E     C O M M A N D
+	!
+	!
+	OUT_CHNL% = 0%				! default = terminal
+	DEBUG% = 0%				! Default to /NODEBUG
+	CALL FET$CQ BY REF (DBG.Q%)		! /[NO]DEBUG specified?
+	DEBUG% = -1% IF NOT (U.NO%)		!  Set the flag if /DEBUG
+
+	SELECT U.CMDC%				! Select the given command
+						! SET functions:
+	CASE	SENO.K%				!	Set NODE command
+		GOTO SET_NODE
+	CASE	SESC.K%				!	Set SERVICE command
+		GOTO SET_SERVICE
+
+						! SHOW functions:
+	CASE	SHNO.K%				!	Show NODE command
+		GOTO SHOW_NODE
+	CASE	SHSC.K%				!	Show SERVICES command
+		GOTO SHOW_SERVICES
+	CASE	SHCO.K%				!	Show COUNTERS command
+		GOTO SHOW_COUNTERS
+	CASE	SHTE.K%				!	Show TERMINAL_SERVERS
+		GOTO SHOW_TERM_SERVERS
+	CASE	SHSS.K%				!	Show SESSIONS command
+		GOTO SHOW_SESSIONS
+
+						! START & STOP functions:
+	CASE	STLA.K%				!	START/LAT command
+		GOTO START_LAT
+	CASE	SPLA.K%				!	STOP/LAT command
+		GOTO STOP_LAT
+
+						! SERVICE functions:
+	CASE	CRSE.K%				!	CREATE command
+		GOTO CREATE_SERVICE
+	CASE	DESE.K%				!	DELETE command
+		GOTO DELETE_SERVICE
+
+						! Outbound LAT functions:
+	CASE	CRPO.K%				!	CREATE/PORT
+		CALL LATOUT
+	CASE	DEPO.K%				!	DELETE/PORT
+		CALL LATOUT
+	CASE	ASPO.K%				!	ASSIGN/PORT
+		CALL LATOUT
+	CASE	DAPO.K%				!	DEASSIGN/PORT
+		CALL LATOUT
+	CASE	SEPO.K%				!	SET PORT
+		CALL LATOUT
+	CASE	SHPO.K%				!	SHOW PORT
+		GOSUB CHECK_OUTPUT
+		CALL LATOUT
+
+	CASE	ELSE				! Anything else
+		PRINT "?LATMGR command not installed"
+
+	END SELECT				! END OF THE COMMANDS
+	GOTO GET_COMMAND			! Get next command
+
+ SET_NODE:
+	!	Set NODE command
+	!
+	ERR% = 0%
+	OPEN "_NL:" AS FILE #1%, MAP LATBUF	! Open null dev,assoc buffer
+	FILLNUM = 0%
+	CALL FET$CQ BY REF (MUL.Q%)		! /MULTICAST_TIMER specified?
+	IF U.PRES% THEN				! Yes
+	  SENO.TYPE1 = 1%			!   Set Type Code
+	  CALL FET$A BY REF			!   Get # of seconds
+	  SENO.MULTICAST = WORD.TO.BYTE(U.LOW%) !   Send # of seconds
+	  FILLNUM = 2%
+	END IF					! Done with Multicast Timer
+ 
+	REMAP (LATBUF) STRING	FILL=FILLNUM,	! Maybe skip Multicast Timer  &
+				SENO.TYPE2,	! Position next type code     &
+				SENO.RESERVED,	! Reserved byte		      &
+				SENO.BITMASK()	! Group Code Bitmask
+	SENO.RESERVED = 0%			! Clear Reserved Byte
+	SENO.TYPE2 = 0%				! Clear Type Code
+	ENAPOS% = 0%				! Clear /ENABLE position
+	DISPOS% = 0%				! Clear /DISABLE position
+	ENAALL% = 0%				! Clear /ENABLE=ALL
+	DISALL% = 0%				! Clear /DISABLE=ALL
+	CALL FET$CQ BY REF (ENA.Q%)		! /ENABLE specified?
+	IF U.PRES% THEN				! Yes
+	  SENO.TYPE2 = 2%			!   Set Type Code
+	  ENAPOS% = U.POS%			!   Save position
+	  ENAALL% = 0%				!   Clear ENAALL
+	  CALL FET$KA BY REF (ALL.K%)		!   /ENA=ALL?
+	  ENAALL% = 1% IF U.PRES% 		!   Yes
+	END IF					!
+	CALL FET$CQ BY REF (DIS.Q%)		! /DISABLE specified?
+	IF U.PRES% THEN				! Yes
+	  SENO.TYPE2 = 2%			!   Set Type Code
+	  DISPOS% = U.POS%			!   Save position
+	  DISALL% = 0%				!   Clear DISALL
+	  CALL FET$KA BY REF (ALL.K%)		!   /DIS=ALL?
+	  DISALL% = 1% IF U.PRES%		!   Yes
+	END IF					!
+	GOTO ID_STRING IF SENO.TYPE2 = 0%	! Neither /ENA nor /DIS?
+	IF ENAALL% + DISALL% = 0% THEN		! Neither was /ALL
+	  CALLBUF(I%) = 0% FOR I% = 0% TO 40%	!  Clear buffer
+	  CALLBUF(0%)  = 40%			!   Num of elements (for CHANGE)
+	  CALLBUF(1%)  = 6%			!   SYS call to FIP
+	  CALLBUF(2%)  = 22%			!   SEND/RCV function code
+	  CALLBUF(3%)  = 12%			!   SHOW function
+	  CALLBUF(4%)  = 1%			!   NODE subfunction
+	  CALLBUF(11%) = 2%			!   Channel Number
+	  CALLBUF(13%) = 116%			!   Length of param list
+	  SENO.BITMASK(I%) = 0% FOR I% = 0% TO 31% ! Clear the bitmask
+
+	  OPEN "_NL:" AS FILE #2%, MAP SHOBUF	!   Open null dev,assoc buffer
+
+	  CHANGE CALLBUF TO CALLBUF$		!   Form the SYS CALL String
+	  ON ERROR GOTO GET_BITMASK_ERR		!   Set local error trap
+	  CHANGE SYS(CALLBUF$) TO CALLBUF	!   Do the SYS CALL
+	  ON ERROR GOTO STANDARD_ERR		!   Reset error trap
+	  REMAP (SHOBUF)  SHNO.MULTICAST,	! Multicast Timer    &
+			  SHNO.RESERVED,	! Reserved byte	     &
+			  SHNO.BITMASK(),	! Bitmask	     &
+			  SHNO.LENGTH,		! String Length	     &
+			  SHNO.STRING = SHNO.LENGTH ! String
+
+	  SENO.BITMASK(I%) = SHNO.BITMASK(I%) FOR I% = 0% TO 31% !Copy bitmask
+	END IF
+
+ DISENA:
+	GOTO ENABLE IF (DISPOS% = 0%)		! No /DISABLE, do /ENABLE
+	GOTO DISABLE IF (ENAPOS% = 0%)		! No /ENABLE, do /DISABLE
+	GOTO DISABLE IF DISPOS% < ENAPOS%	! Was /DISABLE first?
+
+ ENABLE:
+	ENAPOS% = 0%				! Clear ENAPOS% to prevent loop
+	IF ENAALL% THEN				! Enable all groups?
+	  SENO.BITMASK(I%) = -1% FOR I% = 0% TO 31% ! Yes - set all bits
+	ELSE					! No
+	  CALL FET$CQ BY REF (ENA.Q%)		!   Refetch /ENABLE
+	  CALL FET$A BY REF			!   Get an argument
+	  UNTIL NOT (U.PRES%)			!     For each argument
+	    ARG% = U.LOW%			!	Get it
+	    J% = ARG%/8%			!	Calculate word index
+	    SENO.BITMASK(J%) = (SENO.BITMASK(J%) OR ONEBIT(ARG%-(J%*8%)))
+	    CALL FET$A BY REF			!    Get the next argument
+	  NEXT
+	END IF
+ DISABLE:
+	GOTO FINISH_ENA_DIS IF (DISPOS% = 0%)	! Don't need to do /DISABLE
+	DISPOS% = 0%				! Clear DISPOS% to prevent loop
+	IF DISALL% THEN				! Disable all groups?
+	  SENO.BITMASK(I%) =  0% FOR I% = 0% TO 31% ! Yes - clear all bits
+	ELSE					! No
+	  CALL FET$CQ BY REF (DIS.Q%)		!   Refetch /DISABLE
+	  CALL FET$A BY REF			!   Get an argument
+	  UNTIL NOT (U.PRES%)			!     For each argument
+	    ARG% = U.LOW%			!	Get it
+	    J% = ARG%/8%			!	Calculate byte index
+	    SENO.BITMASK(J%) = (SENO.BITMASK(J%) AND NOT(ONEBIT(ARG%-(J%*8%))))
+	    CALL FET$A BY REF			!    Get the next argument
+	  NEXT
+	END IF
+	GOTO ENABLE IF ENAPOS%			! /DISABLE came first
+
+ FINISH_ENA_DIS:
+	FILLNUM = FILLNUM + 34%
+
+ ID_STRING:
+	REMAP (LATBUF) STRING	FILL=FILLNUM,	! Skip other info	      &
+				SENO.TYPE3,	! Position next type code     &
+				SENO.STRLENGTH,	! String Length		      &
+				SENO.IDSTRING = 64% ! ID String
+
+	CALL FET$CQ BY REF (IDE.Q%)		! /IDENTIFICATION specified?
+	IF U.PRES% THEN				! Yes
+	  CALL FET$A BY REF			!   Get ID string
+	  U.LEN% = U.LEN% - 2%			!   Reduce length by the '"'s
+	  IF U.LEN% > 64% THEN			!   String too long?
+	    ERR% = EXPERR			!     Set error
+	    GOTO SET_NODE_ERR			!     Goto error handler
+	  END IF				!
+	  SENO.TYPE3 = 3%			!   Set type code
+	  SENO.IDSTRING = MID(U.STR$,2%,U.LEN%)	!   Extract string w/out "'s
+	  SENO.STRLENGTH = U.LEN%		!   String Length
+	  FILLNUM = FILLNUM + U.LEN% + 2%	!   Calculate buffer size
+	END IF					! Done with /IDENTIFICATION
+
+	IF FILLNUM > 0% THEN 			! If there's somethign to do
+	  CALLBUF(I%) = 0% FOR I% = 0% TO 40%	!   Clear buffer
+	  CALLBUF(0%)  = 40%			!   Num of elements (for CHANGE)
+	  CALLBUF(1%)  = 6%			!   SYS call to FIP
+	  CALLBUF(2%)  = 22%			!   SEND/RCV function code
+	  CALLBUF(3%)  = -12%			!   SET function
+	  CALLBUF(4%)  = 1%			!   NODE subfunction
+	  CALLBUF(11%) = 1%			!   Channel Number
+	  CALLBUF(13%) = FILLNUM		!   Length of param list
+
+	  CHANGE CALLBUF TO CALLBUF$		!   Form the SYS CALL String
+	  ON ERROR GOTO SET_NODE_CALL_ERR	!   Set up error trap
+	  CHANGE SYS(CALLBUF$) TO CALLBUF	!   Do the SYS CALL
+	  ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+	END IF					! End do SYS call
+
+	CALL FET$CQ BY REF (ACC.Q%)		! /ACCESS_DEFAULT specified?
+	IF U.PRES% THEN				! If so then
+	  JUNK$ = "4"C				!   Indicate to set bit 2
+	  CALL FET$K BY REF 			!   Fetch keyword argument
+	  IF U.KEY% = DIA.K% THEN		!   If =DIALUP then
+	    JUNK$ = "0"C + "0"C + JUNK$		!     Make that clear bit 2
+	  END IF				!   Endif
+	  ON ERROR GOTO SET_NODE_CALL_ERR	!   Set up error trap
+	  JUNK$ = SYS("6"C + "34"C + "3"C + "0"C + JUNK$) 
+						!   Execute UU.CFG syscall
+						!   SYS(CHR$(6)+CHR$(34)+...)
+	  ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+	ELSE 					! Else
+	  IF FILLNUM = 0% THEN			!   If there were no qualifiers
+	    ERR% = TLNOFN			!     Indicate that
+	    GOTO SET_NODE_ERR			!     Return error
+	  END IF				!   End if
+	END IF					! End if
+ 
+	CALL FET$CQ BY REF (LOG.Q%)		! Check for /LOG 
+	IF NOT (U.NO%) THEN			! /NOLOG is the default
+	  PRINT "Node characteristics set"
+	END IF
+	GOTO SET_NODE_END
+
+ GET_BITMASK_ERR:
+	RESUME DISENA				! Resume on any error
+
+ SET_NODE_CALL_ERR:
+	RESUME SET_NODE_ERR			! Goto the error handler
+
+ SET_NODE_ERR:
+	SELECT ERR%
+
+	CASE EXPERR				! ID string too long
+	  CALL DISPLY ("?Identification string too long")
+
+	CASE TLNOFN				! No qualifiers on command line
+	  PRINT "?No qualifiers on command line"
+
+	CASE ELSE
+	  SELECT ERR				! Select the error code
+						! 
+	  CASE BADNAM				! Name contained invalid char's
+	    CALL DISPLY ("?Identification string contains invalid characters")
+
+	  CASE PRVIOL				! Privilege violation
+	    PRINT "?SWCFG privilege required"
+
+	  CASE ELSE				! Anything else
+	    GOTO STANDARD_ERR
+
+	  END SELECT
+
+	END SELECT
+
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+
+ SET_NODE_END:
+	CLOSE #1%				! Close MAP channel
+	CLOSE #2%				! Close MAP channel
+	GOTO GET_COMMAND			! Get next command
+
+ SET_SERVICE:
+	!	Set SERVICE command
+	!
+	!
+
+	CALLBUF(J%) = 0% FOR J% = 0% TO 40%	! Clear Call buffer
+
+	CALLBUF(0%)  = 40%			! Num of elements (for CHANGE)
+	CALLBUF(1%)  = 6%			! SYS call to FIP
+	CALLBUF(2%)  = 22%			! SEND/RCV function code
+	CALLBUF(3%)  = -12%			! SET function
+	CALLBUF(4%)  = 2%			! SERVICE subfunction
+	CALL FET$P BY REF (NAM.T%)		! Fetch Parameter
+	IF U.LEN% > 16% THEN			! Too many characters?
+	  CALL DISPLY ("?Service name too long") !   Print error message
+	  GOTO GET_COMMAND			!   Get new command line
+	END IF					!
+	SAVSER$ = EDIT$(LEFT$(U.STR$,U.LEN%),32%) ! Save server name
+	SER.POS% = U.POS%			! Save position in case errmsg
+	CALLBUF(5%)  = U.LEN%			! Parameter name length
+	CALLBUF(6%)  = 1%			! Operation code = modify
+	CALLBUF(11%)  = 1%			! Channel number
+	CALLBUF(24%+I%) = ASCII(MID$(U.STR$,I%,1%)) FOR I% = 1% TO U.LEN%
+	
+	OPEN "_NL:" AS FILE #1%, MAP LATBUF	!   Open null dev,assoc buffer
+
+	CALL FET$CQ BY REF (STA.Q%)		! /STATIC_RATING specified?
+	IF U.PRES% THEN				! Yes
+	  SERV.TYPE1 = 1%			!   Set Data Type Code
+	  SERV.RESERVED = 0%			!   Clear Reserved Byte
+	  CALL FET$A BY REF			!   Get the argument
+	  SERV.RATING = WORD.TO.BYTE(U.LOW%)	!   Static Rating
+	  SERV.BITMASK = 0%			!   Dynamic not yet available
+	  FILLNUM = 4%
+	ELSE
+	  FILLNUM = 0%
+	END IF
+
+	CALL FET$CQ BY REF (IDE.Q%)		! /IDENTIFICATION specified?
+	IF U.PRES% THEN				! Yes
+	  CALL FET$A BY REF			!  Get the ID string
+	  U.LEN% = U.LEN% - 2%			!   Reduce length by the '"'s
+	  IF U.LEN% > 64% THEN			!   String too long?
+	    CALL DISPLY ("?Identification string too long")
+	    CLOSE #1%				!   Close output channel
+	    GOTO GET_COMMAND			!   Get new command line
+	  END IF					!
+	  REMAP (LATBUF) STRING	FILL=FILLNUM,	!   Skip other info	      &
+				SERV.TYPE2,	!   Position next type code   &
+				SERV.STRLENGTH,	!   String Length	      &
+				SERV.IDSTRING = 64% ! ID String
+	  SERV.TYPE2 = 2%			!   Set type code
+	  SERV.IDSTRING = MID(U.STR$,2%,U.LEN%)	! Extract middle w/out "'s
+	  SERV.STRLENGTH = U.LEN%		!   String Length
+	  FILLNUM = FILLNUM + U.LEN% + 2%	!   Update buffer length
+	ELSE					! No
+	  IF FILLNUM = 0% THEN			! Were there no qualifiers?
+	    ERR% = TLNOFN			!   Yes
+	    GOTO SET_SERVICE_ERR		!   Return error
+	  END IF
+	END IF
+
+	CALLBUF(13%) = FILLNUM			! Length of param list
+	CHANGE CALLBUF TO CALLBUF$		! Form the SYS CALL String
+	ON ERROR GOTO SET_SERVICE_CALL_ERR	! Set up error trap
+	CHANGE SYS(CALLBUF$) TO CALLBUF	! Do the SYS CALL
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+
+	CALL FET$CQ BY REF (LOG.Q%)		! Check for /LOG 
+	PRINT "Service "; SAVSER$;" modified" IF NOT (U.NO%) ! /NOLOG is default
+	GOTO SET_SERVICE_END
+
+ SET_SERVICE_CALL_ERR:
+	RESUME SET_SERVICE_ERR			! Goto the error handler
+
+ SET_SERVICE_ERR:
+	SELECT ERR%
+
+	CASE TLNOFN				! No qualifiers on command line
+	  PRINT "?No qualifiers on command line"
+
+	CASE ELSE
+	  SELECT ERR				! Select the error code
+						! 
+	  CASE BADNAM				! Bad name string
+	    PRINT "?Invalid characters in service name or identification string"
+
+	  CASE NOROOM				! No room
+	    PRINT "?No room available for new LAT Service"
+
+	  CASE NOSUCH				! Service does not exist
+	    U.POS% = SER.POS% 			! Restore position 
+	    CALL DISPLY ("?Service " + SAVSER$ + " does not exist")
+
+	  CASE PRVIOL				! Privilege violation
+	    PRINT "?SWCFG privilege required"
+
+	  CASE ELSE				! Anything else
+	    GOTO STANDARD_ERR
+
+	  END SELECT
+
+	END SELECT
+
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+	CLOSE #1%				! Close MAP channel
+	RESUME GET_COMMAND			! Resume to get next command
+
+ SET_SERVICE_END:
+	CLOSE #1%				! Close MAP channel
+	GOTO GET_COMMAND			! Get next command
+
+ SHOW_NODE:
+1000	!	Show NODE command
+	!
+	GOSUB CHECK_OUTPUT			! /OUTPUT specified?
+	
+	CALLBUF(I%) = 0% FOR I% = 0% TO 40%	! Clear buffer
+	CALLBUF(0%)  = 40%			! Num of elements (for CHANGE)
+	CALLBUF(1%)  = 6%			! SYS call to FIP
+	CALLBUF(2%)  = 22%			! SEND/RCV function code
+	CALLBUF(3%)  = 12%			! SHOW function
+	CALLBUF(4%)  = 1%			! NODE subfunction
+	CALLBUF(11%) = 1%			! Channel Number
+	CALLBUF(13%) = 116%			! Length of param list
+
+	OPEN "_NL:" AS FILE #1%, MAP SHOBUF	! Open null dev,assoc buffer
+	ON ERROR GOTO SHOW_NODE_ERR		! Set local error trap
+	CHANGE CALLBUF TO CALLBUF$		! Form the SYS CALL String
+	CHANGE SYS(CALLBUF$) TO CALLBUF		! Do the SYS CALL
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+	REMAP (SHOBUF) 	  SHNO.MULTICAST,	! Multicast Timer    &
+			  SHNO.RESERVED,	! Reserved byte	     &
+			  SHNO.BITMASK(),	! Bitmask	     &
+			  SHNO.LENGTH,		! String Length	     &
+			  SHNO.STRING = SHNO.LENGTH ! String
+
+	PRINT #OUT_CHNL%
+	PRINT #OUT_CHNL%, "Node Name:"; TAB(COLUMN1%);SHNO.STRING
+	FILLNUM = 35% + SHNO.LENGTH
+	REMAP (SHOBUF) STRING	FILL=FILLNUM,		! Skip Node name   &
+				SHNO.LENGTH,		! ID String length &
+				SHNO.STRING = SHNO.LENGTH ! Node ID String
+	PRINT #OUT_CHNL%, "Identification:"; 				   &
+			TAB(COLUMN1%);LEFT$(SHNO.STRING,SHNO.LENGTH)
+	PRINT #OUT_CHNL%, "Multicast Timer:";				   &
+			TAB(COLUMN1%);UNSIGNED.BYTE(SHNO.MULTICAST)
+						! Check Group Codes
+	REMAP (SHOBUF) 	  SHNO.MULTICAST,	! Multicast Timer    &
+			  SHNO.RESERVED,	! Reserved byte	     &
+			  SHNO.BITMASK()	! Bitmask
+	SHNO.ONE% = 0%				! Clear Have-we-printed-one flag
+	PRINT #OUT_CHNL%, "Group Codes:";	! Print the header
+	FOR I% = 0% TO 31%			! Byte by byte
+	  IF SHNO.BITMASK(I%) <> 0% THEN	!   Any bits set?
+	    FOR J% = 0% TO 7%			!     Bit by bit
+	      IF (SHNO.BITMASK(I%) AND ONEBIT(J%)) THEN	!      This bit set?
+		V% = FNPRINTCOLUMN%(NUM1$((I% * 8%) + J%))!Print out group code
+		SHNO.ONE% = -1%			!   Flag that we got one
+	      END IF				!   Done with message
+	    NEXT J%				!     Done with this bit
+	  END IF				!   Done with this word
+	NEXT I%					! Done with Group Codes
+	IF NOT (SHNO.ONE%) THEN			! If we didn't printed one
+		V% = FNPRINTCOLUMN%("None")	!  Say so
+	END IF
+	PRINT #OUT_CHNL%				! Bring the cursor back
+	PRINT #OUT_CHNL%				! Print a blank line
+
+	FILLNUM = 0%
+	CALLBUF(I%) = 0% FOR I% = 0% TO 40%	! Clear buffer
+	CALLBUF(0%)  = 40%			! Num of elements (for CHANGE)
+	CALLBUF(1%)  = 6%			! SYS call to FIP
+	CALLBUF(2%)  = 22%			! SEND/RCV function code
+	CALLBUF(3%)  = 12%			! SHOW function
+	CALLBUF(4%)  = 3%			! LINES subfunction
+	CALLBUF(11%) = 1%			! Channel Number
+	CALLBUF(13%) = 18%			! Length of param list
+
+	CHANGE CALLBUF TO CALLBUF$		! Form the SYS CALL String
+	CHANGE SYS(CALLBUF$) TO CALLBUF	! Do the SYS CALL
+
+	IF SHLI.NUMLINES > 0% THEN		!If any lines are enabled
+	  PRINT #OUT_CHNL%, "LAT is enabled on line ";! Print header
+	  FOR J% = 1% TO SHLI.NUMLINES		! Start the loop
+	    FILLNUM = ((J%-1%) * 4%) + 2%	!   Set up fill count
+	    REMAP (SHOBUF) STRING FILL=FILLNUM, !  Skip over device(s)   &
+			   SHLI.DEVNAME = 2%,	!   Device name		  &
+			   SHLI.DEVUNIT,	!   Device unit number    &
+			   SHLI.UNITFLAG	!   Unit number flag
+	    PRINT #OUT_CHNL%, SHLI.DEVNAME;	!  Print the device name
+	    PRINT #OUT_CHNL%, NUM1$(SHLI.DEVUNIT); IF (SHLI.UNITFLAG <> 0%) !Print unit #
+	    PRINT #OUT_CHNL%, ":  ";		!  Print the colon
+	  NEXT J%				! Next device
+	  PRINT #OUT_CHNL%			! Bring the cursor back
+	ELSE
+	  PRINT #OUT_CHNL%, "LAT is not enabled on any lines" !No lines enabled
+	END IF
+
+	GOTO SHOW_NODE_END
+
+ SHOW_NODE_ERR:
+	SELECT ERR				! Select the error code
+						! 
+	CASE NOTOPN				! I/O channel not open
+	  PRINT "?No LAT Node characteristics set"
+
+	CASE ELSE				! Anything else
+	  GOTO STANDARD_ERR
+
+	END SELECT
+
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+	CLOSE #1%				! Close MAP channel
+	CLOSE #3%				! Close output channel
+	RESUME GET_COMMAND			! Resume to get next command
+
+ SHOW_NODE_END:
+	CLOSE #1%				!close MAP channel
+	CLOSE #3%				!close output channel
+
+	GOTO GET_COMMAND			! Get next command
+
+ SHOW_SERVICES:
+	!	Show SERVICES command
+	!
+	GOSUB CHECK_OUTPUT			! /OUTPUT specified?
+
+	CALLBUF(J%) = 0% FOR J% = 0% TO 40%	! Clear Call buffer
+	CALL FET$P BY REF (NAM.T%)		! Parameter specified?
+	IF U.PRES% THEN				! Yes
+	  IF U.LEN% > 16% THEN			!     Name string too long?
+	    CALL DISPLY ("?Service name too long") !	Print error message
+	    CLOSE #3%				!	Close output channel
+	    GOTO GET_COMMAND			!	Get new command line
+	  END IF				!
+	  SAVSER$ = EDIT$(LEFT$(U.STR$,U.LEN%),32%) ! Save server name
+	  LENGTH% = U.LEN%			!   Store the length
+	  CALLBUF(I%+24%) = ASCII(MID$(U.STR$,I%,1%)) FOR I% = 1% TO LENGTH%
+	ELSE					! No
+	  LENGTH% = 0%				!   Name Length
+	  CALLBUF(5%)  = 1%			!   Initialize Node index
+	END IF					!
+	OPEN "_NL:" AS FILE #1%, MAP LATBUF	!   Open null dev,assoc buffer
+
+	UNTIL (0% = 1%)				!   Loop through known servers
+	  CALLBUF(0%)  = 40%			!   Num of elements (for CHANGE)
+	  CALLBUF(1%)  = 6%			!   SYS call to FIP
+	  CALLBUF(2%)  = 22%			!   SEND/RCV function code
+	  CALLBUF(3%)  = 12%			!   SHOW function
+	  CALLBUF(4%)  = 2%			!   SERVICES subfunction
+	  CALLBUF(6%)  = LENGTH%		!   Name length
+	  CALLBUF(11%) = 1%			!   Channel Number
+	  CALLBUF(13%) = 84%			!   Length of param list
+
+	  CHANGE CALLBUF TO CALLBUF$		!   Form the SYS CALL String
+	  ON ERROR GOTO SHOW_SERVICES_ERR	!   Set up error trap
+	  JUNK$ = SYS(CALLBUF$)			!   Do the SYS CALL
+	  ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+
+	  PRINT #OUT_CHNL%
+	  PRINT #OUT_CHNL%, "Service:        ";LEFT$(SHSC.NAME,SHSC.NAMELENGTH)
+	  RATING = SHSC.SERVCRATING 
+	  FILLNUM = (3% + SHSC.NAMELENGTH)
+	  REMAP (LATBUF) STRING FILL=FILLNUM,		! Skip other stuff &
+				SHSC.IDLENGTH,		! Node name length &
+				SHSC.IDSTRING = SHSC.IDLENGTH ! Srvc ID string
+
+	  PRINT #OUT_CHNL%, "Identification: "; LEFT$(SHSC.IDSTRING,SHSC.IDLENGTH)
+	  PRINT #OUT_CHNL%, "Static rating: ";
+	  IF RATING >= 0 THEN			! If its a positive byte
+	    PRINT #OUT_CHNL%, RATING		!   just print it out
+	  ELSE					! Otherwise
+	    PRINT #OUT_CHNL%, 256% + RATING 	!   Print it as unsigned
+	  END IF
+	  PRINT #OUT_CHNL%
+
+	  GOTO SHOW_SERVICES_END IF CALLBUF(5%) = 0% !  Done if single node
+	  CALLBUF(5%) = CALLBUF(5%) + 1%	!     Increment node index
+	NEXT					!   Do next node
+	PRINT #OUT_CHNL%
+	GOTO SHOW_SERVICES_END
+
+ SHOW_SERVICES_ERR:
+	SELECT ERR
+
+	CASE NOSUCH				! end-of-data received 
+	  CALL DISPLY ("?Service " + SAVSER$ + " does not exist")	&
+		IF (CALLBUF(5%) = 0%) 		!Error on single node
+	  CALL DISPLY ("?No LAT services currently offered") &
+		IF (CALLBUF(5%) = 1%)		! Request for all services
+
+	CASE BADNAM				! Name contained invalid char's
+	  CALL DISPLY ("?Service name contains invalid characters")
+
+	CASE ELSE
+	  GOTO STANDARD_ERR
+
+	END SELECT
+
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+	CLOSE #1%				! Close MAP channel
+	CLOSE #3%				! Close output channel
+	RESUME GET_COMMAND			! Resume to next command
+	  
+ SHOW_SERVICES_END:
+	CLOSE #1%				! Close MAP channel
+	CLOSE #3%				! Close output channel
+
+
+	GOTO GET_COMMAND			! Get next command
+
+ SHOW_COUNTERS:
+	!	Show COUNTERS command
+	!
+	GOSUB CHECK_OUTPUT			! /OUTPUT specified?
+	CALLBUF(J%) = 0% FOR J% = 0% TO 40%	! Clear buffer
+   !
+   !
+   ! /TERMINAL_SERVERS
+   !
+   !
+	CALL FET$CQ BY REF (TER.Q%)		! /TERMINAL_SERVERS specified?
+	IF U.PRES% THEN				! Yes
+	  SAVBUF(6%) = 0%			!   clear bitmask
+	  CALL FET$CQ BY REF (RES.Q%)		!   /RESET (or /ZERO) specified?
+	  SAVBUF(6%) = (SAVBUF(6%) OR ONEBIT(7%)) IF U.PRES%  ! Set bit 7
+	  CALL FET$P BY REF (NAM.T%)		!   Parameter specified?
+	  IF U.PRES% THEN			!   Yes
+	    IF U.LEN% > 16% THEN		!     Name string too long?
+	      CALL DISPLY ("?Server name too long") !	Print error message
+	      CLOSE #3%				!	Close output channel
+	      GOTO GET_COMMAND			!	Get new command line
+	    END IF				!
+	    SAVSER$ = EDIT$(LEFT$(U.STR$,U.LEN%),32%) ! Save server name
+	    CALLBUF(7%) = 0%			!     Get counters for 1 node
+	    LENGTH% = U.LEN%			!     Store the length
+	    CALLBUF(8%) = LENGTH%		!     Pass name length
+	    FOR I% = 1% TO LENGTH%		!     Pass name string
+	      CALLBUF(I%+24%)  = ASCII(MID$(U.STR$,I%,1%)) ! Get next char
+	    NEXT I%				!
+	  ELSE					!   No
+	    CALLBUF(7%) = 1%			!     Get counters for all nodes
+	  END IF				!
+	  OPEN "_NL:" AS FILE #1%, MAP LATBUF	!   Open null dev,assoc buffer
+
+	  UNTIL (0% = 1%)			!   Loop through known servers
+	    CALLBUF(0%)  = 40%			!   Num of elements (for CHANGE)
+	    CALLBUF(1%)  = 6%			!   SYS call to FIP
+	    CALLBUF(2%)  = 22%			!   SEND/RCV function code
+	    CALLBUF(3%)  = 12%			!   SHOW function
+	    CALLBUF(4%)  = 4%			!   COUNTERS subfunction
+	    CALLBUF(5%)  = 2%			!   counter type = server
+	    CALLBUF(6%)  = SAVBUF(6%)		!   bitmask
+	    CALLBUF(11%) = 1%			!   Channel Number
+	    CALLBUF(13%) = 40%			!   Length of param list
+	    CHANGE CALLBUF TO CALLBUF$		!   Form the SYS CALL String
+	    ON ERROR GOTO TER_COUNTER_ERR	!   Set up error trap
+	    JUNK$ = SYS(CALLBUF$)		!   Do the SYS CALL
+	    ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+
+	    PRINT #OUT_CHNL%			! Print the output
+	    PRINT #OUT_CHNL%, "  Server:  ";MID$(JUNK$,25%,ASCII(RIGHT(JUNK$,5%)))
+	    PRINT #OUT_CHNL%, ,"Seconds since last zeroed         : ";
+	    CURR.TIME = SHCT.CTIME
+	    CURR.TIME = 65536 + SHCT.CTIME IF SHCT.CTIME < 0%
+	    ZERO.TIME = SHCT.ZTIME
+	    ZERO.TIME = 65536 + SHCT.ZTIME IF SHCT.ZTIME < 0%
+	    PRINT #OUT_CHNL%, SECDIF(SHCT.CDATE,CURR.TIME,SHCT.ZDATE,ZERO.TIME)
+	    PRINT #OUT_CHNL%, ,"Messages Received                 : ";UNSIGNED.LONG(SHCT.MSGIN)
+	    PRINT #OUT_CHNL%, ,"Bytes Received                    : ";UNSIGNED.LONG(SHCT.BYTIN)
+	    PRINT #OUT_CHNL%, ,"Messages Transmitted              : ";UNSIGNED.LONG(SHCT.MSGOUT)
+	    PRINT #OUT_CHNL%, ,"Bytes Transmitted                 : ";UNSIGNED.LONG(SHCT.BYTOUT)
+	    PRINT #OUT_CHNL%, ,"Messages Retransmitted            : ";UNSIGNED.LONG(SHCT.MSGRETRY)
+	    PRINT #OUT_CHNL%, ,"Messages Received Out of Sequence : ";UNSIGNED.LONG(SHCT.MSGOOS)
+	!    PRINT #OUT_CHNL%, ,"Invalid Messages Received         : ";UNSIGNED.LONG(SHCT.INVMSG)
+	    PRINT #OUT_CHNL%, ,"Invalid Slots Received            : ";UNSIGNED.LONG(SHCT.INVSLOT)
+	    PRINT #OUT_CHNL%
+
+	    GOTO TER_COUNTER_END IF CALLBUF(7%) = 0%	!  Done if single node
+	    CALLBUF(7%) = CALLBUF(7%) + 1%	!     Increment node index
+	  NEXT					!   Do next node
+	  GOTO TER_COUNTER_END
+
+ TER_COUNTER_ERR:
+	  SELECT ERR				! Select the error code
+						! 
+	  CASE NOSUCH				! end-of-data received 
+	    CALL DISPLY ("?Server "+ SAVSER$ + " does not exist") &
+		IF (CALLBUF(7%) = 0%) 		! 1 server
+	    CALL DISPLY ("?No active servers") &
+		IF (CALLBUF(7%) = 1%) 		! Request for all servers
+
+	  CASE PRVIOL				! Privilege violation
+	    PRINT "?SWCTL privilege required"
+
+	  CASE BADNAM				! Name contained invalid char's
+	    CALL DISPLY ("?Server name contains invalid characters")
+
+	  CASE ELSE				! Anything else
+	    GOTO STANDARD_ERR
+
+	  END SELECT
+
+	  ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+	  CLOSE #1%				!   close MAP channel
+	  CLOSE #3%				!   close output channel
+	  RESUME GET_COMMAND			!   resume to get next command
+
+ TER_COUNTER_END:
+	  CLOSE #1%				! Close MAP channel
+	  CLOSE #3%				! Close output channel
+	  GOTO GET_COMMAND			! Get next command
+	END IF					! Done with /TERMINAL_SERVER
+
+   !
+   !
+   ! /DEVICE
+   !
+   !
+	CALL FET$CQ BY REF (DEV.Q%)		! /DEVICE specified?
+	IF U.PRES% THEN				! Yes
+	  SAVBUF(6%) = 0%			!   clear bitmask
+	  CALL FET$CQ BY REF (RES.Q%)		!   /RESET (or /ZERO) specified?
+	  SAVBUF(6%) = (SAVBUF(6%) OR ONEBIT(7%)) IF U.PRES%  ! Set bit 7
+	  CALL FET$P BY REF (NAM.T%)		!   Parameter specified?
+	  PRINT "%Parameter Ignored" IF U.PRES% !   Yes - Ignore for now
+	!
+	! First issue call to get active devices
+	!
+	  FILLNUM = 0%
+	  CALLBUF(I%) = 0% FOR I% = 0% TO 40%	! Clear buffer
+	  CALLBUF(0%)  = 40%			! Num of elements (for CHANGE)
+	  CALLBUF(1%)  = 6%			! SYS call to FIP
+	  CALLBUF(2%)  = 22%			! SEND/RCV function code
+ 	  CALLBUF(3%)  = 12%			! SHOW function
+	  CALLBUF(4%)  = 3%			! LINES subfunction
+	  CALLBUF(11%) = 2%			! Channel Number
+	  CALLBUF(13%) = 18%			! Length of param list
+
+	  OPEN "_NL:" AS FILE #2%, MAP SHOBUF	! Open null dev,assoc buffer
+	  CHANGE CALLBUF TO CALLBUF$		! Form the SYS CALL String
+	  CHANGE SYS(CALLBUF$) TO CALLBUF	! Do the SYS CALL
+
+	  IF SHLI.NUMLINES > 0% THEN		! If any lines are enabled
+	    DEVCOUNT = SHLI.NUMLINES
+	    FOR J% = 1% TO DEVCOUNT		!   For each enabled line
+	      FILLNUM = ((J%-1%) * 4%) + 2%	!   Set up fill count
+
+	      REMAP (SHOBUF) STRING FILL=FILLNUM, !  Skip over device(s)   &
+			     SHLI.DEVNAME = 2%,	!   Device name		    &
+			     SHLI.DEVUNIT,	!   Device unit number      &
+			     SHLI.UNITFLAG	!   Unit number flag
+
+	      SAVENAME(J%) = SHLI.DEVNAME 
+	      SAVEUNIT(J%) = SHLI.DEVUNIT
+	      SAVEUFLAG(J%) = SHLI.UNITFLAG
+	    NEXT J%
+	    CLOSE #2%				! Done with SHOBUF
+
+	    OPEN "_NL:" AS FILE #1%, MAP LATBUF	!   Open null dev,assoc buffer
+	    FOR I% = 1% TO DEVCOUNT
+	      CALLBUF(J%) = 0% FOR J% = 0% TO 40% ! Clear buffer
+	      CALLBUF(0%)  = 40%		!   Num of elements (for CHANGE)
+	      CALLBUF(1%)  = 6%			!   SYS call to FIP
+	      CALLBUF(2%)  = 22%		!   SEND/RCV function code
+	      CALLBUF(3%)  = 12%		!   SHOW function
+	      CALLBUF(4%)  = 4%			!   COUNTERS subfunction
+	      CALLBUF(5%)  = 1%			!   counter type = device
+	      CALLBUF(6%)  = SAVBUF(6%)		!   bitmask
+	      CALLBUF(11%) = 1%			!   Channel Number
+	      CALLBUF(13%) = 28%		!   Length of param list
+	      CALLBUF(33%) = ASCII(LEFT$(SAVENAME(I%),1%)) ! 1st char of device
+	      CALLBUF(34%) = ASCII(MID$(SAVENAME(I%),2%,1%))!2nd char of device
+	      CALLBUF(35%) = SAVEUNIT(I%)	!   Unit number
+	      CALLBUF(36%) = SAVEUFLAG(I%)	!   Unit flag
+
+	      CHANGE CALLBUF TO CALLBUF$	!   Form the SYS CALL String
+	      ON ERROR GOTO DEV_COUNTER_ERR	!   Set up error trap
+	      JUNK$ = SYS(CALLBUF$)		!   Do the SYS CALL
+	      ON ERROR GOTO STANDARD_ERR	!   Reset standard error trap
+
+	      PRINT #OUT_CHNL%			! Print the output
+	      PRINT #OUT_CHNL%, "  Device ";SAVENAME(I%);	! Print the device
+	      PRINT #OUT_CHNL%,		   NUM1$(SAVEUNIT(I%));	! Print unit number &
+	    					IF SAVEUFLAG(I%)!  If its real
+	      PRINT #OUT_CHNL%, ":"				   ! Finish off device
+	      PRINT #OUT_CHNL%, ,"Seconds since last zeroed         : ";
+	      CURR.TIME = SHCD.CTIME
+	      CURR.TIME = 65536 + SHCD.CTIME IF SHCD.CTIME < 0%
+	      ZERO.TIME = SHCD.ZTIME
+	      ZERO.TIME = 65536 + SHCD.ZTIME IF SHCD.ZTIME < 0%
+	      PRINT #OUT_CHNL%, SECDIF(SHCD.CDATE,CURR.TIME,SHCD.ZDATE,ZERO.TIME)
+	      PRINT #OUT_CHNL%, ,"Messages Transmitted              : ";UNSIGNED.LONG(SHCD.PCKTOUT)
+	      PRINT #OUT_CHNL%, ,"Bytes Transmitted                 : ";UNSIGNED.LONG(SHCD.BYTOUT)
+	      PRINT #OUT_CHNL%, ,"Messages Received                 : ";UNSIGNED.LONG(SHCD.PCKTIN)
+	      PRINT #OUT_CHNL%, ,"Bytes Received                    : ";UNSIGNED.LONG(SHCD.BYTIN)
+	      PRINT #OUT_CHNL%, ,"User Buffer Unavailable           : ";UNSIGNED.LONG(SHCD.NOBUF)
+	      PRINT #OUT_CHNL%
+	    NEXT I%				! Next device
+	    PRINT #OUT_CHNL%			! Bring the cursor back
+	  ELSE
+	    PRINT #OUT_CHNL%, "LAT is not enabled on any lines" !No lines enabled
+	  END IF
+	  GOTO DEV_COUNTER_END
+
+ DEV_COUNTER_ERR:
+	  SELECT ERR				! Select the error code
+						! 
+	  CASE NODEVC				! Invalid Ethernet device 
+	    CALL DISPLY ("?Invalid Ethernet Device")
+
+	  CASE PRVIOL				! Privilege violation
+	    PRINT "?SWCTL privilege required"
+
+	  CASE HNGDEV				! Hung Device
+	    CALL DISPLY ("?Controller disabled or inoperative")
+
+	  CASE ELSE				! Anything else
+	    GOTO STANDARD_ERR
+
+	  END SELECT
+
+	  ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+	  CLOSE #1%				!   close MAP channel
+	  CLOSE #3%				!   close output channel
+	  RESUME GET_COMMAND			!   resume to get next command
+
+ DEV_COUNTER_END:
+	  CLOSE #1%				!   Close MAP channel
+	  CLOSE #3%				!   Close output channel
+	  GOTO GET_COMMAND			!   Get next command
+	END IF					! Done with /DEVICE
+
+   !
+   !
+   ! /NODE  (default operation)
+   !
+   !
+	CALLBUF(J%) = 0% FOR J% = 0% TO 40%	! Clear buffer
+	CALLBUF(0%)  = 40%			!   Num of elements (for CHANGE)
+	CALLBUF(1%)  = 6%			!   SYS call to FIP
+	CALLBUF(2%)  = 22%			!   SEND/RCV function code
+	CALLBUF(3%)  = 12%			!   SHOW function
+	CALLBUF(4%)  = 4%			!   COUNTERS subfunction
+	CALL FET$CQ BY REF (RES.Q%)		!   /RESET (or /ZERO) specified?
+	CALLBUF(6%) = (CALLBUF(6%) OR ONEBIT(7%)) IF U.PRES% ! Set bit 7
+	CALLBUF(11%) = 1%			!   Channel Number
+	CALLBUF(13%) = 60%			!   Length of param list
+	CALL FET$P BY REF (NAM.T%)		!   Parameter specified?
+	PRINT "%Parameter Ignored" IF U.PRES%	!   Yes - Ignore
+	OPEN "_NL:" AS FILE #1%, MAP LATBUF	!   Open null dev,assoc buffer
+
+	CHANGE CALLBUF TO CALLBUF$		!   Form the SYS CALL String
+	ON ERROR GOTO NODE_COUNTER_ERR		!   Set up error trap
+	JUNK$ = SYS(CALLBUF$)			!   Do the SYS CALL
+	ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+
+	PRINT #OUT_CHNL%
+	PRINT #OUT_CHNL%, "     LAT Host Node Counters"     ! Print the output
+	PRINT #OUT_CHNL%, ,"Seconds since last zeroed         : ";
+	CURR.TIME = SHCN.CTIME
+	CURR.TIME = 65536 + SHCN.CTIME IF SHCN.CTIME < 0%
+	ZERO.TIME = SHCN.ZTIME
+	ZERO.TIME = 65536 + SHCN.ZTIME IF SHCN.ZTIME < 0%
+	PRINT #OUT_CHNL%, SECDIF(SHCN.CDATE,CURR.TIME,SHCN.ZDATE,ZERO.TIME)
+	PRINT #OUT_CHNL%, ,"Messages Transmitted              : ";UNSIGNED.LONG(SHCN.MSGOUT)
+	PRINT #OUT_CHNL%, ,"Bytes Transmitted                 : ";UNSIGNED.LONG(SHCN.BYTOUT)
+	PRINT #OUT_CHNL%, ,"Messages Received                 : ";UNSIGNED.LONG(SHCN.MSGIN)
+	PRINT #OUT_CHNL%, ,"Bytes Received                    : ";UNSIGNED.LONG(SHCN.BYTIN)
+	PRINT #OUT_CHNL%, ,"Messages Retransmitted            : ";UNSIGNED.LONG(SHCN.MSGRETRY)
+	PRINT #OUT_CHNL%, ,"Messages Received Out of Sequence : ";UNSIGNED.LONG(SHCN.MSGOOS)
+	PRINT #OUT_CHNL%, ,"Invalid Messages Received         : ";UNSIGNED.LONG(SHCN.INVMSG)
+	PRINT #OUT_CHNL%, ,"Invalid Slots Received            : ";UNSIGNED.LONG(SHCN.INVSLOT)
+	PRINT #OUT_CHNL%, ,"Illegal Messages Received         : ";UNSIGNED.LONG(SHCN.ILLMSG)
+	PRINT #OUT_CHNL%, ,"Illegal Slots Received            : ";UNSIGNED.LONG(SHCN.ILLSLOT)
+	PRINT #OUT_CHNL%, ,"Resource Allocation Errors        : ";UNSIGNED.LONG(SHCN.ALLOC)
+	PRINT #OUT_CHNL%, ,"Transmit Errors                   : ";UNSIGNED.LONG(SHCN.TRANS)
+	PRINT #OUT_CHNL%, ,"Circuit Timeouts                  : ";UNSIGNED.LONG(SHCN.TIMEOUTS)
+	PRINT #OUT_CHNL%
+
+	GOTO NODE_COUNTER_END
+
+ NODE_COUNTER_ERR:
+	  SELECT ERR				! Select the error code
+
+	CASE NOTOPN				! I/O channel not open
+	  PRINT "?No LAT Node characteristics set"
+
+	  CASE PRVIOL				! Privilege violation
+	    PRINT "?SWCTL privilege required"
+
+	  CASE ELSE				! Anything else
+	    GOTO STANDARD_ERR
+
+	  END SELECT
+
+	  ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+	  CLOSE #1%				!   close MAP channel
+	  CLOSE #3%				!   close output channel
+	  RESUME GET_COMMAND			!   resume to get next command
+
+ NODE_COUNTER_END:
+	  CLOSE #1%				!   Close MAP channel
+	  CLOSE #3%				!   Close output channel
+	  GOTO GET_COMMAND			!   Get next command
+
+ SHOW_TERM_SERVERS:
+	!	Show TERMINAL_SERVERS command
+	!
+	GOSUB CHECK_OUTPUT			! /OUTPUT specified?
+
+	CALLBUF(J%) = 0% FOR J% = 0% TO 40%	! Clear Call buffer
+	CALL FET$P BY REF (NAM.T%)		! Parameter specified?
+	IF U.PRES% THEN				! Yes
+	  IF U.LEN% > 16% THEN			!     Name string too long?
+	    CALL DISPLY ("?Server name too long") !	Print error message
+	    CLOSE #3%				!	Close output channel
+	    GOTO GET_COMMAND			!	Get new command line
+	  END IF				!
+	  SAVSER$ = EDIT$(LEFT$(U.STR$,U.LEN%),32%) ! Save server name
+	  LENGTH% = U.LEN%			!   Store the length
+	  CALLBUF(I%+24%) = ASCII(MID$(U.STR$,I%,1%)) FOR I% = 1% TO LENGTH%
+	ELSE					! No
+	  LENGTH% = 0%				!   Name Length
+	  CALLBUF(5%)  = 1%			!   Initialize Node index
+	END IF					!
+	OPEN "_NL:" AS FILE #1%, MAP LATBUF	!   Open null dev,assoc buffer
+
+	UNTIL (0% = 1%)				!   Loop through known servers
+	  CALLBUF(0%)  = 40%			!   Num of elements (for CHANGE)
+	  CALLBUF(1%)  = 6%			!   SYS call to FIP
+	  CALLBUF(2%)  = 22%			!   SEND/RCV function code
+	  CALLBUF(3%)  = 12%			!   SHOW function
+	  CALLBUF(4%)  = 5%			!   TERMINAL_SERVER subfunction
+	  CALLBUF(6%)  = LENGTH%		!   Name length
+	  CALLBUF(11%) = 1%			!   Channel Number
+	  CALLBUF(13%) = 14%			!   Length of param list
+
+	  CHANGE CALLBUF TO CALLBUF$		!   Form the SYS CALL String
+	  ON ERROR GOTO SHOW_TER_SERVER_ERR	!   Set up error trap
+	  JUNK$ = SYS(CALLBUF$)		!   Do the SYS CALL
+	  ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+
+	  PRINT #OUT_CHNL%, " Server:  "; MID$(JUNK$,25%,ASCII(RIGHT(JUNK$,6%)))
+	  PRINT #OUT_CHNL%
+	  PRINT #OUT_CHNL%, "   Active sessions:      "; SHTE.SESSIONS
+	  PRINT #OUT_CHNL%, "   Ethernet address:      "; FNHEX$
+	  PRINT #OUT_CHNL%, "   Keep alive timer:     "; SHTE.TIMER; "seconds"
+	  PRINT #OUT_CHNL%, "   Maximum buffer size:  "; SHTE.BUFFSIZE; "bytes"
+	  PRINT #OUT_CHNL%, "   LAT Protocol:          V"; 	&
+				NUM1$(SHTE.PROTLEVEL); "."; NUM1$(SHTE.ECOLEVEL)
+	  PRINT #OUT_CHNL%
+	  PRINT #OUT_CHNL%
+
+	  GOTO SHOW_TER_SERVER_END IF CALLBUF(5%) = 0% !  Done if single node
+	  CALLBUF(5%) = CALLBUF(5%) + 1%	!     Increment node index
+	NEXT					!   Do next node
+	GOTO SHOW_TER_SERVER_END
+
+ SHOW_TER_SERVER_ERR:
+	SELECT ERR
+
+	CASE NOSUCH				! end-of-data received 
+	  CALL DISPLY ("?Server " + SAVSER$ + " does not exist")	&
+		IF (CALLBUF(5%) = 0%) 		! 1 server
+	  CALL DISPLY ("?No known terminal servers") &
+		IF (CALLBUF(5%) = 1%)		! Request for all servers
+
+	CASE ELSE
+	  GOTO STANDARD_ERR
+
+	END SELECT
+
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+	CLOSE #1%				! Close MAP channel
+	CLOSE #3%				! Close output channel
+	RESUME GET_COMMAND			! Resume to next command
+	  
+ SHOW_TER_SERVER_END:
+	CLOSE #1%				! Close MAP channel
+	CLOSE #3%				! Close output channel
+	GOTO GET_COMMAND			! Get next command
+
+ SHOW_SESSIONS:
+2000	!	Show SESSIONS command
+	!
+	GOSUB CHECK_OUTPUT			! /OUTPUT specified?
+
+	SAVBUF(J%) = 0% FOR J% = 0% TO 40%	! Clear Save buffer
+	CALLBUF(J%) = 0% FOR J% = 0% TO 40%	! Clear buffer
+	CALL FET$P BY REF (NAM.T%)		! Parameter specified?
+	IF U.PRES% THEN				! Yes
+	  IF U.LEN% > 16% THEN			!     Name string too long?
+	    CALL DISPLY ("?Server name too long") !	Print error message
+	    CLOSE #3%				!	Close output channel
+	    GOTO GET_COMMAND			!	Get new command line
+	  END IF				!
+	  LENGTH% = U.LEN%			!   Store the length
+	  SAVSER$ = EDIT$(LEFT$(U.STR$,LENGTH%),32%) !   Store the server name
+	  SAVBUF(I%+24%) = ASCII(MID$(SAVSER$,I%,1%)) FOR I% = 1% TO LENGTH%
+	ELSE					! No
+	  LENGTH% = 0%				!   Name Length
+	  SAVSER$ = ""				!   No server name
+	END IF					!
+	OPEN "_NL:" AS FILE #1%, MAP LATBUF	!   Open null dev,assoc buffer
+
+	CALLBUF(5%)  = 0%			!   Node index
+	UNTIL (0% = 1%)				!   Loop through known servers
+	  CALLBUF(0%)  = 40%			!   Num of elements (for CHANGE)
+	  CALLBUF(1%)  = 6%			!   SYS call to FIP
+	  CALLBUF(2%)  = 22%			!   SEND/RCV function code
+	  CALLBUF(3%)  = 12%			!   SHOW function
+	  CALLBUF(4%)  = 6%			!   SESSION subfunction
+	  CALLBUF(5%)  = CALLBUF(5%) + 1%	!   Node index
+	  CALLBUF(6%)  = LENGTH%		!   Name length
+	  CALLBUF(11%) = 1%			!   Channel Number
+	  CALLBUF(13%) = 54%			!   Length of param list
+	  IF LENGTH% > 0% THEN			!   Is there a server name?
+	    CALLBUF(J%+24%) = SAVBUF(J%+24%) FOR J% = 1% TO LENGTH%! Copy it
+	  END IF				!
+
+	  CHANGE CALLBUF TO CALLBUF$		!   Form the SYS CALL String
+	  ON ERROR GOTO SHOW_SESS_ERR		!   Set up ewrror trap
+	  JUNK$ = SYS(CALLBUF$)		!   Do the SYS CALL
+	  ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+
+	  TEMP$ = ""					! Default = non-dialup
+	  TEMP$ = "*" IF (SHSS.BITMASK AND ONEBIT(7%))	! indicate dialup
+	  PRINT #OUT_CHNL%, " KB";NUM1$(SHSS.KBN);TEMP$;TAB(8%); !KB
+	  PRINT #OUT_CHNL%, "Port: "; LEFT$(SHSS.PORTNAME,SHSS.PNAMELENGTH);
+
+	  FILLNUM = (3% + SHSS.PNAMELENGTH)
+	  REMAP (LATBUF) STRING FILL=FILLNUM,		! Skip port name   &
+				SHSS.NAMELENGTH,	! Node name length &
+				SHSS.NAME = SHSS.NAMELENGTH ! Node name
+	    
+	  PRINT #OUT_CHNL%, TAB(31%);"Server: "; LEFT$(SHSS.NAME,SHSS.NAMELENGTH);
+
+	  FILLNUM = (FILLNUM + SHSS.NAMELENGTH + 1%)
+	  REMAP (LATBUF) STRING FILL=FILLNUM,		! Skip node name      &
+				SHSS.NAMELENGTH,	! Service name length &
+				SHSS.NAME = SHSS.NAMELENGTH ! Service name
+
+	  PRINT #OUT_CHNL%, TAB(56%);"Service: "; LEFT(SHSS.NAME,SHSS.NAMELENGTH)
+
+	NEXT 					!   Do next session
+	GOTO SHOW_SESS_END
+
+ SHOW_SESS_ERR:
+	SELECT ERR				! Select the error code
+						! 
+	CASE NOTAVL				! end-of-data received 
+	  CALL DISPLY ("?No active LAT sessions") ! No sessions at all	&
+		IF (CALLBUF(5%) = 1%) AND (LENGTH% = 0%)
+
+	  CALL DISPLY ("?No active LAT sessions on " + SAVSER$) ! No sessions &
+	  	IF (CALLBUF(5%) = 1%) AND (LENGTH%)    !  on this server
+
+	CASE NOSUCH				! No such server
+	    CALL DISPLY ("?Server " + SAVSER$ +  " does not exist") &
+		 IF (CALLBUF(5%) = 1%)
+
+	CASE INTLCK				! Not a valid LAT line
+	  CALL DISPLY ("?Not a valid LAT line")
+
+	CASE ELSE				! Anything else
+	  GOTO STANDARD_ERR
+
+	END SELECT
+
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+	CLOSE #1%				! Close MAP channel
+	CLOSE #3%				! Close output channel
+	RESUME GET_COMMAND			! Resume to get next command
+
+ SHOW_SESS_END:
+	PRINT #OUT_CHNL%
+	CLOSE #1%				! Close MAP channel
+	CLOSE #3%				! Close output channel
+	GOTO GET_COMMAND			! Get next command
+
+ START_LAT:
+	!	START command
+	!
+	CALLBUF(J%) = 0% FOR J% = 0% TO 40% ! Clear Call buffer
+
+	CALLBUF(0%)  = 40%			! Num of elements (for CHANGE)
+	CALLBUF(1%)  = 6%			! SYS call to FIP
+	CALLBUF(2%)  = 22%			! SEND/RCV function code
+	CALLBUF(3%)  = -12%			! SET function
+	CALLBUF(4%)  = 3%			! LINES subfunction
+	CALLBUF(5%)  = 0%			! Operation code = Enable 
+
+	CALL FET$P BY REF (NAM.T%)		! Parameter specified?
+	V$ = FSS$(LEFT(U.STR$,U.LEN%)+":",1%)	! FSS it
+	CALLBUF(J% + 10%)  = ASCII(RIGHT(V$,J%)) FOR J% = 23% TO 26%
+	CHANGE CALLBUF TO CALLBUF$		! Form the SYS CALL String
+	ON ERROR GOTO START_ERR			! Set up error trap
+	CHANGE SYS(CALLBUF$) TO CALLBUF	! Do the SYS CALL
+	ON ERROR GOTO STANDARD_ERR		!   Reset standard error trap
+
+	CALL FET$CQ BY REF (LOG.Q%)		! Check for /LOG 
+	IF NOT (U.PRES%) OR NOT (U.NO%) THEN	! /LOG is the default
+	  PRINT "LAT enabled on "; MID$(V$,23%,2%);
+	  PRINT NUM1$(ASCII(RIGHT(V$,25%))); IF ASCII(RIGHT(V$,26%)) <> 0%
+	  PRINT ":"
+	END IF
+	GOTO START_END
+
+ START_ERR:
+	SELECT ERR				! Select the error code
+						! 
+	CASE NOROOM				! LAT already started
+	  CALL DISPLY ("?LAT already started on this line")
+
+	CASE NOTOPN				! I/O channel not open
+	  PRINT "?No LAT Node characteristics set"
+
+	CASE DTOOOF				! Max number of lines started
+	  PRINT "?Maximum number of LAT lines already enabled"
+
+	CASE HNGDEV				! Hung Device
+	  CALL DISPLY ("?Controller disabled or inoperative")
+
+	CASE PRVIOL				! Privilege violation
+	  PRINT "?SWCTL privilege required"
+
+	CASE ELSE				! Anything else
+	  GOTO STANDARD_ERR
+
+	END SELECT
+
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+	CLOSE #1%				! Close MAP channel
+	RESUME GET_COMMAND			! Resume to get next command
+ START_END:
+	CLOSE #1%				! Close MAP channel
+	GOTO GET_COMMAND			! Get next command
+
+ STOP_LAT:
+	!	STOP command
+	!
+	CALLBUF(J%) = 0% FOR J% = 0% TO 40% ! Clear Call buffer
+
+	CALLBUF(0%)  = 40%			! Num of elements (for CHANGE)
+	CALLBUF(1%)  = 6%			! SYS call to FIP
+	CALLBUF(2%)  = 22%			! SEND/RCV function code
+	CALLBUF(3%)  = -12%			! SET function
+	CALLBUF(4%)  = 3%			! LINES subfunction
+
+	V$ = ""					! Clear V$
+	CALL FET$P BY REF (NAM.T%)		! Parameter specified?
+	IF U.PRES% THEN				! Yes
+	  V$ = FSS$(LEFT(U.STR$,U.LEN%)+":",1%)	! FSS it
+	  CALLBUF(J%+10%)  = ASCII(RIGHT(V$,J%)) FOR J% = 23% TO 26%  ! Copy it
+	  CALLBUF(5%)  = 1%			! Operation code = Disable
+	ELSE
+	  CALLBUF(5%)  = 2%			! Operation code = Disable All
+	END IF					!
+	CHANGE CALLBUF TO CALLBUF$		! Form the SYS CALL String
+	ON ERROR GOTO STOP_ERR			! Set up error trap
+	CHANGE SYS(CALLBUF$) TO CALLBUF	! Do the SYS CALL
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+
+	CALL FET$CQ BY REF (LOG.Q%)		! Check for /LOG 
+	IF NOT (U.PRES%) OR NOT (U.NO%) THEN	! /LOG is the default
+	  IF V$ = "" THEN
+	    PRINT "LAT disabled on all lines"
+	  ELSE
+	    PRINT "LAT disabled on "; MID$(V$,23%,2%);
+	    PRINT NUM1$(ASCII(RIGHT(V$,25%))); IF ASCII(RIGHT(V$,26%)) <> 0%
+	    PRINT ":"
+	  END IF
+	END IF
+	GOTO STOP_END
+
+ STOP_ERR:
+	SELECT ERR				! Select the error code
+						! 
+	CASE NOTOPN				! I/O channel not open
+	  PRINT "?LAT not started";
+	  IF V$ = "" THEN
+	    PRINT
+	  ELSE
+	    PRINT " on "; MID$(V$,23%,2%);
+	    PRINT NUM1$(ASCII(RIGHT(V$,25%))); IF ASCII(RIGHT(V$,26%)) <> 0%
+	    PRINT ":"
+	  END IF
+
+	CASE HNGDEV				! Hung Device
+	  CALL DISPLY ("?Controller disabled or inoperative")
+
+	CASE PRVIOL				! Privilege violation
+	  PRINT "?SWCTL privilege required"
+
+	CASE BADFUO				! ?Illegal SYS() usage
+	  CALL DISPLY ("?Command not installed")
+
+	CASE ELSE				! Anything else
+	  GOTO STANDARD_ERR
+
+	END SELECT
+
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+	CLOSE #1%				! Close MAP channel
+	CLOSE #3%				! Close output channel
+	RESUME GET_COMMAND			! Resume to get next command
+
+ STOP_END:
+	CLOSE #1%				! Close MAP channel
+	CLOSE #3%				! Close output channel
+	GOTO GET_COMMAND			! Get next command
+
+ CREATE_SERVICE:
+	!	CREATE command
+	!
+	CALLBUF(J%) = 0% FOR J% = 0% TO 40%	! Clear Call buffer
+
+	CALLBUF(0%)  = 40%			! Num of elements (for CHANGE)
+	CALLBUF(1%)  = 6%			! SYS call to FIP
+	CALLBUF(2%)  = 22%			! SEND/RCV function code
+	CALLBUF(3%)  = -12%			! SET function
+	CALLBUF(4%)  = 2%			! SERVICE subfunction
+	CALL FET$P BY REF (NAM.T%)		! Fetch Parameter
+	IF U.LEN% > 16% THEN			! Too many characters?
+	  CALL DISPLY ("?Service Name too long") !   Print error message
+	  GOTO GET_COMMAND			!   Get new command line
+	END IF					!
+	CALLBUF(5%)  = U.LEN%			! Parameter name length
+	CALLBUF(6%)  = 0%			! Operation code = Create
+	CALLBUF(11%) = 1%			! Channel number
+	CALLBUF(24%+I%) = ASCII (EDIT$(MID$(U.STR$,I%,1%),32%))		&
+		FOR I% = 1% TO U.LEN%		! Pass service name in uppercase
+	
+	OPEN "_NL:" AS FILE #1%, MAP LATBUF	!   Open null dev,assoc buffer
+
+	CALL FET$CQ BY REF (STA.Q%)		! /STATIC_RATING specified?
+	IF U.PRES% THEN				! Yes
+	  SERV.TYPE1 = 1%			!   Set Data Type Code
+	  SERV.RESERVED = 0%			!   Clear Reserved Byte
+	  CALL FET$A BY REF			!   Get the argument
+	  SERV.RATING = WORD.TO.BYTE(U.LOW%)	!   Static Rating
+	  FILLNUM = 4%
+	ELSE
+	  FILLNUM = 0%
+	END IF
+
+	REMAP (LATBUF) STRING	FILL=FILLNUM,	!   Skip other info	      &
+				SERV.TYPE2,	!   Position next type code   &
+				SERV.STRLENGTH,	!   String Length	      &
+				SERV.IDSTRING = 64% ! ID String
+	CALL FET$CQ BY REF (IDE.Q%)		! /IDENTIFICATION specified?
+	IF U.PRES% THEN				! Yes
+	  CALL FET$A BY REF			!  Get the ID string
+	  U.LEN% = U.LEN% - 2%			!  Shorten length by the '"'s
+	  IF U.LEN% > 64% THEN
+	    CALL DISPLY ("?Identification string too long")
+	    CLOSE #1%				!   Close output channel
+	    GOTO GET_COMMAND			!   Get new command line
+	  END IF				!
+	  SERV.TYPE2 = 2%			!   Set type code
+	  SERV.STRLENGTH = U.LEN%		!   String Length
+	  SERV.IDSTRING = MID(U.STR$,2%,U.LEN%)	!   Copy string
+	  FILLNUM = FILLNUM + 2% + U.LEN%
+	ELSE					! No ID string specified
+	  IF FILLNUM = 0% THEN			!   No qualifiers at all?
+	    SERV.TYPE2 = 2%			!     Set type code
+	    SERV.STRLENGTH = 0%			!     String Length
+	    FILLNUM = 2%
+	  END IF
+	END IF
+
+	CALLBUF(13%) = FILLNUM			! Length of param list
+	CHANGE CALLBUF TO CALLBUF$		! Form the SYS CALL String
+	ON ERROR GOTO CREATE_ERR		! Set up error trap
+	CHANGE SYS(CALLBUF$) TO CALLBUF		! Do the SYS CALL
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+
+	CALL FET$CQ BY REF (LOG.Q%)		! Check for /LOG 
+	IF NOT (U.NO%) THEN			! /NOLOG is the default
+	  CALL FET$P BY REF (NAM.T%)		! Fetch Parameter
+	  PRINT "LAT Service "; EDIT$(LEFT$(U.STR$,U.LEN%),32%); " created"
+	END IF
+	GOTO CREATE_END
+
+ CREATE_ERR:
+	SELECT ERR				! Select the error code
+						! 
+	CASE BADNAM				! Bad name string
+	  CALL DISPLY ("?Invalid characters in service name or identification string")
+
+	CASE NOROOM				! No room
+	  CALL DISPLY ("?No room available for new LAT Service")
+
+	CASE FIEXST				! Service already exists
+	CALL FET$P BY REF (NAM.T%)		! Fetch Parameter
+	  CALL DISPLY ("?Service " + EDIT$(LEFT$(U.STR$,U.LEN%),32%) + " already exists")
+
+	CASE PRVIOL				! Privilege violation
+	  PRINT "?SWCFG privilege required"
+
+	CASE ELSE				! Anything else
+	  GOTO STANDARD_ERR
+
+	END SELECT
+
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+	CLOSE #1%				! Close MAP channel
+	RESUME GET_COMMAND			! Resume to get next command
+
+ CREATE_END:
+	CLOSE #1%				! Close MAP channel
+	GOTO GET_COMMAND			! Get next command
+
+ DELETE_SERVICE:
+3000	!	DELETE command
+	!
+	CALLBUF(J%) = 0% FOR J% = 0% TO 40% ! Clear Call buffer
+
+	CALLBUF(0%)  = 40%			! Num of elements (for CHANGE)
+	CALLBUF(1%)  = 6%			! SYS call to FIP
+	CALLBUF(2%)  = 22%			! SEND/RCV function code
+	CALLBUF(3%)  = -12%			! SET function
+	CALLBUF(4%)  = 2%			! SERVICE subfunction
+	CALL FET$P BY REF (NAM.T%)		! Fetch Parameter
+	IF U.LEN% > 16% THEN			! Too many characters?
+	  CALL DISPLY ("?Service Name too long") !   Print error message
+	  GOTO GET_COMMAND			!   Get new command line
+	END IF					!
+	CALLBUF(5%)  = U.LEN%			! Parameter name length
+	CALLBUF(6%)  = 2%			! Operation code = Delete
+	CALLBUF(24%+I%) = ASCII(MID$(U.STR$,I%,1%)) FOR I% = 1% TO U.LEN%
+	
+	CHANGE CALLBUF TO CALLBUF$		! Form the SYS CALL String
+	ON ERROR GOTO DELETE_ERR		! Set up error trap
+	CHANGE SYS(CALLBUF$) TO CALLBUF		! Do the SYS CALL
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+
+	CALL FET$CQ BY REF (LOG.Q%)		! Check for /LOG 
+	IF NOT(U.NO%) THEN			! /NOLOG is the default
+	  CALL FET$P BY REF (NAM.T%)		! Fetch Parameter
+	  PRINT "LAT Service "; EDIT$(LEFT$(U.STR$,U.LEN%),32%); " deleted"
+	END IF
+	GOTO DELETE_END
+
+ DELETE_ERR:
+	SELECT ERR				! Select the error code
+						! 
+	CASE BADNAM				! Bad name string
+	  CALL DISPLY ("?Invalid characters in service name")
+
+	CASE NOSUCH				! Service does not exists
+	  CALL FET$P BY REF (NAM.T%)		! Fetch Parameter
+	  CALL DISPLY ("?Service " + EDIT$(LEFT$(U.STR$,U.LEN%),32%) + " does not exist")
+
+	CASE PRVIOL				! Privilege violation
+	  PRINT "?SWCFG privilege required"
+
+	CASE ELSE				! Anything else
+	  GOTO STANDARD_ERR
+
+	END SELECT
+
+	ON ERROR GOTO STANDARD_ERR		! Reset standard error trap
+	RESUME GET_COMMAND			! Resume to get next command
+
+ DELETE_END:
+	GOTO GET_COMMAND			! Get next command
+
+ 	! S U B R O U T I N E S
+	!
+ INIT:
+	! Initialize Constants
+	!
+	REV$	= SYS(CHR$(6%)+CHR$(9%)+CHR$(0%)) !Error message 0
+	MASTER%	= (CVT$%(REV$) AND 255%)/2%	!Our KB number
+	REV$	= CVT$$(RIGHT(REV$,3%),4%)	!Get installation name
+	VER$	= "V10.1-A"			!Set up version/edit number
+	CR$	= CHR$(13%)			!<CR>
+	CR.LF$	= CR$ + CHR$(10%)		!<CR><LF>
+	ONEBIT(0%) = 1%
+	ONEBIT(1%) = 2%
+	ONEBIT(2%) = 4%
+	ONEBIT(3%) = 8%
+	ONEBIT(4%) = 16%
+	ONEBIT(5%) = 32%
+	ONEBIT(6%) = 64%
+	ONEBIT(7%) = -128%
+
+	TERM.WIDTH%=ASCII(SEG$(SYS(CHR$(6%)+	!Get this KB's width	    &
+		CHR$(16%)+CHR$(0%)+CHR$(255%)),5%,5%))-1%		   
+	COLUMN1% = 17%				!beginning of first column
+	COLUMNWIDTH% = 5%			!width of a column in SHOW NODE
+
+	!
+	! Define syscall strings
+	!
+	DROP.PRIV$=CHR$(6%)+CHR$(-21%)+CHR$(255%)	! Drop privs string
+	REGAIN.PRIV$=CHR$(6%)+CHR$(-21%)+CHR$(0%)	! Gain privs string
+
+	RETURN
+
+
+
+ PRINT_LATBUF:
+	PRINT #OUT_CHNL%, "Contents of LATBUF:"
+	PRINT #OUT_CHNL%, D%; ASCII(RIGHT(WHOLE.BUFF,D%)),	&
+		FOR D% = 1% TO LEN(WHOLE.BUFF)
+	PRINT #OUT_CHNL%
+	RETURN
+
+
+
+ PRINT_SHOBUF:
+	PRINT #OUT_CHNL%, "Contents of SHOBUF:"
+	PRINT #OUT_CHNL%, D%; ASCII(RIGHT(SHNO.FILL,D%)),	&
+		FOR D% = 1% TO LEN(SHNO.FILL)
+	PRINT #OUT_CHNL%
+	RETURN
+
+	!
+	!	F U N C T I O N S
+	!
+	DEF STRING TIME.CONVERT(WORD TIMESEC)	! TIMESEC = sec's til midnite/2
+	  DECLARE LONG TIMETEMP
+	  DECLARE LONG HOUR, MINUTE, SECOND
+	  TIMETEMP = TIMESEC			! Store it in a longword
+	  IF TIMESEC < 0% THEN			! If its a negative integer
+		TIMETEMP = TIMESEC + 65536	!  Make it an unsigned integer
+	  END IF
+	  TIMETEMP = 86400 - (TIMETEMP*2%)	! TIMETEMP = sec's since midnite
+	  HOUR = INT(TIMETEMP/3600%)		!
+	  TIMETEMP = TIMETEMP - (HOUR * 3600%)
+	  MINUTE = INT(TIMETEMP/60%)
+	  SECOND = TIMETEMP - (MINUTE * 60%)
+	  AM.PM$ = " AM"
+	  AM.PM$ = " PM" IF (HOUR >= 12%)	! Noon or later --> PM
+	  HOUR = HOUR - 12% IF (HOUR > 12%)	! Keep hrs in 1 - 12 range
+	  HOUR$ = NUM1$(HOUR)
+	  MIN$ = NUM1$(MINUTE)
+	  MIN$ = "0"+MIN$ IF LEN(MIN$)=1%
+	  SEC$ = NUM1$(SECOND)
+	  SEC$ = "0"+SEC$ IF LEN(SEC$)=1%
+	  TIME.CONVERT = HOUR$+":"+MIN$+":"+SEC$+AM.PM$
+	END DEF
+
+	DEF STRING UNSIGNED.LONG(LONG SIGNED.VAL)	! Rtrn unsigned longword
+	  LNGWRD = SIGNED.VAL				! Map the MSB and LSB
+	  IF LNGMSB >= 0% THEN				! If its positive
+	    UNSIGNED.LONG = NUM1$(SIGNED.VAL) 		!   store it as is
+	  ELSE						! If not
+	    UNSIGNED.LONG = NUM1$(MAX.LONG+SIGNED.VAL)	!   Get unsigned value
+	  END IF
+	END DEF
+
+	DEF STRING UNSIGNED.BYTE(BYTE SIGNED.VAL)	! Return unsigned byte
+	  IF SIGNED.VAL >= 0% THEN			! If it's positive 
+	    UNSIGNED.BYTE = NUM1$(SIGNED.VAL)		!   Store it as is
+	  ELSE						! If not
+	    UNSIGNED.BYTE = NUM1$(SIGNED.VAL + 256)	!   Store low-order bits
+	  END IF
+	END DEF
+
+	DEF BYTE WORD.TO.BYTE(WORD SIGNED.VAL)		! Return unsigned byte
+	  IF SIGNED.VAL < 128% THEN			! If it's positive 
+	    WORD.TO.BYTE = SIGNED.VAL			!    store it as is
+	  ELSE						! If not
+	    SIGNED.VAL = (SIGNED.VAL AND 127%)		!   Store low-order bits
+	    WORD.TO.BYTE = (SIGNED.VAL OR -128%)	!   Set the sign bit
+	  END IF
+	END DEF
+
+
+4000	DEF STRING SECDIF(WORD CDATE, LONG CTIME, WORD DATELZ, LONG TIMELZ)
+	  SEC = 0				! Initialize seconds variable
+	  IF CDATE < DATELZ THEN		! Curr date befor date last 0'd?
+	    SECDIF = "Unknown"			!   Set seconds to unknown
+	    EXIT DEF				!   and exit
+	  END IF
+	  IF CDATE = DATELZ THEN		! If the dates are the same
+	    IF CTIME > TIMELZ THEN		!   See if the times are okay
+	      SECDIF = "Unknown"		!     No, set seconds to unknown
+	      EXIT DEF				!     and exit
+	    ELSE				! Dates and times are okay
+	      GOTO TIME_DIFF			!  Go figure out the time diff
+	    END IF
+	  END IF
+	  CYEAR% = CDATE/1000%			! Get the current year
+	  YEARLZ% = DATELZ/1000%		! Year last zeroed
+	  IF CYEAR% = YEARLZ% THEN		! If the years are the same
+	    SEC = (CDATE - DATELZ) * 86400	!   Calculate the seconds
+	    GOTO TIME_DIFF			!   and go figure out the time
+	  ELSE					! If different years
+	    SEC = (CYEAR%-YEARLZ%-1%) * 31536000 !  # of seconds per year 
+	    CDATE = CDATE - (CYEAR%*1000%)	!   Strip off the year
+	    DATELZ = DATELZ - (YEARLZ%*1000%)	!   Ditto for date last zeroed
+	    LEAPYR% = 0%			!   Init the # of leap years
+	    IF SEC <> 0 THEN			!   If more than a year apart
+	      CYEAR% = CYEAR% + 70%		!     Get the actual year
+	      YEARLZ% = YEARLZ% + 70%		!     Ditto
+	      YEARLZ% = YEARLZ% + 1% IF DATELZ > 59% !Skip this year if > Feb 28
+	      LEAPYR% = LEAPYR% + 1%		!     Inc the # of leap years  &
+		IF (I%/4%)*4% = I%		!   If evenly divisible by 4   &
+	  	FOR I% = YEARLZ% TO CYEAR% - 1% !   For each year in between
+	    END IF
+	    CDATE = CDATE + 365 + LEAPYR%	! Add in a year and leap years
+	    SEC = SEC + (CDATE-DATELZ) * 86400	! Add in seconds between dates
+	  END IF
+ TIME_DIFF:
+	  IF CTIME = TIMELZ THEN		! If the times are the same
+	    GOTO SEC_END			!   Then go finish up
+	  END IF
+	  IF CTIME < TIMELZ THEN		! If Current time is after
+	    SEC = SEC + (TIMELZ - CTIME) * 2	!   Calculate the seconds
+	    GOTO SEC_END			!   Go finish up
+	  ELSE					! Current time is before
+	    SEC = SEC - (CTIME - TIMELZ) * 2	!   Subtract the difference
+	  END IF
+ SEC_END:
+	  SECDIF = NUM1$(SEC)			! Create the string
+	END DEF
+
+
+5000	DEF FNHEX$				!Function to return the	      
+						! Ethernet address
+	ADDR_HEX$ = ""				!Init the storage variable    
+	FOR J% = 0% TO 5%			!For each of the six bytes    
+		HEX% = (SHTE.ENETADDR(J%) AND 240%)/16%	! Get the first hex number    
+		HEX$ = NUM1$(HEX%)		! Make a string out of it     
+		GOTO HEX_CONVERTED IF HEX% < 10% ! Hex = Decimal if it's < 10  
+		HEX$ = CHR$(HEX%-10%+65%)	! Convert 11-15 to A-F	      
+ HEX_CONVERTED:
+		ADDR_HEX$ = ADDR_HEX$ + HEX$	! Add it to the others	      
+		HEX% = SHTE.ENETADDR(J%) AND 15%! Get the last hex number     
+		HEX$ = NUM1$(HEX%)		! Make a string out of it     
+		GOTO HEX_DONE IF HEX% < 10%	! Hex = Decimal if it's < 10  
+		HEX$ = CHR$(HEX%-10%+65%)	! Convert 11-15 to A-F	      
+ HEX_DONE:
+		ADDR_HEX$ = ADDR_HEX$ + HEX$	! Add it to the others	      
+		ADDR_HEX$ = ADDR_HEX$ + "-" IF J% < 5% !Add dash if not at end 
+	NEXT J%					!Next byte		      
+	FNHEX$ = ADDR_HEX$			!Store the address	      
+	FNEND					!End of function	      
+
+
+	! FNPRINTCOLUMN% (TEXT$) -- Print text in next available column.     
+	! Inputs:							     
+	!	TEXT$ -- The text to print				     
+	!	TERM.WIDTH% -- Width of screen				     
+	!	CCPOS(0%) -- Current cursor position			     
+	! Effect:							     
+	!	If there isn't room for another column, <CR><LF> is	     
+	!	printed and the cursor is advanced to the left margin.	     
+	!	Otherwise cursor is advanced to next column (i.e. position of
+	!	first column plus n * width of a column).		     
+	!	Text is printed.					     
+	! Value: Meaningless.						     
+
+	DEF FNPRINTCOLUMN% (TEXT$)					     
+	CURSOR% = CCPOS(OUT_CHNL%)	! Get current cursor position.
+	IF CURSOR% < COLUMN1% THEN	! If cursor is left of first column of
+					! text then			     
+		PRINT #OUT_CHNL%, SPACE$ (COLUMN1% - CURSOR%);		
+					!   Move cursor to first column of   
+					!   text.			     
+		GOTO PRI_TEXT		!   Go print text.
+	END IF
+
+	NEXTCOLUMN% = ((CURSOR%-COLUMN1%)/COLUMNWIDTH%)*COLUMNWIDTH% +	     &
+		COLUMNWIDTH% + COLUMN1%	! Compute position of next text column
+	PAD% = NEXTCOLUMN% - CURSOR%	! Compute spaces needed to pad cursor
+					! to next column.		     
+									     
+	IF ((NEXTCOLUMN% + COLUMNWIDTH%) > TERM.WIDTH%) OR		     &
+	   ((NEXTCOLUMN% + LEN(TEXT$)) > TERM.WIDTH%)  THEN		     
+					! If there isn't room for another    
+					! column then			     
+	  PRINT #OUT_CHNL%		!   Go to next line of screen.	     
+	  PRINT #OUT_CHNL%, SPACE$(COLUMN1%);!Move cursor to first column
+					!   text.			     
+	  GOTO PRI_TEXT			!   Go print text.		     
+	END IF
+	PRINT #OUT_CHNL%, SPACE$(PAD%);	! Pad cursor out to next column.     
+
+ PRI_TEXT:
+	PRINT #OUT_CHNL%, TEXT$;		! Print the text.		     
+	FNEND								     
+
+ CHECK_OUTPUT:
+	OUT_CHNL% = 0				!Default output to KB:	      
+	CALL FET$CQ BY REF (OUT.Q%)		!/OUTPUT?		      
+	RETURN IF NOT U.PRES%			! Nope, so output to KB:      
+	IF U.NO% THEN				! /NOOUTPUT?		      
+	   OPEN "_NL:" FOR OUTPUT AS FILE 3% 	! Yup, so open null device    
+	ELSE								      
+	   CALL FET$A BY REF			! /OUTPUT=FILENAME?	      
+	   RETURN IF NOT U.PRES%		! Nope, so output to KB:      
+	   ON ERROR GOTO OUT_ERR		! Set up local error trap     
+	   OPEN SEG$(U.STR$,1%,U.LEN%) FOR OUTPUT AS FILE 3%		      
+	   CAUSE ERROR NODEVC			! Don't use it if...	      &
+		IF STATUS AND 256%              !     device is NFS...	      &
+		UNLESS STATUS AND 2048%		!     unless CCPOS() is valid 
+	   CAUSE ERROR PRVIOL			! Don't use it if...	      &
+		IF STATUS AND 1024%             !       we don't have access  
+	   ON ERROR GOTO STANDARD_ERR		! Ensure standard error trap  
+	END IF					! File okay		      
+	OUT_CHNL% = 3				! Channel # to print to       
+	RETURN					! Go back		      
+
+ OUT_ERR:								      
+	CALL DISPLY (ERT$(ERR))			! Print the error
+	RESUME GET_COMMAND			! Get next command	      
+
+ STANDARD_ERR:
+	!	s t a n d a r d   e r r o r   h a n d l i n g
+	!
+	!
+	SELECT ERR				! Select the error code
+						! 
+	CASE CTRLCE				! Control/C received
+	  RESUME WRAP_UP			! Quit
+
+	CASE ERRERR				! LAT Not installed
+	  PRINT "?LAT is not installed"		!
+
+	CASE NORTS				! DECNET not started
+	  PRINT "?DECnet is not started"	!
+
+	CASE ELSE				! Any other error
+	PRINT ERT$(ERR) + " at line ";NUM1$(ERL) ! print error msg
+
+	END SELECT
+
+	CLOSE #1%				!   close MAP channel
+	CLOSE #2%				!   close MAP channel
+	CLOSE #3%				!   close output channel
+	RESUME GET_COMMAND			!   resume to get next command
+
+30500	!	D C L   e n t r y   p o i n t
+	!
+	!
+	ENT.TY% = 16%				! set DCL entry type
+	HDNG% = 0%				! no program heading
+	GOTO MAIN				! and branch to main
+
+ WRAP_UP:
+	!	e n d - o f - p r o g r a m   p r o c e s s i n g
+	!
+	!
+	CLOSE #I% FOR I% = 1% TO 12%		!close all channels
+	Z$ = SYS (CHR$(9%))			!exit to user's KBM
+
+	END

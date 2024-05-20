@@ -1,0 +1,2094 @@
+2!		PROGRAM		: UTILTY.BAS
+5!		VERSION		: V10.1
+6!		EDIT		: A
+7!		EDIT DATE	: 10-MAY-91
+10	EXTEND
+11	! &
+	&
+	&
+	!		  C O P Y R I G H T &
+	&
+	&
+  !		      Copyright (C) 1974, 1991 by &
+  !	        Digital Equipment Corporation, Maynard, Mass. &
+  !	&
+  !	&
+  !	This software is furnished under a license and may be used and &
+  !	copied  only  in accordance with the terms of such license and &
+  !	with the  inclusion  of  the  above  copyright  notice.   This &
+  !	software  or  any  other copies thereof may not be provided or &
+  !	otherwise made available to any other person.  No title to and &
+  !	ownership of the software is hereby transferred. &
+  !	&
+  !	The information in this software is subject to change  without &
+  !	notice  and should not be construed as a commitment by Digital &
+  !	Equipment Corporation. &
+  !	&
+  !	DIGITAL assumes no responsibility for the use  or  reliability &
+  !	of its software on equipment that is not supplied by DIGITAL. &
+  !	&
+  !******************************************************************* &
+	&
+
+20	! &
+	&
+	&
+	!	M O D I F I C A T I O N    H I S T O R Y &
+	&
+	&
+
+21	! VER/ED	EDIT DATE	REASON &
+	! &
+	! V9.0-11	14-Feb-85	(JJT) Fix bugs put in by edit 10: &
+	!				      Main error trap doesn't RESUME &
+	!				      CCL'S not working &
+	!				(JJT) Remove LOAD commands &
+	! V9.0-10	25-Jan-85	(PRL) Remove code for HELP command &
+	!				(PRL) Add '?' prefix to err messages &
+	&
+
+100	! &
+	&
+	&
+	!	G E N E R A L    D E S C R I P T I O N &
+	&
+	&
+
+110!	THIS PROGRAM ALLOWS THE SYSTEM MANAGER OR A PRIVILEGED USER TO &
+   !	PERFORM VARIOUS DISK MANAGEMENT OPERATIONS, CONTROL THE &
+   !	OPERATION OF THE SYSTEM AND CONDUCT TIME SHARING OPERATIONS &
+   !	WITH AN AUXILIARY RUN-TIME SYSTEM. &
+	&
+
+300	! &
+	&
+	&
+	!	I / O    C H A N N E L S &
+	&
+	&
+
+301!	CHANNEL #		USED FOR &
+   !
+302!	1			OPENING RTS FILES AND SWAPFILES &
+   !	3			USER INPUT &
+
+400	! &
+	&
+	&
+	!	V A R I A B L E    D E F I N I T I O N S &
+	&
+	&
+
+401!	VARIABLE NAME		USED FOR &
+   !
+410!	D$			UTILITY STRING &
+   !	D%			UTILITY VARIABLE &
+   !	DD%			USED BY DATE CHANGER &
+   !	D0%			ASCII VALUE OF CHARACTER IN CCL &
+   !				COMMAND &
+   !	D9%			ADD/DELETE CCL FLAG &
+   !	E%			ERROR VARIABLE &
+   !	ENTRY.TYP%		RUN/CCL ENTRY FLAG &
+   !	G$			UTILITY STRING USED IN FNS% &
+   !	I$			HOLDS VERSION/EDIT STRING &
+   !	I%			COMMAND INDEX POINTER AND UTILITY &
+   !				VARIABLE &
+   !	J%			STRING POINTER/UTILITY VARIABLE &
+   !	K0%,K1%			VARIABLES USED IN SYS CALLS &
+   !	L$			USER'S INPUT STRING &
+   !	L.LO$			USER'S INPUT STRING (WITH LOWER CASE) &
+   !	L%			USED FOR DUPLICATE SWITCH CHECK &
+   !	MM%			USED BY DATE CHANGER (MONTH NUMBER) &
+   !	M$			COMMAND STRING &
+   !	M.LO$			COMMAND STRING (WITH LOWER CASE) &
+   !	N$			COMMAND THAT WAS MATCHED &
+   !	N%			COMMAND LENGTH MATCHING VARIABLE &
+   !	Q			QUOTA VARIABLE &
+   !	Q$			UTILITY STRING &
+   !	Q%			UTILITY VARIABLE &
+   !	Q1%			LINE # VARIABLE IN CCL COMMAND &
+   !	Q9%			CCL ADD COMMAND POINTER &
+   !	R%			SWITCHES PRESENT/NOT PRESENT FLAG &
+   !	YY%			USED BY DATE CHANGER (YEAR) &
+
+800	! &
+	&
+	&
+	!	F U N C T I O N / S U B R O U T I N E    D E S C . &
+	&
+	&
+
+801!	FUNCTION/SUBROUTINE	USE &
+   !
+810!	FNE$			EXTRACT AN ERROR MESSAGE &
+   !	FNS%			TERMINATING STRING SCAN FUNCTION &
+   !	FNF.TO.I%(F)		CVTS FLOAT 0:65535 TO INT -32768:32767 &
+   !	FNI.TO.F(I%)		CVTS INT -32768:32767 TO FLOAT 0:65535 &
+   !	FNGET.SWAP$(I%)		RETURNS FILE SPECIFICATION OF INSTALLED &
+   !				SYSTEM FILE &
+   !	LINES 10010-10140	GET A VALID KB NUMBER &
+   !	LINE 12000		FIELDS INFO IN .SIL &
+
+900	! &
+	&
+	&
+	!	D I M E N S I O N    S T A T E M E N T S &
+	&
+	&
+
+910	DIM M%(30%),D%(12%),A%(255) &
+		! M%()	- ARRAY FOR THE CONSTRUCTION OF SYS FUNCTION COMMANDS &
+		! D%()	- NUMBERS OF DAYS IN EACH MONTH. &
+		! A%()	USED TO EXTRACT .SIL INFORMATION &
+
+920	DIM #1%,V%(112%,255%) &
+		! VIRTUAL CORE ARRAY USED FOR ACCESSING THE &
+		! RUN-TIME SYSTEM FILE &
+
+940	DIM #11, F%(32767) &
+		! EXTRACT .SIL NAME FROM INIT.SYS &
+	&
+
+999	! &
+	&
+	&
+	!	M A I N    C O D I N G    A R E A &
+	&
+	&
+
+1000	ON ERROR GOTO 19000 &
+	\ M$=SYS(CHR$(6%)+CHR$(-21%)) &
+	\ PRINT IF CCPOS(0%)<>0% &
+		! SET UP STANDARD ERROR TRAP &
+		! PERMANENTLY DROP TEMPORARY PRIVILEGES &
+		! RETURN KB: TO LEFT MARGIN IF NECESSARY &
+
+1010	I$="V10.1-A" &
+		! SET UP VERSION/EDIT FOR HEADER. &
+
+1020	PRINT "UTILTY";CHR$(9%);I$;CHR$(9%);FNE$(0%) IF ENTRY.TYP%=0% &
+		! PRINT SYSTEM HEADER IF RUN ENTRY OR &
+		! CCL ENTRY WIH NO COMMAND &
+
+1025	CHANGE SYS(CHR$(12%)) TO M% &
+	\ PKG.LOC$="["+NUM1$(M%(6%))+","+NUM1$(M%(5%))+"]" &
+	\ PKG.LOC$="_"+CHR$(M%(23%))+CHR$(M%(24%))+NUM1$(M%(25%))+":"+PKG.LOC$ &
+		IF M%(26%) AND 1% &
+	\ IF M%(3%)+SWAP%(M%(4%))<>15%*2% THEN &
+		PRINT "?Please 'RUN UTILTY'" &
+	\	GOTO 32760 &
+		! BUILD NAME OF DEVICE AND ACCOUNT OF LAST OPENED FILE. &
+		! WE MUST HAVE COME FROM A COMPILED FILE SO WE CAN BE &
+		! SURE THAT THIS NAME IS REALLY OUR PACKAGE LOCATION. &
+
+1026	CHR6$=CHR$(6%) &
+	\ GOTO 1050 IF ENTRY.TYP%=1% &
+		! CCL COMMAND INCLUDED A COMMAND. &
+
+1030	GOTO 32767 UNLESS ENTRY.TYP%=0% &
+	\ OPEN "_KB:UTILTY.CMD" FOR OUTPUT AS FILE 3% &
+	\ PRINT "#"; &
+	\ INPUT LINE #3%,L.LO$ &
+	\ CLOSE 3% &
+	\ L.LO$=CVT$$(L.LO$,4%+8%+16%+128%) &
+	\ L$=CVT$$(L.LO$,32%) &
+	\ GOTO 1030 UNLESS LEN(L$) &
+	\ I%=0% &
+	\ RESTORE &
+		! IF THIS IS A RUN ENTRY OR CCL ENTRY WITH NO COMMAND: &
+		! GET A COMMAND &
+		! DISCARD EXCESS CHARACTERS &
+		! DISCARD LEADING SPACES AND TABS &
+		! REDUCE SPACES AND TABS TO 1 SPACE &
+		! CONVERT LOWERCASE TO UPPERCASE (SAVE LOWER CASE IN L.LO$) &
+		! DISCARD TRAILING SPACES AND TABS &
+		! GET ANOTHER COMMAND IF WE ONLY GOT CRLF$ &
+		! INIT FOR READING &
+
+1050	I%=I%+1% &
+	\ READ N$,N%,K0%,K1% &
+	\ GOTO 1050 IF N$="*reserved*" &
+	\ GOTO 1200 IF N$="END" &
+	\ IF N%<>0% THEN &
+		M$=LEFT(L$,N%) &
+	ELSE	M$=L$ &
+		! FIND WHAT THE COMMAND WAS: &
+		! GET NEXT COMMAND IF THIS ONE IS RESERVED &
+		! N% TELLS HOW MANY CHARACTERS TO MATCH &
+
+1060	IF N$<>M$ THEN &
+		GOTO 1050 &
+	ELSE	M$=RIGHT(L$,N%+1%) IF N%<>0% &
+	\	M.LO$=RIGHT(L.LO$,N%+1%) IF N%<>0% &
+
+1070	ON I% GOTO	2000,	2044,	2044,	2044,	2400,	2400, &
+			2550,	2700,	2800,	2900,	5300, 	5400, &
+			5400,	5450,	5600,	5650,	5650,   6500, &
+			6500,	6500,	7000,	3130,	3100,   2044, &
+			3300,	3400,	3500,	3600,	3700,   3700, &
+			3900,	3900,	4000,	4000,	3900,   3900, &
+			4200,	4400,	4400,	4400,	4600,   32767, &
+		 	4700,	4800,	4900,	5100,	5200,   5200, &
+			5200,	5200,	6000,	2044,	3330,   2044, &
+			7200,	7300,	7300 &
+	! IF WE GOT A MATCH, ISOLATE THE REST OF THE COMMAND. &
+	! I% IS THE INDEX FOR THE COMMAND. &
+	! &
+	!		COMMAND		LINE # &
+	! &
+	!		MOUNT		2000 &
+	!		DISMOUNT	2044 &
+	!		LOCK		2044 &
+	!		UNLOCK		2044 &
+	!		NOLOGINS	2400 &
+	!		LOGINS		2400 &
+	!		SET LOGINS	2550 &
+	!		FORCE		2700 &
+	!		SEND		2800 &
+	!		KILL		2900 &
+	!		ADD SWAPFILE	5300 &
+	!		ADD OVERLAY	5400 &
+	!		ADD ERROR	5400 &
+	!		LIST SWAPFILES	5450 &
+	!		REMOVE SWAPFILE	5600 &
+	!		REMOVE OVERLAY	5650 &
+	!		REMOVE ERROR	5650 &
+	!		ADD LOGICAL	6500 &
+	!		CHANGE LOGICAL	6500 &
+	!		REMOVE LOGICAL	6500 &
+	!		LIST LOGICAL	7000 &
+	!		CHANGE		3130 &
+	!		QUOTA		3100 &
+	!	 	ZERO		2044 &
+	!		HANGUP		3300 &
+	!		DATE		3400 &
+	!		TIME		3500 &
+	!		(reserved)	3600 &
+	!		ADD LIBRARY	3700 &
+	!		ADD		3700 &
+	!		REMOVE LIBRARY	3900 &
+	!		REMOVE		3900 &
+	!		(reserved)	4000 &
+	!		(reserved)	4000 &
+	!		UNLOAD LIBRARY	3900 &
+	!		UNLOAD		3900 &
+	!		NAME		4200 &
+	!		DISABLE CACHE	4400 &
+	!		ENABLE CACHE	4400 &
+	!		LIST CACHE	4400 &
+	!		FLAG		4600 &
+	!		EXIT		32767 &
+	!		DISABLE		4700 &
+	!		LIST CCL	4800 &
+	!		CCL		4900 &
+	!		SUSPEND		5100 &
+	!		PRIORITY	5200 &
+	!		RESUME		5200 &
+	!		RUNBURST	5200 &
+	!		SIZE		5200 &
+	!		DETACH		6000 &
+	!		SEIZE		2044 &
+	!		SNAP		3330 &
+	!		SIEZE (SYN)	2044 &
+	!		DEFAULT KBM	7200 &
+	!		STALL		7300 &
+	!		UNSTALL		7300 &
+
+1200	E%=256% &
+	\ GOTO 19020 &
+		! COULDN'T FIND A MATCH FOR THE COMMAND &
+
+1500	DATA	"MOUNT ",	6,3,0, &
+		"DISMOUNT ",	9,3,2, &
+		"LOCK ",	5,3,4, &
+		"UNLOCK ",	7,3,6, &
+		"NO LOGINS",	0,-2,0, &
+		"LOGINS",	0,-1,0, &
+		"SET LOGINS ",	11,0,0, &
+		"FORCE ",	6,0,0, &
+		"SEND ",	5,0,0, &
+		"KILL ",	5,0,0, &
+		"ADD SWAPFILE ",13,0,1, &
+		"ADD OVERLAY ",	12,4,1, &
+		"ADD ERROR ",	10,5,1, &
+		"LIST SWAPFILE", 13,0,0, &
+		"REMOVE SWAPFILE ",16,0,0, &
+		"REMOVE OVERLAY",0,4,0, &
+		"REMOVE ERROR",	0,5,0, &
+		"ADD LOGICAL ",	12,1,0, &
+		"CHANGE LOGICAL ",15,-1,0, &
+		"REMOVE LOGICAL ",15,0,0, &
+		"LIST LOGICAL",	0,0,0, &
+		"CHANGE ",	6,0,0, &
+		"QUOTA ",	6,0,-1, &
+		"ZERO ",	5,13,0, &
+		"HANGUP ",	7,0,0, &
+		"DATE ",	5,0,0, &
+		"TIME ",	5,0,0, &
+		"*reserved*",	0,0,0, &
+		"ADD LIBRARY ",	12,16,0, &
+		"ADD ",		4,0,0, &
+		"REMOVE LIBRARY ",15,20,0, &
+		"REMOVE ",	7,4,0, &
+		"*reserved*",	0,0,0, &
+		"*reserved*",	0,0,0, &
+		"UNLOAD LIBRARY ",15,22,0, &
+		"UNLOAD ",	7,6,0, &
+		"NAME ",	5,0,0, &
+		"DISABLE CACHE",0,1,0, &
+		"ENABLE CACHE",	12,0,0, &
+		"LIST CACHE",	0,128,0, &
+		"FLAG ",	5,0,0, &
+		"EXIT",		0,0,0, &
+		"DISABLE ",	8,0,0, &
+		"LIST CCL",	0,0,0, &
+		"CCL ",		4,0,0, &
+		"SUSPEND ",	8,4,5, &
+		"PRIORITY ",	9,4,5, &
+		"RESUME ",	7,4,5, &
+		"RUNBURST ",	9,6,7, &
+		"SIZE ",	5,8,9, &
+		"DETACH ",	7,0,0, &
+		"SEIZE ",	6,10,0, &
+		"SNAP",		0,0,0, &
+		"SIEZE ",	6,10,0, &
+		"DEFAULT KBM",	11,8,0, &
+		"STALL",	5,1,0, &
+		"UNSTALL",	7,0,0, &
+		"END",		0,0,0 &
+
+1501	! THESE ARE THE LEGAL COMMANDS &
+	! COMMAND, MIN, K0, K1 &
+	&
+
+1510	DATA	"**FLAG", &
+		"/CACHE",	128,128, &
+		"/NOCACHE",	128,0, &
+		"/SEQ",		64,4, &
+		"/RAN",		64,0, &
+		"/NOCTG",	32,0, &
+		"/PLACE",	1,2, &
+		"/NOPLACE",	1,0, &
+		"END",		0,0
+1511	! DATA FOR FLAG COMMAND SWITCHES. &
+
+1600	DATA	"**DATE", &
+		31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+1601	! NUMBER OF DAYS IN EACH MONTH &
+	&
+
+2000	! &
+	&
+	&
+	!	M O U N T    C O M M A N D &
+	&
+	&
+
+2003	A1%=INSTR(1%,M$,"/PRIVATE") &
+	\ IF A1%<>0% THEN PRIVATE%=-1% &
+		\ M$=LEFT(M$,A1%-1%)+RIGHT(M$,A1%+8%) &
+		\ GOTO 2003 &
+			! SEARCH FOR /PRIVATE IN COMMAND STRING &
+			! IF NOT THERE DO FSS &
+			! ELSE STRIP IT OUT AND THEN DO FSS ON &
+			!	NEW COMMAND STRING &
+
+2005	R%=FNS%(M$) &
+	\ GOTO 1030 IF R%<0% &
+	\ M%(11%),M%(12%),L%=0% &
+	\ GOTO 2050 IF R%=0% AND PRIVATE%=0% &
+		! SET UP FOR THE MOUNT SYS CALL &
+		! SCAN FOR THE 'DEV:ID', ISOLATING ANY SWITCHES &
+		! IF THERE ARE ANY. GET OUT IF ERROR ON SCAN. &
+		! SET UP THE 'NOLOGICAL/LOGICAL' SWITCH FOUND FLAG &
+
+2010	IF PRIVATE%<>0% THEN &
+		M%(18%)=M%(18%) OR 192% &
+	\	PRIVATE%=0% &
+	\	GOTO 2050 IF R%=0% &
+	\	GOTO 2040 &
+		! IF WE HAVE A 'PRIVATE' SWITCH THEN &
+		!	SET BITS 15 (MODE) AND 14 ('PRIV') IN MODE WORD &
+
+2015	IF LEFT(M$,6%)="/RONLY" THEN &
+		M%(18%)=M%(18%) OR 160% &
+	\	M$=RIGHT(M$,7%) &
+	\	GOTO 2040 &
+		! IF WE HAVE A 'READ ONLY' SWITCH THEN &
+		!	SET BITS 15 (MODE) AND BIT 13 (RONLY) IN MODE WORD &
+
+2020	IF LEFT(M$,10%)="/NOLOGICAL" THEN &
+		L%=L% OR 2% &
+	\	GOTO 2035 IF L%<>2% &
+	\	M%(11%),M%(12%)=255% &
+	\	M%(M4%)=0% FOR M4%=13% TO 16% &
+	\	M$=RIGHT(M$,11%) &
+	\	GOTO 2040 &
+		! DO NOT ALLOW LOGICAL/NOLOGICAL COMBINATION &
+		! SET PROPER FIELD FOR 'NOLOGICAL' &
+
+2025	IF LEFT(M$,9%)="/LOGICAL:" THEN &
+		GOTO 2035 IF L%=1% &
+	\	L%=L% OR 1% &
+	\	GOTO 2035 IF L%<>1% &
+	\	J%=INSTR(2%,M$+"/","/") &
+	\	M%(11%),M%(12%)=255% &
+	\	M1$=MID(SYS(CHR6$+ &
+		CHR$(-10%)+MID(M$,10%,J%-10%)),7%,4%) &
+	\	M%(13%)=SWAP%(CVT$%(M1$)) &
+	\	M%(14%)=SWAP%(M%(13%)) &
+	\	M%(15%)=SWAP%(CVT$%(RIGHT(M1$,3%))) &
+	\	M%(16%)=SWAP%(M%(15%)) &
+	\	M$=RIGHT(M$,J%) &
+	\	GOTO 2040 &
+		! IF '/LOGICAL:LID' PRESENT THEN &
+		!	DON'T ALLOW LOGICAL/NOLOGICAL COMBO OR DUPLICATE &
+		!	LOGICALS. &
+		!	EXTRACT LOGICAL ID AND CONVERT TO RAD50, &
+		!	STORING IN THE PROPER BYTES. &
+
+2030	E%=512%+5% &
+	\ GOTO 19020 &
+		! UNRECOGNIZED SWITCH - ISSUE AN ERROR &
+
+2035	E%=512%+6% &
+	\ E%=E%+1% IF L%=3% &
+	\ GOTO 19020 &
+		! 'LOGICAL' SWITCH MAY BE PRESENT ONLY ONCE &
+		! 'LOGICAL' AND 'NOLOGICAL' IS ILLEGAL &
+		! GET ANOTHER COMMAND &
+
+2040	GOTO 2010 IF LEN(M$)>0% &
+	\ GOTO 2050 &
+		! ANY MORE SWITCHES? - IF SO THEN PROCESS THEM &
+		! ELSE	GO AND DO THE MOUNT &
+
+2044	! &
+	&
+	&
+	!	C O M M A N D S    U T I L I Z I N G    T H E &
+	!	F O L L O W I N G    L I N E S    A R E : &
+	! &
+	!		D I S M O U N T &
+	!		L O C K &
+	!		U N L O C K &
+	!		C L E A N &
+	!		Z E R O &
+	!		S E I Z E &
+	&
+
+2045	CHANGE SYS(CHR6$+CHR$(-10%)+M$) TO M% &
+	\ GOTO 2050 UNLESS K0%=13% &
+	\ Q%=M%(29%)+SWAP%(M%(30%)) &
+	\ IF Q%<0% OR (Q% AND 9224%)<>8192% THEN &
+		E%=512%+15% &
+	ELSE	J%=STATUS AND 255% &
+	\	IF J%=0% THEN &
+			E%=512%+15% UNLESS (Q% AND 129%)=128% &
+		ELSE	E%=512%+15% UNLESS (Q% AND (129%+(J%=14%)))=0% &
+		! SCAN THE STRING (OTHER COMMANDS COME HERE; &
+		! MOUNT WAS SCANNED IN FNS%) &
+		! IF "ZERO" THEN DO SOME EXTRA CHECKING: MUST HAVE AT &
+		! LEAST A VALID DEVICE (NOT "." OR PROT CODE); &
+		! IN ADDITION, MUST HAVE ONLY A PPN FOR DISK (NO FILENAME), &
+		! NO PPN FOR OTHER DEVICES, A FILENAME (VOLUME ID) ONLY WITH &
+		! MAGTAPE. &
+
+2047	GOTO 19020 IF E% &
+		! ISSUE AN ERROR ON "ZERO" IF NECESSARY. &
+
+2050	IF K0%=10% THEN &
+		M%(I%)=0% FOR I%=3% TO 22% &
+	\	M%(17%)=1% &
+	\	M%(18%)=128% &
+		! SET UP THE NECESSARY VALUES FOR SEIZE DEVICE. &
+
+2055	M%(3%)=K1% &
+		! START SETTING UP THE CALL; &
+		! USED FOR SEVERAL COMMANDS &
+
+2057	M%(0%)=30% &
+	\ M%(1%)=6% &
+	\ M%(2%)=K0% &
+	\ CHANGE M% TO M$ &
+	\ M$=SYS(M$) &
+	\ CHANGE M$ TO M% &
+	\ IF K0%=3% AND K1%=0% AND L%=1% THEN &
+		IF (M%(13%)+SWAP%(M%(14%)))<>SWAP%(CVT$%(M1$)) OR &
+		(M%(15%)+SWAP%(M%(16%)))<>SWAP%(CVT$%(RIGHT(M1$,3%))) &
+		THEN	E%=512%+3% &
+	\		GOTO 19020 &
+		! SET UP THE REST OF THE SYS CALL AND DO IT. &
+		! IF A LOGICAL NAME WAS SPECIFIED THEN &
+		!	CHECK TO SEE IF IT WAS ACTUALLY ENTERED &
+		!	(WOULDN'T BE IF NOT UNIQUE). &
+		!	IF NOT, ISSUE A PURELY INFORMATIONAL MESSAGE. &
+
+2060	GOTO 1030 &
+		! GET ANOTHER COMMAND &
+
+2400	! &
+	&
+	&
+	!	N O    L O G I N S    O R    L O G I N S &
+	!		   C O M M A N D &
+	&
+	&
+
+2410	M$=SYS(CHR6$+CHR$(K0%)) &
+	\ GOTO 1030 &
+		! DISABLE OR ENABLE LOGINS &
+		! GET ANOTHER COMMAND &
+
+2550	! &
+	&
+	&
+	!	S E T    L O G I N S    C O M M A N D &
+	&
+	&
+
+2560	M$=SYS(CHR6$+CHR$(-19%)+CHR$(VAL(M$))) &
+	\ GOTO 1030 &
+		! SET THE NUMBER OF LOGINS &
+		! GET ANOTHER COMMAND &
+	&
+
+2700	! &
+	&
+	&
+	!	F O R C E    C O M M A N D &
+	&
+	&
+
+2710	GOSUB 10010 &
+	\ GOTO 19020 IF K0%<0% &
+	\ I%=-4% &
+	\ M$=CVT$$(M.LO$+CHR$(13%),8%) &
+	\ IF ASCII(M$)=94% THEN &
+		M$=CVT$$(M$,32%) &
+	\	IF LEN(M$)=2% THEN &
+			M$=CHR$(3%) &
+		ELSE	IF LEN(M$)=3% THEN &
+				M$=CHR$(ASCII(RIGHT(M$,2%))-64%) &
+			ELSE	M$=CHR$(3%)+RIGHT(M$,2%) &
+		! GET THE KB # AND SET UP THE FORCE. &
+		! STRIP OFF LEADING SPACES/TABS AND TACK ON A <CR>. &
+		! IF THE 1ST CHARACTER IS AN UP ARROW OR CARET THEN &
+		!	^C     --> CTRL/C &
+		!	^<CHR> --> CTRL/<CHR> &
+		!	^XXX   --> CTRL/C FOLLOWED BY XX &
+		! &
+		! (THIS WORKS AS IT DOES IN INIT.BAS)X &
+
+2740	FOR J%=K0% TO K1% &
+	\	D$=SYS(CHR6$+CHR$(I%)+CHR$(J%)+M$) &
+		 IF J%<> &
+		(SWAP%(PEEK(PEEK(PEEK(PEEK(520%)))+2%)) AND 255%) &
+
+2745	CHANGE SYS(CHR6$+CHR$(16%)+CHR$(0%)+CHR$(J%)) TO M% &
+	\	IF M%(19%)=8% THEN GOTO 2760 &
+
+2750	R1%=RECOUNT &
+	\	IF LEN(M$)=R1% THEN PRINT "KB";NUM1$(J%);":busy" &
+
+2760	NEXT J% &
+	\ GOTO 1030 &
+		! FOR ALL SPECIFIED KEYBOARDS: &
+		! CHECK TO SEE IF IT'S YOUR OWN KEYBOARD &
+		! IF NOT, DO THE SEND OR FORCE &
+
+2800	! &
+	&
+	&
+	!	S E N D    C O M M A N D &
+	&
+	&
+
+2810	GOSUB 10010 &
+	\ GOTO 19020 IF K0%<0% &
+	\ I%=-5% &
+	\ M$=CHR$(13%)+"** KB"+ &
+	NUM1$(SWAP%(PEEK(PEEK(PEEK(PEEK(520%)))+2%)) AND 255%) &
+	+" ** "+M.LO$+CHR$(13%)+CHR$(10%) &
+	\ GOTO 2740 &
+		! GET AND VERIFY KB NUMBER &
+		! SET UP MESSAGE STRING AND GO SEND IT &
+	&
+	&
+
+2900	! &
+	&
+	&
+	!	K I L L    C O M M A N D &
+	&
+	&
+
+2910	K0%=VAL(M$) &
+	\ M$=SYS(CHR6$+CHR$(8%)+CHR$(K0%)+SPACE$(24%)+CHR$(-1%)) &
+	\ GOTO 1030 &
+		! KILL JOB NUMBER K0% &
+		! GET ANOTHER COMMAND &
+
+3100	! &
+	&
+	&
+	!	Q U O T A    C O M M A N D &
+	!	C H A N G E    C O M M A N D    ( 3 1 3 0 ) &
+	&
+	&
+
+3110	M$=CVT$$(M$,8%+64%) &
+	\ K0%=INSTR(1%,M$,")") &
+	\ IF CVT$$(RIGHT(M$,K0%+1%),-2%)="" THEN &
+		E%=512%+13% &
+	\	GOTO 19020 &
+		! SWITCH BRACKETS TO PARENS. &
+		! SEE IF THERE IS A NEW QUOTA &
+		! IF NOT, ISSUE AN ERROR &
+
+3120	Q=VAL(RIGHT(M$,K0%+1%)) &
+	\ IF Q<0. OR Q>65535. THEN &
+		E%=512%+13% &
+	\	GOTO 19020 &
+		! VERIFY QUOTA ID WITHIN ALLOWABLE RANGE. &
+
+3125	M$=LEFT(M$,K0%) &
+	\ IF Q<32768. THEN &
+		K0%=Q &
+	ELSE	IF Q=32768. THEN &
+			K0%=32767%+1% &
+		ELSE	K0%=Q-65536. &
+		! ASSIGN THE QUOTA TO K0% &
+
+3130	CHANGE SYS(CHR6$+CHR$(-10%)+M$) TO M% &
+	\ M%(28%)=0% &
+	\ M%(13%)=K0% &
+	\ M%(14%)=SWAP%(K0%) &
+		! ASSIGN OR DON'T ASSIGN THE QUOTA - &
+		! I.E., WE MIGHT BE DOING A 'CHANGE' &
+
+3140	M%(21%)=K1% &
+	\ M%(K0%)=M%(K0%-2%) FOR K0%=12% TO 7% STEP -1% &
+	\ K0%=8% &
+	\ GOTO 2055 &
+		! SETUP THE PASSWORD IF 'CHANGE' &
+		! GO DO THE SYS CALL &
+	&
+
+3300	! &
+	&
+	&
+	!	H A N G U P    C O M M A N D &
+	&
+	&
+
+3310	M$=M$+" " &
+	\ GOSUB 10010 &
+	\ IF K0%<0% OR K0%<>K1% THEN &
+		GOTO 19020 &
+	ELSE	M$=SYS(CHR6$+CHR$(-9%)+CHR$(K0%)+CHR$(2%)) &
+	\	GOTO 1030 &
+		! VERIFY WE HAVE A LEGAL DATASET - CAN'T HANGUP 'ALL' &
+		! GO GET ANOTHER COMMAND. &
+
+3330	! &
+	&
+	&
+	!	S N A P S H O T    C O M M A N D &
+	&
+	&
+
+3340	M$=SYS(CHR6$+CHR$(-27%)) &
+	\ GOTO 1030 &
+		! ISSUE THE SNAPSHOT DUMP SYS CALL. &
+		! GO GET ANOTHER COMMAND. &
+
+3400	! &
+	&
+	&
+	!	D A T E    C O M M A N D &
+	&
+	&
+
+3410	D1$="JAN-FEB-MAR-APR-MAY-JUN-JUL-AUG-SEP-OCT-NOV-DEC-" &
+	\ RESTORE &
+	\ D$="" &
+	\ READ D$ WHILE D$<>"**DATE" &
+	\ READ D%(I%) FOR I%=1% TO 12% &
+	\ I%=INSTR(1%,M$,".") &
+	\ GOTO 3420 UNLESS I% &
+	\ YY%=VAL(LEFT(M$,I%-1%)) &
+	\ J%=INSTR(I%+1%,M$,".") &
+	\ GOTO 5240 UNLESS J% &
+	\ MM%=VAL(MID(M$,I%+1%,J%-I%-1%)) &
+	\ DD%=VAL(RIGHT(M$,J%+1%)) &
+	\ GOTO 3430 &
+		! SET UP VALID MONTH STRING; LOAD DAYS IN MONTHS ARRAY. &
+		! FIRST, TRY FOR YY.MM.DD (MONTH AND/OR DAY MIGHT BE JUST &
+		!  ONE DIGIT) &
+		! IF WE THINK IT IS, PEEL OFF THE YEAR &
+		! MAKE SURE THERE'S ANOTHER "." - PEEL OUT THE MONTH &
+		!  NUMBER AND DAY OF THE MONTH. &
+
+3420	I%=INSTR(1%,M$,"-") &
+	\ GOTO 5240 IF I%=0% &
+	\ DD%=VAL(LEFT(M$,I%-1%)) &
+	\ J%=INSTR(I%+1%,M$,"-") &
+	\ GOTO 5240 UNLESS J% &
+	\ YY%=VAL(RIGHT(M$,J%+1%)) &
+	\ I%=INSTR(1%,D1$,MID(M$,I%+1%,J%-I%-1%)) &
+	\ GOTO 5240 UNLESS I% &
+	\ MM%=(I%/4%)+1% &
+		! TRY FOR DD-MMM-YY (OR D-MMM-YY). &
+		! ERROR UNLESS WE FIND A DASH. &
+		! PEEL OFF THE DAY OF THE MONTH. &
+		! CHECK FOR 2ND DASH. &
+		! PEEL OF THE YEAR FROM THE END. &
+		! FIND THE MONTH # BY SCANNING FOR USER MONTH IN MONTH STRING. &
+		! COMPUTE THE MONTH NUMBER BASED ON POSITION. &
+
+3430	GOTO 5240 IF MM%<1% OR MM%>12% OR YY%<70% OR YY%>99% &
+	\ D%(2%)=D%(2%)+1% IF (YY% AND 3%)=0% &
+	\ GOTO 5240 IF DD%>D%(MM%) OR DD%<=0% &
+	\ DD%=DD%+D%(I%) FOR I%=1% TO MM%-1% &
+	\ K0%=(YY%-70%)*1000%+DD% &
+	\ K1%=0% &
+	\ GOTO 3540 &
+		! BOTH FORMS COME HERE. &
+		! VERIFY MONTH NUMBER AND YEAR RANGE. &
+		! MAKE FEBRUARY 29 DAYS IF THEY SPECIFIED A LEAP YEAR. &
+		! CHECK THAT USER DAY OF MONTH IS POSITIVE AND NOT MORE &
+		!  THAN THE MONTH ALLOWS. &
+		! ADD THE NUMBER OF DAYS IN THE MONTHS BEFORE THE ONE &
+		! SPECIFIED ONTO THE DAYS TOTAL. &
+		! INTERNAL FORMAT FOR SYS CALL IS DAYS TOTAL + YEAR. &
+		! DON'T CHANGE THE CURRENT TIME. &
+		! GO DO THE CALL. &
+	&
+
+3500	! &
+	&
+	&
+	!	T I M E    C O M M A N D &
+	&
+	&
+
+3505	I%=INSTR(1%,M$,":") &
+	\ GOTO 5240 IF I%=0% &
+	\ K0%=VAL(LEFT(M$,I%-1%)) &
+	\ K1%=VAL(RIGHT(M$,I%+1%)) &
+	\ IF K0%<0% OR K0%>23% OR K1%<0% OR K1%>59% THEN 5240 &
+	ELSE	K1%=1440%-K1%-(K0%*60%) &
+	\	K0%=0% &
+		! MUST HAVE A COLON. &
+		! GET THE HOURS AND MINUTES. &
+		! PUT THE TIME IN INTERNAL FORMAT &
+		! DON'T CHANGE THE SYSTEM DATE. &
+
+3540	D$=SYS(CHR6$+CHR$(-14%)+CHR$(K0%)+ &
+	CHR$(SWAP%(K0%))+CHR$(K1%)+CHR$(SWAP%(K1%))) &
+	\ PRINT "Date and time set to ";DATE$(0%);" and ";TIME$(0%) &
+	\ GOTO 1030 &
+		! DO THE CHANGES, PRINT THEM OUT AND GET ANOTHER COMMAND &
+
+3600	! &
+	&
+	&
+	!	R E S E R V E D &
+	&
+	&
+
+3610	GOTO 1030 &
+		! DO NOTHING &
+
+3700	! &
+	&
+	&
+	!	A D D    C O M M A N D &
+	&
+	&
+
+3710	I%=INSTR(1%,M$+"/","/") &
+	\ D$=RIGHT(M$,I%) &
+	\ D1$=LEFT(M$,I%-1%) &
+	\ M$=D1$ &
+	\ GOTO 1030 IF FNS%(M$)<0% &
+	\ GOTO 3810 UNLESS M$=D1$ &
+	\ M$=D$ &
+	\ R%=LEN(M$) &
+		! SEPARATE SWITCHES (D$) FROM RTS NAME - THIS IS SO /POS DOES &
+		! NOT NEED TO BE TACKED ON AGAIN IF FSS STRIPS IT OFF. ALSO &
+		! WILL CATCH INCLUSION OF /MODE: ETC. &
+		! MAKE A COPY OF WHAT'S SUPPOSED TO BE ONLY THE RTS NAME - &
+		! IF M$ COMES BACK ANY DIFFERENT, USER INCLUDED FUNNINESS. &
+		! SCAN FOR THE FILENAME IN THE 'ADD' COMMAND. &
+		! GET OUT IF ERROR DURING SCAN. &
+		! R%=0% IF THERE ARE NO SWITCHES. &
+		! R%=LENGTH OF SWITCHES STRINGS IF THERE ARE. &
+
+3720	M%(I%)=0% FOR I%=11% TO 20% &
+	\ M%(5%)=1% IF (M%(5%) OR M%(6%))=0% &
+	\ M%(22%)=42% IF ((M%(29%)+SWAP%(M%(30%))) AND 1024%)=0% IF K0%=16% &
+	\ GOTO 3750 IF K0%=16% &
+	\ M%(I%)=0% FOR I%=21% TO 22% &
+	\ D$=":["+NUM1$(M%(6%))+","+NUM1$(M%(5%))+"]"+ &
+	     RAD$(M%(7%)+SWAP%(M%(8%)))+ &
+	     RAD$(M%(9%)+SWAP%(M%(10%)))+".RTS" &
+	\ D$=NUM1$(M%(25%))+D$ IF M%(26%)<>0% &
+	\ D$="_"+CHR$(M%(23%))+CHR$(M%(24%))+D$ IF M%(23%)<>0% &
+	\ OPEN D$ FOR INPUT AS FILE 1% &
+		! ADD LIBRARY DEFAULT PROTECTION CODE IS 42. &
+		! SKIP DEFAULT STUFF IF ADD LIBRARY. &
+		! ASSIGN THE RUN-TIME SYSTEM NAME TO PASS WITH THE SYS CALL &
+		! TACK ON THE DEVICE IF THERE WAS ONE. &
+		! TRY TO OPEN THE FILE. &
+
+3740	I%=(SWAP%(V%(0%,9%)+511%) AND 255%)/2% &
+	\ M%(13%)=V%(I%,254%) &
+	\ M%(15%)=V%(I%,240%) &
+	\ M%(17%)=255% &
+	\ M%(19%)=V%(I%,237%) &
+	\ M%(20%)=SWAP%(M%(19%)) &
+	\ M%(21%)=V%(I%,238%) &
+	\ M%(22%)=SWAP%(M%(21%)) &
+	\ CLOSE 1% &
+	\ L%=0% &
+		! FIND THE LAST BLOCK OF THE FILE. &
+		! ASSIGN VARIOUS DEFAULTS: &
+		! M%(11%)	LOAD AT PREVIOUS LOAD ADDRESS OF THIS &
+		! M%(12%)	 SYSTEM IF ANY. &
+		! M%(13%)	MAX ALLOWED USER IMAGE SIZE, IN K &
+		! M%(15%)	MIN ALLOWED USER IMAGE SIZE, IN K &
+		! M%(17%)	PLACE AT END OF LIST &
+		! M%(18%)	(ALREADY CLEARED) TEMPORARY RESIDENCY &
+		! M%(19%)	EMT CODE (LOW BYTE OF R.FLAG) &
+		! M%(20%)	HIGH BYTE OF R.FLAG &
+		! THE BITS IN R.FLAG HAVE THE FOLLOWING MEANINGS: &
+		! BIT	MEANING &
+		! 0-7	EMT CODE IF BIT 15 IS SET &
+		! 8	KEYBOARD MONITOR &
+		! 9	1 USER RATHER THAN SHARED CODE &
+		! 10	READ/WRITE RATHER THAN READ ONLY &
+		! 11	ERRORS SHOULD NOT BE LOGGED TO THE &
+		! 	SYSTEM ERROR LOG &
+		! 12	RTS SHOULD BE REMOVED FROM MEMORY &
+		! 	WHEN ALL USERS HAVE SWITCHED TO ANOTHER RTS &
+		! 13	RUN SIZE COMPUTED FROM FILE SIZE &
+		! 14	RESERVED &
+		! 15	SPECIAL EMT PREFIX BIT. IF THIS BIT IS ON &
+		! 	THEN BITS 0-7 CONTAIN THE EMT CODE FOR &
+		! 	THE SPECIAL EMT PREFIX EMT. &
+		! &
+		! M%(21%)	EXTENSION &
+		! M%(22%)	REST OF EXTENSION &
+		! &
+		! CLOSE THE FILE, JUMP OUT IF THERE ARE NO SWITCHES. &
+		! CLEAR FLAG WORD, SET UP FOR ADD &
+
+3750	GOTO 3850 UNLESS R% &
+	\ D1$="KBM   1USER RW    LOGERRREMOVE" &
+	\ D1$="      1USER RW    LOGERRREMOVE" IF K0%=16% &
+	\ I%=INSTR(1%,M$,"/NO") &
+	\ IF I%=0% THEN &
+		L%=1% &
+	\	GOTO 3840 &
+
+3752	J%=INSTR(I%+3%,M$+"/","/") &
+	\ D$=MID(M$,I%+3%,J%-I%-3%) &
+	\ GOTO 3815 IF INSTR(1%,M$,"/"+D$)<>0% &
+	\ IF D$="EMT" AND K0%=0% THEN &
+		M%(20%)=M%(20%) AND 127% &
+	ELSE	I0%=INSTR(1%,D1$,D$)-1% &
+	\	GOTO 3810 IF (I0%/6%*6%)<>I0% &
+	\	I0%=I0%/6% &
+	\	IF I0%=3% THEN &
+			M%(20%)=M%(20%) OR 8% &
+		ELSE	M%(20%)=M%(20%) AND (NOT 2%^I0%) &
+		! SET UP STRING OF ALL LEGAL /NOXXX,/XXX COMMANDS. &
+		! IF THERE AREN'T ANY (MORE) '/NO' COMMANDS THEN &
+		! CONTINUE &
+		! ELSE	GET THE REST OF THE '/NO' COMMAND. &
+		! IF THE COMPLEMENT OF THIS COMMAND IS ALSO &
+		! IN THE STRING THEN IT'S AN ERROR. &
+		! IF WE HAVE '/NOEMT' THEN &
+		! 	TURN OFF THE EMT PREFIX BIT &
+		! ELSE	MAKE SURE WE HAVE 1 OF THE OTHER &
+		! 	LEGAL 'NO' COMMANDS, ISSUEING AN ERROR IF &
+		! 	NECESSARY. &
+		! 	ADJUST R.FLAG AS FOLLOWS: &
+		! 	/NOKBM		CLEAR BIT 0 &
+		! 	/NO1USER	CLEAR BIT 1 &
+		! 	/NORW		CLEAR BIT 2 &
+		! 	/NOLOGERR	SET BIT 3 &
+		! 	/NOREMOVE	CLEAR BIT 4 &
+
+3755	M$=LEFT(M$,I%-1%)+RIGHT(M$,J%) &
+	\ GOTO 3750 &
+		! EXTRACT THIS COMMAND AND CHECK FOR REMAINING '/NO' COMMANDS. &
+		! THIS IS CHECK IS DONE NOW IN ORDER TO PROHIBIT ILLEGAL &
+		! /NOXXX,/XXX COMBINATIONS. &
+
+3757	GOTO 3810 IF ASCII(M$)<>47% &
+	\ J%=INSTR(2%,M$+"/","/") &
+	\ D$=MID(M$,2%,J%-2%) &
+	\ I1%=INSTR(1%,D$,":") &
+	\ I5%=I1% OR (I1%=0% AND J%-1%) &
+	\ GOTO 3815 IF INSTR(J%,M$,MID(D$,1%,I5%-1%)) &
+	\ J1%=1% &
+	\ GOTO 3800 IF K1%=1% &
+	\ I0%=INSTR(1%,D1$,D$) &
+	\ IF I0%=0% THEN &
+		GOTO 3760 &
+	ELSE	I0%=I0%-1% &
+	\	GOTO 3810 IF (I0%/6%*6%<>I0%) &
+	\	I0%=I0%/6% &
+	\	IF I0%=3% THEN &
+			M%(20%)=M%(20%) AND (NOT 8%) &
+		ELSE	M%(20%)=M%(20%) OR (2%^I0%)
+3758	GOTO 3835 &
+		! SWITCH STRING MUST ALWAYS BEGIN WITH A SLASH. &
+		! PINPOINT THE NEXT COMMAND AND SEE IF WE HAVE XXX:. &
+		! DON'T ALLOW DUPLICATE COMMANDS. &
+		! SET RANGE CHECK MIN VALUE TO 1. &
+		! JUMP TO STAY,ADDR: CHECK IF WE HAVE A LOAD. &
+		! IF WE APPEAR TO HAVE THE COMPLEMENT OF A /NO COMMAND THEN &
+		! VERIFY IT'S A LEGAL COMMAND. &
+		! IF IT IS THEN &
+		! 	IF IT'S A /LOGERR THEN &
+		! 		CLEAR BIT 4 &
+		! 	ELSE	SET THE APPROPRIATE BIT (SEE ABOVE). &
+
+3760	GOTO 3800 IF K0%=16% &
+	\ IF LEFT(D$,3%)="EMT" THEN &
+		M%(20%)=M%(20%) OR 128% &
+	\	M%(19%)=-1% &
+	\	IF I1%=0% THEN &
+			GOTO 3835 &
+		ELSE	J1%=0% &
+	\		J2%=255% &
+	\		I%=19% &
+	\		GOTO 3820 &
+		! IF WE HAVE A /EMT THEN &
+		! ERROR IF /EMT ALREADY SPECIFIED. &
+		! TURN ON FLAG BIT. &
+		! ERROR IF /NOEMT ALREADY SPECIFIED. &
+		! FORCE ON SPECIAL EMT PREFIX BIT. &
+		! SET DEFAULT (255) EMT CODE. &
+		! IF USER HAS NOT GIVEN SPECIFIC EMT CODE THEN &
+		! 	CONTINUE &
+		! ELSE	GET PAST COLON. &
+		! 	SET UP TO DETERMINE/CHECK USER VALUE. &
+
+3765	IF LEFT(D$,9%)="POSITION:" THEN &
+		I%=17% &
+	\	J2%=255% &
+	\	GOTO 3820 &
+		! IF POSITION IN LIST SPECIFIED THEN &
+		! SET UP FOR APPROPRIATE WORD STORAGE. &
+		! SET UP FOR MAX CHECK (1<=N<=255) &
+
+3770	J2%=28% &
+	\ IF LEFT(D$,4%)="MAX:" THEN &
+		I%=13% &
+	\	GOTO 3820 &
+		! SET UP FOR MAX VALUE CHECK ON MIN: AND MAX: (1<=N<=28) &
+		! IF MAX: IS PRESENT THEN &
+		! SET UP FOR APPROPRIATE WORD STORAGE &
+
+3775	IF LEFT(D$,4%)="MIN:" THEN &
+		I%=15% &
+	\	GOTO 3820 &
+		! DO THE SAME FOR MIN: &
+
+3780	IF LEFT(D$,4%)="EXT:" THEN &
+		M%(21%)=SWAP%(CVT$%(MID(SYS(CHR$(6%)+CHR$(-10%)+ &
+		        RIGHT(D$,5%)),7%,2%))) &
+	\	M%(22%)=SWAP%(M%(21%)) &
+	\	GOTO 3835 &
+		! CHANGE THE EXTENSION &
+
+3800	IF LEFT(D$,4%)="STAY" THEN &
+		M%(18%)=M%(18%) OR 128% &
+	\	GOTO 3835 &
+		! TURN ON PERM RESIDENCY BIT IF NECESSARY &
+
+3805	IF LEFT(D$,5%)="ADDR:" THEN &
+		I%=11% &
+	\	J2%=1919% &
+	\	GOTO 3820 &
+		! IF AN ADDR: IS PRESENT THEN &
+		! SET UP TO VERIFY VALUE (1<=N<1920) &
+
+3810	E%=512%+5% &
+	\ GOTO 19020 &
+		! UNRECOGNIZED SWITCH IF WE REACH HERE &
+
+3815	E%=512%+6% &
+	\ E%=512%+7% IF L%=0% &
+	\ GOTO 19020 &
+		! SET UP FOR DUPLICATE SWITCH ERROR. &
+		! ADJUST FOR ILLEGAL SWITCH COMBINATION. &
+
+3820	M%(I%)=VAL(RIGHT(D$,I1%+1%)) &
+	\ IF M%(I%)>=J1% AND M%(I%)<=J2% THEN &
+		M%(I%+1%)=SWAP%(M%(I%)) IF I%=11% &
+	ELSE	E%=512%+14% &
+	\	GOTO 19020 &
+		! EXTRACT THE VALUE ASSOCIATED WITH THE MAX,MIN,EMT OR ADDR. &
+		! IF IT'S WITHIN THE ALLOWABLE RANGE THEN &
+		! SET UP BIT 12 FOR ADDR &
+		! ELSE	ISSUE AN ILLEGAL VALUE ERROR. &
+
+3835	M$=RIGHT(M$,J%) &
+		! EXTRACT THIS SWITCH. &
+
+3840	GOTO 3757 IF LEN(M$)>0% &
+		! ARE THERE ANY MORE SWITCHES? &
+
+3850	M%(3%)=K0% &
+	\ IF K0%=16% AND M%(11%)=0% THEN &
+		E%=512%+10% &
+	\	GOTO 19020 &
+		! SET UP FOR AN ADD [LIBRARY] OR LOAD [LIBRARY]. &
+		! ADD LIBRARY MUST HAVE /ADDR: SPECIFIED. &
+		! CODE BELOW IS SHARED. &
+
+3860	M%(0%)=30% &
+	\ M%(1%)=6% &
+	\ M%(2%)=-18% &
+	\ IF (M%(11%)=0%) AND (M%(12%)=0%) AND (M%(18%)=128%) THEN &
+		E%=512%+10% &
+		\ GOTO 19020 &
+		! SET UP THE RUN-TIME SYSTEM MANIPULATION CALL &
+
+3870	CHANGE M% TO M$ &
+	\ M$=SYS(M$) &
+	\ GOTO 1030 UNLESS M%(2%)=-17% &
+		! DO THE PROPER CALL AND GET NEXT COMMAND &
+
+3880	CLOSE 1% &
+	\ GOTO 1030 &
+		! SPECIAL CASE FOR 'NAME' COMMAND &
+	&
+
+3900	! &
+	&
+	&
+	!	R E M O V E    A N D    U N L O A D    C O M M A N D S &
+	&
+	&
+
+3910	GOTO 1030 IF FNS%(M$)<0% &
+	\ M%(3%)=K0% &
+	\ GOTO 3860 &
+		! SCAN FOR RTS/LIB NAME. &
+		! K0% =	4 -> REMOVE (RTS) &
+		!	6 -> UNLOAD (RTS) &
+		!      20 -> REMOVE LIBRARY &
+		!      22 -> UNLOAD LIBRARY &
+		! USE COMMON RTS CODE. &
+
+4000	! &
+	&
+	&
+	!	L O A D    C O M M A N D &
+	&
+	&
+
+4010	R%=FNS%(M$) &
+	\ GOTO 1030 IF R%<0% &
+	\ L%=1% &
+	\ M%(11%),M%(12%),M%(17%),M%(18%)=0% &
+	\ GOTO 3850 IF R%=0% &
+	\ GOTO 3757 &
+		! SET DEFAULTS FOR THE LOAD: &
+		! LOAD ADDRESS=PREVIOUS LOAD ADDRESS OF THIS SYSTEM, IF ANY. &
+		! TEMPORARY RESIDENCY &
+		! GO AND ISSUE CALL IF NO SWITCHES, OTHERWISE GOTO &
+		! COMMON SWITCH CHECK ROUTINE (IN ADD RTS/LIB). &
+
+4200	! &
+	&
+	&
+	!	N A M E    C O M M A N D &
+	&
+	&
+
+4210	GOTO 1030 IF FNS%(M$)<0% &
+	\ M$=RIGHT(M$,2%) &
+	\ OPEN M$ FOR INPUT AS FILE 1% &
+	\ M%(I%)=M%(I%+3%) FOR I%=4% TO 7% &
+	\ M%(0%)=7% &
+	\ M%(1%)=6% &
+	\ M%(2%)=-17% &
+	\ M%(3%)=1% &
+	\ GOTO 3870 &
+		! ISOLATE THE FILENAME AND OPEN THE CHANNEL FOR &
+		! THE 'NAME' COMMAND. &
+		! PUT THE FILENAME IN THE RIGHT PLACE FOR THE &
+		! 'NAME' SYS CALL. SET UP THE REST OF THE CALL AND &
+		! GO DO IT &
+	&
+
+4400	! &
+	&
+	&
+	!	D I S A B L E    O R    E N A B L E    C A C H E &
+	!	A N D    L I S T    C A C H E    C O M M A N D S &
+	&
+	&
+
+4410	M%(I%)=0% FOR I%=0% TO 30% &
+	\ GOTO 4490 IF K0%<>0% OR LEN(M$)=0% &
+	\ L%=0% &
+		! SET TO STAY AT CURRENT SETTINGS FOR ENABLE CACHE. &
+		! BYPASS SWITCH CHECK FOR LIST CACHE OR DISABLE/ENABLE &
+		!  WITH NO SWITCHES. &
+
+4420	GOTO 2030 UNLESS ASCII(M$)=47% &
+	\ J%=INSTR(2%,M$+"/","/") &
+	\ D$=MID(M$,2%,J%-2%) &
+	\ I1%=INSTR(1%,D$,":") &
+	\ GOTO 2030 IF LEN(D$)<3% OR (I1%<>0% AND I1%<3%) &
+	\ GOTO 2035 IF INSTR(J%,M$,D$) OR &
+		(I1%>0% AND INSTR(J%,M$,LEFT(D$,I1%))) &
+	\ IF (D$="ALL" OR D$="FILE") THEN &
+		L%=3% IF M%(11%)<>0% &
+	\	GOTO 2035 IF L% &
+	\	M%(11%)=1% &
+	\	M%(11%)=64% IF D$="ALL" &
+	\	GOTO 4470 &
+		! SWITCH MUST ALWAYS BEGIN WITH A SLASH. &
+		! PINPOINT NEXT ONE AND SEE IF WE HAVE XXX:. &
+		! CLEAR ILLEGAL COMBINATION FLAG. &
+		! ERROR ON DUPLICATE SWITCH. &
+		! PEEL OUT A SWITCH (AND ARGUMENT) &
+		! ALL = CACHE ALL DATA TRANSFERS REGARDLESS. &
+		! FILE = ENABLE DATA CACHING BASED ON FILE AND OPEN MODE. &
+		! ERROR IF BYTE 11 (ALSO USED FOR NODATA) ALREADY SET. &
+		! &
+		! BYTE 11	MEANING &
+		!    0		CURRENT SETTING &
+		!    1		FILE OPEN MODE &
+		!   64		REGARDLESS OF OPEN MODE &
+		!  128		DISABLE DATA CACHING &
+
+4425	IF D$="BUFF" OR D$="NOBUFF" THEN &
+		L%=3% IF M%(12%) &
+	\	GOTO 2035 IF L% &
+	\	M%(12%)=1% &
+	\	M%(12%)=128% IF D$="NOBUFF" &
+	\	GOTO 4470 &
+		! BUFF = USE SMALL BUFFER POOL FOR CACHING &
+		! NOBUFF = DON'T USE SMALL BUFFER POOL FOR CHCHING &
+		! &
+		! BYTE 12	MEANING &
+		!    0		CURRENT SETTING &
+		!    1		USE SMALL BUFFER POOL &
+		!  128		DON'T USE SMALL BUFFER POOL &
+
+4430	IF D$="NOFILE" THEN &
+		M%(11%)=128% &
+	\	GOTO 4470 &
+		! DISABLE DATA CACHING &
+
+4440	GOTO 2030 UNLESS I1% &
+	\ I%=0% &
+	\ IF LEFT(D$,3%)="CL:" THEN &
+		I%=4% &
+	ELSE	IF LEFT(D$,6%)="LIMIT:" THEN &
+		I%=5% &
+	ELSE	IF LEFT(D$,4%)="DIR:" THEN &
+		I%=7% &
+	ELSE	IF LEFT(D$,5%)="DATA:" THEN &
+		I%=9% &
+		! AT THIS POINT, MUST HAVE HAD A ":". &
+		! CL: -  CACHE CLUSTER SIZE &
+		! LIMIT: -  TOTAL # OF CACHE CLUSTERS WHICH WILL BE USED &
+		! DIR: - TOTAL # OF CACHE CLUSTERS WHICH CAN BE USED FOR &
+		!	DIRECTORIES. &
+		! DATA: - TOTAL # OF CACHE CLUSTERS WHICH CAN BE USED &
+		!	FOR DATA &
+
+4450	GOTO 2030 UNLESS I% &
+	\ M%(I%)=FNF.TO.I%(VAL(RIGHT(D$,I1%+1%))) &
+	\ M%(I%+1%)=SWAP%(M%(I%)) IF I%>4% &
+		! UNRECOGNIZED SWITCH &
+		! EXTRACT THE ARGUMENT &
+
+4470	M$=RIGHT(M$,J%) &
+	\ GOTO 4420 IF LEN(M$) &
+		! MORE SWITCHES? &
+
+4490	M%(0%)=30% &
+	\ M%(1%)=6% &
+	\ M%(2%)=19% &
+	\ M%(3%)=K0% &
+	\ CHANGE M% TO M$ &
+	\ M$=SYS(M$) &
+	\ GOTO 1030 UNLESS K0%=128% &
+		! DO THE CALL TO RETURN SETTINGS OR DISABLE OR ENABLE CACHE. &
+		! GET ANOTHER COMMAND UNLESS WE HAVE TO LIST THE SETTINGS. &
+
+4500	CHANGE M$ TO M% &
+	\ IF (M%(3%) OR M%(4%))=0% THEN &
+		PRINT "No caching available" &
+	\	GOTO 1030 &
+
+4510	M$="disabled" &
+	\ M$="enabled" IF M%(3%) AND 1% &
+	\ PRINT "Caching ";M$ &
+	\ PRINT "Data caching "; &
+	\ PRINT "not "; UNLESS M%(3%) AND 128% &
+	\ PRINT "available" &
+	\ PRINT &
+	\ PRINT "Current settings:" &
+	\ PRINT CHR$(9%);"Cluster size :";M%(4%) &
+	\ M$="File selectable" &
+	\ M$="All data" IF M%(11%) AND 64% &
+	\ M$="Disabled" IF M%(11%) AND 128% &
+	\ PRINT CHR$(9%);"Data caching : ";M$ &
+	\ M$="Yes" &
+	\ M$="No" IF M%(12%) AND 128% &
+	\ PRINT CHR$(9%);"Small buffers: ";M$ &
+	\ PRINT &
+	\ PRINT "Cluster  All     Dir     Data" &
+	\ PRINT "Limits:"; &
+	\ PRINT CHR$(9%);FNI.TO.F(M%(I%)+SWAP%(M%(I%+1%))); &
+		FOR I%=5% TO 9% STEP 2% &
+	\ PRINT &
+	\ GOTO 1030 &
+		! PRINT SETTINGS INFO. &
+	&
+
+4600	! &
+	&
+	&
+	!	F L A G &
+	&
+
+4610	R%=FNS%(M$) &
+	\ GOTO 1030 IF R%<0% &
+	\ E%=512%+4% UNLESS R% &
+	\ E%=512%+2% IF (M%(28%) AND 129%)<>1% &
+	\ GOTO 19020 IF E% &
+	\ M%(I%)=0% FOR I%=13% TO 22% &
+	\ M%(0%)=30% &
+	\ M%(1%)=6% &
+	\ M%(2%)=-26% &
+	\ M%(3%)=0% &
+	\ M%(4%)=0% &
+		! SET UP FOR FILE UTILITY SYS CALL. &
+
+4620	RESTORE &
+	\ READ D$ UNTIL D$="**FLAG" &
+	\ L%=32767% &
+	\ READ D$, I0%, J0% UNTIL LEFT(M$,LEN(D$))=D$ OR D$="END" &
+		! READ THE FLAG SWITCHES UNTIL WE GET THE RIGHT ONE. &
+	\ E%=512%+5% IF D$="END" &
+	\ E%=512%+7% IF (M%(4%) AND I0%) &
+	\ GOTO 19020 IF E% &
+		! REPORT UNRECOGNIZED SWITCH OR ILLEGAL COMBINATION. &
+	\ M%(4%)=M%(4%) OR I0% &
+	\ M%(15%)=M%(15%) OR J0% &
+	\ M$=RIGHT(M$,LEN(D$)+1%) &
+	\ GOTO 4620 IF LEN(M$) &
+	\ CHANGE M% TO M$ &
+	\ M$=SYS(M$) &
+	\ GOTO 1030 &
+		! MODIFY A FILE'S DIRECTORY FLAGS. &
+	&
+
+4700	! &
+	&
+	&
+	!	D I S A B L E    C O M M A N D &
+	&
+	&
+
+4710	GOSUB 10010 &
+	\ GOTO 19020 IF K0%<0% OR K0%<>K1% &
+	\ D$=SYS(CHR6$+CHR$(8%)+CHR$(K0%)+STRING$(23%,0%)+CVT%$(-1%)) &
+	\ GOTO 1030 &
+		! DISABLE A TERMINAL &
+
+4800	! &
+	&
+	&
+	!	C C L    C O M M A N D &
+	!	4800	L I S T    C C L &
+	!	4900	A D D / R E M O V E    C C L &
+	&
+	&
+
+4810	CHANGE SYS(CHR$(6%)+CHR$(-12%)) TO M% &
+	\ D%=M%(27%)+SWAP%(M%(28%)) &
+	\ GOTO 4830 IF PEEK(D%)<>0% IF D%<>0% &
+	\ E%=512%+8% &
+	\ GOTO 19020 &
+		! GET THE POINTER TO THE TABLES AND SEE IF THERE &
+		! ARE ANY ENTRIES &
+
+4830	GOTO 1030 IF D%=0% &
+	\ D%=PEEK(D%) &
+	\ GOTO 1030 IF D%=0% &
+	\ M%(Q%)=PEEK(D%+Q%+1%) FOR Q%=1% TO 29% STEP 2% &
+	\ M%(Q%)=SWAP%(M%(Q%-1%)) AND 255% FOR Q%=2% TO 30% STEP 2% &
+	\ M%(Q%)=M%(Q%) AND 255% FOR Q%=1% TO 29% STEP 2% &
+	\ M%(4%)=PEEK(D%+28%)-D%-14% &
+	\ M%(Q%)=M%(Q%)+SWAP%(M%(Q%+1%)) FOR Q%=1% TO 29% STEP 2% &
+	\ Q%=13% &
+		! WHEN WE REACH THE END OF THE TABLES, GET OUT. &
+		! SET UP THE TABLE IN M% FOR BYTE REFERENCES. &
+		! SET UNIQUENESS POINTER ADD RESET WORD REFERENCES &
+
+4860	PRINT "-"; IF Q%=M%(4%)+13% &
+	\ GOTO 4870 IF (255% AND M%(Q%))=0% &
+		OR (255% AND M%(Q%))=255% &
+	\ PRINT CHR$(M%(Q%)); &
+	\ Q%=Q%+1% &
+	\ GOTO 4860 &
+		! PRINT OUT THE COMMAND &
+		! INSERT AN '-' AT THE POINT OF UNIQUENESS &
+
+4870	PRINT "="; &
+	\ IF M%(23%)<>0% THEN &
+		PRINT CHR$(M%(23%));CHR$(M%(24%)); &
+	\	PRINT NUM1$(M%(25%) AND 255%); IF M%(26%)<>0% &
+	\	PRINT ":"; &
+		! PRINT THE DEVICE AND NUMBER &
+
+4880	PRINT "[";NUM1$(M%(6%));",";NUM1$(M%(5%) AND 255%);"]"; &
+		IF M%(5%)<>0% &
+	\ PRINT CVT$$(RAD$(M%(7%))+RAD$(M%(9%)),2%)+"."; &
+	\ IF M%(11%)<>-1% THEN &
+		PRINT CVT$$(RAD$(M%(11%)),2%); &
+	ELSE	PRINT "*"; &
+		! PRINT PROJ,PROG IF OTHER THAN USER. &
+		! PRINT THE EXTENSION &
+
+4895	PRINT ";"; &
+	\ PRINT "PRIV "; IF M%(29%)<0% &
+	\ PRINT NUM1$(M%(29%) AND 32767%) &
+	\ GOTO 4830 &
+		! PRINT THE PARAMETER WORD, GET NEXT ENTRY &
+
+4900	D%=INSTR(1%,M$,"=") &
+	\ GOTO 5080 IF D%=0% &
+	\ Q$=CVT$$(LEFT(M$,D%-1%),-2%) &
+	\ M$=CVT$$(RIGHT(M$,D%+1%),-2%) &
+	\ D9%=2% &
+	\ D9%=0% IF LEN(M$)<>0% &
+	\ Q1%=0% &
+	\ D%,Q9%=INSTR(1%,M$,";") &
+	\ GOTO 4950 UNLESS D%<>0% &
+	\ IF MID(M$,D%+1%,4%)="PRIV" THEN &
+		Q1%=32767%+1% &
+	\	Q9%=Q9%+4% &
+		! MUST HAVE AN '=' IN THE CCL 'ADD' AND 'DELETE' COMMANDS &
+		! PUT THE COMMAND IN Q$ AND THE FILE SPEC IN M$ &
+		! SET THE ADD/DELETE FLAG: 0=ADD,2=DELETE &
+		! SCAN FOR 'PRIV' SPECIFICATION AND PREPARE TO GET &
+		! STARTING LINE NUMBER - NOTE THAT IF 'PRIV' IS THERE &
+		! THEN LINE NUMBER GOES TO LINE # + 32767+1 &
+
+4940	Q9%=VAL(RIGHT(M$,Q9%+1%)) &
+	\ M$=LEFT(M$,D%-1%) &
+	\ Q1%=Q1% OR Q9% &
+		! GET THE LINE NUMBER, ISOLATE THE REST OF THE SPEC &
+		! MAKE SURE LINE NUMBER INCLUDES 32767+1 IF &
+		! 'PRIV' WAS SPECIFIED &
+
+4950	CHANGE SYS(CHR$(6%)+CHR$(-10%)+M$) TO M% &
+	\ M%(D%)=0% FOR D%=0% TO 4% &
+	\ M%(11%),M%(12%)=255% IF (M%(29%) AND 32%)<>0% &
+	\ M%(D%)=0% FOR D%=13% TO 22% &
+	\ M%(27%)=Q1% AND 255% &
+	\ M%(28%)=SWAP%(Q1%) AND 255% &
+	\ D%=13% &
+	\ Q$=Q$+"-" UNLESS INSTR(1%,Q$,"-") &
+		! SCAN THE FILE SPEC &
+		! SET THE EXTENSION TO 'AUTO EXTENSION DETERMINATION' &
+		! IF '*' WAS SPECIFIED &
+		! PREPARE TO SCAN FOR UNIQUENESS POINTER &
+		! WILL BE 9 IF NONE INSERTED &
+
+4980	GOTO 5050 UNLESS LEN(Q$)<>0% &
+	\ D0%=ASCII(Q$) &
+	\ Q$=RIGHT(Q$,2%) &
+	\ IF D0%=45% THEN &
+		M%(4%)=D%-13% &
+	\	GOTO 4980 &
+		! CHECK FOR THE END OF THE COMMAND &
+		! IF IT'S NOT THE END, SEE IF WE HAVE THE &
+		! UNIQUENESS INDICATOR - IF SO, SET THE PROPER BIT &
+		! AND CONTINUE SAVING THE REST OF THE COMMAND &
+
+5000	M%(D%)=D0% &
+	\ D%=D%+1% &
+	\ IF D%<23% THEN 4980 &
+		ELSE 5080 &
+		! SAVE THIS CHARACTER OF THE COMMAND &
+		! CHECK FOR A 'TOO LONG' COMMAND &
+		! IF WE'RE OK, CONTINUE SCANNING &
+
+5050	IF D%=13% THEN &
+		GOTO 5080 &
+	ELSE	M%(0%)=30% &
+	\	M%(1%)=6% &
+	\	M%(2%)=-24% &
+	\	M%(3%)=D9% &
+		! SET UP THE SYS CALL &
+
+5060	CHANGE M% TO D$ &
+	\ D$=SYS(D$) &
+	\ GOTO 1030 &
+		! DO THE ADD OR DELETE &
+
+5080	E%=512%+15% &
+	\ GOTO 19020 &
+		! ERROR IN FORMAT COME HERE &
+		! GET ANOTHER COMMAND &
+	&
+
+5100	! &
+	&
+	&
+	!	S U S P E N D    C O M M A N D &
+	&
+	&
+
+5110	M%(3%)=VAL(M$) &
+	\ J%=-128% &
+		! GET THE JOB # AND SET THE PRIORITY TO -128 &
+		! TO SUSPEND THE SPECIFIED JOB &
+
+5120	M%(I%)=0% FOR I%=4% TO 30% &
+	\ M%(0%)=9% &
+	\ M%(1%)=6% &
+	\ M%(2%)=-13% &
+	\ M%(K0%)=255% &
+	\ M%(K1%)=J% &
+	\ CHANGE M% TO M$ &
+	\ M$=SYS(M$) &
+	\ GOTO 1030 &
+		! DO THE PRIORITY/RUNBURST/SWAPMAX CHANGE CALL &
+
+5200	! &
+	&
+	&
+	!	P R I O R I T Y ,   R E S U M E ,    R U N B U R S T , &
+	!		A N D    S I Z E    C O M M A N D S &
+	&
+	&
+
+5210	J%=INSTR(1%,M$," ") &
+	\ GOTO 5240 UNLESS J%<>0% &
+	\ M%(3%)=VAL(LEFT(M$,J%-1%)) &
+	\ J%=VAL(RIGHT(M$,J%+1%)) &
+	\ GOTO 5120 &
+		! GET THE JOB NUMBER AND NEW PRIORITY/RUNBURST/SIZE &
+		! GO AND DO THE CHANGE &
+
+5240	E%=512%+15% &
+	\ GOTO 19020 &
+		! ILLEGAL FORMAT (MAY BE MISSING ARGUMENT) &
+		! USED BY DATE AND TIME COMMANDS ALSO. &
+		! GO GET ANOTHER COMMAND &
+	&
+
+5300	! &
+	&
+	&
+	!	A D D    S W A P F I L E    C O M M A N D &
+	&
+
+5310	J%=INSTR(1%,M$," ") &
+	\ GOTO 5080 IF J%=0% &
+	\ Q$=LEFT(M$,J%-1%) &
+	\ M$=RIGHT(M$,J%+1%) &
+	\ GOTO 1030 IF FNS%(M$)<0% &
+	\ GOTO 19020 IF FNR%(Q$)<>0% &
+	\ J%=M%(27%)+SWAP%(M%(28%)) &
+	\ GOTO 5910 IF J%<0% OR (J% AND 4096%)=0% &
+		OR (J% AND 768%)=512% OR (J% AND 260%)=4% &
+	\ D$=CHR$(M%(23%))+CHR$(M%(24%)) &
+	\ D$=D$+NUM1$(M%(25%)) IF M%(26%)<>0% &
+	\ D$="_"+D$+":" &
+	\ IF (J% AND 256%)=0% THEN &
+		GOTO 5330 &
+	ELSE	I%=M%(13%)+SWAP%(M%(14%)) &
+	\	D$=D$+"[0,1]"+RAD$(M%(7%)+SWAP%(M%(8%)))+ &
+		RAD$(M%(9%)+SWAP%(M%(10%)))+".SYS" &
+	\	OPEN D$ FOR INPUT AS FILE 1% &
+	\	IF (J% AND 4%)<>0% THEN &
+			S%=SWAP%(CVT$%(MID(SYS(CHR$(12%)),13%,2%))) &
+	\		IF I%<>S% THEN &
+				PRINT "NOTE - The Size of ";D$;" is"; &
+				NUM$(S%);"not ";NUM1$(I%) &
+		! EXTRACT THE SWAPFILE # AND PUSH THE REST THROUGH THE &
+		! FILENAME STRING SCAN. &
+		! VERIFY THE SWAPFILE #. &
+		! ISSUE AN ERROR IF LOGICAL DEVICE NAME PROBLEM (OR &
+		! WILDCARD), NO DEVICE, EXTENSION SANS FILENAME, OR &
+		! SIZE WITH NO FILENAME. &
+		! *NOTE-PPN'S AND EXTENSIONS WILL BE IGNORED- THEY &
+		! WILL BE FORCED BY THE CALL TO [0,1] AND .SYS. &
+		! BUILD THE DEVICE STRING. &
+		! IF NO FILENAME WAS GIVEN THEN &
+		!	ISSUE THE CALL &
+		! ELSE	SET I% TO THE SPECIFIED FILESIZE. &
+		!	TACK ON THE MANDATORY PPN AND EXTENSION. &
+		!	SEE IF THE FILE EXISTS. &
+		!	IF SO AND A SIZE WAS SPECIFIED THEN &
+		!		GET THE LENGTH IN DISK BLOCKS AND &
+		!		ISSUE AN INFORMATIONAL MESSAGE IF<>USER &
+		!		SPECIFIED SIZE. &
+
+5320	CLOSE 1% &
+		! CLOSE THE FILE &
+
+5330	M%(4%)=K1% &
+	\ M%(0%)=30% &
+	\ M%(1%)=6% &
+	\ M%(2%)=23% &
+	\ CHANGE M% TO M$ &
+	\ M$=SYS(M$) &
+	\ GOTO 1030 &
+		! SET UP FOR AN ADD (K1%=1%) OR A REMOVE (K1%=0%). &
+		! SET UP AND EXECUTE THE SWAPFILE CALL. &
+
+5380	OPEN D$ FOR OUTPUT AS FILE 1%,FILESIZE I%,MODE 16% &
+	\ GOTO 5320 &
+		! WE REACHED HERE IF A FILE NOT FOUND ERROR OCCURRED AND A &
+		! FILESIZE WAS SPECIFIED. &
+		! CREATE THE FILE, CONTIGUOUSLY, AT THE SPECIFIED SIZE. &
+
+5400	! &
+	&
+	&
+	!	A D D    O V E R L A Y    D E V : F I L E N A M E &
+	!			O R &
+	!	A D D    E R R O R    D E V : F I L E N A M E &
+	&
+	&
+
+5410	GOTO 1030 IF FNS%(M$)<0% &
+	\ J%=M%(29%)+SWAP%(M%(30%)) &
+	\ GOTO 5910 IF J%<0% OR (J% AND 4097%)<>4097% &
+	\ M%(3%)=K0% &
+	\ GOTO 5330 &
+		! SCAN THE FILESPEC. &
+		! ERROR IF LOGICAL DEVICE PROBLEM OR BOTH DEVICE &
+		! AND FILENAME WERE NOT SPECIFIED. &
+		! PUT IN THE PROPER SWAPFILE # AND GOT SET UP THE &
+		! REST OF THE CALL. &
+	&
+
+5450	! &
+	&
+	&
+	!	L I S T    S W A P F I L E S , &
+	!	E R R O R    F I L E , &
+	!	O V E R L A Y    F I L E, &
+	!	N S P 0. S Y S &
+	&
+
+5460	PRINT &
+	\ FOR I%=0% TO 3% &
+	\	Q$=FNGET.SWAP$(I%) &
+	\	PRINT "Swapfile "+NUM1$(I%);":	";Q$ &
+	\ NEXT I% &
+	\ PRINT &
+	\ Q$=FNGET.SWAP$(4%) &
+	\ PRINT "Overlay file:	";Q$ &
+	\ Q$=FNGET.SWAP$(5%) &
+	\ PRINT "Error file:	";Q$ &
+	\ PRINT &
+	\ Q$=FNGET.SWAP$(6%) &
+	\ PRINT "DECnet/E file:	";Q$ &
+	\ GOTO 1030 &
+		! &
+		! PRINT THE SWAPFILES, OVERLAY FILE, ERROR FILE &
+		! AND DECNET/E FILE. &
+		! RETURN TO COMMAND LEVEL. &
+	&
+
+5600	! &
+	&
+	&
+	!	R E M O V E    S W A P F I L E    n &
+	&
+	&
+
+5610	GOTO 19020 IF FNR%(M$)<>0% &
+	\ GOTO 5330 &
+		! VERIFY THE SWAPFILE #. &
+		! SET UP FOR REMOVE. USE COMMON SWAPFILE CALL CODE. &
+
+5650	! &
+	&
+	&
+	!	R E M O V E    O V E R L A Y    O R    E R R O R &
+	&
+	&
+
+5660	M%(3%)=K0% &
+	\ GOTO 5330 &
+		! SET UP TO REMOVE SWAPFILE # 4 (OVERLAY) OR SWAPFILE # 5 &
+		! (ERROR). &
+
+5910	E%=512%+9% &
+	\ E%=2% IF J%<0% &
+	\ GOTO 19020 &
+		! SET UP FOR MISSING DEVICE OR FILENAME ERROR. &
+		! ADJUST FOR LOGICAL (OR WILDCARD) ERROR. &
+	&
+
+6000	! &
+	&
+	&
+	!	D E T A C H    C O M M A N D &
+	&
+	&
+
+6010	K0%=INSTR(1%,M$+"/","/") &
+	\ J%=VAL(LEFT(M$,K0%-1%)) &
+	\ M$=RIGHT(M$,K0%+1%) &
+	\ IF M$="CLOSE" OR LEN(M$)=0% THEN &
+		K0%=128% &
+	ELSE	IF M$="NOCLOSE" THEN &
+			K0%=0% &
+		ELSE	GOTO 2030 &
+		! PEEL OFF ANY SWITCHES. &
+		! SET SWITCH BIT APPROPRIATELY OR GO AND ISSUE &
+		! ERROR FOR AN ILLEGAL SWITCH. &
+
+6020	CHANGE SYS(CHR6$+CHR$(-3%)) TO M% &
+	\ IF J%<1% OR J%>M%(4%) OR &
+		J%=(PEEK(518%) AND 255%)/2% THEN &
+		E%=512%+12% &
+	\	GOTO 19020 &
+		! IF THE USER SUPPLIED JOB # IS <0, > THE MAX JOB # &
+		! ALLOWED ON THE SYSTEM OR HIS/HER OWN JOB # THEN &
+	!	GO AN ISSUE AN ERROR. &
+
+6030	M$=SYS(CHR6$+CHR$(7%)+CHR$(J%+K0%)) &
+	\ GOTO 1030 &
+		! ISSUE THE DETACH CALL - AN ERROR ON THE &
+		! CALL WOULD MEAN THAT THE JOB IS ALREADY DETACHED. &
+		! GO AND GET ANOTHER COMMAND. &
+	&
+
+6500	! &
+	&
+	&
+	!	A D D ,    C H A N G E    O R &
+	!	R E M O V E    L O G I C A L    C O M M A N D &
+	&
+	&
+
+6510	GOTO 1030 IF FNS%(M$)<0% &
+	\ M%(3%)=K0% &
+	\ Q%=M%(29%)+SWAP%(M%(30%)) &
+	\ GOTO 6600 IF (Q% AND 8192%) <> 0% &
+	\ M%(23%)=ASCII("S") &
+	\ M%(24%)=ASCII("Y") &
+		! DEFAULT TO "SY:" IF NO DEVICE HAS BEEN SPECIFIED. &
+		! SET UP FUNCTION AS FOLLOWS: &
+	!	K0%	FUNCTION &
+	!	1	ADD &
+	!	-1	CHANGE &
+	!	0	REMOVE &
+
+6600	M%(0%)=30% &
+	\ M%(1%)=6% &
+	\ M%(2%)=21% &
+	\ CHANGE M% TO M$ &
+	\ M$=SYS(M$) &
+	\ GOTO 1030 &
+		! SET UP FOR THE 'LOGICAL' CALL AND EXECUTE THE &
+		! ADD, REMOVE OR CHANGE. &
+	&
+
+7000	! &
+	&
+	!	L I S T    L O G I C A L    C O M M A N D &
+	&
+
+7010	INDX% = 0%				!INIT THE INDEX COUNTER &
+\	FOUND% = 0%				!DEFAULT TO NONE FOUND &
+\	PRINT IF CCPOS(0%)			!GO BACK TO THE LEFT MARGIN &
+\	ON ERROR GOTO 7050			!SET LOCAL ERROR TRAP &
+\	UNTIL 0%				!LOOP FOREVER &
+\		M%(0%) = 30%			!  30 BYTES &
+\		M%(1%) = 6%			!  SYS CALL TO FIP &
+\		M%(2%) = 21%			!  ADD/REMOVE/LIST LOGICALS &
+\		M%(3%) = 2%			!  LIST LOGICAL CODE &
+\		M%(4%) = 0%			!  RESERVED &
+\		M%(5%) = INDX%			!  LOWER HALF OF INDEX &
+\		M%(6%) = SWAP%(INDX%)		!  UPPER HALF OF INDEX &
+\		M%(I%) = 0% FOR I% = 7% TO 30%	!  CLEAR OUT THE REST &
+\		CHANGE M% TO M$			!  CHANGE ARRAY TO A STRING &
+\		CHANGE SYS(M$) TO M%		!  DO THE SYS CALL &
+\		GOTO 7030 IF M%(27%) +		!  CHECK FOR A DISMOUNT DISK &
+			SWAP%(M%(28%)) = -1%	!   BY FQCLUS = -1 &
+\		M$ = ""				!  INIT THE LOGICAL NAME VAR &
+\		M$ = M$ + RAD$(M%(I%)+SWAP%(M%(I%+1%))) !FORM THE &
+			FOR I% = 7% TO 11% STEP 2%	!LOGICAL NAME &
+\		M$ = CVT$$(M$,-2%)		!  REMOVE ALL JUNK &
+\		F$ = ""				!  INIT THE FILE NAME VAR &
+\		IF M%(23%) <> 0% THEN		!  IF THERE IS A DEVICE &
+			F$ = F$ + CHR$(M%(23%))+CHR$(M%(24%)) !GET DEVICE NAME &
+\			F$ = F$ + NUM1$(M%(25%)) IF M%(26%) <> 0% !GET UNIT # &
+\			F$ = F$ + ":"		!    ADD THE COLON
+7020		F$ = F$+"["+NUM1$(M%(6%))+","+NUM1$(M%(5%))+"]" !GET THE PPN &
+			IF M%(5%)+SWAP%(M%(6%)) <> 0%		! IF VALID &
+\		PRINT M$;TAB(11%);"= ";F$	!  PRINT IT &
+\		FOUND% = -1%			!  FLAG THAT WE FOUND ONE
+7030		INDX% = INDX% + 1%		!  BUMP THE COUNTER &
+\	NEXT &
+
+7040	ON ERROR GOTO 19000			!RESET THE ERROR TRAP &
+\	GOTO 1030 IF FOUND%			!RETURN IF WE FOUND ANY &
+\	PRINT "%No Logicals installed"		!PRINT ERROR &
+\	GOTO 1030				!RETURN &
+
+7050	RESUME 7040				!SEE IF WE FOUND ANY &
+
+7200	! &
+	&
+	&
+	!	D E F A U L T    K B M    C O M M A N D &
+	&
+	&
+
+7210	GOTO 1030 IF FNS%(M$) < 0% &
+	\ M%(0%) = 30% &
+	\ M%(1%) = 6% &
+	\ M%(2%) = -18% &
+	\ M%(3%) = K0% &
+	\ CHANGE M% TO M$ &
+	\ M$ = SYS(M$) &
+	\ GOTO 1030 &
+		! &
+		! RETURN TO COMMAND LEVEL IF THE FILENAME STRING SCAN &
+		! ON THE NAME FAILED. &
+		! SETUP AND ISSUE THE CHANGE DEFAULT KBM CALL AND RETURN. &
+		! &
+	&
+	&
+
+7300	! &
+	&
+	! UNSTALL-SYSTEM COMMAND &
+	&
+	M$ = SYS(CHR6$+CHR$(29%)+CHR$(K0%))
+7310	IF K0% = 0% AND ERR=0% THEN PRINT "SYSTEM NO LONGER STALLED"
+7320	IF K0% = 1% AND ERR=0% THEN PRINT "SYSTEM STALLED"
+7330	GOTO	1030 &
+	&
+
+10000	! &
+	&
+	&
+	!	S U B R O U T I N E S &
+	&
+	&
+
+10010	ON ERROR GOTO 10120 &
+	\ CHANGE SYS(CHR6$+CHR$(-3%)) TO M% &
+	\ K0%=-1% &
+	\ IF LEFT(M$,4%)="ALL " THEN &
+		M$=RIGHT(M$,5%) &
+	\	M.LO$=RIGHT(M.LO$,5%) &
+	\	 K0%=0% &
+	\	 K1%=M%(3%) &
+	\	 GOTO 10090 &
+		! IF WE HAVE AN 'ALL', GET THE MAX KB # IN THE SYSTEM. &
+
+10020	GOTO 10140 IF LEFT(M$,2%)<>"KB" OR INSTR(1%,M$,":")=0% &
+	\ M$=RIGHT(M$,3%) &
+	\ M.LO$=RIGHT(M.LO$,3%) &
+	\ J%=INSTR(1%,M$,":") &
+	\ K1%=VAL(LEFT(M$,J%-1%)) &
+	\ GOTO 10130 IF K1%>M%(3%) &
+	\ M$=RIGHT(M$,J%+1%) &
+	\ M.LO$=RIGHT(M.LO$,J%+1%) &
+	\ K0%=K1% &
+		! IF WE'RE HERE, MUST HAVE 'KBN:' &
+		! IF WE DO, EXTRACT THE KB #, VERIFYING THAT IT'S <= MAX KB #. &
+
+10090	ON ERROR GOTO 19000 &
+		! RESET THE ERROR TRAP &
+
+10100	RETURN &
+		! K0%=-1% MEANS SOME ILLEGALITY WAS ENCOUNTERED &
+		! &
+		! K0%=K1% MEANS SOME PARTICULAR KB WAS GIVEN &
+		! OTHERWISE, 'ALL' WAS SPECIFIED AND &
+		! K0%=0% AND K1%=HIGHEST KB# &
+
+10120	RESUME 10130 &
+		! TRAP VAL ERRORS &
+
+10130	E%=512%+11% &
+	\ GOTO 10090 &
+		! ILLEGAL KB #. &
+
+10140	E%=512%+15% &
+	\ GOTO 10090 &
+		! ILLEGAL FORMAT - MUST BE KBn:. &
+	&
+
+12000	FOR I%=0% TO 511% STEP 2% &
+	\	FIELD #4%, I% AS S$, 2% AS D2$ &
+	\	A%(I%/2%)=SWAP%(CVT$%(D2$)) &
+	\ NEXT I% &
+	\ S$,D2$="" &
+	\ RETURN &
+	! &
+	!	. S I L    R E C O R D    S E T U P &
+	! &
+	! FIELD .SIL RECORD IN PREPARATION FOR SYMBOL TABLE SCAN. &
+	&
+
+15000	! &
+	&
+	&
+	!	F U N C T I O N S &
+	&
+	&
+
+15050	DEF* FNS%(G$) &
+	! FUNCTION:	FNS%	TERMINATING STRING SCAN FUNCTION &
+	! RETURNS:		>0	IF THERE ARE SWITCHES. &
+	!			-1	IF ANY ERROR &
+
+15060	ON ERROR GOTO 15120 &
+	\ GOTO 15130 IF CVT$$(G$,2%)="" &
+	\ CHANGE SYS(CHR6$+CHR$(-23%)+G$) TO M% &
+		! DO THE STRING SCAN &
+
+15070	F$=G$ &
+	\ IF RECOUNT<>0% THEN &
+		F$=LEFT(G$,LEN(G$)-RECOUNT) &
+	\	G$=CVT$$(RIGHT(G$,LEN(G$)-RECOUNT+1%),-2%) &
+		! IF THERE ARE POSSIBLE SWITCHES, ISOLATE THEM &
+
+15080	M$=G$ &
+		! SAVE THE REST OF THE STRING &
+
+15090	FNS%=RECOUNT &
+		! SET THE FUNCTION VALUE &
+
+15095	ON ERROR GOTO 19000 &
+		! RESET ERROR TRAP &
+
+15100	FNEND &
+
+15120	E$=FNE$(ERR)+" - "+G$ &
+	\ RESUME 15140 &
+		! CATCH ILLEGAL FILENAME ERRORS. &
+
+15130	E$="?Missing argument - no filename given" &
+		! NO FILESPEC &
+
+15140	FNS%=-1% &
+	\ PRINT E$;" - in ";N$ &
+	\ GOTO 15095 &
+		! SET THE FUNCTION TO INDICATE AN ERROR. &
+		! PRINT AS APPROPRIATE ERROR MESSAGE. &
+
+15300	DEF* FNE$(E8%)= &
+		CVT$$(RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(E8%)),3%),4%) &
+		! EXTRACT AN ERROR MESSAGE. &
+	&
+
+15400	DEF* FNR%(G$) &
+	! FUNCTION:	FNR%	CHECK SWAPFILE # &
+	! RETURNS:		0 IF LEGAL # (0,1 OR 3) &
+	!			ERR IF 2,NEGATIVE OR >3 &
+	!		M%(3%)	SWAPFILE # &
+
+15410	ON ERROR GOTO 15430 &
+	\ I%=3% &
+	\ M%(I%)=VAL(G$) &
+	\ IF M%(I%)=2% OR M%(I%)<0% OR M%(I%)>3% THEN &
+		E%=512%+14% &
+		! SET UP TO TRAP VAL() ERRORS. &
+		! VERIFY SWAPFILE #. &
+
+15420	ON ERROR GOTO 19000 &
+	\ FNR%=E% &
+		! RESET ERROR TRAP AND SET FUNCTION &
+
+15425	FNEND &
+
+15430	E%=ERR &
+	\ RESUME 15420 &
+		! TRAP ERRORS &
+
+16000	DEF* FNF.TO.I%(F) = F+65536.*(F>32767. AND F<65536.) &
+		! PACK A FLOATING NUMBER IN THE RANGE 0-65535 &
+		! INTO AN UNSIGNED INTEGER FORMAT. &
+		! AN ERROR WILL OCCUR IF THE FLOATING NUMBER IS OUT OF RANGE. &
+
+16100	DEF* FNI.TO.F(I%) = 32768.+(I% EQV 32767%) &
+		! CONVERT A NUMBER FROM UNSIGNED INTEGER FORMAT &
+		! TO A FLOATING NUMBER IN THE RANGE 0-65535. &
+	&
+
+16200	DEF* FNGET.SWAP$(Q%) &
+	! &
+	! FUNCTION:	FNGET.SWAP$	RETURN FILE SPECIFICATION OF &
+	!				SYSTEM FILE Q% &
+	! INPUT:			SYSTEM FILE # &
+	! RETURNS:			1) FILE SPECIFICATION IF FILE IS &
+	!				   PRESENT &
+	!				2) "None" IF FILE IS NOT PRESENT &
+	!				3) DEVICE+(NFS) IF NONFILE STRUCTURED &
+	!				   I.E., DK0: (NFS) &
+	! &
+	! NOTE: THE ADD/REMOVE SYSTEM FILE SYS() CALL WILL RETURN NULLS IN &
+	!	THE FIRST TWO BYTES OF THE FILENAME IF THE DEVICE IS NONFILE &
+	!	STRUCTURED. &
+	! &
+
+16210	ON ERROR GOTO 16230 &
+	\ Q$="None" &
+	\ CHANGE SYS(CHR$(6%)+CHR$(23%)+CHR$(Q%)+CHR$(-1%)) TO M% &
+	\ Q$=CHR$(M%(23%))+CHR$(M%(24%))+NUM1$(M%(25%))+":" &
+	\ IF M%(7%)=0% AND M%(8%)=0% THEN &
+		Q$=Q$+" (NFS)" &
+	  ELSE &
+		Q$=Q$+"["+NUM1$(M%(6%))+","+NUM1$(M%(5%))+"]" &
+		     +RAD$(M%(7%)+SWAP%(M%(8%))) &
+		     +RAD$(M%(9%)+SWAP%(M%(10%))) &
+		     +"."+RAD$(M%(11%)+SWAP%(M%(12%))) &
+		! &
+		! SET ON ERROR TRAP FOR THIS FUNCTION. &
+		! SET DEFAULT TO "None". &
+		! IF THE FILE IS NOT THERE WE GET A CAN'T FIND FILE &
+		! OR ACCOUNT ERROR. &
+		! IF THE DEVICE IS NONFILE STRUCTURED THEN &
+		!	RETURN THE DEVICE LABEL+(NFS) &
+		! ELSE &
+		!	RETURN THE DEVICE LABEL+PPN+NAME.EXT &
+
+16220	FNGET.SWAP$=Q$ &
+	\ ON ERROR GOTO 19000 &
+	\ FNEND &
+		! &
+		! RESET THE PROGRAM ERROR TRAP LOCATION AND RETURN. &
+
+16230	RESUME 16220 &
+		! &
+		! TRAP ERRORS &
+	&
+
+19000	! &
+	&
+	&
+	!	E R R O R    H A N D L I N G &
+	&
+	&
+
+19010	E%=ERR &
+	\ RESUME 5380 IF E%=5% AND ERL=5310% AND (J% AND 4%)<>0% &
+	\ RESUME 19020 &
+
+19020	GOTO 32767 IF E%=11% &
+	\ IF ERL=5460% THEN &
+		E$=FNE$(E%)+" - "+Q$ &
+	ELSE	IF E%=18% AND ERL=6030% THEN &
+		E$="%Job number"+NUM$(J%)+"is already detached" &
+	ELSE	IF E%=512%+2% THEN &
+		E$="?Illegal filename - "+F$ &
+	ELSE	IF E%=512%+3% THEN &
+		E$="?Logical name is not unique" &
+	ELSE	IF E%=512%+4% THEN &
+		E$="?Switch required" &
+	ELSE	IF E%=512%+5% THEN &
+		E$="?Unrecognized switch - "+M$ &
+	ELSE	IF E%=512%+6% THEN &
+		E$="?Duplicate switches illegal" &
+	ELSE	IF E%=512%+7% THEN &
+		E$="?Illegal switch combination" &
+	ELSE	IF E%=512%+8% THEN &
+		E$="%No CCL commands now installed" &
+	ELSE	IF E%=512%+9% THEN &
+		E$="?Missing device or filename" &
+	ELSE	IF E%=512%+10% THEN &
+		E$="?Missing /ADDR: switch" &
+	ELSE	IF E%=512%+11% THEN &
+		E$="?Illegal KB number" &
+	ELSE	IF E%=512%+12% THEN &
+		E$="?Illegal job number" &
+	ELSE	IF E%=512%+13% THEN &
+		E$="?Missing or illegal quota" &
+	ELSE	IF E%=512%+14% THEN &
+		E$="?Illegal value - "+NUM1$(M%(I%)) &
+	ELSE	IF E%=512%+16% THEN &
+		E$="?Missing required symbols" &
+	ELSE	IF E%=512%+15% THEN &
+		M$="No Argument" IF CVT$$(M$,254%)="" &
+	\	E$="?Illegal format - "+M$ &
+
+19025	IF E%=256% THEN &
+		E$="?Unrecognized command - "+L$ &
+		! GET OUT IF CONTROL/Z &
+		! OTHERWISE, EXTRACT THE PROPER MESSAGE &
+
+19030	E$=FNE$(E%) UNLESS LEN(E$) &
+	\ E$=E$+" - in "+N$ IF (E% AND 256%)=0% &
+	\ PRINT E$ &
+	\ E%=0% &
+	\ E$="" &
+	\ GOTO 1030 &
+		! PRINT THE MESSAGE &
+		! GET ANOTHER COMMAND &
+	&
+
+30000	! &
+	&
+	&
+	!	C C L    E N T R Y &
+	&
+	&
+
+30010	ON ERROR GOTO 19000 &
+	\ N$="CCL ENTRY" &
+	\ ENTRY.TYP%=1% &
+	\ L.LO$=CVT$$(SYS(CHR$(7%)),4%+8%+16%+128%) &
+	\ L$=CVT$$(L.LO$,32%) &
+	\ FOR J%=6% TO 1% STEP -1% &
+	\	IF LEFT(L$,J%)=LEFT("UTILTY",J%) THEN &
+			L$=RIGHT(L$,J%+1%) &
+	\		L.LO$=RIGHT(L.LO$,J%+1%) &
+	\		GOTO 30030
+30020	NEXT J% &
+		! GET THE ENTIRE CCL COMMAND FROM CORE COMMON &
+		! DISCARD EXCESS CHARACTERS &
+		! DISCARD LEADING SPACES AND TABS &
+		! REDUCE SPACES AND TABS TO 1 SPACE &
+		! CONVERT LOWERCASE TO UPPERCASE (SAVE LOWERCASE IN L.LO$) &
+		! DISCARD TRAILING SPACES AND TABS. &
+		! STRIP OFF 'UTILTY' OR PART THEREOF. &
+
+30030	RESTORE &
+	\ L$=CVT$$(L$,8%) &
+	\ L.LO$=CVT$$(L.LO$,8%) &
+	\ ENTRY.TYP%=0% UNLESS LEN(L$)>0% &
+	\ GOTO 1000 &
+		! IF AN ACTUAL 'COMMAND' WAS GIVEN THEN WE'RE ALL &
+		! SET FOR 'REAL' CCL ENTRY (NO HEADER, PROCESS &
+		! JUST THIS COMMAND) - OTHERWISE, TREAT AS THOUGH &
+		! IT HAD BEEN A RUN ENTRY &
+	&
+
+32760	M$=SYS(CHR$(9%)) &
+		! REMOVE OURSELVES FROM MEMORY. &
+
+32767	END &
+

@@ -1,0 +1,190 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	BCKINI,<Initialization routines>,0A,10-MAY-91,BSB/KPH/BGN
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BCKINI
+
+;+
+;			[RSTS V9.0]
+;  000  BSB  28-Nov-83	Creation - brand new module
+;  001	KPH  14-Nov-84	Don't report NOSUCH when detaching from region
+;
+;			[RSTS V9.1]
+;  002  KPH  05-Jun-85	High density support
+;
+;			[RSTS V9.3]
+;  003  KPH  20-Jan-86	Add CRC-32 calculation
+;  004  BGN  25-May-89  Indicate the status of the dynamic region in GENFLG
+;
+;			[RSTS V10.0]
+;  005	REG  18-Feb-90	Default to /REPLACE=ASSIST if under BATCH
+;  006  REG  03-Apr-90	Add big blocks
+;  007  REG  03-Apr-90	Fix /ASSIST code
+;  008  REG  03-Apr-90	Default to /NOREPLACE if under BATCH
+;  009  REG  10-Apr-90	Disable qualifier changes due to BATCH environment
+;  010  REG  26-Apr-90	Set new default blocksizes: 28672 disk, 8192 tape
+;  011  REG  30-Apr-90	Set new default blocksize for tape:  16384
+;
+;-
+
+
+.SBTTL	Call any needed MACROs
+
+.MCALL	CALBX,.ASCIC
+
+.SBTTL	Define the zero tables
+
+; Note: The following depends on sequential p-sect ordering
+
+	.PSECT	ZROTBK,RO,D,GBL,REL,CON
+ZROTBL:
+	.PSECT	ZROTBL,RO,D,GBL,REL,CON
+	.PSECT	ZROTBM,RO,D,GBL,REL,CON
+
+ZROTBE:	
+
+.SBTTL	Define our local data
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+MODNAM:	.ASCIC	/BCKINI/
+
+.EVEN	;Cowgirls get the blues
+
+.SBTTL	Initialize the impure area
+
+;+
+; BCKINI - Initialize the impure area
+;
+; This routine is used to initialize BACKUPs impure area. In addition,
+; it initializes dynamic memory. Come here to set up context before
+; beginning parsing.
+;-
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+BCKINI::SAVREG			; Save the world just in case
+
+; First thing to do is set up the date defaults
+
+	MOV	#D$SIZE/4,R0	; Get the number of entries in table
+	MOV	#$DATTB,R1	;   also get the beginning of the date table
+10$:	CLR	(R1)+		; Set the "EARLIEST" date cell to zero
+	MOV	#-1,(R1)+	;   and the "LATEST" as high as possible 
+	SOB	R0,10$		;     for all the dates
+
+; Now we zero out the zero areas
+
+	MOV	#ZROTBL,R0	;R0 -> Zeroing table
+20$:	MOV	(R0)+,R1	;R1 -> First area to zero
+	MOV	(R0)+,R2	;R2 -> Last location to zero
+30$:	CLR	(R1)+		;Clear a word
+	CMP	R1,R2		;Are we there yet?
+	BNE	30$		;No, not this time
+	CMP	R0,#ZROTBE	;Yes, is there more to zero?
+	BNE	20$		;Yes, so go for it
+
+; Set up dynamic memory
+;
+; Note: We set up dynamic memory before the .STAT below since $INIDM
+; will change the current program size.
+
+	MOV	#FRELST,R0	;Get pointer to dynamic memory free list
+	CALLX	$INIDM		;Now initialize dynamic memory
+
+; Now do misc. initialization
+
+	.STAT			;Get job statistics
+	MOV	@#XRB+10,$MYPPN	;Save the caller's PPN
+	MOVB	@#XRB,CURSIZ	;And the current size
+	MOV	#10.,$GRPSZ	;Default the groupsize to 10
+	MOVB	#3.,RGNSIZ	;Default the region size to 3K
+	MOV	#-1,$DEN	;Default density is highest possible	;002
+	MOV	#1,$OCCUR	;Default occurance is one
+	MOV	#1,BBHDAT+BBH$VL ;First volume number is one
+	MOV	#28672.,BLKSIZ	;Default blocksize for disk		;010
+	MOV	#16384.,TBKSIZ	;Default blocksize for tape		;011
+	MOV	#28672.,HBKSIZ	;Highest legal blocksize for disk/tape	;006
+	MOV	#$VERIF,NOVTAL	;Set the tail of the no-verify table
+
+; Set up the CRC tables
+
+	CALBX	CRCTAB,<#CRCTBL,#120001> ;Initialize the CRC-16 table
+	CALBX	CRCTAB,<#CRC32T,#101440,#166670> ;Initialize CRC-32 table ;003
+
+; Determine if we are running under batch				;005
+
+	CALLX	CLRFQB		; Clear the firqb			;005
+	MOVB	#UU.SYS,@#FIRQB+FQFUN ; Return job status		;005
+	MOVB	#2,@#FIRQB+FQSIZM ; Subfunction 2			;005
+	.UUO			; Do it					;005
+	CRASH			; Shouldn't get an error		;005
+	MOVB	@#FIRQB+FQJOB,JOBNO ; save the job # *2			;007
+	ASR	JOBNO		; Make it job #				;007
+	BITB	#2,@#FIRQB+FQBUFL ; Check out the batch flag		;005
+	BEQ	40$		; Nope, not set				;005
+	BIS	#GF.BAT,@#GENFLG ; Yup, we're running under BATCH	;005
+	; REP.S set means to consult DO.REP for file replacement decsion
+	; REP.S clear means to consult the user (/REPLACE=QUERY)
+	; DO.REP set means to replace files
+	; DO.REP clear means to not replace files
+	; All this code has been disabled for V10.0			;009
+;	BIS	#REP.S,C$FLAG	;Don't query for replacement		;009
+;	BIC	#DO.REP,C$FLAG	;Don't replace files			;009
+;	BIS	#GF.QOP,@#GENFLG ; Default: send replace queries to OMS	;008
+;	BIS	#GF.QOQ,@#GENFLG ; Default: send query queries to OMS	;007
+;	BIS	#C2$AST,C$FLG2	; Default: assist mode			;009
+40$:									;005
+	RETURN			; All done here
+
+GLOBAL	<$DATTB,$MYPPN,$GRPSZ,$DEN,$OCCUR,BBHDAT,FRELST,BLKSIZ,CURSIZ,CRCTBL>
+GLOBAL	<$VERIF,NOVTAL,RGNSIZ,CRC32T>					;003
+GLOBAL	<HBKSIZ,TBKSIZ,C$FLG2,JOBNO>					;007
+GLOBAL	<C$FLAG>							;REG
+
+.SBTTL	Detach our dynamic region
+
+;+
+; DETRGN - Detach our dynamic region
+;
+;	LIBID = ID of region to detach
+;
+;	CALL	DETRGN
+;
+;	All registers are preserved.
+;
+; This routine is used to detach our dynamic region. We are called at
+; the end of a BACKUP.
+;-
+
+DETRGN::CALLX	CLRFQB		;Clear out the FIRQB
+	MOVB	#DTRFQ,@#FIRQB+FQFIL ;Function code is detach region
+	MOV	LIBID,@#FIRQB+FQPPN ;Using the passed region ID
+	.PLAS			;Now go for it
+	CMPB	@#FIRQB,#NOSUCH	;Were we actually attached?		;001
+	BEQ	10$		;No, so that's fine			;001
+	CRASH			;Die on other errors
+10$:	BIC	#GF.DYN,GENFLG	;Indicate that we no longer have a region ;004
+	RETURN			;All done for now			;001
+
+GLOBAL	<LIBID,NOSUCH,GENFLG>						;004
+
+	.END

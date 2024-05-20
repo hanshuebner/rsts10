@@ -1,0 +1,657 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+.INCLUDE /CMN:PKDEF/
+TITLE	PKDVR,<Pseudo Keyboard Handling>,0A,10-MAY-91,KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	PKDVR EDIT HISTORY
+
+;+
+;			[RSTS/E V9.6]
+;  000  KPH  04-Jun-87	Creation - Extract from TTDVR.MAC
+;  001	DRP  09-Dec-87	Source clear fix to correct Pseudo-keyboard
+;			allocation problem.
+;  002	DRP  03-Feb-88	Fix bug in close routine
+;  003	DRP  16-Feb-88	Fix problem causing failure to shutdown system
+;			when killing a job with a PK open.
+;			Don't wake up a sleeping job if no output is
+;			available.
+;  004	DRP  05-May-88	Fix bug OPN$PK where the KB number is not being
+;			posted back to the user.
+;  005	DRP  01-Jun-88	Add priv check to open service for dynamic PKs.
+;
+;			[RSTS/E V9.7]
+;  006	DRP  18-Oct-88	Lock out interrupts before calling TTHGLN.
+;-
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	PKDVRM		;It all goes here
+
+.SBTTL	MODIFIERS FOR .READ/.WRITE 
+
+.BSECT			;.READ MODIFIERS
+
+	.BLKB	.	;    +1., UNUSED
+	.BLKB	.	;    +2., UNUSED
+	.BLKB	.	;    +4., UNUSED
+	.BLKB	.	;    +8., UNUSED
+	.BLKB	.	;   +16., UNUSED
+	.BLKB	.	;   +32., UNUSED
+	.BLKB	.	;   +64., UNUSED
+	.BLKB	.	;  +128., UNUSED
+	.BLKB	.	;  +256., UNUSED
+	.BLKB	.	;  +512., UNUSED
+	.BLKB	.	; +1024., UNUSED
+	.BLKB	.	; +2048., UNUSED
+	.BLKB	.	; +4096., UNUSED
+	.BLKB	.	; +8192., UNUSED
+	.BLKB	.	;+16384., UNUSED
+	.BLKB	.	;+32768., UNUSED
+
+.BSECT			;.WRITE MODIFIERS
+
+PO.NCK:	.BLKB	.	;    +1., DON'T CHECK STATUS OF JOB
+PO.CKC:	.BLKB	.	;    +2., CHECK FOR NEEDING CONTROL/C
+PO.NTX:	.BLKB	.	;    +4., DON'T TRANSFER ANYTHING
+PO.STL:	.BLKB	.	;    +8., STALL IF JOB CAN'T ACCEPT INPUT
+PO.KIL:	.BLKB	.	;   +16., KILL THE JOB
+PO.FCR:	.BLKB	.	;   +32., FAKE A <CR> (RESET TO LEFT MARGIN)
+	.BLKB	.	;   +64., UNUSED
+	.BLKB	.	;  +128., UNUSED
+	.BLKB	.	;  +256., UNUSED
+	.BLKB	.	;  +512., UNUSED
+	.BLKB	.	; +1024., UNUSED
+	.BLKB	.	; +2048., UNUSED
+	.BLKB	.	; +4096., UNUSED
+	.BLKB	.	; +8192., UNUSED
+	.BLKB	.	;+16384., UNUSED
+	.BLKB	.	;+32768., UNUSED
+
+	UNORG
+
+.SBTTL	SPECIAL FUNCTION SERVICE   
+
+;+
+; SPC$PK - SPECIAL FUNCTION SERVICE FOR PSEUDO KEYBOARDS.
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB/FCB
+;	R2 =  SPECIAL FUNCTION CODE
+;	R3 -> XRB
+;	R4 =  CALLING JOB NUMBER TIMES 2
+;	R5 -> (MAPPED) XRB
+;
+;	...
+;
+;	JMP	RTI3               
+;
+;	-OR-
+;
+;	ERROR	CODE
+;
+; LEGAL FUNCTIONS ARE:
+;                                  
+;	0	READ/WRITE THE NOECHO BIT OF THE PK'S KB.
+;	1	Read exit status of controlled job			
+;-
+
+	TMPORG	SPCTBL,6
+	 .WORD	SPC$PK
+	UNORG                      
+
+.ENABL	LSB
+
+SPC$PK:	BIS	#JFPOST,@JOBF	;Set up posting				
+	CALL	PKTOKB		;GET KB# AND KB DDB POINTER		
+	CMP	(R3)+,#1	;Legal function code?			
+	BHI	30$		;Too large, error			
+	BEQ	40$		;Code 1 -- return exit status		
+	MOV	DDFLAG(R1),R5	;Get previous DDFLAG contents		
+	TSTB	(R3)+		;IF <0 THEN WRITE ELSE READ
+	BPL	10$		;READ ONLY CALL
+	BIC	#NOECHO,DDFLAG(R1) ;ASSUME FUNCTION IS CLEAR NO ECHO BIT
+	TSTB	(R3)		;IF <0 THEN SET BIT ELSE CLEAR		
+	BPL	10$		;CLEAR THE NO ECHO BIT SO ALL DONE
+	BIS	#NOECHO,DDFLAG(R1) ;SET NO ECHO BIT
+10$:	DEC	R3		;Point to XRBC in work block		
+	MOV	R5,(R3)		;And return the DDFLAG value		
+20$:	JMPX	RTI3		;THAT'S ALL FOR NOW			
+
+30$:	ERROR	PRVIOL		;INVALID SPECIAL FUNCTION CODE
+
+                                  
+40$:	MOVB	DDJBNO(R1),R0	;Get job * 2 of job at the PK		
+	BEQ	50$		;There isn't one, error			
+	CALLX	MAPJCR		;Map JCR entry				
+	CLR	(R3)		;Clear the return value			
+	MOVB	JCEXST(R1),(R3) ; and return exit status		
+	JMPX	RTI3		;And we're done				
+                                   
+50$:	ERROR	NOSUCH		;No job on the PK			
+
+.DSABL	LSB
+
+.SBTTL	"SLEEP" CHECKING
+
+;+                                 
+; SLP$PK - "SLEEP" CHECKING ENTRY POINT.
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB
+;	R4 -> JOB'S IOB @ CH# +2
+;
+;	...                        
+;
+;	R0 =  RANDOM
+;	R1 =  RANDOM
+;	R4 =  RANDOM
+;
+;	IF C=1 THEN DON'T LET THE JOB "SLEEP"
+;	IF C=0 THEN LET THE JOB "SLEEP"
+;
+;	RETURN
+;-
+
+.ENABL	LSB
+	
+	TMPORG	SLPTBL,6           
+	 .WORD	SLP$PK
+	UNORG
+
+SLP$PK:	TSTB	PKINWT(R1)	;IS CONTROLLED JOB INPUT STALLED OR GONE? 
+	BNE	10$		;YES, GO EXIT C=1
+
+;+                                 
+; PKTOKB - GET KB INFORMATION FROM PK INFORMATION.
+;
+;	R1 -> PK DDB
+;
+;	CALL	PKTOKB
+;
+;	R0 =  KB NUMBER TIMES 2    
+;	R1 -> KB DDB
+;-
+
+PKTOKB:	MOV	DDFLAG(R1),R0	;GET THE KB# *2 FROM THE PK DDB
+	MOV	DEV.KB(R0),R1	;GET THE KB'S DDB POINTER
+	CMP	DDBUFC+EP(R1),DDBUFC+FP(R1) ;ANY OUTPUT FROM CONTROLLED JOB?
+	BEQ	20$		;NO OUTPUT, EXIT C=0 ('BEQ'=>'BHIS'='BCC')
+10$:	SEC			;SET C=1
+20$:	RETURN			;EXIT					
+
+.DSABL	LSB
+
+GLOBAL	<DEV.KB>
+
+                                  
+.SBTTL	TIMEOUTS
+
+;+
+; TMO$PK - TIME OUT ENTRY POINT.
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB                  
+;	PRIORITY IS PR5
+;
+;	...
+;
+;	RETURN
+;-
+                                   
+	TMPORG	TMOTBL,6
+	 .WORD	TMO$PK
+	UNORG
+
+TMO$PK:	.BR	DEA$PK		;;NOTHING TO DO...
+
+.SBTTL	DEVICE ASSIGNMENT SERVICE  
+
+;+
+; ASN$PK - DEVICE ASSIGNMENT SERVICE FOR PSEUDO KEYBOARDS.
+;
+;	R0 =  JOB NUMBER OF ASSIGNER TIMES 2
+;	R1 -> DDB
+;                                  
+;	...
+;
+;	RETURN		(WITH ALL REGISTERS PRESERVED)
+;-
+
+	TMPORG	ASNTBL,6
+	 .WORD	ASN$PK             
+	UNORG
+
+ASN$PK:	.BR	DEA$PK		;NOTHING TO DO...
+
+.SBTTL	DEVICE DEASSIGNMENT SERVICE
+
+;+                                 
+; DEA$PK - DEVICE DEASSIGNMENT SERVICE FOR PSEUDO KEYBOARDS.
+;
+;	R1 -> DDB
+;
+;	...
+;
+;	RETURN		(WITH ALL REGISTERS PRESERVED)
+;-
+
+	TMPORG	DEATBL,6
+	 .WORD	DEA$PK
+	UNORG
+
+DEA$PK:	RETURN			;NOTHING TO DO...
+
+.SBTTL	OPEN SERVICE
+ 
+;+
+; OPN$PK - OPEN SERVICE FOR PSEUDO KEYBOARDS.
+;
+;	R0 =  UNIT NUMBER TIMES 2  
+;	R1 -> DDB (MUST BE PRESERVED)
+;	R4 -> FIRQB (DEFAULT FQFLAG AND FQBUFL VALUE LOADED)
+;	R5 -> JOB'S IOB ENTRY (MUST BE PRESERVED)
+;
+;	...
+;
+;	RETURN                     
+;
+;	-OR-
+;
+;	CALL	RETDEV
+;	ERROR	CODE
+;-
+                                   
+.ENABL	LSB
+
+	TMPORG	OPNTBL,6                          
+	 .WORD	OPN$PK
+	UNORG
+
+OPN$PK:	MOVB	FQMODE(R4),R2	;Pick up PK open mode			
+	MOV	#PKNET!PKBAT,-(SP) ;Set up to check for Network and Batch
+	BIC	R2,(SP)+	;Are they?				
+	BEQ	100$		;Yes, forget this open			
+	BIT	#PKDYN,R2	;Is this a dynamic PK request?
+	BEQ	40$		;No, not this time
+	MOV	R4,-(SP)	;Get a work register			;005
+	MOV	R2,-(SP)	;And another one			;005
+	TSTPRV	EXQTA,FIPRVM	;Does user have "Exceed Quota" privs?	;005
+	BNE	30$		;Yes, allow more than one dynamic PK open ;005
+	MAP	FIPPOL		;No, Map FIP Pool to access the IOB	;005
+	MOV	@FIJBDA,R2	;R2 -> User's IOB			;005
+10$:	MOV	(R2)+,R4	;Get an entry				;005
+	BEQ	20$		;Skip if nothing there			;005
+	CMPB	#IDX.PK,(R4)	;Is this a PK?				;005
+	BNE	20$		;No, then try another entry		;005
+	BIT	#PKDYN,PKMODE(R4) ;Yes, dynamic PK?			;005
+	BNE	120$		;Yes, error only allowed one		;005
+20$:	BIT	#40-1,R2	;More entries to check?			;005
+	BNE	10$		;Yes, continue				;005
+	MAP	@#KISAR5,APR=5,DATA ;Set up our APR 5 mapping		;005
+30$:	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver		;005
+	MOV	#PKDSIZ,R1	;Get size of PK DDB extension		;005
+	CALLM	CREKBD,KBDAP5	;And create a new KB: device
+	BCS	110$		;Failed, give an error
+ 	MOV	#TTPK11,TTINTF(R1) ;Success, set interface type code
+	MOV	R4,R1		;Set up PK DDB pointer
+	MOV	#IDX.PK,(R4)+	;Set up DDIDX and DDSTS			
+.ASSUME	DDIDX	EQ	0
+.ASSUME	DDSTS	EQ	DDIDX+1                 
+	MOVB	@#FIJOB,(R4)+	;Set up the job number times two
+.ASSUME	DDJBNO	EQ	DDSTS+1                   
+	MOVB	#-1,(R4)+	;Set up unit number as -1
+.ASSUME	DDUNT	EQ	DDJBNO+1
+	CLR	(R4)+		;Clear out DDTIME			
+.ASSUME	DDTIME	EQ	DDUNT+1
+	CLR	(R4)+		;Clear out DDCNT (set by open code)
+.ASSUME	DDCNT	EQ	DDTIME+2
+	MOVB	R0,(R4)+	;Set up corresponding KB number times two
+.ASSUME	DDFLAG	EQ	DDCNT+2                 
+	CLRB	(R4)+		;High byte of DDFLAG is reserved	
+	CLR	(R4)+		;Clear PKMODE and PKINWT  
+.ASSUME	PKMODE	EQ	DDFLAG+2
+.ASSUME	PKINWT	EQ	PKMODE+1                
+.ASSUME	PKDSIZ	EQ	PKINWT+1
+	MOV	(SP)+,R2	;Restore open mode
+	MOV	(SP)+,R4	;Restore work block pointer
+	BR	50$		;And join up
+                  
+40$:	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver		;005
+	CALLX	GETDEV		;Ensure we can get this PK		;001
+	TSTB	DDCNT(R1)	;This PK already opened?		;001
+	BNE	90$		;Yes, then simply return		;001
+50$:	MOVB	R2,PKMODE(R1)	;SAVE THE PK: OPEN MODE			
+	TSTPRV	EXQTA,FIPRVM	;Privileged to specify detach on close?	
+	BNE	60$		;Yes					;003
+	BICB	#PKDET,PKMODE(R1) ;No, so clear it			
+60$:	MOV	DDFLAG(R1),R0	;Pick up the KB # * 2 			;003
+	ASR	R0		; make it KB # * 1			;003
+	MOVB	R0,FQSIZM(R4)	;  and return it to our caller		;003
+	MOV	@#FIJBDA,R0	;R0 -> JDB				;004
+	MOVB	#CREFQ,JDPOST(R0); Ensure posting back to the user	;004
+70$:	CLRB	PKINWT(R1)	;SAY CONTROLLED JOB NOT IN INPUT WAIT OR GONE
+	MOV	R1,-(SP)	;SAVE PK DDB POINTER
+	CALL	PKTOKB		;GET KB NUMBER AND DDB POINTER
+	CALLMI	CLRTER,KBDAP5	;CLEAR THE TERMINAL BUFFERS
+	BITB	#1,DDJBNO(R1)	;DISABLED?
+	BEQ	80$		;NO
+	CLRB	DDJBNO(R1)	;YES, RE-ENABLE IT              
+80$:	CALLX	DDBSET		;SET THE STATUS
+	MOV	(SP)+,R1	;RESTORE PK DDB POINTER
+90$:	RETURN			; AND EXIT				
+
+100$:	ERROR	MODERR		;Say ?Modifier error		
+                   
+110$:	ERROR	NOROOM		;Can't create any new KB devices
+
+120$:	ERROR	QUOTA		;Insufficient privs to open more than	;005
+				; one dynamic PK			;005
+
+GLOBAL	<TERAP6,FIPRVM,KBDAP5,FIJOB,FIJBDA>				;004
+
+.SBTTL	CLOSE SERVICE
+
+;+
+; CLS$PK - CLOSE SERVICE FOR PSEUDO KEYBOARDS.                  
+;
+;	R0 =  UNIT NUMBER TIMES 2  
+;	R1 -> DDB/FCB
+;	R5 -> DDB/FCB (MUST BE PRESERVED)
+;	IF Z=1 THEN A REAL CLOSE CALL
+;	IF Z=0 THEN A "RESET" CLOSE CALL
+;
+;	...
+;                                  
+;	RETURN
+;-
+
+	TMPORG	CLSTBL,6
+	 .WORD	CLS$PK
+	UNORG
+                                   
+CLS$PK:	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver
+	CMPB	#1,DDCNT(R1)	;Last open?				
+	BNE	160$		;No, simply return			
+	CALL	70$		;DO THE COMMON THING
+	MOVB	PKMODE(R1),-(SP) ;SAVE THE PK: OPEN MODE
+	CALL	PKTOKB		;GET KB NUMBER AND DDB POINTER
+	ASRB	(SP)		;SET C=1 IF NO JOB KILL (BIT <0> WAS 1)
+.ASSUME	PKDET	EQ	1
+	MOVB	DDJBNO(R1),(SP)	;NOW SAVE JOB # *2 OF THE KB: JOB
+	BCC	130$		;KEEP JOB # *2 IF JOB KILL DESIRED
+	CLR	(SP)		;ELSE SAY JOB # = 0 FOR NO JOB KILL
+130$:	SPLC	5		;Lock out interrupts			;006
+	CALLX	TTHGLN		;;NOW "HANG UP" THE KB: (PRI=3 on return) ;006	
+	MOVB	(SP)+,R2	;GET BACK JOB # *2 OF KB: JOB (OR 0)
+	TSTB	DDJBNO(R1)	;IS KB FREE NOW?         
+	BNE	150$		;NO
+	INCB	DDJBNO(R1)	;YES, DISABLE IT
+	CMPB	R2,JOB		;IS JOB "JOB" ?
+	BNE	140$		;NO
+	L3QSET	QDUMP		;FORCE HIM NOT TO BE JOB (MIGHT HANG SYSTEM)
+140$:	MOV	R1,-(SP)	;Preserve our KB: DDB ->		;002
+	CALLM	DOKILL,KBDAP5	; AND KILL THAT JOB IF ANY		
+	MOV	(SP)+,R1	;Restore the KB: DDB ->			;002
+150$:	BITB	#PKDYN,PKMODE(R5) ;Is this a dynamic PK?
+	BEQ	160$		;No, not this time
+	CALLM	REMKBD,KBDAP5	;Yes, destroy the KB device
+	MOV	#FAKDDB,R5	;Set up to exit pointing at fake DDB
+160$:	RETURN			;EXIT
+
+.DSABL	LSB
+
+GLOBAL	<TERAP6,KBDAP5,FAKDDB>
+
+.SBTTL	USER LEVEL SERVICE
+
+;+
+; SER$PK - USER LEVEL READ/WRITE SERVICE.
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB/FCB
+;	R2 =  2 (.READ)
+;	      4 (.WRITE)
+;	R3 -> XRB
+;	R4 =  CALLING JOB NUMBER TIMES 2
+;	R5 -> USER'S BUFFER (THROUGH APR 6)
+;
+; NOTES:
+;
+;	1) ACCESS RIGHTS HAVE BEEN VERIFIED.
+;	2) DIRECTIONAL RIGHTS HAVE BEEN VERIFIED.
+;
+; EXITS:
+;
+;	1) ALL COMPLETE WITH NO ERROR
+;
+;		JMP	IOEXIT
+;
+;	2) ALL COMPLETE WITH ERROR
+;
+;		SETERR	CODE
+;		JMP	IOEXIT
+;
+;		-OR-
+;
+;		ERROR	CODE
+;
+;	3) STALL DESIRED (FOR "REDO" LATER)
+;
+;		JMP	IOREDO
+;-
+
+.SBTTL	USER I/O SERVICE
+
+	TMPORG	SERTBL,6
+	 .WORD	SER$PK
+	UNORG
+
+.ENABL	LSB
+
+SER$PK:	CLR	XRBLK(R3)	;INDICATE A TRUELY			
+	CLRB	XRBLKM(R3)	; SEQUENTIAL DEVICE
+	MOV	R1,R4		;SAVE THE PK DDB POINTER
+	CALL	PKTOKB		;GET KB NUMBER AND DDB POINTER
+	TST	(R3)+		;POINT TO XRBC
+	CMP	R2,#.READ&377	;READ OR WRITE
+	BNE	70$		;IT IS WRITE (PK: TO KB:)
+
+; READ SERVICE
+
+	BIT	#TTSFLO,DDFLAG(R1) ;Need to send flow control data?
+	BEQ	20$		;No, not this time
+	MOVB	#'Q-100,R2	;Yes, guess that it is flow on
+	BIT	#TTXOFF,DDFLAG(R1) ;Good guess?
+	BEQ	10$		;Yes, sure is
+	MOVB	#'S-100,R2	;No, get a flow off character instead
+10$:	PUTUSR			;Give this character to the user
+	INC	(R3)		;Update the byte count
+	INC	XRLOC-XRBC(R3)	;And the pointer
+	BIC	#TTSFLO,DDFLAG(R1) ;And clear the flag for later
+20$:	TST	DDFLAG(R1)	;Is output stopped from the PK?
+	BPL	30$		;No, go do the I/O
+.ASSUME	TTSTOP	EQ	100000
+	TST	(R3)		;Yes, did we transfer flow control?
+	BNE	60$		;Yes, get out
+	BR	50$		;No, give an error
+
+30$:	CMP	XRLEN-XRBC(R3),(R3)+ ;ANY ROOM LEFT?
+	BLOS	60$		;NO
+	CALLX	FETCH,R5,DDBUFC+EP ;GET A CHARACTER FROM KEYBOARD'S BUFFER
+	BCS	40$		;NO MORE LEFT IN BUFFER
+	PUTUSR			;Give the character to the user
+	INC	(R3)		;BUMP THE POINTER
+	INC	-(R3)		; AND THE BYTE COUNT
+	BR	30$		;LOOP FOR MORE CHARACTERS
+
+40$:	CALLX	IOFINI,R5,JSTEL ;TELL KEYBOARD JOB THAT HE CAN RUN AGAIN
+	TST	-(R3)		;DID WE SEND ANYTHING AT ALL?
+	BNE	60$		;YES, SO JUST EXIT
+50$:	ERROR	EOF		;NO, GIVE END-OF-FILE ERROR
+
+60$:	JMPX	IOEXIT		;EXIT FROM I/O
+
+; WRITE SERVICE
+        
+70$:	CLRB	PKINWT(R4)	;CLEAR JOB STALLED OR GONE FLAG IF HERE
+	MOV	XRMOD-XRBC(R3),R4 ;GET THE MODIFIER BIT(S)
+	BIT	R4,#PO.NCK	;SHOULD WE CHECK STATUS OF JOB?
+	BNE	80$		;NOPE
+	MOVB	DDJBNO(R1),R2	;NOW GET THE JOB OF KEYBOARD
+	BIC	#^C<63.*2>,R2	;AVOID THE DISABLED KB...
+	BEQ	150$		;NO JOB IS "NOSUCH" ERROR
+	BIT	JBSTAT(R2),JBWAIT(R2) ;JOB NOW RUNNABLE?
+	BNE	160$		;YES IS "INUSE" ERROR
+	CMP	JBWAIT(R2),#JS.KB ;IS JOB WAITING FOR KEYBOARD INPUT?
+	BNE	160$		;NO IS "INUSE" ERROR ALSO
+	MOV	JOBTBL(R2),R2	;GET THE JOB DATA ADDRESS
+	MAP	PUSH,APR=6,DATA	;Save user's mapping
+	MOV	(R2),-(SP)	;SAVE ADDRESS OF THE I/O BLOCK
+.ASSUME	JDIOB	EQ	0
+	MOV	JDWORK(R2),R2	;NOW GET ADDRESS OF THE WORK BLOCK (XRB)
+	CLR	-(SP)		;CLEAR A STACK ITEM IN ORDER TO
+	MOVB	XRCI(R2),(SP)	; GET THE CH# TIMES 2 OF PENDING KB REQUEST
+	ADD	(SP)+,(SP)	;FORM ADDRESS OF ENTRY IN THE I/O BLOCK
+	MAP	FIPPOL		;Set up FIP pool mapping		
+	CMP	R1,@(SP)+	;In a KB wait for this DDB?		
+	BNE	190$		;No, so we'll give INUSE error		
+	MAP	@#KISAR5,APR=5,DATA ;Set up APR5 data mapping
+	MAP	POP,APR=6,DATA 	;And restore user's buffer mapping
+	BIT	R4,#PO.CKC	;SHOULD WE CHECK FOR NEEDING CONTROL/C?
+	BEQ	80$		;NOPE
+	TST	XRTIME(R2)	;EDITOR TYPE WAIT??
+	BPL	170$		;NOPE, NEED CONTROL/C
+	TST	XRBC(R2)	;YEP, BUT GOT ANYTHING?
+	BNE	170$		;IF SO, THEN STILL NEED CONTROL/C
+80$:	BIT	R4,#PO.KIL	;SHOULD WE KILL THE KB: JOB?
+	BEQ	90$		;NOPE
+	BIT	#DDCONS,DDCNT(R1) ;IS THIS THE CONSOLE FOR THE JOB ?
+	BEQ	90$		;NO, SO DON'T KILL JOB
+	MOVB	DDJBNO(R1),R2	;YEP, GET JOB # *2 FROM DDB
+	MOV	R0,-(SP)	;Get one work register			
+	MOV	R1,-(SP)	;And another one			
+	CALLM	DOKILL,KBDAP5	; AND GO TRY TO KILL THAT JOB
+	MOV	(SP)+,R1	;Restore a work register		
+	MOV	(SP)+,R0	;And another one			
+90$:	BIT	R4,#PO.NTX	;SHOULD WE TRANSFER ANYTHING?
+	BNE	60$		;NOPE
+
+GLOBAL	<JBSTAT,JBWAIT,JOBTBL,KBDAP5>
+
+       
+100$:	TST	(R3)+		;ANYTHING MORE TO MOVE TO KEYBOARD?
+	BEQ	130$		;NOPE, CHECK IF RESET DDHORZ WANTED
+	BIT	#NOECHO,DDFLAG(R1) ;ARE WE ECHOING?
+	BNE	110$		;NOPE, DON'T CHECK "ECHO" QUOTA
+	TST	DDBUFC+BC(R1)	;IS "ECHO" OVER QUOTA?
+	BLT	180$		;YES, SO GIVE AN ERROR
+110$:	BIT	#TTXOFF,DDFLAG(R1) ;Can we write to the PK side of the KB?
+	BEQ	120$		;Yes, go for it
+	BIT	XRMOD-XRBC(R3),#PO.STL ;SHOULD WE STALL OR GIVE ERROR
+	BEQ	180$		;GIVE THE "NOROOM" ERROR
+	MOVB	JOB,R4		;ELSE GET THE JOB NUMBER
+	BIS	#JSBUF,JBWAIT(R4) ; AND ALSO WAIT ON BUFFERS
+	JMPX	IOREDO		;NOW STALL
+                              
+120$:	GETUSR			;Get a character from the user's buffer
+	MOV	R3,-(SP)	;SAVE THE XRB POINTER
+	MOV	R5,-(SP)	;And the user buffer pointer
+	MAP	PUSH,APR=6,DATA	;Save caller's mapping
+	MAP	TERAP6,APR=6,CODE,DATA ;Map the terminal driver
+	CALLX	TTIN09		;PROCESS THE CHARACTER
+	MAP	POP,APR=6,DATA	;Restore user mapping
+	MOV	(SP)+,R5	;And user buffer pointer
+	MOV	(SP)+,R3	;RESTORE XRB POINTER
+	INC	(R3)		;BUMP ADDRESS POINTER (XRLOC)
+	DEC	-(R3)		; AND ONE MORE SENT (XRBC<-XRBC-1)
+	BR	100$		;Now loop for the data
+
+130$:	TST	-(R3)		;FIX XRB POINTER
+140$:	BIT	XRMOD-XRBC(R3),#PO.FCR ;SHOULD WE RESET HORIZONTAL POSITION?
+	BEQ	60$		;NO, JUST EXIT
+	MOVB	DDHORC(R1),DDHORZ(R1) ;RESET DDHORZ
+	BR	60$		; THEN EXIT
+
+150$:	ERROR	NOSUCH		;NO JOB ERROR
+
+160$:	ERROR	INUSE		;BUSY ERROR
+
+170$:	ERROR	CTRLCE		;NEED CTRL/C ERROR
+
+180$:	ERROR	NOROOM		;NON-FULL TRANSFER
+
+190$:	ERROR	INUSE		;Not waiting for input from this PK	
+
+.DSABL	LSB
+
+GLOBAL	<CSR.KB,JBWAIT,TERAP6>
+
+.SBTTL	KP$SRT	Start up output
+
+;+
+; KP$SRT - Start up output
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> Pseudo keyboard DDB
+;	Priority is PR5
+;
+; This routine is called by the class driver to start up any output
+; which may have been bufferred by the port driver.
+;-
+
+	PRTENT	SRT		;Port specific routine to start output
+
+	CMP	DDBUFC+EP(R1),DDBUFC+FP(R1) ;;Anything to output?	;003
+	BEQ	10$		;;No, then no need to wake up the job	;003
+	MOV	R1,-(SP)	;;Save KB: DDB
+	MOV	R3,R1		;;Get PK DDB pointer
+	CALLX	IOFINI,R5,<JSTIM> ;;Wake up any sleeping job
+	MOV	(SP)+,R1	;;Restore KB: DDB
+10$:	RETURN			;;And exit				;003
+
+.SBTTL	SETPKW	Say that controlled job is in an input wait or gone away
+
+;+
+; SETPKW - Say that controlled job is in an input wait or gone away
+;
+;	R0 =  KB Unit # * 2
+;
+;	CALL	SETPKW
+;
+;	R1 -> PK DDB
+;	R4 =  Undefined
+;-
+
+	TMPORG	PKDDSP,0
+	 .WORD	SETPKW
+	UNORG
+
+SETPKW:	MOV	CSR.KB(R0),R1	;Get PK DDB pointer
+	MOVB	(PC),PKINWT(R1)	;SAY CONTROLLED JOB IN INPUT STALL OR GONE
+	CALLX	IOFINI,R5,<JSTIM+JS.PK> ; AND WAKE UP FROM SLEEP OR PK: WAIT
+10$:	RETURN			;EXIT
+
+GLOBAL	<CSR.KB,JS.PK>
+
+.END

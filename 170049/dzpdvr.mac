@@ -1,0 +1,297 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+TITLE	DZPDVR,<DZ-11 compatible port driver>,0A,10-MAY-91,KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	DZPDVR EDIT HISTORY
+
+;+
+;  000  KPH  28-Jun-87	Creation - extract from TTDVR.MAC
+;  001	DRP  31-Dec-87	Fix crash problem in the "Once a second" service
+;-
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	DZPDVR
+
+.SBTTL	KP$SEC	Once a second service
+
+;+
+; KP$SEC - Once a second service
+;
+;	C  =  0 if no hangup
+;	C  =  1 if port driver should hangup modem
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;
+;	Priority is Pr3
+;                     
+; This routine is called once a second by the class driver for port
+; specific checking.
+;-
+
+.ENABL	LSB
+
+	PRTENT	SEC		;Once a second service
+
+	BIT	#TTMODM,TTINTF(R1) ;No, is there a modem on this line?
+	BEQ	30$		;No, not this time
+	ROR	-(SP)		;Save hangup flag
+	SPLC	5		;Yes, lock out interrupts
+	MOV	R3,-(SP)	;;Save the current CSR ->		;001
+	CALL	DZCHEK		;;Poll the DZ for modem status
+	MOV	(SP)+,R3	;;Restore the saved CSR ->		;001
+	CALLX	SUBLIN		;;GET SUBLINE NUMBER
+	MOV	BITWRD(R2),R5	;;GET THE BIT FOR CHECKING
+	TST	(SP)+		;;HANGUP THE LINE?
+	BMI	10$		;;YES, SO DO IT ALREADY
+	TSTB	MODCLK(R1)	;;IS THE MODEM TIMEING OUT?
+	BNE	20$		;;LEAVE IT ALONE IF SO
+	BITB	R5,7(R3)	;;ELSE CHECK FOR CARRIER
+	BNE	20$		;;CARRIER ON, ALL O.K.
+10$:	BICB	R5,5(R3)	;;SHUT OFF DTR
+	BICB	R5,4(R3)	;;SHUT OFF TRANSMISSION
+	JMPX	TTHGLN		;;FINISH UP
+
+20$:	SPLC	3		;;Enable interrupts
+30$:	RETURN			;And we're done
+
+GLOBAL	<BITWRD>
+           
+.DSABL	LSB
+
+.SBTTL	DZ11 & DJ11 INPUT INTERRUPTS
+
+;+
+; D?ONT - INPUT INTERRUPT SERVICE FOR DJ AND DZ LINES.
+;          
+;	R0 =  CONTROLLER NUMBER TIMES 2
+;	PRIORITY IS INTERRUPT PRIORITY
+;
+;	...
+;
+;	RETURN
+;-         
+
+	TMPORG	DJKINT,6
+	 .WORD	DJINT
+
+	TMPORG	DZKINT,6
+	 .WORD	DZINT
+	UNORG
+
+.ENABL	LSB
+
+DJINT:	MOV	DJKBN,R5	;;Get base keyboard number table
+	BR	10$		;;And join up
+
+DZINT:	MOV	DZKBN,R5	;;Get base keyboard number table
+10$:	MOV	#20000,R2	;;Set SILO overflow bit
+	JMPX	TTINMX		;;And process the input
+
+GLOBAL	<DJKBN,DZKBN>
+
+.SBTTL	DZ11 & DJ11 OUTPUT INTERRUPTS
+           
+;+
+; D?ONT - OUTPUT INTERRUPT SERVICE FOR DJ AND DZ LINES.
+;
+;	R0 =  CONTROLLER NUMBER TIMES 2
+;	PRIORITY IS INTERRUPT PRIORITY
+;
+;	...
+;
+;	RETURN
+;-
+
+	TMPORG	DJKINT,16
+	 .WORD	DJONT
+                       
+	TMPORG	DZKINT,16
+	 .WORD	DZONT
+	UNORG
+
+.ENABL	LSB
+
+DJONT:	MOV	DJKBN,R5	;;GET THE BASE KB
+	BR	10$		;;And join up
+
+DZONT:	MOV	DZKBN,R5	;;GET THE BASE KB
+10$:	CALLX	MUXKBN		;;SET UP FOR THE BASE KB
+	MOV	R0,-(SP)	;;SAVE BASE KB # *2
+20$:	TST	(R3)		;;MORE TO DO?
+	BPL	70$		;;NO, GO EXIT FROM INTERRUPT
+	CMPB	#TTDZ11,TTINTF(R1) ;;Is this a DZ-11 interface?
+	BEQ	30$		;;Yes, process that
+	MOV	6(R3),R0	;;No, DJ11, get subline number in <11-8>
+	BR	40$		;;And join up
+
+30$:	MOV	(R3),R0		;;GET SUBLINE NUMBER IN <11-8>
+	BIC	#^C<7*400>,R0	;;CLEAR THE UNWANTED BITS
+40$:	CALLX	FNDLIN		;;NOW FIND THE CORRECT LINE
+	BCS	60$		;;ILLEGAL, STOP IT
+	MOV	#50$,-(SP)	;;Set return address
+	MOV	R4,-(SP)	;;PUT DJ11 OR DZ11 BAR BIT ON THE STACK
+	JMPX	TTOUT		;;And do the output
+
+50$:	SUB	#4,R3		;;RESTORE POINTER TO CSR
+	BR	20$		;; AND LOOP
+
+60$:	BIC	R4,4(R3)	;;TURN OFF THE ILLEGAL LINE
+	BR	20$		;; THEN LOOP
+
+70$:	TST	(SP)+		;;Dump the base KB # * 2
+	RETURN			;;And exit
+
+.DSABL	LSB
+
+GLOBAL	<DJKBN,DZKBN>
+
+.SBTTL	KP$PRM	Set line parameters
+           
+;+
+; KP$PRM - Set line parameters
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R2 =  Requested parameter word
+;	R3 -> CSR
+;
+;	Priority is PR5
+;
+; This routine is called by the class driver to set line parameters.
+; It is used anytime the software-controllable port characteristics
+; are to be changed.
+;-
+
+.ENABL	LSB
+
+	PRTENT	PRM		;;Set line parameters
+
+	CMPB	#TTDJ11,TTINTF(R1) ;;Is this a DJ11?
+	BEQ	10$		;;Yes, no parameters to set
+	MOV	R2,2(R3)	;;No, DZ-11, set them
+10$:	RETURN			;;And we're done
+
+.DSABL	LSB
+
+.SBTTL	KP$DTR	Set DTR for interface
+
+;+
+; KP$DTR - Set DTR for interface
+;
+;	R0 =  Keyboard number times two
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;
+; This routine is used by the class driver to set DTR on a modem control
+; interface.
+;-
+
+	PRTENT	DTR
+
+	CALL	SUBLIN		;;GET SUB LINE NUMBER TIMES 2
+	MOV	BITWRD(R2),R4	;;FAKE A RINGING INDICATION
+	BR	DZDTR		;;NOW GO PROCESS THE ENABLE
+
+GLOBAL	<BITWRD>
+
+;+
+; DZCHEK - CHECK A DZ11 MODEM LINE (NO INTERRUPTS...).
+;          
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB
+;	R3 -> CSR
+;
+;	CALL	DZCHEK
+;
+;	R2 =  UNDEFINED
+;	R3 =  UNDEFINED
+;	R4 =  UNDEFINED
+;	R5 =  UNDEFINED
+;-
+
+DZCHEK:	MOVB	6(R3),R4	;;GRAB THE RING STATUS BITS
+	CALLX	SUBLIN		;;GET SUB LINE NUMBER TIMES 2
+DZDTR:	MOV	BITWRD(R2),R5	;;THIS IS THE BIT FOR RING/CARRIER CHECKING
+	MOVB	7(R3),R2	;;GET CURRENT CARRIER STATUS BITS
+	ADD	#5,R3		;;POINT TO THE DTR BYTE OF DZ11
+	BITB	R5,(R3)		;;IS DTR ON NOW?
+	BNE	10$		;;YES, DO CARRIER CHECKING		
+	BISB	R2,R4		;;OR THE CARRIER BITS IN WITH THE RING BITS
+	BITB	R5,R4		;;NO, IS LINE RINGING??
+	BEQ	20$		;;NEITHER, JUST EXIT
+	BISB	R5,(R3)		;;RINGING, SET DTR
+	JMPX	TTMRNG		;;And process the ring
+
+10$:	JMPX	TTMCAR		;;Go do carrier checking far away
+
+20$:	RETURN			;;All done
+
+GLOBAL	<BITWRD>
+
+.SBTTL	KP$SRT	Start up output
+
+;+
+; KP$SRT - Start up output
+;
+;	R0 =  Keyboard number * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;	Priority is PR5
+;
+; This routine is called by the class driver to start up any output
+; which may have been bufferred by the port driver.
+;-
+
+	PRTENT	SRT		;Port specific routine to start output
+
+	CALLX	SUBLIN		;;GET THE SUBLINE NUMBER *2
+	BIS	BITWRD(R2),4(R3) ;;Set the BAR bit
+	RETURN			;;And we're done
+
+.SBTTL	KP$ERL	Log an error
+
+;+
+; KP$ERL - Log an error
+;          
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	KBEREG contains CSR pointer, and two words are set to be logged
+;	KBESCR contains CSR+4 pointer, and one word is set to be logged
+;	Priority is PR7
+;
+; This routine is called by the class driver in response to a LOG$KB
+; instruction.
+;-
+
+	PRTENT	ERL		;Error logging
+
+	INC	KBESCN		;;Log two words on DJ and DZ interfaces
+	RETURN			;;And exit
+
+GLOBAL	<KBESCN>
+
+.END

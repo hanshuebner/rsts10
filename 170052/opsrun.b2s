@@ -1,0 +1,2184 @@
+2!		PROGRAM		: OPSRUN
+5!		VERSION		: V10.1
+6!		EDIT		: A
+7!		EDIT DATE	: 13-MAY-91
+8!
+10		EXTEND		! EXTEND
+11	!								      &
+									      &
+									      &
+	!		  C O P Y R I G H T				      &
+									      &
+									      &
+  !		      Copyright (C) 1976, 1991 by			      &
+  !	        Digital Equipment Corporation, Maynard, Mass.		      &
+  !									      &
+  !									      &
+  !	This software is furnished under a license and may be used and	      &
+  !	copied  only  in accordance with the terms of such license and	      &
+  !	with the  inclusion  of  the  above  copyright  notice.   This	      &
+  !	software  or  any  other copies thereof may not be provided or	      &
+  !	otherwise made available to any other person.  No title to and	      &
+  !	ownership of the software is hereby transferred.		      &
+  !									      &
+  !	The information in this software is subject to change  without	      &
+  !	notice  and should not be construed as a commitment by Digital	      &
+  !	Equipment Corporation.						      &
+  !									      &
+  !	DIGITAL assumes no responsibility for the use  or  reliability	      &
+  !	of its software on equipment that is not supplied by DIGITAL.	      &
+  !									      &
+  !*******************************************************************
+20	!								      &
+									      &
+									      &
+	!	M O D I F I C A T I O N    H I S T O R Y		      &
+									      &
+									      &
+
+21	! VER/ED	EDIT DATE	REASON				      &
+	!								      &
+	! V9.0-09	08-NOV-84	(PRL) Update for multiple privileges  &
+	!				      Force package location OPSER$:  &
+	! V9.0-14	12-APR-85	(PRL) Change OPER command check for   &
+	!				      [1,*] to check for SWCFG priv   &
+	! V9.7-04	12-JAN-89	(REG) Fix SYS(6+16) error 8 bug	      &
+	! V10.0-H	01-Feb-90	(REG) Add feature patches	      &
+	! V10.0-K	05-Apr-90	(REG) Fix feature patches	      &
+	! V10.1-A	06-Feb-91	(REG) Remove the "\" from line 8080   &
+	! V10.1-A	06-Feb-91	(REG) Fix broadcast for new TERSER    &
+									      &
+
+900	!								      &
+									      &
+									      &
+	!	D I M E N S I O N    S T A T E M E N T S		      &
+									      &
+									      &
+									      &
+	DIM #3%,	A%(31%,3%),					      &
+			M1%(63%),					      &
+			M0%(31%,1%),					      &
+			B%(32767%)					      &
+		! ACTIVITY TABLE: ACTIVITIES TO BE EXECUTED.		      &
+		! MESSAGE-CONTROL-TABLE FREE LIST.			      &
+		! BUILD-TABLE FREE LIST.				      &
+		! MESSAGE-CONTROL-TABLE DIRECTORY OF ASSIGNED MSG #'S.	      &
+									      &
+	\ DIM #4%,	J%(23%,7%),					      &
+			O%(15%,3%),					      &
+			M%(63%,11%),					      &
+			D$(27%)=16%,					      &
+			D%(31%),					      &
+			B$(32767%)=32%					      &
+		! J%() - JOB TABLE OF ON-LINE JOBS.			      &
+		! M%() - MESSAGE-CONTROL-TABLE.				      &
+		! D$() - LEGAL COMMANDS TABLE.				      &
+		! D%() - CORRESPONDING LEGAL COMMAND CODES.		      &
+		! B$() - BUILD TABLE STRING STORAGE.			      &
+									      &
+	\ DIM	W%(5%)							      &
+		! TEMPORARY WORK AREA FOR SORTING.			      &
+									      &
+	\ DIM	Z%(30%)							      &
+
+999	!								      &
+									      &
+									      &
+	!	M A I N    C O D I N G    A R E A			      &
+									      &
+									      &
+
+1000	ON ERROR GOTO 19000						      &
+	\ CHR6$ = CHR$(6%)						      &
+	\ PKG.LOC$ = "OPSER$:"						      &
+	\ PRINT IF CCPOS(0%)						      &
+		! SET UP STD ERROR TRAP					      &
+		! DEFINE OPSER PACKAGE LOCATION				      &
+		! RETURN KB: TO LEFT MARGIN.				      &
+
+1030	IF E0% <> 2% THEN						      &
+		PRINT "?Illegal entry - Please 'RUN " + PKG.LOC$ + "OPSER'"   &
+	\	GOTO 32767						      &
+		! IF NOT A CHAIN ENTRY, COMPLAIN AND EXIT		      &
+
+1040	IF NOT (FNPRV%("WREAD") AND FNPRV%("WWRITE") AND FNPRV%("JOBCTL")     &
+		AND FNPRV%("SEND") AND FNPRV%("RDMEM"))  THEN		      &
+		PRINT "?OPSRUN must be privileged"			      &
+		\ GOTO 32767						      &
+		!MAKE SURE PROGRAM HAS REQUIRED PRIVILEGES TO RUN	      &
+
+1050	OPEN "_KB:OPSER.CMD" AS FILE 1%					      &
+	\ OPEN PKG.LOC$+"OPSER.LOG<188>" FOR OUTPUT AS FILE 2%		      &
+		! KB: IS SYSTEM CONSOLE TERMINAL;			      &
+		! OPSER.LOG IS DEFAULT LOGFILE.				      &
+									      &
+	\ D%=0%								      &
+	\ D0%=-1%							      &
+		! DETACHED FLAG,D%: 0-ATTACHED, -1-DETACHED;		      &
+		! PUT PROMPT,#, ON KB:; SET PROMPT FLAG.		      &
+									      &
+	\ L%,M%=3%							      &
+	\ N5%=1%							      &
+		! LOG FILE FLAG: 1=LOG REQUESTS, 2=LOG MESSAGES.	      &
+		! O.S.C. PRINT FLAG: 1=PRINT REQUESTS, 2=PRINT MESSAGES.      &
+		! MESSAGE # INCREMENT COUNT, USED FOR STORING COUNT.	      &
+									      &
+	\ CRLF$=CHR$(13%)+CHR$(10%)					      &
+	\ S3$=CHR6$+CHR$(22%)+CHR$(-1%)+CHR$(0%)			      &
+		! OFTEN USED SYS() CALL STRINGS:			      &
+		! S3$=SEND MSG;						      &
+									      &
+	\ S$=SYS(CHR6$+CHR$(-12%))					      &
+	\ DEVNAM%=SWAP%(CVT$%(MID(S$,5%,2%)))				      &
+	\ S$=SYS(CHR6$+CHR$(-3%))					      &
+	\ DEVPTR%=SWAP%(CVT$%(MID(S$,7%,2%)))				      &
+	\ S1%=0%							      &
+	\ S1%=S1%+1% WHILE CVT%$(SWAP%(PEEK(DEVNAM%+S1%*2%)))<>"KB"	      &
+	\ DEVTBL%=PEEK(DEVPTR%+S1%*2%)					      &
+	\ S1%=SWAP%(CVT$%(MID(S$,11%,2%)))				      &
+	\ S2%=SWAP%(CVT$%(MID(S$,15%,2%)))				      &
+		! MONITOR TABLES PART 1.				      &
+		! (JOBTBL) START OF JOB TABLE.				      &
+		! (JBWAIT) JOB WAIT FLAGS TABLE.			      &
+		! (DEVTBL) DEVICE TABLE.				      &
+									      &
+	\ OPEN PKG.LOC$+"OPSER0.WRK" FOR INPUT AS FILE #3%		      &
+	\ OPEN PKG.LOC$+"OPSER1.WRK" FOR INPUT AS FILE #4%		      &
+		! OPEN THE TWO WORK FILES SET UP PREVIOUSLY.		      &
+									      &
+	\ N%=M%(0%,0%)							      &
+	\ A%=M%(0%,1%)							      &
+	\ B%=M%(0%,2%)							      &
+	\ K0%=M%(0%,3%)							      &
+	\ K5%=M%(0%,4%)							      &
+	\ M0%=M%(0%,5%)							      &
+	\ M1%=M%(0%,6%)							      &
+	\ I0%=M%(0%,7%)							      &
+	\ A0%=M%(0%,8%)							      &
+	\ J0%=M%(0%,9%)							      &
+	\ T0=300.							      &
+									      &
+	\ GOSUB 8000 	! Good time to init the feature patch		      &
+	\ GOSUB 8050 	! 	bits to OFF				      &
+	\ PRINT #1%,"#";						      &
+
+1500	!								      &
+									      &
+									      &
+	!	C O N T R O L   L O O P					      &
+									      &
+									      &
+									      &
+	TBLFUL%,I2%=0%							      &
+	\ ON A%(I2%,2%) GOSUB						      &
+		2000,2500,3000,3500,4000,				      &
+		5000,1900,1900,4500					      &
+									      &
+		! 1	2000	RECEIVE MESSAGE				      &
+		! 2	2500	READ KB:				      &
+		! 3	3000	CMD ACTIVITY				      &
+		! 4	3500	SEND MESSAGE				      &
+		! 5	4000	PRINT/DISPLAY				      &
+		! 6	5000	RETYPE					      &
+		! 7	1900	STOP (NOT USED)				      &
+		! 8	1900	STOP	''				      &
+		! 9	4500	SLEEP					      &
+									      &
+	\ A%(Z%,0%)=A%(Z%,0%)+A%(Z%,1%) FOR Z%=0% TO A%			      &
+		! INCR PRIORITIES HERE					      &
+									      &
+	\ T=TIME(0.)							      &
+	\ T=T+86400. IF T < T9						      &
+	\ GOSUB 1800 IF ((T-T9) >= T0)	AND (S9% <> -1%)		      &
+									      &
+									      &
+	\ Z0%=FNS2%(I2%)						      &
+		! SORT THE ACTIVITY TABLE.				      &
+									      &
+	\ IF S9% THEN							      &
+		IF T0 <> 10. THEN GOTO 7850				      &
+			ELSE GOTO 7930 IF (T-T9) >= T0			      &
+		! IF IN SHUTDOWN MODE.					      &
+
+1560	GOTO 1500							      &
+
+1800	FOR Z5%=0% TO 23%						      &
+	\ GOTO 1850 UNLESS J%(Z5%,0%)					      &
+	\ S$=""								      &
+	\ S$=" INACTIVE -" UNLESS PEEK(S1%+J%(Z5%,1%)*2%)		      &
+	\ S$=" HIBERNATING -" UNLESS PEEK(S2%+J%(Z5%,1%)*2%)		      &
+	\ S$=" NOT A RECEIVER -" UNLESS FNN3%(J%(Z5%,1%))		      &
+	\ GOTO 1850 IF S$="" AND (J%(Z5%,5%)=Z2%) AND (J%(Z5%,6%)=Z3%)	      &
+	\ S$=" DIFFERENT LOGICAL ID -" UNLESS LEN(S$)			      &
+	\ S$="JOB # "+NUM1$(J%(Z5%,1%))+S$+" TAKEN OFFLINE"		      &
+	\ A1%=5%							      &
+	\ GOSUB 10050							      &
+	\ M%(A%(I2%,3%),0%)=0%						      &
+	\ M%(A%(I2%,3%),1%)=J0%						      &
+	\ M%(A%(I2%,3%),9%)= -1%					      &
+	\ J%(Z5%,Z3%)=0% FOR Z3%=0% TO 7%				      &
+
+1850	NEXT Z5%							      &
+	\ T=T-86400. IF T > 86400.					      &
+	\ T9=T								      &
+									      &
+	\ RETURN							      &
+									      &
+
+1900	!	S T O P							      &
+									      &
+	!	NOT USED						      &
+	STOP								      &
+	\ GOTO 32767							      &
+
+2000	!								      &
+									      &
+	!	R E C E I V E   M E S S A G E				      &
+									      &
+									      &
+									      &
+	IF FNN1%(J0%) THEN						      &
+		S$=SYS(CHR6$+CHR$(22%)+CHR$(2%))			      &
+		ELSE P1%=0%						      &
+	\ GOTO 2300							      &
+		! REMOVE CTL. TBL. ENTRY; IF MSGS. PENDING, REC. MSG.;	      &
+		! IF NO MSGS. PENDING, SET PRIORITY TO LOW AND EXIT.	      &
+
+2010	S$=STRING$(4%,0%)+MID(S$,4%,1%)+CHR$(0%)+MID(S$,5%,2%)+		      &
+	   RIGHT(S$,21%)						      &
+		! SET POINTERS FOR S$					      &
+
+2020	A1%=SWAP%(CVT$%(MID(S$,7%,2%)))					      &
+	\ J1%=ASCII(RIGHT(S$,5%))/2%					      &
+		! PPN OF SENDER.					      &
+		! JOB # OF SENDER.					      &
+									      &
+	\ W1%=ASCII(RIGHT(S$,9%))					      &
+		! COUNT FROM MESSAGE RECEIVED.				      &
+
+2040	IF W1%>20% THEN W2%=19% ELSE W2%=W1%-1%				      &
+		! GET COUNT OF ACTUAL DATA CHARACTERS.			      &
+
+2050	S$=MID(S$,10%,W2%)						      &
+		! WANT DATA CHARACTERS ONLY.				      &
+									      &
+	\ FOR I1%=1% TO 63%						      &
+	\ IF J1%=(M%(I1%,1%) AND 255%) THEN				      &
+		IF (M%(I1%,1%) AND 256%) THEN				      &
+			I%=M%(I1%,8%)					      &
+	\ I%=B%(I%) WHILE B%(I%)					      &
+	\ GOSUB 10200							      &
+	\ GOTO 2150							      &
+		! LOOK FOR SAME JOB # AND PARTIAL MESSAGE RECVD.;	      &
+		! CONCATENATE THIS MSG WITH IT.				      &
+
+2080	NEXT I1%							      &
+									      &
+	\ I1%=FNI1%(I1%)						      &
+	\ I%=FNI%(I%)							      &
+		! GET NEXT ENTRY, I1%, IN MESSAGE CTL. TABLE.		      &
+		! GET NEXT ENTRY, I%, IN BUILD-TABLE.			      &
+									      &
+	\ B$(I%)=""							      &
+	\ GOSUB 10200							      &
+		! STORE MESSAGE IN BUILD-TABLE'S STRING STORAGE AREA.	      &
+									      &
+	\ M%(I1%,1%)=J1%						      &
+	\ M%(I1%,2%)=A1%						      &
+	\ M%(I1%,8%)=I%							      &
+		! SET MESSAGE-TABLE ENTRY: MSG #, JOB #,		      &
+		! BUILD-TABLE INDEX; INCREMENTS MSG #.			      &
+									      &
+	\ M%(I1%,3%)=FNN2%(J1%,0%)					      &
+	\ M%(I1%,4%)=FNN2%(J1%,2%)					      &
+	\ M%(I1%,5%),M%(I1%,6%)=0%					      &
+		! GET JOB NAME OF THIS JOB #.				      &
+		! CLEAR LOGICAL ID WORDS.				      &
+
+2150	IF W1% > 20% THEN M%(I1%,1%)=M%(I1%,1%) OR 256%			      &
+	\ P1%=9%							      &
+	\ GOTO 2300							      &
+		! SET PARTIAL MSG. FLAG IF MORE TO RECEIVE;		      &
+		! SET PRIORITY TO HIGH AND EXIT.			      &
+
+2160	M%(I1%,1%)=M%(I1%,1%) AND 255%					      &
+	\ P2%=0%							      &
+	\ I2%=FNI2%(I2%)						      &
+		! MSG. COMPLETE,RESET PARTIAL-MSG-FLAG;			      &
+		! ENTER JOB IN ONLINE TBL. IF NOT THERE;		      &
+		! GET NEXT ENTRY IN ACTIVITY TABLE.			      &
+
+2170	W%=ASCII(B$(M%(I1%,8%)))					      &
+	\ IF W% AND 128% THEN GOTO 2220					      &
+		ELSE							      &
+		A1%=5%							      &
+	\	M%(I1%,0%)=N%						      &
+	\	N%=FNN%(N%)						      &
+	\	M%(I1%,9%)= -1%
+2180	IF M0% > 31% THEN						      &
+		I9%=FNF0%(I1%)						      &
+	\	IF I9% <> -1% THEN GOTO 2200				      &
+			ELSE						      &
+			S$="MESSAGE TABLE FULL"				      &
+	\		A1%=5%						      &
+	\		TBLFUL%=-1%					      &
+	\		GOSUB 10050					      &
+	\		GOTO 2300					      &
+	!								      &
+	! SET TBLFUL% SWITCH IF MESSAGE TABLE IS FULL.			      &
+	!								      &
+
+2190	I9%=M0%								      &
+	\ M0%=M0%+1%
+2200	M0%(I9%,0%)=M%(I1%,0%)						      &
+	\ M0%(I9%,1%)=I1%
+2210	IF (W% AND 127%) <> 7% THEN GOTO 2230				      &
+		ELSE							      &
+		M%(I1%,7%)=2%						      &
+	\	IF FNN3%(J1%) = 0% THEN GOTO 2230			      &
+		ELSE							      &
+			M%(I1%,5%)=Z2%					      &
+	\		M%(I1%,6%)=Z3%					      &
+	\		GOTO 2230
+2220	IF (W% AND 64%) THEN						      &
+		A1%=3%							      &
+	\	M%(I1%,0%)=0%						      &
+	\	M%(I1%,7%)=0%						      &
+	\	M%(I1%,9%)=FNK%(M%(i1%,1%))				      &
+		! SET THE ELEMENTS OF THE CTL TABLE ENTRY.		      &
+
+2230	P1%=5%								      &
+	\ GOSUB 10010							      &
+		! SET ACTIVTITY FOR MSG. JUST RECVD.;			      &
+		! PRINT/DISPLAY OR CMD. SYNTAX - MED PRIOR.		      &
+									      &
+	\ Z%=FNS1%(I1%)							      &
+	\ I2%=0%							      &
+		! SORT MSG.-CTL. DIRECTORY TBL. BY MSG. #.		      &
+
+2300	Z%=FNX0%(I2%,1%)						      &
+		! GET NEXT ENTRY IN ACTIVITY TBL.;			      &
+		! SET ENTRY FOR ANOTHER RECV. MSG. ACTIVITY.		      &
+									      &
+	\ RETURN							      &
+									      &
+									      &
+
+2500	!								      &
+									      &
+									      &
+	!	R E A D   K B :						      &
+									      &
+									      &
+									      &
+	P1%=0%								      &
+	\ IF D% THEN IF FND% THEN GOTO 2800				      &
+		ELSE D%,D0%=0%						      &
+	\ S$=SYS(CHR6$+CHR$(14%)+STRING$(6%,0%)+CHR$(1%))		      &
+	\ A0%=SWAP%(CVT$%(MID(S$,7%,2%)))				      &
+	\ S$=SYS(CHR6$+CHR$(9%)+CHR$(0%))				      &
+	\ K0%=ASCII(MID(S$,2%,1%))/2%					      &
+	\ K5%=K0%							      &
+	\ M%(0%,4%)=K5%							      &
+	\ Z%=J%(0%,0%)							      &
+	\ J0%=ASCII(S$)/2%						      &
+	\ OPEN "_KB:OPSER.CMD" FOR INPUT AS FILE #1%			      &
+	\ PRINT "'OPSER' ATTACHING"					      &
+		! IF DETACHED, SEE IF NOW ATTACHED,RETURN IF NOT.	      &
+
+2520	PRINT #1%, "#"; UNLESS D0%					      &
+	\ D0%= -1%							      &
+		! PROMPT IF NOT THERE.					      &
+									      &
+	\ GET #1%, RECORD 8192%						      &
+	\ FIELD #1%, RECOUNT AS C1$					      &
+	\ C1$=CVT$$(C1$,188%)						      &
+	\ IF LEN(C1$)=0% THEN						      &
+		P1%=1%							      &
+	\	GOTO 2760						      &
+		! GETS INPUT, MASSAGES IT.				      &
+
+2540	C1%=INSTR(1%,C1$," ")						      &
+	\ C1%=LEN(C1$)+1% UNLESS C1%					      &
+		! SEARCH FOR TERMINATING SPACE.				      &
+									      &
+	\ C$=LEFT(C1$,C1%-1%)						      &
+	\ C1$=RIGHT(C1$,C1%+1%)						      &
+		! COMMAND ONLY IN C$; REMAINING IN C1$.			      &
+									      &
+	\ P%=0%								      &
+		! INITIALIZE FOR LEGAL CMD TEST.			      &
+
+2570	FOR W%=0% UNTIL P% OR (W% > D%(0%))				      &
+	\ P%=FNR%(D$(W%),3%)						      &
+	\ P%=FNR%(D$(W%),LEN(D$(W%))) IF P%				      &
+		IF INSTR(1%,"FOR/NOF",LEFT(C$,3%))			      &
+		! If they typed FORMS_WAIT, FORM_FEED, NOFORMS_WAIT, or	      &
+		! NOFORM_FEED, then we'll have duplicates in 1st 3 chars, so  &
+		! we need to make the whole thing match.		      &
+	\ NEXT W%							      &
+	\ GOTO 2700 UNLESS P%						      &
+		! RECOGNIZE INPUT CMD, MATCHED CHARS IN P%.		      &
+									      &
+	\ IF P% < LEN(C$) THEN GOTO 2700				      &
+		ELSE							      &
+		IF INSTR(1%,"OFF/ONL/SLE/SIM",LEFT(C$,3%))		      &
+			THEN GOTO 2700					      &
+			ELSE						      &
+			PRINT #2%, C$,C1$ IF L%				      &
+		! ALL CHARS MUST MATCH.					      &
+
+2590	I%=FNI%(I%)							      &
+	\ I1%=FNI1%(I1%)						      &
+	\ I2%=FNI2%(I2%)						      &
+		! GET NEXT ENTRY POINTERS FOR ALL 3 TABLES.		      &
+									      &
+	\ A1%=3%							      &
+	\ P1%=5%							      &
+	\ GOSUB 10010							      &
+		! SET CMD-SYNTAX ENTRY IN CTL-TABLE.			      &
+									      &
+	\ M%(I1%,0%)=0%							      &
+	\ M%(I1%,1%)=J0%						      &
+	\ M%(I1%,2%)=A0%						      &
+	\ M%(I1%,3%)=FNN2%(J0%,0%)					      &
+	\ M%(I1%,4%)=FNN2%(J0%,2%)					      &
+	\ M%(I1%,Z3%)=0% FOR Z3%=5% TO 7%				      &
+	\ M%(I1%,8%)=I%							      &
+	\ M%(I1%,9%)= -1%						      &
+		! SET MSG-TABLE ENTRY.					      &
+									      &
+	\ B$(I%)=""							      &
+	\ S$=RIGHT(CVT%$(D%(W%-1%) OR 128% OR 64%),2%)+C1$		      &
+	\ GOSUB 10200							      &
+		! SET PPN AND TEXT IN BUILD-TABLE.			      &
+									      &
+	\ I2%=0%							      &
+	\ GOTO 2800
+2700	PRINT #1%, "ILLEGAL COMMAND"					      &
+
+2760	PRINT IF CCPOS(0%)						      &
+	\ PRINT #1%, "#";						      &
+	\ D0%= -1%
+2800	Z%=FNX0%(I2%,2%)						      &
+	\ RETURN
+3000	!								      &
+									      &
+									      &
+	!	C O M M A N D   A C T I V I T Y				      &
+									      &
+									      &
+									      &
+	E%=1%								      &
+	\ I1%=A%(I2%,3%)						      &
+	\ IF FNO1%(M%(I1%,9%),M%(I1%,2%)) = -1% THEN			      &
+		IF NOT FNPRIV%(M%(I1%,1%),"SWCFG") THEN			      &
+			GOTO 3140					      &
+	! IF REQUESTOR'S PPN & KB NOT IN OPERATOR TABLE,		      &
+	!    IF REQUESTOR'S JOB DOES NOT HAVE SWCFG PRIV,		      &
+	!	SKIP TO PRIV ERROR					      &
+
+3020	I%=M%(I1%,8%)							      &
+	\ C%=ASCII(B$(I%))						      &
+	\ C$,C1$=""
+3040	C1$=C1$+B$(I%)							      &
+	\ IF B%(I%)=0% THEN GOTO 3050					      &
+		ELSE I%=B%(I%)						      &
+	\ GOTO 3040
+3050	C1$=RIGHT(C1$,2%)						      &
+	\ IF C% AND 63% THEN						      &
+		C%=C% AND 63%						      &
+	\	GOTO 3100
+3060	C1$=CVT$$(C1$,128%+32%+16%+8%+4%)				      &
+	\ PRINT #2%,C1$ IF L%						      &
+	\ E%=2%								      &
+	\ IF LEN(C1$)=0% THEN GOTO 3140					      &
+		ELSE C1%=INSTR(1%,C1$," ")				      &
+	\ C1%=LEN(C1$)+1% UNLESS C1%
+3070	C$=LEFT(C1$,C1%-1%)						      &
+	\ C1$=RIGHT(C1$,C1%+1%)						      &
+	\ P%=0%								      &
+	\ FOR W%=0% UNTIL P% OR (W% > D%(0%))				      &
+	\ P%=FNR%(D$(W%),3%)						      &
+	\ P%=FNR%(D$(W%),LEN(D$(W%))) IF P%				      &
+		IF INSTR(1%,"FOR/NOF",LEFT(C$,3%))			      &
+		! If they typed FORMS_WAIT, FORM_FEED, NOFORMS_WAIT, or	      &
+		! NOFORM_FEED, then we'll have duplicates in 1st 3 chars, so  &
+		! we need to make the whole thing match.		      &
+	\ NEXT W%							      &
+	\ E%=3%								      &
+	\ GOTO 3140 IF P%=0% OR P%<LEN(C$)				      &
+	\ C%=D%(W%-1%)
+3100	ON C% GOSUB	6000,6200,6300,6500,6400,			      &
+			7100,7200,6800,7000,6500,			      &
+			7300,7400,7600,7800,7900,			      &
+			8010,8000,8060,8050				      &
+									      &
+		! 1	6000	OPERATOR CMD				      &
+		! 2	6200	LOGFILD CMD				      &
+		! 3	6300	MESSAGE CMD				      &
+		! 4	6500	RETYPE/DELETE CMD			      &
+		! 5	6400	CHANGE CONSOLE CMD			      &
+		! 6	7100	DETACH CMD				      &
+		! 7	7200	EXIT CMD				      &
+		! 8	6800	ANSWER CMD				      &
+		! 9	7000	INTERRUPT CMD				      &
+		! 10	6500	RETYPE/DELETE CMD			      &
+		! 11	7300	ONLINE CMD				      &
+		! 12	7400	OFFLINE CMD				      &
+		! 13	7600	LIST CMD				      &
+		! 14	7800	SLE CMD					      &
+		! 15	7900	SIM CMD					      &
+		! 16	8010	NOFORMS_WAIT COMMAND			      &
+		! 17	8000	FORMS_WAIT COMMAND			      &
+		! 18	8060	NOFORM_FEED COMMAND			      &
+		! 19	8050	FORM_FEED COMMAND			      &
+
+3110	I2%=0%								      &
+	\ Z%=FNX1%(I2%)							      &
+	\ RETURN
+3140	S$="INVALID OPER" IF E%=1%					      &
+	\ S$="NO CMD SPECIFIED" IF E%=2%				      &
+	\ S$="ILLEGAL CMD" IF E%=3%					      &
+	\ S$="?"+S$							      &
+	\ A1%=5%							      &
+	\ GOSUB 10050							      &
+	\ GOTO   3110
+3500	!								      &
+									      &
+									      &
+	!	S E N D   M E S S A G E   A C T I V I T Y		      &
+									      &
+									      &
+									      &
+	I1%=A%(I2%,3%)							      &
+	\ I%=M%(I1%,8%)							      &
+	\ S$=""								      &
+	\ N1%=0%							      &
+	\ N9%=19%
+3530	R1%=1%								      &
+	\ R9%=LEN(B$(I%))
+3540	S$=S$+MID(B$(I%),R1%,N9%)					      &
+	\ R1%=R1%+N9%							      &
+	\ R9%=R9%-R1%+1%						      &
+	\ N1%=LEN(S$)							      &
+	\ N9%=19%-N1%							      &
+	\ GOTO 3580 UNLESS N9%						      &
+	\ IF B%(I%)=0% THEN GOTO 3660					      &
+		ELSE							      &
+		I%=B%(I%)						      &
+	\	GOTO 3530
+3580	GOTO 3660 IF (R9% <= 0%) AND (B%(I%)=0%)			      &
+	\ GOSUB 3650							      &
+	\ IF R9% > 0% THEN GOTO 3540					      &
+		ELSE							      &
+		I%=B%(I%)						      &
+	\	GOTO 3530
+3650	S$=CHR$(255%)+S$						      &
+	\ S$=FNS7$(S$)							      &
+	\ GOTO 3690 IF S$=""						      &
+	\ N1%=0%							      &
+	\ N9%=19%							      &
+	\ S$=""								      &
+	\ RETURN
+3660	S$=CHR$(N1%+1%)+S$						      &
+	\ S$=FNS7$(S$)							      &
+	\ GOTO 3690 IF S$=""						      &
+
+3670	Z%=FNX1%(I2%)							      &
+									      &
+	\ RETURN							      &
+
+3690	T9=0. IF T > 300.						      &
+	\ T9=86100. IF T < 300.						      &
+	\ GOTO 3670							      &
+		! SET FOR TBL. SCAN IF RECVR. NOT THERE.		      &
+
+4000	!								      &
+									      &
+									      &
+	!	P R I N T / D I S P L A Y				      &
+									      &
+									      &
+									      &
+	I1%=A%(I2%,3%)							      &
+	\ I%=M%(I1%,8%)							      &
+		! MSG.-CTL. TBL. INDEX FROM ACTIVITY TBL.;		      &
+		! BUILD-TBL. INDEX FROM MSG.-CTL. TBL.			      &
+									      &
+	\ IF M%(I1%,1%)=J0%						      &
+		OR M%(I1%,0%)=0% THEN					      &
+			W%=0%						      &
+	\ P$,P6$,P8$,P9$=""						      &
+	\ GOTO 4110
+4040	IF (M%(I1%,7%) AND 2%) THEN					      &
+		IF M%(I1%,5%) THEN					      &
+		P7$=RAD$(M%(I1%,5%))+RAD$(M%(I1%,6%))			      &
+	ELSE								      &
+		P7$=STRING$(6%,63%)					      &
+	\	M%(I1%,7%)=M%(I1%,7%) OR 4%				      &
+		! GET LOGICAL ID.					      &
+
+4050	P1$=RAD$(M%(I1%,3%))+RAD$(M%(I1%,4%))				      &
+	\ P1$=STRING$(6%,63%) UNLESS M%(I1%,3%)				      &
+	\ P2$="["+NUM1$(SWAP%(M%(I1%,2%))AND 255%)			      &
+		+","+NUM1$(M%(I1%,2%)AND 255%)+"] "			      &
+	\ P3$="  JOB:"+NUM1$(M%(I1%,1%)AND 255%)			      &
+	\ MKBD%=0%							      &
+	\ MKBD%=PEEK(PEEK(PEEK(S1%+((M%(I1%,1%) AND 255%)*2%)))) IF M%(I1%,3%) &
+	\ MKBD% = 0% IF (MKBD% AND 1%) = 1%				      &
+	\ MKB%=SWAP%(PEEK(MKBD%+2%)) AND 127% IF MKBD%			      &
+	\ IF MKBD%=0% THEN						      &
+		P3$=P3$+"  KB??:  "					      &
+	ELSE								      &
+	MKB%=MKB%							      &
+	\ IF (PEEK(MKBD%+2%) AND 255%)/2%=(M%(I1%,1%) AND 255%) AND	      &
+		(PEEK(MKBD%+6%) AND 8192%)=8192% THEN			      &
+		P3$=P3$+"  KB"+NUM1$(MKB%)+":  "			      &
+		ELSE							      &
+		P3$=P3$+"  DET    "					      &
+		! GET JOB NAME.						      &
+		! GET PPN IN BRACKETS.					      &
+		! GET JOB #.						      &
+		! GET KB:.						      &
+
+4060	P4$="REQUEST		"					      &
+	\ W%=56%							      &
+	\ GOTO 4080 IF (M%(I1%,7%) AND 2%)				      &
+	\ W%=64%							      &
+	\ P4$="MESSAGE		"					      &
+	\ P4$="FATAL MESSAGE	" IF ASCII(B$(M%(I1%,8%)))=63%		      &
+		! TELL WHAT IT IS.					      &
+
+4080	P5$=NUM1$(M%(I1%,0%))						      &
+	\ P5$=SPACE$(5%-LEN(P5$))+P5$+" : "				      &
+		! MESSAGE #.						      &
+									      &
+	\ P$=CRLF$+P4$+P5$+DATE$(0%)+" "+TIME$(0%)+			      &
+		P3$+P1$+P2$						      &
+	\ P$=P$+P7$ IF (M%(I1%,7%) AND 2%)				      &
+									      &
+	\ P6$,P9$=""							      &
+	\ P8$="	"							      &
+	\ P8$="	"+P8$ IF (M%(I1%,7%) AND 2%)				      &
+		! 2 TABS IF REQUEST.					      &
+
+4110	P6$=P6$+B$(I%)							      &
+	\ P9$=P9$+P8$+P6$						      &
+	\ P$=P$+CRLF$+P9$						      &
+	\ P$=P$+CRLF$ UNLESS B%(I%)					      &
+
+4112	IF B%(I%) THEN							      &
+		I%=B%(I%)						      &
+	\	P$=P$+B$(I%)						      &
+	\	P$=P$+CRLF$ UNLESS B%(I%)				      &
+	\	GOTO 4112						      &
+
+4120	IF (W%=64% AND (L% AND 2%)=0%) OR				      &
+		(W%=56% AND L%=0%) THEN GOTO 4140			      &
+		ELSE							      &
+		PRINT #2%,P$; IF L%					      &
+
+4140	IF (W%=64% AND (M% AND 2%)=0%) OR				      &
+		(W%=56% AND M%=0%)  THEN GOTO 4164			      &
+
+4150	R0%=0%								      &
+	\ IF M%(I1%,9%) <> -1% THEN					      &
+		K9%=M%(I1%,9%) AND 255%					      &
+		ELSE							      &
+		IF D%= -1% THEN						      &
+			K9%=K5%						      &
+			ELSE						      &
+			K9%=K0%						      &
+
+4160	S$=SYS(CHR6$+CHR$(-5%)+CHR$(K9%)+P$)				      &
+	\ IF RECOUNT THEN						      &
+		R0%=(R0%+1%) AND (RECOUNT=LEN(P$))			      &
+	\	K9%=-1% IF						      &
+		((PEEK(PEEK(DEVTBL%+K9%*2%)+2%) AND 255%) AND 1%) OR	      &
+		(PEEK(PEEK(DEVTBL%+K9%*2%)+30%) AND 16384%) IF R0%>18%	      &
+	\	K9%=FNCHK.GAG%(K9%) UNLESS K9%=-1%			      &
+	\	P$=RIGHT(P$,LEN(P$)-RECOUNT+1%)				      &
+	\	SLEEP 5% IF R0%						      &
+	\	GOTO 4160 UNLESS K9%=-1%				      &
+	\	M%(0%,4%),K5%,K9%=0% IF M%(I1%,9%)=-1% AND M%(0%,4%)<>0%      &
+	\	GOTO 4160 UNLESS K9%					      &
+		! RECOUNT HAS # BYTES NOT BROADCAST.			      &
+		! IF NOTHING GOT THROUGH AND THE KB: WAS DISABLED OR A MODEM  &
+		! OR THE KB: IS GAGGED THEN CHANGE THE OSC TO KB0: IF WE      &
+		! WERE TRYING TO SEND TO THE OSC. AND IT'S NOT KB0:	      &
+		! IF WE WERE TRYING TO SEND TO A NON-OSC KB: OR THE OSC	      &
+		! IS KB0: AND RAN INTO THOSE PROBLEMS THEN FORGET THAT IT     &
+		! EVER FAILED AND CONTINUE.				      &
+
+4164	GOTO 4190 IF (W%=64% AND (M% AND 2%)=0%) OR			      &
+		(W%=56% AND M%=0%)					      &
+									      &
+	\ M%(I1%,7%)=M%(I1%,7%) OR 1%					      &
+	\ IF D%=0% AND (K9%=K0%) THEN					      &
+		S$=SYS(CHR6$+CHR$(-5%)+CHR$(K0%)+"#")			      &
+
+4190	M%(I1%,0%)=0% IF (M%(I1%,7%) AND 256%)				      &
+	\ IF M%(I1%,0%)=0% THEN						      &
+		Z%=FNX1%(I2%)						      &
+		ELSE							      &
+		Z%=FNX0%(I2%,0%)					      &
+
+4200	RETURN								      &
+									      &
+									      &
+
+4500	!								      &
+									      &
+									      &
+	!	S L E E P   A C T I V I T Y				      &
+									      &
+									      &
+									      &
+	SLP=T0-(T-T9)							      &
+	\ IF SLP < -32767 THEN						      &
+		SLP% = -32767%						      &
+	  ELSE								      &
+		SLP% = SLP						      &
+
+4505	SLP%=T0 UNLESS SLP%>0%						      &
+	\ SLEEP SLP% EQV 32767%						      &
+									      &
+	\ P1%=0%							      &
+	\ Z%=FNX0%(I2%,9%)						      &
+	\ RETURN							      &
+									      &
+									      &
+
+5000	!								      &
+									      &
+									      &
+	!	R E T Y P E   A C T I V I T Y				      &
+									      &
+									      &
+									      &
+	I1%=A%(I2%,3%)							      &
+	\ I%=M%(I1%,8%)							      &
+	\ N1%=0%							      &
+	\ N1%=M%(I1%,1%) IF LEFT(B$(I%),1%)="#"				      &
+									      &
+	\ N2%=CVT$%(RIGHT(B$(I%),2%))					      &
+	\ N0%=M%(I1%,0%)						      &
+	\ N3%= -1%							      &
+	\ C%=4%
+5040	FOR Z%=0% TO M0%-1%						      &
+	\ IF (M0%(Z%,0%)=N0%) AND (Z% < M0%-1%) THEN			      &
+			I1%=Z%+1%					      &
+	\		GOTO 5070
+5050	IF M0%(Z%,0%) > N0% THEN					      &
+		I1%=Z%							      &
+	\	GOTO 5070
+5060	NEXT Z%								      &
+	\ GOTO 5080
+5070	IF N1% THEN GOTO 6720						      &
+		ELSE							      &
+		GOTO 6750
+5080	I2%=0%								      &
+	\ Z%=FNX1%(I2%)							      &
+	\ RETURN							      &
+
+6000	!								      &
+									      &
+									      &
+	!	O P E R A T O R   C M D					      &
+									      &
+									      &
+									      &
+	C1%=INSTR(1%,C1$," ")						      &
+	\ C1%=LEN(C1$)+1% UNLESS C1%					      &
+	\ C$=LEFT(C1$,C1%-1%)						      &
+	\ S$=""								      &
+	\ E%=3%								      &
+	\ GOTO 6190 UNLESS FNPRIV%(M%(I1%,1%),"SWCFG")			      &
+	\ C1$=CVT$$(C1$,64%+2%)
+6040	IF LEFT(C1$,1%) <> "-" THEN					      &
+		D8%=0%							      &
+	  ELSE								      &
+		D8%= -1%						      &
+	\	C1$=RIGHT(C1$,2%)
+6050	E%=1%								      &
+	\ GOTO 6190 UNLESS FNS4%(C1$)					      &
+	\ R%=RECOUNT							      &
+	\ IF Z%(23%) THEN						      &
+		IF SWAP%(CVT$%("KB")) <> Z%(23%) THEN GOTO 6190		      &
+	  ELSE IF (Z%(25%) AND -256%) <> -256% THEN GOTO 6190
+6090	Z%(25%)=255% UNLESS Z%(23%)					      &
+	\ IF D8% = 0% THEN GOTO 6120					      &
+		ELSE							      &
+		Z0%=FNO%((Z%(25%) AND 255%),Z%(5%))			      &
+	\	IF Z0%= -1% THEN GOTO 6130				      &
+			ELSE						      &
+			O%(Z0%,Z3%)=0% FOR Z3%=0% TO 3%			      &
+	\		GOTO 6130
+6120	IF FNO1%((Z%(25%) AND 255%),Z%(5%))= -1% THEN			      &
+		IF FNO2%((Z%(25%) AND 255%),Z%(5%))=0% THEN		      &
+		E%=2%							      &
+		\ GOTO 6190
+6130	IF R% THEN							      &
+		C1$=RIGHT(C1$,LEN(C1$)-R%+2%)				      &
+	\ GOTO 6040
+6150	Z%=FNO4%(Z%)
+6170	A1%=5%								      &
+	\ GOSUB 10050							      &
+	\ Z8%=M%(0%,0%)							      &
+	\ RETURN
+6190	S$="ILLEGAL PARAMETER" IF E%=1%					      &
+	\ S$="VALID OPERATOR TABLE FULL" IF E%=2%			      &
+	\ S$="SWCFG PRIV. NEEDED TO UPDATE VALID-OPER. TABLE" IF E%=3%	      &
+	\ GOTO 6170
+6200	!								      &
+									      &
+									      &
+	!	L O G F I L E   C M D .					      &
+									      &
+									      &
+									      &
+	L0%=0%								      &
+	\ S$=""								      &
+	\ IF LEN(C1$)=0% THEN CLOSE 2%					      &
+	\ L1%=0%							      &
+	\ S$="LOGFILE DEASSIGNED"					      &
+	\ GOTO 6286
+6220	C1%=INSTR(1%,C1$,";")						      &
+	\ IF C1%=0% THEN C$=C1$						      &
+	\ C1$=""							      &
+	\ GOTO 6240
+6230	C$=LEFT(C1$,C1%-1%)						      &
+	\ C1$=RIGHT(C1$,C1%+1%)						      &
+	\ IF LEN(C$)=0% THEN GOTO 6250
+6240	E%=1%								      &
+	\ IF FNS5%(C$)=0% THEN GOTO 6380				      &
+		ELSE							      &
+		CLOSE 2%						      &
+	\	OPEN C$ FOR OUTPUT AS FILE #2%				      &
+	\	S$="LOGFILE = "+C$					      &
+
+6250	L1%=0%								      &
+	\ L1%=3% UNLESS LEN(C1$)					      &
+	\ C$=C1$							      &
+									      &
+	\ P%=0%								      &
+	\ E%=2%								      &
+	\ L1%=3% IF FNR%("ALL",2%)					      &
+	\ L1%=1% IF FNR%("REQUESTS",2%) UNLESS P%			      &
+	\ L1%=0% IF FNR%("NONE",2%) UNLESS P%				      &
+	\ GOTO 6380 IF P%<LEN(C$)					      &
+	\ Z$="ALL" IF L1%=3%						      &
+	\ Z$="REQUESTS" IF L1%=1%					      &
+	\ Z$="NONE" UNLESS L1%						      &
+									      &
+	\ IF L0% THEN							      &
+		S$="MESS LEVEL = " + Z$					      &
+	ELSE								      &
+		S$=S$+" LOG LEVEL = "+Z$				      &
+
+6286	A1%=5%								      &
+	\ GOSUB 10050							      &
+	\ IF L0%=0% THEN L%=L1%						      &
+		ELSE M%=L1%						      &
+
+6290	RETURN								      &
+
+6300	!								      &
+									      &
+									      &
+	!	M E S S A G E   C M D .					      &
+									      &
+									      &
+									      &
+	E%=2%								      &
+	\ GOTO 6380 UNLESS LEN(C1$)					      &
+	\ L0%= -1%							      &
+	\ GOTO 6250							      &
+									      &
+
+6380	S$="ILLEGAL FILE SPECIFICATION" IF E%=1%			      &
+	\ S$="ILLEGAL PARAMETER" IF E%=2%				      &
+	\ GOTO 6286							      &
+
+6400	!								      &
+									      &
+									      &
+	!	C H A N G E   C O N S O L E   C M D .			      &
+									      &
+									      &
+									      &
+	S$=""								      &
+	\ IF FNS6%(C1$) THEN						      &
+		IF SWAP%(CVT$%("KB"))=Z%(23%) THEN			      &
+			IF (Z%(25%) AND -256%)= -256% THEN		      &
+				KB%=Z%(25%) AND 255%			      &
+	\		Z%=FNCHK.GAG%(KB%)				      &
+	\		IF Z% THEN					      &
+			   S$="KB"+NUM1$(KB%)+": IS GAGGED,"+		      &
+				" CHANGE OSC COMMAND ABORTED"		      &
+			ELSE						      &
+			   K5%=KB%					      &
+	\		   S$="OSC WAS KB"+NUM1$(M%(0%,4%))+": "	      &
+				+"NOW = KB"+NUM1$(K5%)+":"		      &
+
+6410	GOTO 6420 UNLESS LEN(S$)					      &
+	\		Z$=SYS(CHR6$+CHR$(-5%)+CHR$(M%(0%,4%))+S$+CRLF$)      &
+	\		GOTO 6430 IF Z%					      &
+	\		Z$=SYS(CHR6$+CHR$(-5%)+CHR$(K5%)+S$+CRLF$)	      &
+	\			M%(0%,4%)=K5%				      &
+	\			Z%=J%(0%,0%)				      &
+	\			GOTO 6430				      &
+
+6420	S$="ILLEGAL PARAMETER"						      &
+
+6430	A1%=5%								      &
+	\ GOSUB 10050							      &
+	\ RETURN
+6500	!								      &
+									      &
+									      &
+	!	R E T Y P E   &   D E L E T E   C M D S .		      &
+									      &
+									      &
+									      &
+	N3%=0%								      &
+	\ E%=3%								      &
+	\ GOTO 6790 UNLESS M0%						      &
+	\ GOTO 6740 UNLESS LEN(C1$)					      &
+	\ Z%=0%								      &
+	\ Z%=Z%+1% WHILE ASCII(MID(C1$,Z%,1%)) > 47% AND		      &
+		ASCII(MID(C1$,Z%,1%)) < 58%				      &
+	\ GOTO 6600 UNLESS Z%						      &
+	\ N0%=VAL(LEFT(C1$,Z%-1%))					      &
+	\ C1$=RIGHT(C1$,Z%)						      &
+	\ E%=1%								      &
+	\ IF C1$ <> "" THEN GOTO 6790					      &
+		ELSE							      &
+		I1%= -1%						      &
+	\	N2%=0%
+6540	FOR Z%=0% TO M0%-1%						      &
+	\ IF M0%(Z%,0%)=N0% THEN					      &
+		I1%=M0%(Z%,1%)						      &
+	\	GOTO 6560
+6550	NEXT Z%								      &
+	\ E%=2%								      &
+	\ GOTO 6790
+6560	GOTO 6790 UNLESS FNM%(I1%)					      &
+	\ IF C% = 10% THEN						      &
+		GOSUB 10400						      &
+	\	GOTO 6590
+6580	GOSUB 10300
+6590	RETURN
+6600	Z%=INSTR(1%,C1$,":")						      &
+	\ IF Z%=0% THEN N2%= -1%					      &
+		ELSE							      &
+		N2%=VAL(RIGHT(C1$,Z%+1%))				      &
+	\	C1$=LEFT(C1$,Z%-1%)
+6606	E%=1%								      &
+	\ IF (C%=10%) AND Z% THEN GOTO 6790				      &
+		ELSE							      &
+		IF N2%=0% THEN GOTO 6790
+6610	I1%=0%								      &
+	\ IF "#"=LEFT(C1$,1%) THEN N1%=VAL(RIGHT(C1$,2%))		      &
+	\ GOTO 6720
+6616	E%=1%								      &
+	\ GOTO 6790
+6650	IF C%=10% THEN							      &
+		I1%=Z%+1%						      &
+	\	GOSUB 10400						      &
+	\	IF N1% THEN GOTO 6720					      &
+			ELSE						      &
+			GOTO 6750
+6660	GOSUB 10300							      &
+	\ IF N2%=1% THEN GOTO 6780					      &
+		ELSE							      &
+		I%=FNI%(I%)						      &
+	\	B$(I%)=B9$
+6680	IF N2%= -1% THEN						      &
+		B$(I%)=B$(I%)+CVT%$(-1%)				      &
+		ELSE							      &
+		B$(I%)=B$(I%)+CVT%$(N2%-1%)
+6690	I9%=I1%								      &
+	\ I1%=FNI1%(I1%)						      &
+	\ M%(I1%,Z3%)=M%(I9%,Z3%) FOR Z3%=0% TO 7%			      &
+	\ M%(I1%,8%)=I%							      &
+	\ M%(I1%,9%)=M%(A%(0%,3%),9%)
+6700	I2%=FNI2%(I2%)							      &
+	\ A1%=6%							      &
+	\ P1%=5%							      &
+	\ GOSUB 10010							      &
+	\ GOTO 6780
+6720	FOR Z%=I1% TO M0%-1%						      &
+	\ IF M%(M0%(Z%,1%),1%)=N1% THEN					      &
+		IF FNM%(M0%(Z%,1%)) THEN				      &
+			I1%=M0%(Z%,1%)					      &
+	\		B9$="#"						      &
+	\		GOTO 6650
+6730	NEXT Z%								      &
+	\ E%=4%								      &
+	\ IF C% <> 10% THEN GOTO 6790					      &
+		ELSE GOTO 6780
+6740	N2%= -1%							      &
+	\ N1%,I1%=0%							      &
+	\ B9$=""							      &
+
+6750	FOR Z%=I1% TO M0%-1%						      &
+	\	IF FNM%(M0%(Z%,1%)) THEN				      &
+			I1%=M0%(Z%,1%)					      &
+	\		B9$="A"						      &
+	\		GOTO 6650
+6760	NEXT Z%								      &
+	\ E%=3%								      &
+	\ IF B9$ <> "A" THEN						      &
+		IF C% <> 10% THEN GOTO 6790				      &
+			ELSE						      &
+			IF FNN3%(M%(A%(I2%,3%),1%))=0% THEN GOTO 6790	      &
+
+6780	GOTO 5080 IF N3%= -1%						      &
+	\ RETURN
+6790	S$="ILLEGAL PARAMETERS" IF E%=1%				      &
+	\ S$="NO  MATCH ON MSG #" IF E%=2%				      &
+	\ S$="NO DATA FOR THIS REQUEST" IF E%=3%			      &
+	\ S$="NO MATCH FOR THIS JOB" IF E%=4%				      &
+	\ IF N3%= -1% THEN GOTO 5080					      &
+		ELSE							      &
+		I1%=A%(I2%,3%)						      &
+	\	A1%=5%							      &
+	\	GOSUB 10050						      &
+	\	GOTO   6780
+6800	!								      &
+									      &
+									      &
+	!	A N S W E R   C M D .					      &
+									      &
+									      &
+									      &
+	Z1%=INSTR(1%,C1$,":")						      &
+	\ E%=1%								      &
+	\ GOTO 6890 IF Z1%=0% OR Z1%=1%					      &
+	\ Z%=0%								      &
+	\ Z%=Z%+1% WHILE ASCII(MID(C1$,Z%,1%)) > 47% AND		      &
+		ASCII(MID(C1$,Z%,1%)) < 58%				      &
+	\ IF Z%=0% THEN GOTO 6890					      &
+		ELSE							      &
+		IF Z% <> Z1% THEN GOTO 6890
+6830	N0%=VAL(LEFT(C1$,Z%-1%))					      &
+	\ C1$=RIGHT(C1$,Z%+1%)						      &
+	\ I1%= -1%							      &
+	\ FOR Z%=0% TO M0%-1%						      &
+	\	IF M0%(Z%,0%)=N0% THEN					      &
+			I1%=M0%(Z%,1%)					      &
+	\		GOTO 6860
+6850	NEXT Z%								      &
+	\ E%=2%								      &
+	\ GOTO 6890
+6860	E%=2%								      &
+	\ IF (M%(I1%,7%) AND 7%) <> 3% THEN GOTO 6890			      &
+		ELSE							      &
+		IF M%(I1%,5%)=0% THEN GOTO 6890				      &
+		ELSE							      &
+		M%(I1%,7%)=M%(I1%,7%) OR 4%
+6870	S$=C1$								      &
+	\ A1%=4%							      &
+	\ GOSUB 10050
+6880	RETURN
+6890	S$="ILLEGAL SYNTAX" IF E%=1%					      &
+	\ S$="NOT OUTSTANDING ACTION REQUEST" IF E%=2%			      &
+	\ I1%=A%(I2%,3%)						      &
+	\ A1%=5%							      &
+	\ GOSUB 10050							      &
+	\ GOTO 6880
+7000	!								      &
+									      &
+									      &
+	!	I N T E R R U P T   C M D .				      &
+									      &
+									      &
+									      &
+	Z1%=INSTR(1%,C1$,":")						      &
+	\ E%=1%								      &
+	\ GOTO 7090 IF Z1%=0% OR Z1%=1%					      &
+	\ C$=LEFT(C1$,Z1%-1%)						      &
+	\ C1$=RIGHT(C1$,Z1%+1%)
+7020	IF "#"=LEFT(C$,1%) THEN						      &
+		N1%=VAL(RIGHT(C$,2%))					      &
+	\	E%=2%							      &
+	\	IF FNJ1%(N1%)= -1% THEN GOTO 7090			      &
+			ELSE GOTO 7040
+7030	N1%=0%								      &
+	\ Z$=FNP$(C$)							      &
+	\ E%=2%								      &
+	\ GOTO 7090 IF Z$=""						      &
+	\ Z1%=SWAP%(CVT$%(Z$))						      &
+	\ Z2%=SWAP%(CVT$%(RIGHT(Z$,3%)))				      &
+	\ IF FNJ2%(Z1%)=0% THEN GOTO 7090
+7040	M%(A%(I2%,3%),1%)=N1%						      &
+	\ M%(A%(I2%,3%),5%)=Z1%						      &
+	\ M%(A%(I2%,3%),6%)=Z2%						      &
+	\ S$=C1$							      &
+	\ A1%=4%							      &
+	\ GOSUB 10050
+7080	RETURN
+7090	S$="ILLEGAL SYNTAX" IF E%=1%					      &
+	\ S$="NO MATCH FOR THE SPECIFIED JOB IDENTIFICATION" IF E%=2%	      &
+	\ A1%=5%							      &
+	\ GOSUB 10050							      &
+	\ GOTO 7080
+7100	!								      &
+									      &
+									      &
+	!	D E T A C H    C M D .					      &
+									      &
+									      &
+									      &
+	GOTO 7180 IF D%= -1%						      &
+	\ PRINT #1%,"DETACHING . . .";CHR$(12%);CHR$(13%)		      &
+	\ CLOSE 1%							      &
+	\ D%= -1%							      &
+	\ S$=SYS(CHR6$+CHR$(7%)+CHR$(128%))				      &
+
+7180	RETURN								      &
+									      &
+
+7200	!								      &
+									      &
+									      &
+	!	E X I T   C M D .					      &
+									      &
+									      &
+									      &
+	S$=SYS(CHR6$+CHR$(22%)+CHR$(0%)+CHR$(0%))			      &
+	\ CLOSE #3%,4%,2%						      &
+	\ GOTO 32767 UNLESS D%						      &
+	\ Z$="'OPSER' TERMINATING"+CHR$(12%)+CHR$(13%)			      &
+	\ Z$=SYS(CHR6$+CHR$(-5%)+CHR$(0%)+Z$)				      &
+			IF S9% <> -1%					      &
+	\ PRINT Z$ IF S9%= -1%						      &
+	\ S$=SYS(CHR6$+CHR$(8%)+CHR$(J0%)+STRING$(24%,0%)+		      &
+		CHR$(255%))						      &
+	\ GOTO 32767
+7300	!								      &
+									      &
+									      &
+	!	O N L I N E   C M D .					      &
+									      &
+									      &
+									      &
+	GOSUB 1800							      &
+	\ J1%=M%(I1%,1%)						      &
+	\ A1%=M%(I1%,2%)						      &
+	\ P2%=0%							      &
+	\ GOTO 7330 UNLESS LEN(C1$)					      &
+
+7320	P2%=VAL(C1$)							      &
+	\ E%=1%								      &
+	\ GOTO 7380 IF P2% < 0% OR P2% > 9%				      &
+	\ P2%=P2% OR 128%						      &
+
+7330	GOSUB 10100							      &
+
+7360	A1%=5%								      &
+	\ M%(I1%,9%)= -1%						      &
+	\ GOSUB 10050							      &
+									      &
+	\ RETURN							      &
+
+7380	S$="ILLEGAL PARAMETER" IF E%=1%					      &
+	\ S$="ILLEGAL SYNTAX" IF E%=2%					      &
+	\ GOTO 7360							      &
+
+7400	!								      &
+									      &
+									      &
+	!	O F F L I N E   C M D .					      &
+									      &
+									      &
+									      &
+	J1%=M%(I1%,1%)							      &
+	\ E%=2%								      &
+	\ GOTO 7380 IF LEN(C1$)						      &
+									      &
+	\ J2%=FNJ1%(J1%)						      &
+	\ GOTO 7480 IF J2%= -1%						      &
+	\ S$="JOB #"+NUM1$(J1%)+" '"+RAD$(J%(J2%,5%))+			      &
+			RAD$(J%(J2%,6%))+"' TAKEN OFFLINE"		      &
+	\ J%(J2%,Z3%)=0% FOR Z3%=0% TO 7%				      &
+	\ GOTO 7360							      &
+
+7480	S$="JOB #"+NUM1$(J1%)+" IS NOT ON-LINE"				      &
+	\ GOTO 7360							      &
+
+7600	!								      &
+									      &
+									      &
+	!	L I S T   C M D .					      &
+									      &
+									      &
+	C$=C1$								      &
+	\ P%,E%=0%							      &
+	\ E%=1% IF FNR%("JOBS",2%)					      &
+	\ E%=2% IF FNR%("OPERATORS",2%) UNLESS E%			      &
+	\ E%=0% IF (P% < LEN(C$))					      &
+	\ Z%=FNO4%(Z%) IF E%=2%						      &
+	\ Z%=FNJ4%(Z%) IF E%=1%						      &
+	\ S$="ILLEGAL PARAMETERS" UNLESS E%				      &
+	\ A1%=5%							      &
+	\ GOSUB 10050							      &
+	\ RETURN							      &
+
+7800	!								      &
+									      &
+									      &
+	!	S L E    C M D .					      &
+									      &
+									      &
+	GOTO 7840 IF RAD$(FNN2%(M%(I1%,1%),0%))+			      &
+			RAD$(FNN2%(M%(I1%,1%),2%)) <> "SHUTUP"		      &
+	\ S9%= -1%							      &
+	\ T9=TIME(0%)							      &
+	\ T0=30.							      &
+	\ S5%=0%							      &
+
+7820	S$=CHR$(4%)+"END"						      &
+	\ FOR S4%=0% TO 23%						      &
+	\	IF J%(S4%,0%)=0% THEN GOTO 7830				      &
+			ELSE						      &
+			IF J%(S4%,7%) <> S5% THEN GOTO 7830		      &
+
+7822	Z$=SYS(S3$+RAD$(J%(S4%,5%))+RAD$(J%(S4%,6%))+STRING$(10%,0%)	      &
+			+S$)						      &
+
+7830	NEXT S4%							      &
+	\ IF S5%=0% THEN						      &
+		GOSUB 10450						      &
+
+7840	RETURN UNLESS S5%						      &
+	\ GOTO 1500							      &
+
+7850	FOR Z%=0% TO 23%						      &
+	\	IF J%(Z%,0%) THEN					      &
+			IF J%(Z%,7%)=S5% THEN GOTO 1500			      &
+
+7860	NEXT Z%								      &
+	\ IF S5%=8% THEN GOTO 7950					      &
+		ELSE							      &
+		S5%=S5%+1%						      &
+	\ GOTO 7820							      &
+
+7900	!								      &
+									      &
+									      &
+	!	S I M    C M D .					      &
+									      &
+
+7910	RETURN IF RAD$(FNN2%(M%(I1%,1%),0%))+				      &
+			RAD$(FNN2%(M%(I1%,1%),2%)) <> "SHUTUP"		      &
+	\ S$=CHR$(8%)+"OFFLINE"						      &
+	\ FOR Z%=0% TO 23%						      &
+
+7915	IF J%(Z%,0%) THEN						      &
+			IF J%(Z%,7%) <> 9% THEN				      &
+				Z$=SYS(S3$+RAD$(J%(Z%,5%))		      &
+				+RAD$(J%(Z%,6%))+STRING$(10%,0%)+S$)	      &
+
+7920	NEXT Z%								      &
+	\ GOSUB 10450							      &
+	\ S9%= -1%							      &
+	\ T9=TIME(0%)							      &
+	\ T0=10.							      &
+	\ RETURN							      &
+
+7930	J%(Z1%,Z2%)=0% FOR Z2%=0% TO 7% FOR Z1%=0% TO 23%		      &
+
+7950	D%= -1%								      &
+	\ GOTO 7200							      &
+									      &
+									      &
+
+8000	!								      &
+									      &
+									      &
+	!	F O R M S _ W A I T,   N O F O R M S _ W A I T		      &
+	!	F O R M _ F E E D,   N O F O R M _ F E E D		      &
+	!	F E A T U R E   P A T C H E S				      &
+									      &
+									      &
+	F.P.5%=0%		! BIT TO SET				      &
+	\ F.P.6%=8%		! BIT TO CLEAR				      &
+	\ S$="FORMS_WAIT enabled"					      &
+	\ GOTO 8080		! WRITE IT AND LEAVE			      &
+
+8010	F.P.5%=8%		! BIT TO SET				      &
+	\ F.P.6%=0%		! BIT TO CLEAR				      &
+	\ S$="FORMS_WAIT disabled"					      &
+	\ GOTO 8080		! WRITE IT AND LEAVE			      &
+
+8050	F.P.5%=0%		! BIT TO SET				      &
+	\ F.P.6%=16%		! BIT TO CLEAR				      &
+	\ S$="FORM_FEED enabled"					      &
+	\ GOTO 8080		! WRITE IT AND LEAVE			      &
+
+8060	F.P.5%=16%		! BIT TO SET				      &
+	\ F.P.6%=0%		! BIT TO CLEAR				      &
+	\ S$="FORM_FEED disabled"					      &
+	\ GOTO 8080		! WRITE IT AND LEAVE			      &
+
+8080	JUNK$=SYS(CHR$(6%)+CHR$(34%)+CHR$(3%)+CHR$(0%)			      &
+		+CVT%$(SWAP%(F.P.5%))+CVT%$(SWAP%(F.P.6%)))		      &
+		! SET THE BITS						      &
+	\ A1%=5%							      &
+	\ GOSUB 10050							      &
+	\ RETURN							      &
+
+10000	!								      &
+									      &
+									      &
+	!	S U B R O U T I N E S					      &
+									      &
+									      &
+
+10010	A%(I2%,0%)=P1%							      &
+	\ A%(I2%,1%)=I0%						      &
+	\ A%(I2%,2%)=A1%						      &
+		! SUBROUTINE:	SET PRIORITY, PRIOR. INC. & ACTIV. CODE.      &
+									      &
+	\ A%(I2%,3%)=0%							      &
+	\ A%(I2%,3%)=I1% IF A1% >2% AND  A1% < 9%			      &
+		! SET INDEX INTO MSG. TBL. IF NEEDED.			      &
+									      &
+	\ RETURN							      &
+
+10050		! SUBR TO SET P/D ACTIV					      &
+		! STORE S$ IN B.T.					      &
+		! SET ENTRY IN MCT					      &
+									      &
+									      &
+	I%=FNI%(I%)							      &
+	\ Z4%=I%							      &
+	\ B$(I%)=""							      &
+	\ GOSUB 10200							      &
+	\ I9%=I1%							      &
+	\ I1%=FNI1%(I1%)						      &
+	\ M%(I1%,0%)=0%							      &
+	\ M%(I1%,Z3%)=M%(I9%,Z3%) FOR Z3%=1% TO 6%			      &
+	\ M%(I1%,7%)=M%(I9%,7%)						      &
+	\ M%(I1%,8%)=Z4%						      &
+	\ M%(I1%,9%)=M%(I9%,9%)						      &
+	\ I2%=FNI2%(I2%) UNLESS TBLFUL%					      &
+	\ P1%=5%							      &
+	\ GOSUB 10010							      &
+	\ I1%=I9%							      &
+	\ RETURN							      &
+									      &
+									      &
+
+10100	! SUBROUTINE TO PUT ENTRY INTO ONLINE JOB TBL IF NOT THERE	      &
+	E%=1%								      &
+	\ IF FNJ1%(J1%)= -1% THEN					      &
+		IF FNN3%(J1%)=0% THEN GOTO 10150			      &
+		ELSE							      &
+		J%=FNJ3%(Z%)						      &
+	\	E%=2%							      &
+	\	IF J%= -1% THEN GOTO 10150				      &
+		ELSE							      &
+		J%(J%,1%)=J1%						      &
+	\	J%(J%,2%)=A1%						      &
+	\	J%(J%,3%)=0%						      &
+	\	J%(J%,4%)=0%						      &
+	\	J%(J%,5%)=Z2%						      &
+	\	J%(J%,6%)=Z3%						      &
+	\	J%(J%,7%)=P2% AND 127%					      &
+	\	J%(J%,0%)= -1%						      &
+	\	E%=3%							      &
+	\	GOTO 10150						      &
+
+10120	J2%=Z3%								      &
+	\ IF FNN3%(J1%)=0% THEN						      &
+		J%(J%,Z3%)=0% FOR Z3%=0% TO 7%				      &
+	\	E%=1%							      &
+	\	GOTO 10150						      &
+
+10130	IF J%(J2%,5%)=Z2% AND J%(J2%,6%)=Z3% THEN			      &
+			J%(J2%,2%)=A1%					      &
+	\		J%(J2%,7%)=P2% AND 127% IF (P2% AND 128%)	      &
+	\		E%=4%						      &
+	\		GOTO 10150					      &
+
+10140	J%(J2%,5%)=Z2%							      &
+	\ J%(J2%,6%)=Z3%						      &
+	\ J%(J2%,7%)=P2% AND 127%					      &
+	\ J%(J2%,2%)=A1%						      &
+	\ J%=J2%							      &
+	\ E%=3%
+10150	S$="NOT AN ELIGIBLE RECVR." IF E%=1%				      &
+	\ S$="ONLINE JOB TBL. FULL" IF E%=2%				      &
+	\ S$="'"+RAD$(J%(J%,5%))+RAD$(J%(J%,6%))+"' PUT ONLINE" IF E%=3%      &
+	\ S$="ALREADY ONLINE" IF E%=4%					      &
+	\ S$="JOB #"+NUM1$(J1%)+" "+S$ UNLESS E%=2%			      &
+	\ Z8%=M%(0%,11%)						      &
+	\ RETURN							      &
+									      &
+									      &
+
+10200	IF LEN(B$(I%))+LEN(S$) <= 32%					      &
+		THEN B$(I%)=B$(I%)+S$					      &
+	\	RETURN
+10210	Z%=LEN(B$(I%))							      &
+	\ Z1%=32%-Z%							      &
+	\ B$(I%)=B$(I%)+LEFT(S$,Z1%)					      &
+	\ S$=RIGHT(S$,Z1%+1%)						      &
+	\ RETURN UNLESS LEN(S$)						      &
+	\ Z2%=I%							      &
+	\ I%=FNI%(I%)							      &
+	\ B%(Z2%)=I%							      &
+	\ B$(I%)=""							      &
+	\ GOTO 10210							      &
+									      &
+									      &
+
+10300	! SUBROUTINE TO SET UP ENTRIES					      &
+									      &
+	S$=""								      &
+	\ I%=M%(I1%,8%)
+10320	S$=S$+B$(I%)							      &
+	\ IF B%(I%) THEN						      &
+		I%=B%(I%)						      &
+	\	GOTO 10320
+10330	A1%,P1%=5%							      &
+	\ GOSUB 10050							      &
+	\ M%(A%(I2%,3%),9%)=M%(A%(0%,3%),9%)				      &
+	\ M%(A%(I2%,3%),0%)=M%(I1%,0%)					      &
+	\ M%(A%(I2%,3%),7%)=M%(A%(I2%,3%),7%) OR 256%			      &
+	\ RETURN							      &
+									      &
+									      &
+
+10400	S$="REQUEST #"+NUM$(M%(M0%(Z%,1%),0%))+"DELETED"		      &
+	\ A1%=5%							      &
+	\ M%(A%(I2%,3%),9%)= -1% IF FNN3%(M%(A%(I2%,3%),1%))		      &
+	\ GOSUB 10050							      &
+	\ RETURN							      &
+									      &
+									      &
+
+10450	!	SUBROUTINE:	FOR SHUTDOWN:SENDS 'CONFIRM' TO 'SHUTUP'      &
+	!			AND ENTERS 'SHUTUP' IN ON-LINE TABLE.	      &
+
+10460	Z$=SYS(S3$+"SHUTUP"+STRING$(10%,0%)+"CONFIRM")			      &
+	\ J1%=M%(I1%,1%)						      &
+	\ IF FNN3%(J1%) THEN						      &
+		Z4%=Z3%							      &
+	\	IF Z$=FNP$("SHUTUP") THEN				      &
+			IF FNJ1%(J1%) <> -1% THEN			      &
+			J%(Z3%,7%)=9%					      &
+			ELSE						      &
+			Z%=FNJ3%(J1%)					      &
+	\		IF Z% <> -1% THEN				      &
+				J%(Z%,0%)=-1%				      &
+	\			J%(Z%,1%)=J1%				      &
+	\			J%(Z%,5%)=Z2%				      &
+	\			J%(Z%,6%)=Z4%				      &
+	\			J%(Z%,7%)=9%				      &
+
+10480	IF D%= -1% THEN							      &
+		SSPRIV% = SSPRIV% + 1%					      &
+	\	Z$=SYS(CHR6$+CHR6$+CHR$(J0%)+CHR$(0%))			      &
+		! REATTACH IF DETACHED.					      &
+		! USE KB0: EVEN IF IT IS NOT THE CURRENT OSC.		      &
+
+10490	RETURN								      &
+									      &
+									      &
+
+12000	!								      &
+									      &
+									      &
+	!	F U N C T I O N S					      &
+									      &
+
+12010	DEF* FNP$(Z$)							      &
+	\ FNP$=""							      &
+	\ FNP$=MID(SYS(CHR6$+CHR$(-10%)+Z$),7%,4%)			      &
+		! FILENAME STRING TO RAD 50.				      &
+
+12012	FNEND								      &
+									      &
+
+12020	DEF* FND%							      &
+	\ FND%= -1%							      &
+	\ FND%=0% IF ((PEEK(PEEK(PEEK(PEEK(520%)))+2%) AND 255%)=	      &
+	  (PEEK(518%) AND 255%) AND					      &
+	  (PEEK(PEEK(PEEK(PEEK(520%)))+6%) AND 8192%)=8192%)		      &
+									      &
+	\ FNEND								      &
+									      &
+									      &
+
+12050	DEF* FNI%(I%)							      &
+		! FUNCTION:	GET NEXT ENTRY IN BUILD TABLE.		      &
+									      &
+	\ IF B% <> -1% THEN						      &
+		Z%=B%							      &
+	\	B%=B%(Z%)						      &
+	\	B%(Z%)=0%						      &
+	\	GOTO 12070						      &
+
+12066	Z%=M%(0%,10%)+1%						      &
+	\ B%(Z6%)=Z6%+1% FOR Z6%=Z% TO Z%+254%				      &
+	\ B%(Z%+255%)=-1%						      &
+	\ M%(0%,10%)=Z%+255%						      &
+	\ B%=B%(Z%)							      &
+	\ B%(Z%)=0%							      &
+	\ B$(Z%+255%)=""						      &
+	\ Z6%=M1%(0%)							      &
+
+12070	FNI%=Z%								      &
+	\ FNEND								      &
+									      &
+									      &
+
+12080	DEF* FNI2%(I2%)							      &
+		! FUNCTION: GET NEXT ENTRY IN CTL-TABLE.		      &
+									      &
+	\ IF A% >= 31% THEN GOTO 19200					      &
+		ELSE FNI2%=A%						      &
+	\ A%=A%+1%
+12100	FNEND								      &
+									      &
+									      &
+
+12110	DEF* FNI1%(I1%)							      &
+		! FUNCTION:	GET NEXT ENTRY IN MSG. CTL. TBL.	      &
+
+12120	IF M1%= -1% THEN GOTO 19200 ELSE Z%=M1%				      &
+	\ M1%=M1%(Z%)							      &
+	\ M1%(Z%)=0%							      &
+	\ FNI1%=Z%
+12130	FNEND								      &
+									      &
+									      &
+
+12140	DEF* FNN2%(Z%,Z1%)						      &
+	\ FNN2%=0%							      &
+	\ FNN2%=SWAP%(CVT$%(MID(SYS(CHR6$+CHR$(26%)+CHR$(Z%)		      &
+		+CHR$(0%)),17%+Z1%,2%))) IF PEEK(S1%+Z%*2%)		      &
+	\ FNEND								      &
+		! FUNCTION:	GET JOB NAME FROM NAMTBL.		      &
+									      &
+									      &
+
+12150	DEF* FNN1%(Z%)=							      &
+		SWAP%(PEEK(SWAP%(CVT$%(MID(SYS(CHR6$+CHR$(26%)+CHR$(0%)+      &
+		CHR$(1%)),29%,2%)))+14%)) AND 255%			      &
+		! FUNCTION FOR # MSGS. QUEUED FOR ME.			      &
+									      &
+									      &
+
+12300	DEF* FNS1%(I1%)							      &
+	\ FNS1%=0%							      &
+		! FUNCTION:	SORT THE MSG. CTL. TBL. DIRECTORY;	      &
+		!		ASCENDING MSG. #'S.			      &
+
+12304	Z2%=M0%-2%
+12310	Z%=0%								      &
+	\ FOR Z1%=0% TO Z2%						      &
+	\ IF M0%(Z1%,0%) > M0%(Z1%+1%,0%) THEN				      &
+		W%(Z3%)		= M0%(Z1%,Z3%)	  FOR Z3%=0% TO 1%	      &
+	\	M0%(Z1%,Z3%)	= M0%(Z1%+1%,Z3%) FOR Z3%=0% TO 1%	      &
+	\	M0%(Z1%+1%,Z3%) = W%(Z3%)	  FOR Z3%=0% TO 1%	      &
+	\	Z%= -1%							      &
+		! SWAP ENTRIES IF NOT IN ORDER, SET INVERSION FLAG.	      &
+
+12314	NEXT Z1%							      &
+									      &
+	\ Z2%=Z2%-1%							      &
+	\ GOTO 12310 IF Z%						      &
+		! REPEAT IF INVERSIONS.					      &
+									      &
+	\ FNEND								      &
+									      &
+									      &
+
+12350	DEF* FNS2%(I2%)							      &
+	\ FNS2%=0%							      &
+		! FUNCTION:	SORT THE ACTIVITY TABLE; DESCENDING	      &
+		!		PRIORITY.				      &
+
+12352	FOR Z%=0% TO A%-2%						      &
+	\ A%(Z%,Z3%)=A%(Z%+1%,Z3%) FOR Z3%=0% TO 3%			      &
+	\ NEXT Z%							      &
+	\ A%=Z%+1%							      &
+		! SHUFFLE ENTRIES TO START OF TBL.			      &
+									      &
+	\ A%(Z%+1%,Z3%)=0% FOR Z3%=0% TO 3%				      &
+		! CLEAR UNUSED ENTRY.					      &
+									      &
+	\ Z2%=A%-1%							      &
+		! SET # OF ENTRIES TO BE SORTED.			      &
+
+12360	Z%=0%								      &
+	\ FOR Z1%=0% TO Z2%						      &
+	\ IF A%(Z1%,0%) < A%(Z1%+1%,0%) THEN				      &
+		W%(Z3%)		= A%(Z1%,Z3%)	FOR Z3%=0% TO 3%	      &
+	\	A%(Z1%,Z3%)	= A%(Z1%+1%,Z3%)FOR Z3%=0% TO 3%	      &
+	\	A%(Z1%+1%,Z3%)	= W%(Z3%)	FOR Z3%=0% TO 3%	      &
+	\	Z%= -1%							      &
+		! SWAP ENTRIES IF NOT IN ORDER; SET INVERSION FLAG.	      &
+
+12370	NEXT Z1%							      &
+									      &
+	\ Z2%=Z2%-1%							      &
+	\ GOTO 12360 IF Z%						      &
+		! BACK AGAIN IF ANY INVERSIONS.				      &
+									      &
+	\ FNEND								      &
+									      &
+									      &
+
+12400	DEF* FNO1%(Z1%,Z2%)						      &
+	\ FNO1%= -1%							      &
+
+12410	FOR Z%=0% TO 15%						      &
+	\	IF O%(Z%,0%)=0% THEN GOTO 12430				      &
+		ELSE							      &
+		IF (O%(Z%,0%) AND 255%) <> 255% THEN			      &
+			IF (O%(Z%,0%) AND 255%) <> Z1% THEN		      &
+				GOTO 12430 UNLESS Z1%= -1%		      &
+
+12420	IF O%(Z%,1%)= -1% THEN GOTO 12426				      &
+		ELSE							      &
+		IF O%(Z%,1%)=Z2% THEN GOTO 12426			      &
+			ELSE						      &
+			IF (O%(Z%,1%) AND 255%) <> 255% THEN		      &
+			IF (O%(Z%,1%) AND 255%) <> (Z2% AND 255%)	      &
+				THEN GOTO 12430				      &
+
+12424	IF (O%(Z%,1%) AND -256%) <> -256% THEN				      &
+		IF (O%(Z%,1%) AND -256%) <> (Z2% AND -256%)		      &
+			THEN GOTO 12430					      &
+
+12426	FNO1%=Z%							      &
+	\ GOTO 12440							      &
+
+12430	NEXT Z%								      &
+
+12440	FNEND								      &
+									      &
+									      &
+									      &
+									      &
+
+12490	DEF* FNS$(Z$)							      &
+	\ FNS$=""
+12500	FNS$=SYS(CHR6$+CHR$(-23%)+Z$)
+12504	FNEND								      &
+									      &
+
+12510	DEF* FNS3%(Z$)							      &
+	\ FNS3%=0%
+12520	Z1$=FNS$(Z$)							      &
+	\ IF Z1$="" THEN GOTO 12530					      &
+		ELSE							      &
+		CHANGE Z1$ TO Z%					      &
+	\ Z%(Z%)=Z%(Z%)+SWAP%(Z%(Z%+1%)) FOR Z%=5% TO 29% STEP 2%	      &
+	\ FNS3%=-1%
+12530	FNEND								      &
+									      &
+									      &
+
+12540	DEF* FNS4%(Z$)							      &
+	\ FNS4%,Q%=0%							      &
+	\ IF LEFT(Z$,4%)="KB*:" THEN					      &
+		Q%=-1%							      &
+	\	Z$="KB:"+RIGHT(Z$,5%)
+12550	IF FNS3%(Z$)=0% THEN GOTO 12570					      &
+		ELSE							      &
+		Z%(25%)=-1% IF Q%					      &
+	\	IF (Z%(29%) AND (1%+8%+1024%)) THEN GOTO 12570		      &
+		ELSE							      &
+			IF (Z%(29%) AND 128%) THEN			      &
+				FNS4%= -1%				      &
+				ELSE Z%(5%)=-1%
+12560	IF (Z%(29%) AND 4096%) THEN					      &
+		IF (Z%(29%) AND 8192%) THEN				      &
+				IF Z%(29%) >= 0% THEN FNS4%= -1%
+12570	FNEND								      &
+									      &
+									      &
+
+12580	DEF* FNS5%(Z$)							      &
+	\ FNS5%=0%
+12590	IF FNS3%(Z$)= -1% THEN						      &
+		IF (Z%(29%) AND 1%) THEN				      &
+			FNS5%= -1%
+12596	FNEND								      &
+									      &
+									      &
+
+12650	DEF* FNN2$(Z%)							      &
+	\ FNN2$=""
+12660	IF (Z% AND 255%)=255% THEN Z$="*"				      &
+		ELSE Z$=NUM1$(Z% AND 255%)				      &
+
+12670	FNN2$=Z$
+12680	FNEND								      &
+									      &
+									      &
+
+12700	DEF* FNS6%(Z$)							      &
+	\ FNS6%=0%
+12710	IF FNS3%(Z$)= -1% THEN						      &
+		IF (Z%(29%) AND (1%+8%+128%+1024%))=0% THEN		      &
+			IF (Z%(29%) AND (4096%+8192%)) THEN		      &
+				IF Z%(29%) >= 0% THEN			      &
+					FNS6%= -1%
+12720	FNEND								      &
+									      &
+									      &
+
+12750	DEF* FNM%(Z1%)							      &
+	\ FNM%=0%
+12760	IF C%=10% THEN							      &
+		IF (M%(Z1%,7%) AND 7%) <> 3% THEN GOTO 12790		      &
+			ELSE						      &
+			M%(Z1%,7%)=M%(Z1%,7%) OR 4%			      &
+	\		GOTO 12780
+12770	IF (M%(Z1%,7%) AND 3%)=0% THEN					      &
+		M%(Z1%,7%)=M%(Z1%,7%) OR 1% UNLESS M%=0%		      &
+		ELSE							      &
+		IF (M%(Z1%,7%) AND 7%) <> 3% THEN GOTO 12790
+12780	FNM%= -1%
+12790	FNEND								      &
+									      &
+									      &
+
+12800	DEF* FNJ1%(Z%)							      &
+	\ FNJ1%= -1%
+12810	FOR Z3%=0% TO 23%						      &
+	\ IF J%(Z3%,0%) THEN						      &
+		IF J%(Z3%,1%)=Z% THEN					      &
+		Z1%=J%(Z3%,5%)						      &
+	\	Z2%=J%(Z3%,6%)						      &
+	\	FNJ1%=Z3%						      &
+	\	GOTO 12830
+12820	NEXT Z3%
+12830	FNEND								      &
+									      &
+									      &
+
+12850	DEF* FNJ2%(Z%)							      &
+	\ FNJ2%=0%
+12860	FOR Z3%=0% TO 23%						      &
+	\ IF J%(Z3%,0%) THEN						      &
+		IF J%(Z3%,5%)=Z1% THEN					      &
+			IF J%(Z3%,6%)=Z2% THEN				      &
+			N1%=J%(Z3%,1%)					      &
+	\		FNJ2%= -1%					      &
+	\		Z8%=M%(0%,11%)					      &
+	\		GOTO 12880
+12870	NEXT Z3%
+12880	FNEND								      &
+									      &
+									      &
+
+12900	DEF* FNN3%(Z%)							      &
+	\ FNN3%=0%							      &
+		! FUNCTION:	SEARCH TABLE OF ELIGIBLE RECEIVERS	      &
+		! --------	TO SEE IF JOB # HAS BEEN DECLARED.	      &
+
+12910	IF PEEK(S1%+Z%*2%) THEN						      &
+		Z0%=SWAP%(CVT$%(MID(SYS(CHR6$+CHR$(26%)+CHR$(Z%)+	      &
+		CHR$(1%)),29%,2%)))					      &
+	\ IF Z0% THEN							      &
+		Z$=FNP$(CVT%$(SWAP%(PEEK(Z0%+2%)))+			      &
+			CVT%$(SWAP%(PEEK(Z0%+4%)))+			      &
+			CVT%$(SWAP%(PEEK(Z0%+6%))))			      &
+	\	Z2%=SWAP%(CVT$%(LEFT(Z$,2%)))				      &
+	\	Z3%=SWAP%(CVT$%(RIGHT(Z$,3%)))				      &
+	\	FNN3%=  -1%						      &
+		! IF JOB # HAS BEEN DECLARED AN ELIGIBLE RECEIVER,	      &
+		!	STORE ITS LOGICAL ID IN Z2% AND Z3%.		      &
+
+12930	FNEND								      &
+									      &
+									      &
+
+13000	DEF* FNF0%(Z%)							      &
+	\ FNF0%= -1%
+13010	FOR Z1%=0% TO M0%-1%						      &
+	\ Z2%=M%(M0%(Z1%,1%),7%) AND 7%					      &
+	\ IF Z2%=1% THEN GOTO 13030					      &
+		ELSE							      &
+		IF Z2%=7% THEN GOTO 13030				      &
+			ELSE						      &
+			IF Z2%=0% THEN					      &
+				IF (M% AND 2%)=0% THEN GOTO 13030
+13020	NEXT Z1%							      &
+	\ GOTO 13040
+13030	Z%=FNF1%(M%(M0%(Z1%,1%),8%))					      &
+	\ FNF0%=Z1%
+13036	M%(M0%(Z1%,1%),Z3%)=0% FOR Z3%=0% TO 10%			      &
+	\ M1%(M0%(Z1%,1%))=M1%						      &
+	\ M1%=M0%(Z1%,1%)
+13040	FNEND								      &
+									      &
+									      &
+
+13050	DEF* FNF1%(Z%)							      &
+	\ FNF1%=0%
+13060	Z4%=B%(Z%)							      &
+	\ B%(Z%)=B%							      &
+	\ B%=Z%								      &
+	\ IF Z4% THEN							      &
+		Z%=Z4%							      &
+	\	GOTO 13060
+13080	FNEND								      &
+									      &
+									      &
+
+13100	DEF* FNF2%(Z1%)							      &
+	\ FNF2%=0%
+13110	M1%(Z1%)=M1%							      &
+	\ M1%=Z1%							      &
+	\ M%(Z1%,Z3%)=0% FOR Z3%=0% TO 10%				      &
+	\ FNEND								      &
+									      &
+
+13200	DEF* FNX0%(Z1%,Z2%)						      &
+	\ FNX0%=0%							      &
+
+13210	A%(Z1%,Z3%)=0% FOR Z3%=0% TO 3% UNLESS TBLFUL%			      &
+									      &
+	\ IF Z2%=0% THEN GOTO 13240					      &
+		ELSE							      &
+		I2%=FNI2%(Z1%)						      &
+	\	A1%=Z2%							      &
+	\	GOSUB 10010						      &
+
+13240	FNEND								      &
+									      &
+
+13250	DEF* FNX1%(Z1%)							      &
+	\ FNX1%=0%							      &
+
+13260	I1%=A%(Z1%,3%)							      &
+	\ I%=M%(I1%,8%)							      &
+									      &
+	\ Z0%=FNF1%(I%)							      &
+	\ Z0%=FNF2%(I1%)						      &
+									      &
+	\ A%(Z1%,Z3%)=0% FOR Z3%=0% TO 3%				      &
+									      &
+	\ FNEND								      &
+									      &
+
+13300	DEF* FNK%(Z%)							      &
+	\ FNK%= -1%
+13310	IF PEEK(S1%+Z%*2%) THEN						      &
+		Z0%=PEEK(PEEK(PEEK(S1%+Z%*2%)))				      &
+	\ IF (PEEK(Z0%+2%) AND 255%)=Z%*2% THEN				      &
+		IF (PEEK(Z0%+6%) AND 8192%)=8192% THEN			      &
+			FNK%=(SWAP%(PEEK(Z0%+2%)) AND 255%)
+13330	FNEND								      &
+									      &
+
+13350	DEF* FNS7$(Z7$)							      &
+	\ FNS7$=""							      &
+	\ R0%=0%							      &
+
+13360	FNS7$=SYS(S3$							      &
+		+RAD$(M%(I1%,5%))					      &
+		+RAD$(M%(I1%,6%))					      &
+		+STRING$(10%,0%)+Z7$)
+13380	FNEND
+13390	FNS7$=""							      &
+	\ GOTO 13380							      &
+									      &
+									      &
+
+13400	DEF* FNO%(Z1%,Z2%)						      &
+	\ FNO%= -1%							      &
+
+13410	FOR Z%=0% TO 15%						      &
+	\ IF O%(Z%,0%) THEN						      &
+			IF (O%(Z%,0%) AND 255%)=Z1% AND			      &
+			O%(Z%,1%)=Z2% THEN				      &
+			FNO%=Z%						      &
+	\		GOTO 13440					      &
+
+13430	NEXT Z%								      &
+
+13440	FNEND								      &
+									      &
+
+13450	DEF* FNO2%(Z1%,Z2%)						      &
+	\ FNO2%=0%
+13460	FOR Z%=0% TO 15%						      &
+	\ IF O%(Z%,0%)=0% THEN						      &
+		O%(Z%,0%)=Z1% OR 256%					      &
+	\	O%(Z%,1%)=Z2%						      &
+	\	FNO2%= -1%						      &
+	\	Z8%=M%(0%,11%)						      &
+	\	GOTO 13480
+13470	NEXT Z%
+13480	FNEND								      &
+									      &
+
+13500	DEF* FNN%(Z%)							      &
+	\ FNN%=0%
+13510	Z%=0% UNLESS Z%<32767%						      &
+	\ Z%=Z%+1%							      &
+	\ IF N5% < 10% THEN						      &
+		N5%=N5%+1%						      &
+		ELSE							      &
+		N5%=1%							      &
+	\	M%(0%,0%)=Z%						      &
+	\	Z8%=J%(0%,0%)
+13520	FNN%=Z%								      &
+	\ FNEND								      &
+	!								      &
+	! FUNCTION RETURNS NEXT MESSAGE NUMBER.				      &
+	! RESET TO 0 UNLESS MESSAGE NUMBER IS LESS THAN 32767.		      &
+	! STORE MESSAGE NUMBER IN OPSER'S WORKFILE IF 10TH PASS.	      &
+									      &
+
+13550	DEF* FNJ3%(Z%)							      &
+	\ FNJ3%= -1%
+13560	FOR Z%=0% TO 23%						      &
+	\ IF J%(Z%,0%)=0% THEN						      &
+		FNJ3%=Z%						      &
+	\	GOTO 13580
+13570	NEXT Z%
+13580	FNEND								      &
+									      &
+
+13600	DEF* FNO4%(Z%)							      &
+	\ FNO4%=0%
+13610	S$="Valid operator list:"					      &
+	\ FOR Z1%=0% TO 15%						      &
+	\	S$=S$+CRLF$+"     ["+FNN2$(SWAP%(O%(Z1%,1%)))+","+	      &
+		   FNN2$(O%(Z1%,1%))+"] on KB"+FNN2$(O%(Z1%,0%))+":"	      &
+			IF O%(Z1%,0%)					      &
+	\ NEXT Z1%							      &
+									      &
+	\ FNEND								      &
+									      &
+									      &
+
+13650	DEF* FNJ4%(Z%)							      &
+	\ FNJ4%=0%
+13660	S$="ON-LINE JOBS:"+CRLF$					      &
+	\ Z7%=0%							      &
+									      &
+	\ FOR Z1%=0% TO 23%						      &
+	\ IF J%(Z1%,0%) THEN						      &
+		S$=S$+"	#"+						      &
+		FNN2$(J%(Z1%,1%))+					      &
+		"["+							      &
+		FNN2$(SWAP%(J%(Z1%,2%)))+				      &
+		","+							      &
+		FNN2$(J%(Z1%,2%))+					      &
+		"]"+							      &
+		"'"+RAD$(J%(Z1%,5%))+RAD$(J%(Z1%,6%))+"'"		      &
+		+"SL="+NUM1$(J%(Z1%,7%))				      &
+	\	Z7%=Z7%+1%						      &
+	\	S$=S$+CRLF$ IF (Z7% AND 1%)=0%				      &
+
+13680	NEXT Z1%							      &
+	\ S$=S$+"	(NONE)" UNLESS Z7%				      &
+	\ FNEND								      &
+									      &
+									      &
+
+13700	DEF* FNPRIV%(JOB%,PRV$)						      &
+	\ FNPRIV% = 0%							      &
+	\ CHANGE SYS(CHR6$+CHR$(32%)+CHR$(1%)+STRING$(3%,0%)+PRV$) TO Z%      &
+	\ GOTO 13710 IF Z%(Z0%) <> 0%					      &
+		FOR Z0% = 7% TO 14%					      &
+	\ GOTO 13720							      &
+
+13710	JOB% = ASCII(MID(SYS(CHR6$+CHR$(26%)+CHR$(JOB%)+CHR$(2%)),Z0%,1%))    &
+	\ FNPRIV% = ((Z%(Z0%) AND JOB%) <> 0%)				      &
+
+13720	FNEND								      &
+		! check if job no. JOB% has current privilege PRV$	      &
+		! returns: -1% if job has privilege			      &
+		!	    0% if no job or job doesn't have privilege	      &
+
+15000	DEF* FNR%(S$,L%)						      &
+	\ FNR%=0%							      &
+	\ P%=0%								      &
+	! FUNCTION:	KEYWORD MATCHING ROUTINE. MATCHES A STRING IN	      &
+	!		THE COMMAND STRING C$ STARTING AT POSITION P%+1%      &
+	!		TO THE DUMMY STRING S$. A MATCH IS MADE WHEN THE      &
+	!		MINIMUM NUMBER OF CHARACTERS ARE MATCHED. THIS	      &
+	!		MINIMUM NUMBER IS HELD IN THE DUMMY VARIABLE	      &
+	!		L%.						      &
+	! PARAMETERS:	S$	STRING TO MATCH TO.			      &
+	!		L%	MINIMUM LENGTH OF MATCH.		      &
+	! GLOBAL							      &
+	! VARIABLES							      &
+	! AFFECTED:	P%	POSITION POINTER POINTS TO THE LAST CHAR-     &
+	!			ACTER MATCHED SUCCESSFULLY.		      &
+	! LOCAL								      &
+	! VARIABLES							      &
+	! USED:		Z%	TEMPORARY CHARACTER POINTER.		      &
+	!		Z$	CHARACTER MATCHING VARIABLE FOR PROCESS-      &
+	!			ING BEYOND THE MINIMUM LENGTH.		      &
+	! RETURNS:	THE NUMBER OF CHARACTERS SUCCESSFULLY MATCHED.	      &
+	! ERRORS:	NONE EXPECTED.					      &
+
+15010	Z%=ASCII(RIGHT(C$,P%+1%))					      &
+	\ IF Z%=32% OR Z%=9% THEN P%=P%+1%				      &
+				\ GOTO 15010				      &
+		! SKIP PAST BLANKS AND TABS.				      &
+
+15020	IF MID(S$,1%,L%)=MID(C$,P%+1%,L%) THEN Z%=L%			      &
+	ELSE GOTO 15050							      &
+		! SEARCH FOR MINIMUM MATCH.				      &
+
+15030	Z$=MID(C$,P%+Z%+1%,1%)						      &
+	\ IF Z$<>MID(S$,Z%+1%,1%) THEN GOTO 15040			      &
+	  ELSE Z%=Z%+1% UNLESS Z$=""					      &
+	  \ GOTO 15030 UNLESS Z$=""					      &
+		! SEARCH FOR MORE MATCHING CHARACTERS.			      &
+
+15040	P%=P%+Z%							      &
+	\ FNR%=Z%							      &
+		! RETURN WITH P% POINTING TO THE LAST SUCCESSFULLY	      &
+		! MATCHED CHARACTER. FUNCTION WILL RETURN AS THE NUMBER	      &
+		! OF CHARACTERS MATCHED.				      &
+
+15050	FNEND								      &
+									      &
+
+15100	DEF* FNCHK.GAG%(KB%)						      &
+	\ FNCHK.GAG% = 0%						      &
+	!								      &
+	! FUNCTION:	TEST TERMINAL TO BROADCAST TO AND ENSURE THAT	      &
+	!		IT'S GAG BIT IS NOT SET.			      &
+	!								      &
+	! PARAMETERS:	KB%	  = KEYBOARD NUMBER TO CHECK.		      &
+	!								      &
+	! LOCAL								      &
+	! VARIABLES							      &
+	! USED: &	Z%	  = DUMMY INTEGER VARIABLE		      &
+	!								      &
+	! RETURNS:	0 MEANS DEVICE IS NOT GAGGED, OKAY TO SEND	      &
+	!	       -1 MEANS DEVICE IS GAGGED, DON'T SEND		      &
+	!								      &
+	! ERRORS:	NON EXPECTED					      &
+	!								      &
+
+15120	CHANGE SYS(CHR6$+CHR$(16%)+CHR$(0%)+CHR$(KB%)) TO Z%		      &
+	\ FNCHK.GAG% = Z%(28%) = 255%					      &
+	\ GOTO 15124							      &
+
+15122	FNCHK.GAG% = -1%						      &
+
+15124	FNEND								      &
+									      &
+
+15200	DEF* FNPRV%(PRIV$)						      &
+									      &
+	\ CHANGE SYS(CHR6$+CHR$(32%)+CHR$(1%)+STRING$(3%,0%)+		      &
+		PRIV$) TO Z%						      &
+	\ FNPRV% = (Z%(3%)=0%)						      &
+	\ FNEND								      &
+	! Check to see if job currently has privileged named		      &
+	! If privileged then return -1%					      &
+	! Else return 0%						      &
+
+19000	!								      &
+									      &
+									      &
+	!	E R R O R   H A N D L E R				      &
+									      &
+									      &
+
+19010	PRINT "NO DATA FILES" IF ERL=1050% AND ERR=5%			      &
+	\ E%=1%								      &
+	\ RESUME 2300 IF ERL = 2000% AND ERR = 5%			      &
+	\ RESUME 2800 IF ERL = 2520% AND ERR = 13%			      &
+	\ RESUME 12504 IF ERL = 12500% AND ERR = 2%			      &
+	\ IF ERR=51% OR ERR=52% THEN					      &
+		RESUME 6790 IF (ERL = 6600% OR ERL = 6610% OR ERL = 6500%)    &
+	\	RESUME 6890 IF ERL = 6830%				      &
+	\	RESUME 7380 IF ERL = 7320%				      &
+	\	RESUME 7090 IF ERL = 7020%				      &
+
+19020	RESUME 10490 IF ERL = 10460% AND ERR = 5%			      &
+	\ RESUME 7920 IF ERL =  7910% AND ERR = 5%			      &
+	\ RESUME 12012 IF ERL = 12010% AND ERR = 2%			      &
+	\ RESUME 13390 IF ERL = 13360% AND ERR = 5%			      &
+	\ RESUME 13720 if ERL = 13710%					      &
+									      &
+									      &
+	\ IF ERL = 13360% AND (ERR=32% OR ERR=4%) THEN			      &
+		R0%=R0%+1%						      &
+	\	IF R0% >= 60% THEN RESUME 13390%			      &
+		ELSE							      &
+		SLEEP 1%						      &
+	\	RESUME 13360%						      &
+		! WAIT FOR SMALL BUFFERS OR FOR THE RECEIVER'S MESSAGE	      &
+		! QUE TO EMPTY						      &
+
+19100	IF (ERL=7822% OR ERL=7915%) AND ERR=4% THEN CNT%=CNT%+1%	      &
+		\ SLEEP 5%						      &
+		\ IF CNT%<60% THEN RESUME				      &
+		  ELSE CNT%=0%						      &
+			\ RESUME 7830% IF ERL=7822%			      &
+			\ RESUME 7920% IF ERL=7915%			      &
+		! ERR=4 CAN BE FOR EITHER A FULL MESSAGE TABLE OR FOR A	      &
+		! HIBERNATING JOB, IF THE JOB IS HIBERNATING, MOVE ON TO      &
+		! THE NEXT ENTRY IN THE TABLE, SO THAT THIS PROGRAM DOES      &
+		! NOT GO INTO AN INFINITE LOOP WHILE WAITING FOR A JOB THAT   &
+		! IS DEAD IN THE WATER. IF THIS PROGRAM LOOPS, THEN 'OPSER'   &
+		! CAN NOT BE COMMUNICATED WITH TO SEE WHAT THE OTHER SPOOLERS &
+		! ARE DOING.						      &
+
+19150	IF ERL = 7822% AND ERR = 5% THEN				      &
+		J%(S4%,Z3%)=0% FOR Z3%=0% TO 7%				      &
+	\	RESUME 7830%						      &
+
+19160	IF (ERL=7822% OR ERL=7915%) AND ERR=32% THEN			      &
+		SLEEP 1%						      &
+	\	RESUME 7822% IF ERL = 7822%				      &
+	\	RESUME 7915% IF ERL = 7915%				      &
+
+19170	IF ERL = 10480 AND ERR = 18% THEN				      &
+		SLEEP 2% IF SSPRIV% <4%					      &
+	\	IF SSPRIV% <3% THEN RESUME 10480			      &
+		ELSE							      &
+		 IF SSPRIV% > 6% THEN PRINT "FAILURE TO REATTACH AT LINE 10480" &
+		ELSE							      &
+		T%=ASCII(MID(SYS(CHR6$+CHR$(-12%)),9%,1%))		      &
+	\	T%=T% + SWAP%(CVT$%(MID(SYS(CHR6$+CHR$(-3%)),7%,2%)))	      &
+	\	T%= (PEEK(PEEK(PEEK(T%)) +2%) AND 255%)/2%		      &
+	\	S$=SYS(CHR6$+CHR$(-4%)+CHR$(0%)+CHR$(3%)+CHR$(3%)+CHR$(3%))   &
+	\	S$=SYS(CHR6$+CHR$(8%)+CHR$(T%)+SPACE$(23%)+CHR$(0%)+CHR$(255%)) IF T%>0% &
+	\	RESUME 10480						      &
+
+19180	IF ERL = 4050 AND ERR = 33% THEN				      &
+		P3$=P3$+"  KB??:  "					      &
+	\	RESUME 4060						      &
+
+19190	IF ERL = 15120 AND ERR = 8% THEN RESUME 15122			      &
+
+19200	PRINT "ERR #";ERR;"AT LINE";ERL					      &
+	\ STOP								      &
+	\ GOTO 32767							      &
+									      &
+
+31000	!								      &
+									      &
+									      &
+	!	C H A I N   E N T R Y					      &
+									      &
+									      &
+	E0%=2%								      &
+	\ GOTO 1000							      &
+
+32767	END

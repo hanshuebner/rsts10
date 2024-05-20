@@ -1,0 +1,324 @@
+TITLE	DZDSK,<RX50 DISK DRIVER>,0A,10-MAY-91,MHB/MND/GPK
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+
+.SBTTL	EDIT HISTORY FOR DZDSK
+
+;+
+;
+;  000	MHB  17-JUN-82	CREATION
+;  001	MND  23-JUL-82	Driver completed, for V8.0-06
+;
+;			[RSTS X9.4]
+;  002	GPK  17-Sep-86	More finishing up, ported to V9.4
+;
+;			[RSTS V9.6]
+;  003	KCG  29-Feb-88	Add FMTFUN.
+;
+;-
+
+
+	DEFORG	DZDSK
+
+	INCLUDE	<CMNDSK,ERLDSK,OPTDSK>
+
+	DSKDEF	DZ
+
+.SBTTL	ERROR LOGGING
+
+	ERRENT	LOG$DZ
+
+	CALLX	ERLDSK,R5	;;;USE COMMON ROUTINE
+	  .BYTE	ERC$DZ		;;;ERROR CODE
+	  .BYTE	0		;;;NON-OVERLAPPED SEEK
+	  .BYTE	RX5ID,9.	;;;OFFSET, 9. REGISTERS			;002
+	  .BYTE	0,0		;;;THAT'S ALL
+	RETURN			;;; AND BACK
+
+.SBTTL	FIP FUNCTION TO RX50 FUNCTION CONVERSION
+
+DZFUN:	.WORD	RXWRIT		;WRITE WITH WRITE CHECK
+	.WORD	RXWRIT		;WRITE
+	.WORD	RXRRTY		;READ
+	.WORD	RXRRTY		;WRITE CHECK
+	.WORD	0		;IFUN is a NOP				;002
+	.WORD	RXWRIT		;Erase (done as a Write, sort of)	;002
+	.WORD	0		;Release is a NOP			;002
+	.WORD	0		;Unload is a NOP			;002
+	.WORD	0		;Format is a NOP			;003
+
+
+.SBTTL	Form the physical address and set up DSQ
+
+;+
+; QDS$DZ - Form the physical address and set up DSQ.
+;
+;		R0 =  	MSB of starting LBN of transfer
+;		R1 =  	LSB OF starting LBN of transfer
+;		R2 =  	RSTS's disk driver index
+;		R3 =  	Physical unit number *2
+;		R4 ->	DSQ to set up
+;  			DSQOUN =  Physical unit number *2
+;			DSQPUN =  Physical unit number
+;		R5 =  	FIP unit number * 2
+;	CALL	QDS$DZ
+;		
+;	RETURN:	R0,R1,R2,R3 RANDOM
+;		R4 -> 	DSQ
+;			DSQFUN(R4) 	= RX50 function
+;			DSQPDA(R4) 	= Starting LBN of transfer
+;			DSQOPT(R4) 	= Cylinder number		;002
+;			DSQOUN(R4)	= 0 (both drives opt. together)	;002
+;			DSQPUN(R4)	= Physical unit number * 2	;002
+;			DSQPTO(R4) 	= MMU value for data buffer
+;			DSQCTO(R4) 	= APR6 offset for data buffer	;002
+;		R5 =  	FIP unit number * 2
+;
+;	CALL	@(SP)+
+;
+;	R4 -> DSQ
+;-
+.ENABL	LSB
+
+QDS$DZ::NOP			; Optionally patched to BPT for humor.
+	MOVB	DSQSAV(R4),R3	; Get FIP function code
+	MOVB	DZFUN-WFUN.C(R3),DSQFUN(R4) ; Convert to RX50 function code
+	TST	R0		; High order LBN should be zero		;002
+	BEQ	5$		; OK					;002
+	MOV	#-1,R1		; Force illegal LBN for later		;002
+5$:	MOV	R1,DSQPDA(R4)	; Save starting LBN of transfer (LSB)
+	DIV	#10.,R0		; Get cylinder (track) in R0		;002
+	INC	R0		; Adjust for LBN 0 being on track 1	;002
+	CMP	R0,#80.		; Off the end?				;002
+	BNE	7$		; No					;002
+	CLR	R0		; Yes, wrap				;002
+7$:	MOV	R0,DSQOPT(R4)	; Save it for OPTDSK			;002
+	CLRB	DSQOUN(R4)	; Both drives optimize together		;002
+	ASLB	DSQPUN(R4)	; We want unit * 2 for later		;002
+	ASL	DSQCNT(R4)	; Make word count into byte count	;002
+	MOVB	DSQMAM(R4),R0	; Get MSB of buffer address
+	MOV	DSQMAL(R4),R1	;   and LSB of buffer address
+	MOV	R1,R2		;Get working copy of the buffer's LSB addr,
+	BIC	#^C<77>,R2	;  mask it down to just an MMU offset.
+	ASHC	#-6,R0		; Now calculate the MMU sliver of the buffer.
+	MOV	R1,DSQPTO(R4)	; Save APR6's MMU value for interrupt code
+	MOVB	R2,DSQCTO(R4)	; Save the virtual address also.	;002
+	CALL	@(SP)+		; Return with DSQ all set up.
+
+
+
+.SBTTL	Comes here if first in driver's queue
+
+	BR	DSKGDZ		;;First in queue, start transfer
+
+DSKGOP:	CALLX	OPTDSK,R5,OPT$DZ ;;Optimize the disk queue (if possible)
+
+.SBTTL	Start up an operation (PR5)
+
+;+
+; DSKGDZ - Start up an operation (PR5).
+;
+;	R0 -> Queue root
+;	R4 -> DSQ
+;-
+
+.ENABL	LSB
+
+DSKGDZ:	INC	DSO$XX(R0)	;;Unit will no longer be idle
+	NEG	DSQCNT(R4)	;;Undo the NEG that DSK did unto us	;002
+	BIT	#UC.MNT!UC.NFS,UNTCNT(R5) ;; Is disk not mounted or NFS
+	BNE	DZNEXT		;;Yes, Continue
+
+	; Volume valid code should be added here			;002
+
+DZNEXT:	MOVB	DSQSAV(R4),R1	;;Get the FIP function
+	ADD	R1,PC		;;  and dispatch to RX50's read/write function
+	 BR	20$		;;Write with write check = write
+	 BR	20$		;;Write = write
+	 BR	70$		;;Read = read
+	 BR	70$		;;Write check = read
+	 BR	DZEXIT		;;Ifun is a NOP				;002
+	 BR	20$		;;Erase = write				;002
+	 BR	DZEXIT		;;Relfun is a NOP			;002
+	 BR	DZEXIT		;;Unload is a NOP			;002
+	 BR	DZFMT		;;Format is an error			;003
+
+;	Write requests
+;	Fill silo with 512. bytes from user's buffer
+
+20$:	TSTB	DSQFUN(R4)	;;Erase and buffer already set?		;002
+	BMI	70$		;;Yes, skip ahead			;002
+.ASSUME	RXWRIT NE 0							;002
+.ASSUME	RXWRIT LT 200							;002
+	MOV	DSQCNT(R4),R2	;;Get requested byte count.
+	CMP	R2,#512.	;;Is read greater than 1 sector?	;002
+	BLOS	30$		;;  No, do only 1 sector.
+	MOV	#512.,R2	;;  Yes, set up for 1 sector.
+30$:	MAP	PUSH,APR=6,DATA	;;Save current APR6
+	CALL	MAPUSR		;;Map the user buffer			;002
+	CMPB	DSQFUN(R4),#WERFUN ;;Write or erase?			;002
+	BNE	50$		;;Write					;002
+	MOVB	#200,DSQFUN(R4)	;;Erase, indicate no buffer setup next time ;002
+40$:	MOVB	#0,RX5FB(R3)	;;Clear a byte				;002
+	SOB	R2,40$		;;Only R2 bytes left			;002
+	BR	60$		;; and go				;002
+
+50$:	MOVB	(R1)+,RX5FB(R3)	;;Move another byte into RX50s internal buffer
+	SOB	R2,50$		;;Only R2 bytes to go.
+60$:	MAP	POP,APR=6,DATA	;;Now restore previous mapping		;002
+
+;+
+;	Read/Write requests
+;	Compute the physical disk address and issue the I/O
+;-
+
+70$:	MOV	R0,R5		;;Save Queue root pointer		;002
+	CLR	R0		;;High order LBN is zero		;002
+	MOV	DSQPDA(R4),R1	;;Get LSB of starting LBN
+	DIV	#10.,R0		;; Divide for: R0=track, R1=sector (0-9.)
+	CMP	#4,R1		;; Set C=1 (BLO=BCS) for 5 <= sector <= 9.
+	ROL	R1		;; Sector * 2 (+1 if C set) = [2:1] interleave
+	ADD	R0,R1		;; Adjust for a 3 sector skew between 
+	ADD	R0,R1		;;   tracks by adding track *2. (R1/10. below)
+	INC	R0		;; Bump track number			;002
+	CMP	#80.,R0		;; Valid track?				;002
+	BHI	80$		;; Yes, and not last (C = 0)		;002
+	BLO	ERRCHK		;; No, illegal track (Z = 0)		;002
+	ADD	#-80.,R0	;; Last, so adjust to track 0 (C for side 2)
+80$:	MOVB	DSQPUN(R4),R2	;; Get physical unit number * 2,	;002
+	;ADC	R2		;;   + side (for double sided RX's)
+	BISB	DSQFUN(R4),R2	;; Merge the RX50 function with unit and side
+	MOVB	R2,RX5CS0(R3)	;; Load the requested function, unit and side
+	MOVB	#0,RX5CS5(R3)	;; Clear CSR5 in case fun = ext.fun.	;002
+	MOVB	R0,RX5CS1(R3)	;; Load the physical track
+	CLR	R0		;; 
+	DIV	#10.,R0		;; Determine interleave skew from R1.
+	INC	R1		;; LBN 0-4 maps SEC 1-9. LBN 5-9 maps SEC 2-10
+	MOVB	R1,RX5CS2(R3)	;; Load desired sector [1 - 10.]
+	MOVB	SP,RX5GO(R3)	;;Go.
+	MOV	R5,R0		;;Restore queue root pointer		;002
+	MOVB	#-10.,DSO$XX+1(R0) ;;Start 10. second timeout		;002
+	RETURN			;;All set!				;002
+
+
+.DSABL	LSB
+
+GLOBAL	<UMR$DZ,DQS$DZ,OPT$DZ,DSO$XX,UNTCNT>				;002
+
+.SBTTL	Interrupt service (PR5)
+
+;+
+; INT$DZ - Interrupt service (PR5).
+;-
+.ENABL	LSB
+
+DZFMT:	SETERR	ERRERR,DSQERR(R4)					;003
+DZEXIT:	BR	DZDONE							;002
+
+INT$DZ::MOV	CSR.DZ,R3	;;Get the CSR address
+	MOV	#DQS$DZ,R0	;;Get queue root pointer
+	MOV	(R0),R4		;;Get top of queue
+	BEQ	DZRET		;;None, so ignore interrupt
+	BIT	#RXDNE!RXERR,RX5CS0(R3) ;;Done or error?		;002
+	BEQ	DZRET		;;Neither, so spurious interrupt	;002
+	BPL	20$		;;Done, carry on			;002
+	MOV	RX5CS1(R3),R1	;;Get error code			;002
+	BIC	#^C<370>,R1	;;Isolate interesting bits		;002
+	ASH	#-3,R1		;;Shift to the right			;002
+	CLR	R0		;;For DIV				;002
+	DIV	#8.,R1		;;Form quotient and remainder		;002
+	BITB	BITBYT(R1),HFLAG(R0) ;;Hard error?			;002
+	BR	ERRCHK		;;Z = 0 if hard, go check it		;002
+
+TMO$DZ::SEZ			;;Timeouts are soft errors
+ERRCHK:	LOG$DZ			;;Error, so log it (Z-CLR = hard/Z-SET = soft)
+	CALLX	DFINT1		;;Check for more retries if soft.
+	BMI	DSKGDZ		;;More retries left, so retry.
+	BR	DZDONE		;;No more retries, exit
+
+; Table of hard/soft error flags.  1 is hard, 0 is soft			;002
+
+	.RADIX	2							;002
+HFLAG:	.BYTE	11111100,01110000,00100111,11111111			;002
+	.RADIX	8							;002
+
+20$:	MOVB	DSQSAV(R4),R1	;;Get the FIP function
+	ADD	R1,PC		;;  and dispatch to RX50's read/write function
+	 BR	60$		;;Write with write check = write
+	 BR	60$		;;Write = write
+	 BR	30$		;;Read = read
+	 BR	30$		;;Write check = read
+	 CRASH			;;Ifun -- can't happen			;002
+	 BR	60$		;;Erase = write				;002
+	 CRASH			;;Relfun -- can't happen		;002
+	 CRASH			;;Unload -- can't happen		;002
+;+
+;	Read completion
+;	Empty silo into user's buffer
+;-
+30$:	MOV	DSQCNT(R4),R2	;;Get requested byte count.
+	CMP	R2,#512.	;;Is read greater than 1 sector?	;002
+	BLOS	33$		;;  No, do only the byte count.
+	MOV	#512.,R2	;;  Yes, set up for 1 sector.
+33$:	MAP	PUSH,APR=6,DATA	;;Save current APR6			;002
+	CALL	MAPUSR		;; and map the user buffer		;002
+	CMPB	DSQSAV(R4),#RFUN.C ;;Compare?				;002
+	BNE	40$		;;No, complete a read			;002
+35$:	CMPB	RX5EB(R3),(R1)+	;;Check for a match			;002
+	BNE	65$		;;Mismatch, exit the loop		;002
+	SOB	R2,35$		;;Loop through the sector		;002
+	BR	45$		;; and leave				;002
+
+40$:	MOVB	RX5EB(R3),(R1)+	;;Move another byte into user's buffer
+	SOB	R2,40$		;;Only R2 bytes to go.
+45$:	MAP	POP,APR=6,DATA	;;Now restore previous mapping
+;+
+;	Read/Write completion
+;	Subtract 1 sector from byte count in DSQ and update DSQ
+;	for next logical block and next user's buffer MMU value
+;	if byte count is greater than zero.
+;
+;-
+60$:	SUB	#512.,DSQCNT(R4) ;;More left to do?
+	BLOS	DZDONE		;;   No. This request is complete.
+	ADD	#1,DSQPDA(R4)	;; Update DSQ for next LBN of request
+	ADD	#512./100,DSQPTO(R4) ;; Update MMU value by 1/4Kw (256 wrds)
+	JMP	DZNEXT		;; Do the next I/O for this request	;002
+
+65$:	SETERR	DATERR,DSQERR(R4) ;;Set error code = read check error	;002
+DZDONE:	CALLX	DFINT9		;;Done, say idle, de-queue, and housekeep
+	MOV	(R0),R4		;;Another request in queue?
+	BEQ	DZRET		;;No, exit
+	JMP	DSKGOP		;;Yes. process it now			;002
+
+MAPUSR:	MOV	DSQPTO(R4),R1	;;Get APR6's MMU value for transfer
+	MAP	R1,APR=6,DATA 	;;  and map that MMU sliver
+	MOV	#140000,R1	;;APR6 base address			;002
+	BISB	DSQCTO(R4),R1	;; and form the virtual buffer address.	;002
+	MOVB	#1,RX5CA(R3)	;;Initialize controller buffer address.	;002
+DZRET:	RETURN			;; and exit.
+
+UMR$DZ::CRASH			;;UMR?  What's that?			;002
+
+.DSABL	LSB
+
+GLOBAL	<CSR.DZ,DQS$DZ,IE,BITBYT,ERRERR>
+.END

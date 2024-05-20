@@ -1,0 +1,369 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+TITLE	ZER,<ZERO DEVICE/ACCOUNT>,0A,10-MAY-91,MHB/ABC/SRM/AWR/FEK/WJS/GPK/KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR ZER
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	SRM  23-Mar-81	Make UU.ZER return the error "Can't find file"
+;			even if the device specified is SY:
+;  002	AWR  14-MAY-81	REQUIRE PPN FOR DISK (NMC MEMORIAL CHANGE)
+;  003  SRM  09-Jun-81	Restrict nonprivileged users from zeroing
+;			their account on a locked disk.
+;  004  FEK  29-Jul-82	Don't release the UFD DCN's if user is non-prived
+;			check flag for delete all, and UFD
+;  005  FEK  30-AUG-82	ADD gfd support
+;  006	WJS  29-Oct-82	New UUOENT for EMT Logger
+;
+;				[RSTS V9.0]
+;  007	GPK  25-Mar-83	Multiple privileges
+;  008	GPK  17-May-83	Clear out UFD tag word when releasing first UFD cluster
+;  009	GPK  21-Sep-83	Add SYSMGR privilege, new permanent file handling
+;  010	GPK  17-Nov-83	Bugfix (preserve FIPUNT)
+;  011	GPK  29-Dec-83	Split ACNT into WACNT/GACNT
+;  012	GPK  08-Jan-84	Fix 009 not to step on R0
+;  013	DRP  06-Apr-84	Add logged-in quota support
+;  014	GPK  17-Apr-84	Change privilege names
+;  015	KPH  26-Jun-84	Bugfixes
+;  016  DRP  03-Jul-84	Fix problem with system crashing during zero account
+;  017	GPK  30-Oct-84	Fix GACNT privilege check
+;  018	KPH  08-Jan-85	Bugfix in DCN returner
+;
+;			[RSTS V9.2]
+;  019  KPH  09-Aug-85	Add job control region
+;
+;
+;			[RSTS V9.3]
+;  020  DRP  30-Apr-86	Exit with error if we are unable to create the QTB
+;
+;			[RSTS V9.5]
+;  021	PJH  25-Aug-87	Fix QTB error exits in ZER1
+;-
+
+FQFSRT	ZER
+
+.SBTTL	ZERO DEVICE/ACCOUNT
+
+;+
+; UU.ZER - ZERO DEVICE/ACCOUNT.
+;
+;	R4 -> FIRQB
+;		FQERNO =  = 0  DON'T RELEASE CLUSTERS
+;			  = -1 DO RELEASE CLUSTERS
+;		FQPPN  =  PPN (0=>SELF)
+;		FQDEV,FQDEVN = DEVICE TO USE
+;
+;	FIPGEN	= -1 means a general device name was specified
+;		=  0 means a specific device was specifed
+;
+;		NOTE In the case that a general device name
+;		     was specified, FIPGEN is reused as a
+;		     flag to indicate that the account was
+;		     found on one of the disks of the public
+;		     structure.
+;-
+
+.ENABL	LSB								;007
+
+	UUOENT	ZER,,,LOGABL,DOLOG	;ZERO
+
+	CALLX	GUN,R5		;GET THE UNIT
+	 BR	30$		;IT IS DISK
+	CALLX	GETDEV		;TRY TO GET THE DEVICE
+	CALLX	RETDEV		;THEN RETURN IT...
+	CMP	R0,#DTAHND	;DECTAPE ZERO?
+	BEQ	10$		;YES
+	CMP	R0,#MTAHND	;MAGTAPE ZERO?
+	BEQ	20$		;YES
+	ERROR	DEVNFS		;NONE OF THE ABOVE
+
+10$:	FJMPDV	DT,ZER		;DECTAPE ZERO
+
+20$:	FJMPDV	MT,ZER		;MAGTAPE ZERO
+
+30$:	CLR	@#QTCURR	;No QTBs yet				;013
+	MOV	R4,R0		;COPY FIRQB POINTER
+	ADD	#FQPPN,R0	; AND POINT TO THE PPN
+	TST	(R0)		;PPN SPECIFIED?
+	BNE	40$		;YES
+	ERROR	BADFUO		;NO? REFUSE TO DO IT
+
+40$:	MOV	R0,-(SP)	;Save R0				;007
+	MOV	(R0),R0		;Get PPN to zero			;007
+	CALLX	CHKACC		;What access do we have to this PPN?	;007
+	BIT	#DDPRVO,R0	;Must have create/rename rights to zero	;007
+	BEQ	60$		;Error if not				;007
+	TST	R0		;Do we have accounting rights?		;017
+	BMI	50$		;Yes, skip				;017
+.ASSUME	DDSTAT LT 0							;017
+	CLRB	FQERNO(R4)	;No, so never release clusters		;017
+50$:	MOV	(SP)+,R0	;Restore R0				;017
+	BIT	#UC.WLO,(R1)	;IS THIS A WRITE LOCKED UNIT?
+	BEQ	110$		;No, continue				;013
+60$:	ERROR	PRVIOL		;ELSE PROTECTION ERROR			;013
+
+GLOBAL	<FIUSER,FIPRVM,FIPUNT,QTCURR>					;013
+GLOBAL	<FIPESP>							;021
+
+70$:	TSTB	@#FIPGEN	;GENERAL?
+	BNE	90$		;Yes, then try another unit		;013
+80$:	ERROR	NOSUCH		;No, then not there			;013
+
+90$:	CALLX	NXTUNT,R1,<UC.MNT!UC.PRI!UC.NFS!UC.WLO> ;GET THE NEXT UNIT
+	 BR	100$		;None
+	BR	110$		;Another				;007
+100$:	INCB	@#FIPGEN	;Did we find this account on any disk?
+	BEQ	80$		;Nope
+	CALL	200$		;Check for returning quota block	;013
+	RETURN			;Yes, so exit.
+
+110$:	CALLX	SDM		;NOW FIND THAT PPN IN MFD		;007
+	BCS	70$		;NOT FOUND
+	MOV	UAR(R5),R2	;GET UFD STARTING DCN
+	BEQ	180$		;NO UFD
+	MOV	#UP.WPO*400!US.DEL!US.UFD!US.NOK,-(SP) ; DELETABLE FLAGS
+	MOVB	UACNT(R5),-(SP)	;SAVE UFD-AS-OPEN-FILE COUNT
+	CALLX	SNE		;FIND FCB IF OPEN-AS-FILE ON LARGE FILE SYS
+	MOV	R2,R1		;MOVE STARTING DCN TO BETTER PLACE
+	ROL	-(SP)		;SAVE THE CARRY
+	CMPB	FQERNO(R4),#-1	;REALLY RELEASE THE CLUSTERS
+	BNE	130$		;NO, DON'T RELEASE THEM
+	MOV	#US.DEL!US.UFD!US.NOK,4(SP) ; REPLACE FLAG TO DELETE ALL
+	ROR	(SP)		;GET THE CARRY BACK
+	BCC	130$		;IF OPEN-AS-FILE, DON'T RELEASE CLUSTERS
+120$:	CALLX	RAE		;READ THE ACCOUNTING ENTRY
+	BIT	(R5),#UL.BAD	;BAD BLOCK(S) IN ACCOUNT?
+	BEQ	140$		;NO
+130$:	INCB	2(SP)		;YES, DON'T RELEASE ANY CLUSTERS
+140$:	TST	(SP)+		;POP THE OPEN-AS-FILE FLAG
+150$:	CMPB	@#FIPGEN,#-1	;2nd public unit?			;013
+	BLT	155$		;Yes, QTBs already created		;013
+	MOVB	@#FIPUNT,R2	;No, then get the Fip Unit Number	;013
+	ASL	R2		; and make it FUN * 2			;013
+	CMP	UNTLVL(R2),(PC)+ ;Support extended disk quotas?		;013
+	 .BYTE	2,1							;013
+	BLO	155$		;No, then no QTBs to create		;013
+	CMP	(R0),(PC)+	;Account [0,1]?				;013
+	 .BYTE	1,0							;013
+	BEQ	155$		;Yes, then same here			;013
+	MOV	#1,R2		;Increment the open count		;013
+	CALLM	CREQTB,OPNAP5	;Create QTBs for this PPN		;013
+	MAP	FIP,DATA,PIC	;Remap FIP				;013
+	BCS	230$		;QTB error, so exit			;021
+	MOVPIC	#220$,-(SP)	;Get PIC address for error trap		;021
+	MOV	(SP)+,@#FIPERX	;Set it for any later errors		;021
+
+155$:	MOV	R1,R2		;COPY THE STARTING DCN
+	CALLX	READUF		;READ THE UFD
+	CLR	R3		;SET INITIAL LAST LINK
+	MOV	#FIBUF,R5	; AND GET FIRST POINTER
+160$:	CALLX	RDEPRV		;GET NEXT FILE N.E. SAVING PREVIOUS
+	BEQ	170$		;NO MORE
+	BIT	USTAT(R5),2(SP)	;DELETABLE?
+	BNE	160$		;NOPE, LOOP
+	MOV	UNAM(R5),FQNAM1(R4) ;Copy over the name			;009
+	MOV	UNAM+2(R5),FQNAM1+2(R4) ; and part 2			;009
+	MOV	UNAM+4(R5),FQEXT(R4) ;  and the extension		;009
+	MOV	R4,-(SP)	;Save the FIRQB pointer			;009
+	MOV	R2,-(SP)	; and the link to previous blockette	;009
+	MOV	R0,-(SP)	;  and the PPN pointer			;012
+	MOV	@#FIPUNT,R0	;Get FUN				;009
+	CALLX	SCNPRU		;Scan permanent file list for match	;009
+	MOV	(SP)+,R0	;Restore PPN pointer			;012
+	MOV	(SP)+,R2	;Restore registers first		;009
+	MOV	(SP)+,R4	; and R4 too				;009
+	BCC	160$		;If found, it's not deletable		;009
+	CALLX	XFL		;NOW DELETE FILE
+	BR	155$		; AND LOOP FROM THE TOP AGAIN		;013
+
+170$:	MOV	(SP)+,(SP)	;REPLACE THE FLAGS WITH COUNT
+	TSTB	(SP)+		;SHOULD WE RELEASE CLUSTERS?
+	BNE	180$		;NO, JUST CONTINUE
+	MOV	@#FIPUNT,R1	;Yes, then save FIPUNT and FIPGEN	;015
+	MOV	R0,-(SP)	;And save the PPN pointer		;021
+	MOV	SP,@#FIPESP	;Save current stack location for error	;021
+	FCALL	ZEROXX		; and go do it				;013
+	MOV	(SP)+,R0	;Restore PPN Pointer			;021
+	MOV	R1,@#FIPUNT	;Restore FIPUNT and FIPGEN		;015
+180$:	TSTB	@#FIPGEN	;GENERAL?
+	BEQ	190$		;NO, EXIT
+	DECB	@#FIPGEN	;Yes, so indicate we found one
+	JMP	90$		; and continue.
+
+190$:	CALL	200$		;Check for returning quota block	;013
+	RETURN			;GENERAL RETURN
+
+200$:	TST	@#QTCURR	;Any QTBs for this PPN			;013
+	BEQ	210$		;No, then nothing to do			;013
+	MOV	#1,R2		;Otherwise, set the decrement count	;013
+	CALLM	RETQTB,OPNAP5	; and go return them			;013
+210$:	RETURN			;Return to our caller			;013
+
+ERRQTB:	MOV	R1,@#FIPUNT	;Restore FIPUNT/FIPGEN			;021
+	MOV	(SP)+,R0	;Restore PPN pointer			;021
+220$:	CALL	200$		;Error, so return the QTBs already done	;021
+230$:	JMPX	FIEXIT		;And go away with error			;021
+
+GLOBAL	<FIPGEN,FIBUF,FIPRVM,QTCURR,OPNAP5,FIPUNT,UNTLVL>		;013
+GLOBAL 	<FIPERX>							;021
+
+.DSABL	LSB								;007
+
+FQFEND									;007
+
+FQFSRT									;007
+
+.ENABL	LSB								;007
+
+ZEROXX:	MOVPIC	#200$,-(SP)	;Error handler setup			;021
+	MOV	(SP)+,@#FIPERX	;Set it for now				;021
+	MOV	R1,@#FIPUNT	;Restore the FIPUNT and FIPGEN values	;015
+	TST	R2		;IS DIRECTORY TOTALLY EMPTY?
+	BEQ	140$		;YES, QUICK DELETE
+10$:	MOV	#FIBENT+<7*2>,R1 ;POINT TO MAP END +2
+20$:	MOV	-(R1),R2	;GET AN ENTRY
+	BEQ	20$		;WAIT FOR A NON-0 ONE
+	CALLX	CNVDCN		;CONVERT DCN TO FBN
+	MOVB	@#FIBMAP,R5	;PUT CLUSTER COUNTER INTO R5
+	ADD	R5,R2		;R2 IS LAST BLOCK+1
+	ADC	R3		;LET CARRY DO ITS THING
+30$:	SUB	#1,R2		;R2,R3 IS A UFD FIP BLOCK NUMBER
+	SBC	R3		; DOUBLE PRECISION
+	CALLX	READ		;SO READ IT IN
+	MOV	#760,R4		;START AT BOTTOM
+40$:	MOV	FIBUF-20(R4),-(SP) ;IF THE FIRST 2 WORDS OF
+	BIS	FIBUF+2-20(R4),(SP)+ ; ARE NON-ZERO THEN
+	BNE	90$		;  THE ENTRY IS NOT A HOLE
+	SUB	#20,R4		;BACK ONE
+	BNE	40$		;THERE ARE MORE
+	SOB	R5,30$		; ELSE GO TO NEXT BLOCK
+	MOV	(R1),-(SP)	;SAVE THE DCN
+	MOVB	@#FIBMAP,-(SP)	;SAVE CLUSTER SIZE
+	;CLR	R4		;R4=0 FROM LAST 'SUB' ABOVE
+50$:	MOV	FIBENT(R4),R2	;GET A UFD DCN
+	BEQ	70$		;THE END
+	CALLX	CNVDCN		;CONVERT DCN TO FBN
+	MOVB	(SP),R5		;GET A COUNTER				;018
+60$:	CALLX	READ		;READ IT
+	MARK	FIBUF		;MARK BUFFER
+	CLR	(R1)		;CLEAR THE ONE WE ARE RELEASING
+	ADD	#1,R2		;NEXT BLOCK
+	ADC	R3		; PLEASE
+	SOB	R5,60$		;AND LOOP
+	TST	(R4)+		;ADD 2 TO R4
+	BR	50$		; AND CONTINUE
+
+70$:	MOVB	(SP)+,R1	;GET CLUSTER SIZE			;018
+	MOV	(SP)+,R2	;GET DCN FOR CLUSTER TO RETURN
+	MOVPIC	#10$,-(SP)	;SET PIC RETURN ADDRESS
+80$:	CALLX	RETCLU		;RETURN THE CLUSTER
+	CALLRX	WOMSAT		; AND CLEAN UP SAT
+
+GLOBAL	<FIBENT,FIBMAP,FIBUF>
+
+90$:	CMP	R4,#20		;WAS NON-HOLE AT BLOCK'S TOP?
+	BNE	120$		;IF NOT THEN NO DIRECTORY REMOVAL
+	MOV	#FIBENT,R5	;GET POINTER TO STUFF
+	CMP	R1,R5		;FIRST CLUSTER ?
+	BNE	120$		;NOPE
+	MOV	R2,R4		;LSB OF CURRENT BLK # INTO R4
+	MOV	(R1),R2		;THIS CLUSTER'S DCN
+	MOV	R3,R1		;MSB OF CURRENT BLK # INTO R1
+	CALLX	CNVDCN		;CONVERT THAT DCN TO A BLK #
+	CMP	R4,R2		;IS CURRENT BLK THE 1ST BLK IN CLUSTER ?
+	BNE	120$		;NOPE
+	CMP	R1,R3		;MAYBE
+	BNE	120$		;ZERKS! FAILED AGAIN
+100$:	MOV	(R5),-(SP)	;SAVE DCN FOR CLUSTER
+	MOV	-(R5),R1	;GET CLUSTER SIZE FOR LATER
+	CALLX	SDM		;FIND THE MFD ENTRY
+	MOV	UAR(R5),-(SP)	;Get UFD starting DCN			;008
+	CLR	UAR(R5)		;NO UFD ANY MORE
+	MARK	FIBUF		;MARK BUFFER
+	CALL	160$		;CHECK FOR CLEARING RESIDENT DATA BASE
+	TST	UNTLVL(R2)	;R2 RETURNS FUN*2 FROM 160$, NEW DISK??
+	BEQ	110$		;NO, SO JUST CONTINUE
+	CALLX	SDMDCN		;GET THE DCN TABLE INTO FIBUF
+	CLR	FIBUF(R5)	;CLEAR THE DCN FROM THE TABLE (R5 FROM SDMDCN)
+	CALLX	WRITE		;AND MAKE SURE WE UPDATE IT.
+110$:	MOV	(SP)+,R2	;Retrieve UFD starting DCN		;008
+	CALLX	READUF		;Re-read first UFD block		;008
+	CLR	@#FIBUF+LID	;Invalidate the label ID word		;008
+	CALLX	WRITE		; and write the buffer			;008
+	MOV	(SP)+,R2	;RESTORE DCN
+	CALL	80$		;DO COMMON STUFF
+120$:	MOV	@#FIPUNT,R1	;Save the current FIPUNT and FIPGEN	;015
+130$:	RETURN			;And we're done				;016
+
+GLOBAL	<FIBENT,FIPGEN,FIBUF,UNTLVL>
+
+140$:	MOV	#FIBENT+<7*2>,R5 ;GET END +2 POINTER FOR MAPPING INFO
+150$:	MOV	-(R5),R2	;GET A MAPPING ITEM
+	BEQ	150$		;WAIT FOR A REAL ONE
+	CMP	R5,#FIBENT	;IS IT THE 1ST ONE?
+	BEQ	100$		;YES, SO FINISH UP
+	MOVB	@#FIBMAP,R1	;NO, GET CLUSTER SIZE			;010
+	CALL	80$		; AND RETURN THIS CLUSTER
+	BR	150$		;NOW CONTINUE
+
+160$:	MOVB	@#FIPUNT,R2	;GET THE CURRENT FIP UNIT
+	ASL	R2		;TIMES 2 NOW
+	CMP	(R0),@#PPNTBL	;IS THIS THE LIBRARY PPN?
+	BNE	170$		;NO
+	CLR	UNTLIB(R2)	;YES, SO CLEAR SAVED UFD DCN
+170$:	CMPB	R2,@#SYSUN2	;IS THIS THE SYSTEM DISK UNIT?
+	BNE	130$		;NO, JUST EXIT NOW			;016
+	MOV	#JOBTBL,R3	;YES, SO GET JOB TABLE ADDRESS
+	MOV	R1,-(SP)	;Get a work register			;019
+	MOV	R0,-(SP)	;And another one			;019
+180$:	MOV	(R3)+,R5	;GET A JOB DATA ADDRESS
+	BEQ	180$		;NONE THERE
+	CMP	R5,#-1		;END OF TABLE?
+	BEQ	190$		;YES					;016
+	MOV	JDJDB2(R5),R5	;NOPE, GET JDB2 POINTER
+	CMP	J2PPN(R5),@(SP)	;DOES THE PPN MATCH?			;019
+	BNE	180$		;NOPE, SO CONTINUE
+	MOV	R3,R0		;Yes, copy JOBTBL pointer @ next JDB	;019
+	SUB	#JOBTBL+2,R0	;Get job # * 2				;019
+	CALLX	MAPJCR		;Map the JCR entry			;019
+	CLR	JCUFDR(R1)	;Clear the UFD pointer			;019
+	BR	180$		; AND LOOP FOR OTHERS
+
+190$:	MOV	(SP)+,R0	;Restore PPN pointer			;019
+	MOV	(SP)+,R1	;Restore work register			;019
+	MAP	FIPPOL		;Restore FIP pool mapping		;019
+	RETURN			;And we're done				;019
+
+200$:	MOV	@#FIPUNT,R1	;Save FIPUNT and FIPGEN	for jump	;021
+	MOV	@#FIPESP,SP	;Restore stack to my saved data		;021
+	FJMP	ERRQTB		;Error in write, so return QTBs		;021
+
+GLOBAL	<FIBENT,FIBMAP,FIPUNT,PPNTBL,UNTLIB,SYSUN2,JOBTBL>
+
+.DSABL	LSB								;007
+
+FQFEND
+
+.END

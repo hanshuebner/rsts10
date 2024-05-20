@@ -1,0 +1,212 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element MROOT.MAC
+;  *4     7-OCT-1987 20:02:22 STEVENS "V05.05 VERSION"
+;  *3    18-AUG-1986 11:24:53 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:36:10 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:41:43 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element MROOT.MAC
+	.NLIST							;Edit Level 02
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	MROOT	- MACRO-11 Start/Driver module
+	.SBTTL	MROOT	- MACRO-11 Start/Driver module
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Too many people to list here
+;
+;   Created:	From the dust and dirt
+;
+;  Abstract:	MROOT	- MACRO-11 Start/Driver module
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;	001	Jrw	03-Feb-85	Change command-line and CSI block
+;					locations.
+;	002	Jrw	20-Feb-85	Call SETTIM before CSI/ENTERS to roll
+;					date/time info. (RT-11 only)
+;--
+
+
+.IF	DF,RT11			;If RT-11
+
+.SBTTL	MACRO - MACRO/RT Start address
+
+; Macro library calls
+
+	.MCALL	.PRINT,	.RCTRLO
+
+EMTERR	==	52	;General EMT error byte
+USERRB	==	53	;User error byte for DCL/@files
+SYSPTR	==	54	;-> RMON
+CONFIG	==	300	;Configuration word 1
+SYSGEN	==	372	;Sysgen feature mask
+
+; RT-11 Error code defines for EMTERR
+
+	SUCC$==	1		;Success status for DCL/@files
+	WARN$==	2		;"MACRO-W-..."
+	ERROR$==4		;"MACRO-E-..."
+	FATAL$==10		;"MACRO-F-..."
+	RTEM$==10		;Sysgen bit for RTEM-11 support.
+
+	.PSECT	MIXED,D,RW
+
+	$STKGD	== 500+<48.*2>	;Yellow stack limit for expression stack
+				; checking in EXPRS.MAC.
+$STKAD::.BLKW	1		;-> Top of stack, saved on entry from RUN
+
+;+
+; MACRO
+; This is the main entry point to MACRO-11 from RT-11.
+;-
+	PURE	PUREI,I
+
+MACRO::	MOV	SP,$STKAD	;Save initial stack pointer.
+
+;+
+; MACRO-11/RT Restart address
+;-
+
+CONT::	MOV	$STKAD,SP	;Reset stack pointer to initial value
+	CALL	MACINI		;Do assembler general init code
+	MOV	#CTLTBL,R0	;SET FOR MASTER LOOP			;**-1
+10$:	MOV	(R0)+,R1	;FETCH NEXT ADDRESS
+	MOV	R0,-(SP)	;STACK POINTER
+	CALL	@R1		;CALL THE ROUTINE
+	MOV	(SP)+,R0	;RETRIEVE POINTER
+	BR	10$		;Loop until control is taken away
+
+	PURE	DPURE,D
+CTLTBL::			;Main execution path of assembler
+
+	.WORD	SETTIM		;Set time of day to allow roll over
+	.WORD	$INOFL		;CALL CSI, INIT INPUT AND OUTPUT FILES
+	.WORD	SETTIM		;Set time of day again for elapsed time
+	.WORD	ASSEM		;INIT ASSEMBLER DYNAMIC STORAGE
+	.WORD	HSHPST		;HASH THE PERMANENT SYMBOL TABLE TO
+				; VIRTUAL MEMORY FROM ITS OVERLAY
+	.WORD	INIP1		;INITIALIZE PASS 1
+	.WORD	MACP1		;PERFORM PASS 1
+;;;	.WORD	FINP1		;Finish PASS1 (RSX-ONLY FOR NOW)
+	.WORD	ENDP1		;END-OF-PASS 1
+	.WORD	INIP2		;INITIALIZE PASS 2
+	.WORD	MACP2,ENDP2	;START PASS 2, END-OF-PASS 2
+	.WORD	SETDN		;DONE, PRINT SYMBOL TABLE, DUMP GSD,
+				; CLOSE OUTPUT FILES, EXIT
+
+	PURE	PUREI,I
+
+RESTRT::.RCTRLO			;Reset any ^O that may have been hit
+	.PRINT			;Print any error messages passed in R0
+	TSTB	$PRTLN		;Print LINBUF with error message?
+	BEQ	10$		;Branch if not.
+	.PRINT	#LINBUF		;Else print it out.
+10$:	.PRINT	#$GTLIN		;Print command line given too.
+	BISB	#FATAL$,@#USERRB ;Say fatal for DCL support
+	BR	CONT		;Now just branch to continuation point
+
+
+;	Pass one initialization
+;	Pass two initialization
+
+INIP2::
+INIP1::	CLR	CHAN+SRCCHN	;Indicate first file not open
+
+;	Pass one finish (NOP FOR RT-11 VERSION)
+
+FINP1::	RETURN			;Finish pass
+
+
+.IFF;	DF,RT11		;If RT-11
+
+.SBTTL	MACRO - MACRO/RSX Start address
+
+; Macro library calls
+
+	.PSECT	MIXED,D,RW
+
+$STKAD::.BLKW	1		;Save initial (RESTART) stack pointer
+$STKGD::.BLKW	1		;Stack overflow guard (ADDRESS)
+
+
+	PURE	PUREI,I
+
+;+
+; MACRO - Entry point for MACRO/RSX
+;-
+
+MACRO::	MOV	SP,$STKAD	;Save initial stack pointer
+
+;+
+; CONT - RE-ENTRY POINT
+;-
+
+CONT::	MOV	$STKAD,SP	;RELOAD STACK POINTER TO INITIAL VALUE
+	CALL	MACINI		;Init general assembler variables
+	MOV	#CTLTBL,R0	;SET FOR MASTER LOOP
+10$:	MOV	(R0)+,R1	;FETCH NEXT ADDRESS
+	MOV	R0,-(SP)	;STACK POINTER
+	CALL	@R1		;CALL THE ROUTINE
+	MOV	(SP)+,R0	;RETRIEVE POINTER
+	BR	10$		;LOOP 'TILL CONTROL IS TAKEN AWAY
+
+RESTRT::CALL	$OPTER		;++018 SEND MESSAGES AND CLEANUP FILES
+	BR	CONT		;++018 START NEXT ASSEMBLY
+
+
+	PURE	DPURE,D
+
+CTLTBL::			;TABLE TO ASSOCIATE ASSEMBLER AND EXEC
+
+	.WORD	$INOFL		;Get command line / Init output files
+	.WORD	SETTIM		;SET TIME OF DAY
+	.WORD	ASSEM		;++014 INIT ASSEMBLER DYNAMIC STORAGE
+	.WORD	HSHPST		;HASH THE PERMANENT SYMBOL TABLE TO VIRTUAL;JR
+				; MEMORY FROM ITS OVERLAY		;JR
+	.WORD	MACP1		;++014 PERFORM PASS 1
+	.WORD	FINP1		;Finish pass one
+	.WORD	ENDP1		;END-OF-PASS 1
+	.WORD	MACP2,ENDP2	;++011 START PASS 2, END-OF-PASS 2
+	.WORD	SETDN		;FINISHED, CONTROL NOT RETURNED
+
+
+	.PSECT	IMPURE,D,RW	;++017
+PASSSW::.BLKW	1		;++003 PASS SWITCH
+LSTFIL::.BLKB	1		;++014 INDICATES LISTING FILE CREATED
+OBJFIL::.BLKB	1		;++014 INDICATES OBJECT FILE CREATED
+$LSTVZ::.BLKW	1		;++017 SIZE OF FSR NEEDED FOR LST DEVICE
+
+.ENDC;	DF,RT11		;If RT-11
+
+
+	.END	MACRO

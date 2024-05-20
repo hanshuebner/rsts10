@@ -1,0 +1,996 @@
+.INCLUDE /CMN:COMMON/							;012
+.INCLUDE /CMN:KERNEL/							;012
+.INCLUDE /INIT:INIPFX/							;012
+.INCLUDE /DSK:DLDEF/							;012
+TITLE	CRA,<CRASH AND RESTART>,0A,10-MAY-91,MDS/SRM/JTC/SJM/AWL/JHC/GPK/GMB/FEK/VAM/KPH/WRM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit History for CRASH
+
+;+
+;  000  MDS  12-MAR-81	CREATION FROM TBL, RTI, AND THIN AIR
+;  001  SRM  29-Apr-81  Complete development.
+;  002	JTC  13-May-81	Incorporate some review changes.
+;  003	JTC  21-May-81	Remove DEBUG symbol and fix KISAR5 reporting.
+;  004	JTC  01-Jul-81	Fix and clean up more code.
+;  005	SJM  27-Jul-81	Add support for I&D space.
+;  006	JTC  29-Jul-81	Fix things yet again.
+;  007  SRM  14-Oct-81	Correct merging of GOINIT CRADSP Psect.
+;  008  AWL  30-OCT-81  Change CRAPAT from 200 words to 64. words
+;  009	JTC  31-Oct-81	Put back 2 <FF>'s and the .END statement.
+;
+;				[RSTS V7.2]
+;  000  JHC  19-APR-82  Add subroutine CLRCOM to be used by CRASH
+;			to clear comm region for UDA, and add code
+;			to jam CSR and unit number into bootstrap
+;			when rebooting.
+;
+;				[RSTS V8.0]
+;  000	GPK  07-Jul-82	Changes for new bootstraps
+;  001	GPK  30-Aug-82	Bugfix in powerfail
+;  002  GMB  30-Sep-82	Add logging of -6(PC) thru 8(PC), $$ESID, $$ECPU
+;			and $$EMED data to CRASAV area. Removes need for
+;			ERL logging of crash errors.
+;  003  FEK  02-Nov-82  Source clear 3.1.5 (V7.2)
+;  004  GMB  14-Jan-83	Saved registers across boot writer reset
+;  005  GMB  24-Jan-83  Removed need to save registers
+;			Insure SP in root for ERLPC calls
+;			Added CRASAV area map
+;  006  GMB  25-Feb-83	Fixed unsigned LBN calc. in wrilow.
+;			Added halt on write error to wrilow.
+;  007	FEK  12-MAR-84	ADD DUMPING OF USER D REGS.
+;
+;			[RSTS/E V9.0]
+;  008  VAM  25-Oct-84  Saved booted unit number and CSR address in R0 and R1
+;			to conform to hardware boot standards.
+;
+;			[RSTS/E V9.1]
+;  009  KPH  08-Jul-85	Turn off UMRs in IONLY (for MSCP boot to work)
+;  010  KPH  19-Aug-85	Add restart entry point for UU.DIE
+;
+;			[RSTS/E V9.3]
+;  011  KPH  01-Dec-86	Remove patch space
+;
+;			[RSTS/E V9.6]
+;  012  VAM  03-Feb-88	Make sure RLBE on RLV12 controllers is cleared
+;			before writing crash dump.
+;			Add .INCLUDEs
+;
+;			[RSTS/E V9.7]
+;  013  WRM  12-Apr-89	Add supervisor APR's to dump pickup proper mode SP
+;  014	JFM  18-May-89	Fix large clustersize dumping by using block references
+;			instead of DCN.  Added new routines NEWDCN and DCNBLK
+;			extracted from the WRILOW routine.
+;
+;			[RSTS/E V10.0]
+;  015  WRM  10-Jul-89	Fix KISAR5,DR5 placement in CRASAV
+;			Replace CRAPAT space
+;
+;-
+
+.SBTTL	General Description
+
+;+
+;
+;
+;	TO SHUTUP:
+;			Code in the root jumps to GOINIT in CRA through the 
+;			merged pointer GOINIT in the root.
+;
+;	TO RESTART:
+;
+;			Code in UU.DIE jumps to GOREST with a CALLMR.
+;
+;	TO CRASH:
+;			(If from power fail)
+;			Code in the root sets X.SWRP if the switch register
+;			is volatile and set to -1.  this allows a crash on
+;			power fail to save the action requested by the switch
+;			register after a powerfail wipes it out.
+;
+;			(In any case that causes a crash)
+;			The root jumps to GOCRSH in CRA through the merged 
+;			pointer GOCRSH which is contained in the root.
+;			
+;			GOCRSH then dumps the root portion of the resident
+;			monitor to the first segment then the routine XCRASH
+;			is called to dump all extended memory segments 
+;			described in the table X.TBL which is contained in
+;			the root.
+;
+;	ASSUMPTIONS:
+;
+;			The total size of this phase may not be more than
+;			one APR (4K words)
+;
+;-
+
+.SBTTL	Merge table section
+
+	MERGE	CRA
+
+	MERGE	CRADSP,6
+
+	MERGE	END
+
+
+
+
+
+
+
+
+.SBTTL	Order the PSECTs
+
+	DEFORG	BOOT
+
+	DEFORG	CRA
+
+	DEFORG	BUSINI
+
+	DEFORG	CRADAT
+
+	DEFORG	CRAPAT
+
+.SBTTL	Allocate/Define the local data
+
+;+
+;		S y m b o l i c    P a r a m e t e r s
+;-
+
+KISDR5	=:	5*2+KISDR0	;Kernel Instruction Space Descriptor Reg. 5.
+AP6BAS	=:	140000		;Virtual base address of APR 6.
+SEGAPR	=:	200		;Number of 64. byte segments in an APR.
+LOCORE	=:	1000+6		;Address of crash code that executes unmapped.
+				; This code is copied to low core by the crash
+				; phase.  This area begins above the date
+				; and time.
+RW4K	=:	128.-1*256.+6	;PDR value for a 4K, read/write APR.
+BPT.PC	=:	14		;Define the address of the BPT vector.
+
+;+
+;	Mirror area for the dump related items that were stored in the
+;	root.  We probably wrote over them with the extended memory dump
+;	code so they are copied here before that code is run and used
+;	out of this area.
+;-
+
+	ORG	CRADAT
+
+;
+;	Order from MI.BEG to MI.END must match the X.????? area 	;014
+;	in .PSECT CRACTL (in RES.MAC).					;014
+;
+MI.BEG:				;Beginning of mirror area.
+MI.SWRP:.WORD	0		;<>0 To auto-restart on power failure
+				;= 0 otherwise
+MI.TAB:	.BLKW0	XMSEGS*XMTLEN/2	;ADDRESS/64., COUNT/64. Table of extended
+				; memory sections to dump
+MI.DCN:	.BLKW0	1		;Starting DCN of the CRASH file
+MI.SCS:	.BLKW0	1		;System Disk Cluster Size
+MI.END:
+
+MI.BKL:	.BLKW0	1		;Block number for next CRASH file write	;014
+MI.BKH:	.BLKW0	1		; (low and high order words)		;014
+
+
+MI.SIZE	=:	MI.END-MI.BEG	;Amount of data to transfer from the root
+
+SMU22W:	.BLKW0	2		;Saved MMU22W and @MMU22W (with D-space off!)
+
+.DSECT	,NOCREF			;Verify the order of a memory dump segment.
+
+XM.ADD:	.BLKW			;Address of the area/64.
+XM.LEN:	.BLKW			;Length of the area/64.
+XMTLEN:				;Length of a table entry.
+
+	UNORG
+
+.SBTTL	Define the global variables used
+
+;+
+;	Name	Description
+;
+;	CRASAV	The saved kernel mode SP
+;	IDATE	System startup date.
+;	ITIME	System startup time.
+;	MMU22W	Contains the address of MMUSR3 (or JUNK if no MMUSR3).
+;	SWITCH	Contains the address of the switch register.
+;	X.CON	Configuration word
+;	X.DCN	DCN that the dump file begins on.
+;	X.MONS	Size the the of the monitor image to dump
+;	X.SWRP	<> 0 if the switch register is volitile and
+;		we are handling a power failure.
+;		= 0 otherwise
+;- 
+
+.SBTTL	Patch Space for CRASH phase
+
+	ORG	CRAPAT
+
+	.BLKW0	64.	;must be here for no other memory is safe when		;015
+			;  CRA is around!
+	UNORG
+
+.SBTTL	Bootstrap
+
+	ORG	BOOT
+;
+;			INIT.SYS expects Boot to be the first thing in the
+;			phase so that it can write it out to the SIL image
+;			on disk before loading RSTS/E during startup.
+;
+
+$$BOOT	==	.		;Boot and params go here
+
+			;*** INIT ****	writes the bootstrap out to here
+			;		in the sil image before loading
+
+BOOT:	.BLKW0	256.		;This is the correct size for an entire boot
+
+O	=:	BOOT-B.BOOT	;Offset for B.xxxx symbols
+
+
+
+
+
+.SBTTL	Verification word and code
+
+	ORG	CRA
+
+;+
+;	Put a bit pattern at the beginning of the CRA phase that can
+;	be identified.  This is done so that the crashing routine in
+;	the root can identify the CRA phase.  NOTE: If the value of
+;	MAPVER is changed, the code in the root must be changed as well.
+;-
+
+	TMPORG	CRADSP,4	;Dispatch merge table.
+	.WORD	CRAVER		;Verification values.
+	UNORG
+
+ST.CRA::			;Global symbol for the start of CRA PSECT.
+CRAVER:	.WORD	MAPVER		;Verification word to make sure the crash
+				; phase was properly mapped.
+
+.SBTTL	CRASAV area map
+
+;+
+;
+; CRASAV area allocation map
+;
+;CRASAV+0		KISAR5
+;	2		KDSAR5
+;	4  .. 12	Instruction Space -6(PC) to (PC)
+;	14 .. 22	Instruction Space  2(PC) to 8(PC)
+;	24		CPU ID register
+;	26		CPU error register
+;	30		PDP 11/60 MED data length
+;	32 .. 54	PDP 11/60 MED data (reserved for) (10. words)
+;
+;		The following area is unassigned and must be
+;		  AT LEAST 10. WORDS LONG for stack space.
+;
+;	56 .. 324 [56-120]	UNASSIGNED
+;
+;		Many of the next words may be at higher addresses
+;		depending on exclusion of other conditional data
+;		below.  Offsets for non I and D space systems are
+;		listed first as "start .. end".  Offsets for I and
+;		D space systems are listed second as "[start-end]".
+;		Where they are identical, only the non I and D offsets
+;		are listed.
+;
+;
+;	326 [122]		Complement of size of dumped monitor image
+;	330 [124]		Size of dumped monitor image
+;
+;	BEGIN:	The following data is only present if
+;		The system has Unibus Mapping Registers.
+;		If I and D space is not present this data will
+;		occupy slot's 332 thru 524.
+;
+;	332 .. xxx [126-144]	UMR's  0 - 3
+;		   [146-164]	UMR's  4 - 7
+;		   [166-204]	UMR's  8 - 11
+;		   [206-224]	UMR's 12 - 15
+;		   [226-244]	UMR's 16 - 19
+;		   [246-264]	UMR's 20 - 23
+;		   [266-304]	UMR's 24 - 27
+;	xxx .. 524 [306-320]	UMR's 28 - 30
+;
+;	END:	UMR only
+;
+;	BEGIN:	The following data is only present if the
+;		CPU is configured for I and D space.
+;
+;		[Kernel] Data Space [Addr.] Register n
+;		[User  ]	    [Desc.]
+;		[Supervisor]
+;
+;	[322-334]	SDSAR0 SDSDR0 UDSAR0 UDSDR0 KDSAR0 KDSDR0
+;	[336-350]	SDSAR1 SDSDR1 UDSAR1 UDSDR1 KDSAR1 KDSDR1
+;	[352-364]	SDSAR2 SDSDR2 UDSAR2 UDSDR2 KDSAR2 KDSDR2
+;	[366-400]	SDSAR3 SDSDR3 UDSAR3 UDSDR3 KDSAR3 KDSDR3
+;	[402-414]	SDSAR4 SDSDR4 UDSAR4 UDSDR4 KDSAR4 KDSDR4
+;	[416-430]	SDSAR5 SDSDR5 UDSAR5 UDSDR5 KDSAR5 KDSDR5
+;	[432-444]	SDSAR6 SDSDR6 UDSAR6 UDSDR6 KDSAR6 KDSDR6
+;	[446-460]	SDSAR7 SDSDR7 UDSAR7 UDSDR7 KDSAR7 KDSDR6
+;
+;	[462]		Memory Management Register 3
+;	[464]		Memory Management Register 1
+;
+;	END:	I and D space only
+;
+;	526 [466]		Memory Management Register 2
+;	530 [470]		Memory Management Register 0
+;
+;		[User  ] Instruction Space [Addr.] Register n
+;		[Kernel]		   [Desc.]
+;		[Supervisor]	(only if I & D space)
+;
+;	532 .. 540 [472-504]	[SISAR0 SISDR0] UISAR0 UISDR0 KISAR0 KISDR0
+;	542 .. 550 [506-520]	[SISAR1 SISDR1] UISAR1 UISDR1 KISAR1 KISDR1
+;	552 .. 560 [522-534]	[SISAR2 SISDR2] UISAR2 UISDR2 KISAR2 KISDR2
+;	562 .. 570 [536-550]	[SISAR3 SISDR3] UISAR3 UISDR3 KISAR3 KISDR3
+;	572 .. 600 [552-564]	[SISAR4 SISDR4] UISAR4 UISDR4 KISAR4 KISDR4
+;	602 .. 610 [566-600]	[SISAR5 SISDR5] UISAR5 UISDR5 KISAR5 KISDR5
+;	612 .. 620 [602-614]	[SISAR6 SISDR6] UISAR6 UISDR6 KISAR6 KISDR6
+;	622 .. 630 [616-630]	[SISAR7 SISDR7] UISAR7 UISDR7 KISAR7 KISDR7
+;
+;	END:	I and D space optionals
+;
+;	646 .. 632	User XRB (in reverse order)
+;	706 .. 650	User FIRQB (in reverse order)
+;	710		User keyword
+;
+;	712 .. 720	  16(SP), 14(SP), 12(SP), 10(SP)	; User
+;	722 .. 730	   6(SP),  4(SP),  2(SP),   (SP)	; User
+;	732		User SP
+;
+;	734 .. 742	  16(SP), 14(SP), 12(SP), 10(SP)	; Kernel
+;	744 .. 752	   6(SP),  4(SP),  2(SP)    (SP)	; Kernel
+;	754		Processor Status Word
+;	756		Virtual PC
+;	760 .. 772	R0, R1, R2, R3, R4, R5
+;	774		Kernel SP
+;CRASAV+776		Error code
+;
+;-
+
+.SBTTL	GOCRSH - Do a crash!
+
+.SBTTL	Save context for the crash dump
+
+;+
+;
+; GOCRSH		Entry point for crash dump and (auto)restart.
+;
+; Data passed:		All registers contain values that need to be
+;			saved in the crash file.
+;
+; Calling convention:	JMP @GOCRSH
+;
+; Data returned:	All registers are scratched.  No return is
+;			possible (obviously).   If the system has been
+;			up longer than a minute, the system will auto-
+;			restart.
+;-
+
+	TMPORG	CRADSP,0	;Dispatch merge table.
+	.WORD	GOCRSH		;Crash with auto-restart attempt entry.
+	UNORG
+
+GOCRSH:	BIS	#4340,@#PS	;;;raise priority to level 7,save modes	;013
+	MOV	SP,CRASAV+774	;;;Save kernel SP stack value
+	MOV	#CRASAV+774,SP	;;;Now set stack into the save area
+	REGSAV	INLINE		;;;Save R0 through R5
+	MOV	CRASAV+774,R1	;;;Get pointer to old kernel SP stack items
+	MOV	#10.,R5		;;;Save the top 10. items
+10$:	MOV	(R1)+,-(SP)	;;;Save a word
+	SOB	R5,10$		;;; and loop for more...
+	MFPI	SP		;;;Save user's SP stack value
+	MOV	(SP),R1		;;;Now get that value as a pointer
+	MOV	#8.,R5		;;;Save the top 8. items
+20$:	CALLX	DPEEKR		;;;Get a (previous mode) word		;002
+	MOV	R2,-(SP)	;;; and save contents on stack
+	SOB	R5,20$		;;;  then loop for more...
+	SPLC	7		;;;Ensure no interrupts (& PREV=USER)	;013
+	MOV	#KEY,R1		;;;Point as user's KEY, FIRQB, XRB
+	MOV	#<2+FQBSIZ+XRBSIZ>/2,R5 ;;;Set count of items to save
+30$:	CALLX	DPEEKR		;;;Get a (previous mode) word		;002
+	MOV	R2,-(SP)	;;; and save contents on stack
+	SOB	R5,30$		;;;  then loop for more
+	.BR	MORCRS		;;;Continue with more crash code...
+
+GLOBAL	<CRASAV,X.CON>
+
+MORCRS:	MOV	#KISDR0+<8.*2>,R1 ;;;Point to MMU registers
+	MOV	#8.,R5		;;;There are 8. in each group
+10$:	MOV	-(R1),-(SP)	;;;Save a kernel desc reg
+	MOV	KISAR0-KISDR0(R1),-(SP) ;;;Save a kernel addr reg
+	MOV	UISDR0-KISDR0(R1),-(SP) ;;;Save a user desc reg
+	MOV	UISAR0-KISDR0(R1),-(SP) ;;;Save a user addr reg
+	BIT	#XC$IDS,@#X.CON	;;;Is there I & D space?		;013
+	BEQ	15$		;;; if not then no supervisor either	;013
+	MOV	SISDR0-KISDR0(R1),-(SP) ;;;Save a supervisor desc reg	;013
+	MOV	SISAR0-KISDR0(R1),-(SP) ;;;Save a supervisor addr reg	;013
+15$:	SOB	R5,10$		;;;Loop for all of them...		;013
+	BIT	#XC$IDS,@#X.CON	;;;Is there I & D space?		;015
+	BEQ	17$		;;; if not then no supervisor either	;015
+	MOV	CRASAV,<4+<6*5>>*2(SP) ;;;Move saved KISAR5 to its place;015+
+	BR	18$		;;;do only the correct one		;015
+17$:	MOV	CRASAV,<2+<4*5>>*2(SP) ;;;Move saved KISAR5 to its place;015
+				;;;  (APR5 had to change to map this phase)
+18$:	MOV	@#MMUSR0,-(SP)	;;;Save memory management register 0
+	MOV	@#MMUSR2,-(SP)	;;;Save memory management register 2
+	BIT	#XC$IDS,@#X.CON	;;;Is there I & D space?
+	BEQ	30$		;;;Branch if there is not
+	MOV	@#MMUSR1,-(SP)	;;;Save memory management register 1
+	MOV	@#MMUSR3,-(SP)	;;;Save memory management register 3
+	MOV	#KDSDR0+<8.*2>,R1 ;;;Point to data space mmu registers
+	MOV	#8.,R5		;;;There are 8. in each group
+20$:	MOV	-(R1),-(SP)	;;;Save a KERNEL desc reg
+	MOV	KDSAR0-KDSDR0(R1),-(SP) ;;;Save a KERNEL addr reg
+	MOV	UDSDR0-KDSDR0(R1),-(SP) ;;;SAVE A USER DESCRIPTOR REG.	;007
+	MOV	UDSAR0-KDSDR0(R1),-(SP) ;;;SAVE A USER ADDR REG.	;007
+	MOV	SDSDR0-KDSDR0(R1),-(SP) ;;;SAVE A Super DESCRIPTOR REG.	;013
+	MOV	SDSAR0-KDSDR0(R1),-(SP) ;;;SAVE A Super ADDR REG.	;013
+	SOB	R5,20$		;;;Loop for all of them to...
+	MOV	CRASAV+2,<4+<6*5>>*2(SP) ;;;Move saved KDSAR5 to its place ;015+
+30$:	BIT	#XC$UMR,@#X.CON ;;;Test for UMR's
+	BEQ	50$		;;;Branch if there are none
+	MOV	#<31.*2>,R5	;;;31. 2 word registers
+	MOV	#UNIWIN+<<31.*2>*2>,R1 ;;;Point just past the UMR's
+40$:	MOV	-(R1),-(SP)	;;;Save the unibus mapping registers
+	SOB	R5,40$		;;;Loop (or did you guess that?)
+50$:	MOV	X.MONS,-(SP)	;;;Set size of dumped monitor image
+	MOV	(SP),-(SP)	;;;Also set its
+	COM	(SP)		;;; complement as a "valid dump" flag
+	BIC	#XC$NEM,X.CON	;;;Ensure that the extended memory flag is on
+
+	MOV	#RW4K,@DPDR5	;;;Make our data mapping Read/Write, 4KW.
+
+;	The following code saves data into the CRASAV area from		;005
+;	the bottom up, rather than from the top down as above.		;005
+;	It also requires that the stack be mapped into the root.	;005
+;	This implies that the stack pointer (currently pointing into	;005
+;	the CRASAV area) have at least 10. free words below it for	;005
+;	stack usage and that another register (R5) be used as a		;005
+;	pointer to the CRASAV area for logging data.			;005
+
+	MOV	CRASAV,R0	;;; Get the old IPAR5			;005
+	MOV	@#KISAR6,R3	;;; IPAR6 unchanged, get it.		;005
+	MOV	CRASAV+756,R1	;;; Get the old PC			;005
+	MOV	#CRASAV+4,R5	;;; Set up the CRASAV pointer		;005
+	MOV	#PR7&4340,@#PS	;;; Set previous mode = kernel		;005
+	CALLX	ERLPC		;;; Call to save -6(PC) thru (PC)	;005
+	CALLX	ERLPC2		;;; Call to save 2(PC) thru 8(PC)	;005
+	MOV	#$$ESID,R0	;;; Get pointer to pointer to CPU ID reg;005
+	MOV	@(R0)+,(R5)+	;;; Save CPU ID REG			;005
+	MOV	@(R0)+,(R5)+	;;; Save CPU ERROR REG			;005
+	MOV	R5,R1		;;; Point MED data log into CRASAV area	;005
+				;;;  (MED code expects R1 -> save area) ;005
+	CLR	(R5)		;;; Clear MED data counter		;005
+	CMP	(R0)+,(R1)+	;;; Pass by copy of CPU ERR REG ptr	;005
+				;;;  and allocate space for MED data cnt;005
+	CALL	@(R0)+		;;; Call to save MED data		;005
+				;;; If any data was saved, the number	;005
+				;;;  of items saved is stored at (R5)	;005
+				;;; Next higher unassigned CRASAV	;005
+				;;;  location is (R1).			;005
+
+	MOV	PC,SP		;;;Move stack out of the root to this phase.
+				;;; (The stack will overwrite the MOV PC,SP
+				;;; instruction and some preceeding code,
+				;;; but this is one-shot code and this hack
+				;;; saves some permanently allocated memory.)
+	.BR	MORDMP		;;;And on to bigger and stranger things...
+
+GLOBAL	<X.MONS,X.CON,DPDR5,$$ESID>
+
+MORDMP:	MOV	#MI.BEG,R2	;;;Get start of our mirror area.
+	MOV	#X.SWRP,R1	;;;Find the low core area to mirror.
+	MOV	#MI.SIZE/2,R0	;;;Get the number of words to copy.
+10$:	MOV	(R1)+,(R2)+	;;;Move a word
+	SOB	R0,10$		;;; and loop.
+
+.SBTTL	Dump the root, Mung APR's and vectors.
+
+	CALL	IONLY		;;;The dump writer may not like D-space.
+	TST	@#MI.TAB+2	;;;Are we dumping the root?		;005
+	BEQ	25$		;;;Oops, we're not dumping the root.
+	CMP	B.NAME+O,#"DU	;;;MSCP boot?
+	BNE	21$		;;;No
+	MOV	@#KISAR5,B.MMU+O ;;;Yes, set up its MMU value
+21$:	CALL	B.RSET+O	;;;Set up the boot writer
+	CALL	DCNBLK		;;;Set up starting block number for 	;014
+				;;; CRASH file write			;014
+	CLR	R5		;;;Start root dumping at zero		;005
+	MOV	@#MI.TAB+2,R1	;;; and transfer this many MMU slivers.	;005
+	CALL	WRILOW		;;;Dump the root.
+	MOV	@#MI.TAB+2,R1	;;;Refetch number of slivers written	;014
+	CALL	NEWDCN		;;;Calculate DCN for first segment 	;014
+25$:	CALL	MUNGER		;;;Set up the vectors and I-APR's.
+
+.SBTTL	Should we restart after crash?
+
+	CLR	-(SP)		;;;Guess at no auto-restart.
+	TST	@#MI.SWRP	;;;Do we have both:
+				;;;   1)  a powerfail?
+				;;;   2)  a volitile switch register?
+	BNE	30$		;;;No, have INIT look at the switch reg.
+	BIT	#SW.AUT,@SWITCH	;;;Yes, what does the switch register say?
+	BEQ	50$		;;;It says don't restart (good guess).
+30$:	CMP	@#DATE,@#IDATE	;;;Restart desired, have we been up long?
+	BNE	40$		;;;Good, we've been up since yesterday.
+	CMP	@#TIME,@#ITIME	;;;Booted today, but within this minute?
+	BEQ	50$		;;;Two crashes in one minute: stay down!
+40$:	MOV	#-4,(SP)	;;;We will attempt an auto-restart.	;010
+	TST	@#MI.SWRP	;;;Is this powerfail with a volatile sw. reg? ;010
+	BEQ	50$		;;;No, we want INIT to check the switch reg. ;010
+	MOV	#-10,(SP)	;;;Yes, tell INIT to ignore switch register ;010
+50$:	.BR	BUSRST		;;;Now go do a bus reset...
+
+;
+; Until now, we've been freely looking at symbols in the root.
+; The only part of the root we've munged so far has been the
+; vector area.  All this changes now.  In order to reset the bus
+; and dump the non-root sections of memory, we will be scribbling
+; in part of the root.  So from now on, we won't count on anything
+; being preserved in the root above LOCORE.
+;
+
+GLOBAL	<X.SWRP,SWITCH,IDATE,ITIME>
+
+.SBTTL	Do a bus init to clear the world
+
+BUSRST:	MOV	#BUSEND,R1	;;;Move the routine to low core that resets
+	MOV	#LOCORE+BUSLEN+100,R5 ;;; the bus and tells everyone to stop.
+				;;;Keep it way above the stack limit!
+	MOV	#BUSLEN/2,R0	;;;Count of what to move
+10$:	MOV	-(R1),-(R5)	;;;Move it
+	SOB	R0,10$		;;; until it's all down there.
+	CALL	(R5)		;;;Now reset the world and come back.
+	.BR	DMPMOR		;;;And it's time to dump some more again...
+;+
+; BUSINI		Do a bus INIT to clear the world
+;
+;		This routine is dedicated to devices such as the DMC, who
+;		really trust their in-memory tables.  If their tables change
+;		out from under them, they may get VERY confused.  In some
+;		cases they may take the bus and not give it back.  (They don't
+;		leave the driving to us...)  This routine shuts them down so
+;		we can scribble all over low core with a clear conscience.
+;
+; Data passed:		R5 = Top of a 10. word scratch area in low core.
+;
+; Calling convention:	Copy the BUSINI routine to low core and call it.
+;
+; Data returned:	R0-R2 = Undefined
+;			R3-R5 = Same as passed
+;
+; Note:			This code must be PIC!
+;-
+	TMPORG	BUSINI
+
+BUSINI:	MOV	#8.,R1		;;;We save the 8 Kernel Instruction APR's.
+	MOV	R1,R2		;;;(We restore them also.)
+	MOV	#KISAR0,R0	;;;Point to first Kernel Instr. Address Reg.
+10$:	MOV	KISDR0-KISAR0(R0),-(R5) ;;;Save a Kernel Instr. Desc. Reg.
+	MOV	(R0)+,-(R5)	;;;And save a Kernel Instr. Addr. Reg.
+	SOB	R1,10$		;;;For all 8. APR's.
+	RESET			;;;Do the bus reset!
+20$:	MOV	(R5)+,-(R0)	;;;Restore a Kernel Instr. Descriptor Reg.
+	MOV	(R5)+,KISDR0-KISAR0(R0) ;;;And a Kernel Instr. Address Reg.
+	SOB	R2,20$		;;;For all 8. APR's.
+	MOV	#001001,@#MMUSR0 ;;;Turn MMU back on.
+	MOV	#SMU22W+2,R2	;;;Get pointer to saved MMUSR3 contents.
+	MOV	(R2),@-(R2)	;;;Enable 22-bit in the word pointed to by
+				;;; SMU22W.  Do not enable D-space or UMRs.
+				;;; (This is PIC code for:
+				;;;   "MOV @#SMU22W+2,@SMU22W".)
+	RETURN			;;;Return back on our feet.
+
+BUSEND:				; End of the low core routine.
+BUSLEN	=	BUSEND-BUSINI	; Length of the low core routine.
+
+	UNORG
+
+.SBTTL	Dump the non-root sections
+
+DMPMOR:	CALL	B.RSET+O	;;;Reset the boot again to recover from RESET
+	MOV	#MI.TAB+XMTLEN,R0 ;;;Index to the first segment past the root.
+10$:	MOV	(R0)+,R2	;;;Retrieve the address/64 of this segment
+	MOV	(R0)+,R3	;;; as well as the length.
+	BEQ	20$		;;;Skip it if it's a zero length segment.
+	CALL	XCRASH		;;;Write out this segment.
+20$:	CMP	R0,#MI.TAB+<XMTLEN*XMSEGS> ;;;At end of dump table yet?
+	BLO	10$		;;;Not yet, keep going.
+	BR	REBOOT		;;;Done dumping, now go reboot the system.
+
+.SBTTL	GOREST - Go restart the system (SHUTUP and RESTART)
+
+;+
+; GOREST - Go and restart the system
+;
+;	JMPM	GOREST,CRAAP5
+;
+; And it happens.
+;-
+
+GOREST::SPLC	7		;Quiet the world... I want to get off!	;010
+	CALL	MUNGER		;;;Fix up I-space and vectors		;010
+	MOV	#-32,-(SP)	;;;Set the startup offset for start	;010
+	BR	REBOOT		;;;And go!				;010
+
+.SBTTL	GOINIT - Go to INIT without auto-restart (SHUTUP)
+
+;+
+; GOINIT		Go down to INIT (do not automatically restart)
+;
+; Data Passed:		None
+;
+; Calling convention:	JMP @GOINIT (Jump through a merge table)
+;
+; Data returned:	None.
+;-
+
+	TMPORG	CRADSP,2	;Dispatch merge table.
+	.WORD	GOINIT		;Go down to INIT (e.g. SHUTUP).
+	UNORG
+
+GOINIT:	CALL	MUNGER		;;;Wipe out the vectors, fix up APR's.
+	CLR	-(SP)		;;;Indicate no auto-restart.
+	.BR	REBOOT		;;;O.K., take off.
+
+.SBTTL	Try and reboot the system
+
+;+
+; REBOOT		Try and reboot the system.
+;
+; Data passed:		One word on the stack:
+;			 Offset at which to start up INIT
+;
+; Calling convention:	BR REBOOT
+;
+; Data returned:	You will not return.  The system will attempt to
+;			reboot or restart itself.  It will halt if it fails.
+;
+; Note:			ODT can NOT be used to debug this routine because the
+;			boot block is read into memory beginning at location
+;			zero!  Yes, this is stupid, but unless all of the
+;			software boots are updated this is the way life is.
+;-
+
+REBOOT:	CMP	B.NAME+O,#"DU	;;;MSCP boot?
+	BNE	5$		;;;No
+	MOV	@#KISAR5,B.MMU+O ;;;Yes, set up its MMU value
+5$:	CALL	B.RSET+O	;;;Set up the bootstrap
+	MOVB	B.RFUN+O,B.FUNC+O ;;;Set function as read
+	MOV	#400,B.TWC+O	;;; of 1 block (400 words)
+	CLR	B.BLKL+O	;;;  from block 0
+	CLR	B.BLKH+O	;;;   (double precision)
+	CLR	B.MEML+O	;;;    into memory starting at 0
+	CLR	B.MEMH+O	;;;     (again double precision)
+	CALL	B.READ+O	;;;Now do it
+	CMP	#NOP,@#0	;;;Did boot get read in?
+	BEQ	10$		;;;Yes, so finish up and jump to it.
+	HALT			;;;No, so die a violent death ...
+	BR	REBOOT		;;; but retry the boot if continued.
+
+10$:	ADD	(SP)+,B.XFER-B.BOOT ;;;Offset the boot address		;010
+	CLR	@SMU22W		;;;Turn off 22-bit mapping and UMR's.	;010
+	MOV	#MMUSR0,R2	;;;Get address of MMUSR0.
+	MOV	#LOCORE,R3	;;;Make a little 2-word routine in low core:
+	MOV	(PC)+,(R3)+	;;; 1st word:
+		CLR	(R2)	;;;  Turn off all memory management.
+	MOV	(PC)+,(R3)	;;; 2nd word:
+		CLR	PC	;;;  Jump to boot in traditional evil fashion.
+				;;;before going, better check....
+	CMP	#"DU,B.NAME+O	;;;is booted device UDA?
+	BNE	30$		;;;no, so don't worry.
+	MOV 	B.CSR+O,B.CSR-B.BOOT ;;;Yes. UDA has floating CSR, we have to 
+				;;;tell the boot code what it is.
+30$:	MOV	B.CSR+O,R1	;;;Put CSR address into R1		;008
+	MOV	B.UNIT02+O,R0	;;;get unit # into R0 for reboot code.
+	JMP	-(R3)		;;;Now jump to our little 2-word routine.
+	;CLR	@#MMUSR0	;;; And this is
+	;CLR	PC		;;;  what it does.
+
+.SBTTL	Set trap catcher, Fix I-APR's, Disable D-space.
+
+;+
+; MUNGER		Set trap catcher, Fix I-APR's, Disable D-space.
+;
+; Data passed:		none
+;
+;			I-space should still map $$ODTB.
+;
+; Calling convention:	CALL MUNGER
+;
+; Data returned:	R0-R2 = Undefined.
+;			R3-R5 = Same as passed.
+;
+; This routine:
+;
+;	1. Sets a trap catcher in the vector region.
+;	2. Maps Kernel I-APR's 0-4 to low memory.
+;	3. Makes all Kernel I-APR's 4 K Read/Write.
+;	4. Turns off D-space if present and enabled.
+;
+; The vector region in low core is crammed with the following pattern:
+;
+;		000000/ 000002
+;		000002/ 000000
+;		000004/ 000006
+;		000006/ 000000
+;		000010/ 000012
+;		000012/ 000000
+;		 - - -  - - -
+;		000774/ 000776
+;		000776/ 000000
+;
+; Thus any unexpected trap will cause a halt at (interrupt vector + 2)
+; and leave the PC displayed at (interrupt vector + 4).  This is done in
+; case the normal trap handling routines are wiped out, non-functional,
+; or off somewhere in no-longer-mapped I-space.
+;-
+
+; (MUNGER routine described on previous page)
+;
+
+;
+; First, set up the trap vectors.
+;
+
+MUNGER:	MOV	#1000,R2	;;;Start the pattern just below 1000.
+	CLR	R0		;;;Assume we cram all vectors on first pass.
+	BIC	#30000,@#PS	;;;Set Previous mode = Kernel,
+	MFPI	@#$$ODTB	;;; so we can see if we have ODT.
+	CMP	#BPT,(SP)+	;;;Is monitor ODT installed?
+	BNE	10$		;;;No, really cram all vectors the first time.
+	MOV	#BPT.PC+4,R0	;;;Yes, so stop before we hit the BPT vector.
+
+10$:	CLR	-(R2)		;;;Clear the PS vector word,
+	MOV	R2,R1		;;; and cram the PC vector word with
+	MOV	R1,-(R2)	;;;  the address of the PS vector word.
+	CMP	R2,R0		;;;Should we stop now (either 0 or BPT.PS)?
+	BNE	10$		;;;Not yet, cram some more.
+	CLR	R0		;;;Cram to zero next pass if stopped for BPT.
+	SUB	#4,R2		;;;Skip BPT vector if stopped for BPT.
+	BPL	10$		;;;Go cram to zero unless we did already.
+
+;
+; Then move the I-APR's.
+;
+
+	MOV	#KISAR0,R1	;;;Point to Kernel Instruction PAR's.
+	MOV	#5,R2		;;;For the first 5 of them,
+	;CLR	R0		;;;Starting at the bottom of low core:
+30$:	MOV	R0,(R1)+	;;; Map this APR to low core
+	ADD	#SEGAPR,R0	;;;  and compute the next APR address.
+	SOB	R2,30$		;;;   For APR's 0,1,2,3,4.
+
+;
+; And, finally, change the I-PDR's and turn of D-space.
+;
+
+	.CALLR	IONLY		;;;IONLY does the rest of our work.
+
+GLOBAL	<$$ODTB>
+
+.SBTTL	Disable D-space if present
+
+;+
+; IONLY			Disable D-space if present
+;			Make all I-APR's Read/Write and 4 K.
+;
+; Data passed:		none
+;
+; Calling convention:	CALL IONLY
+;
+; Data returned:	SMU22W   = Pointer to MMUSR3 (or junk)
+;			SMU22W+2 = MMUSR3 value to enable 22-bit addressing
+;				   but not D-space and UMRs.
+;
+;			R0-R1 = Undefined.
+;			R2-R5 = Same as passed.
+;-
+
+
+IONLY:	MOV	#KISDR0,R1	;;;Point to Kernel Instruction PDR's.
+	MOV	#8.,R0		;;;For all 8 of them:
+10$:	MOV	#RW4K,(R1)+	;;; Make this APR Read/Write and 4 K.
+	SOB	R0,10$		;;;  For APR's 0,1,2,3,4,5,6,7.
+
+	MOV	#SMU22W+2,R0	;;;Point to our MMUSR3 save area.
+	MOV	@#MMU22W,R1	;;;Get monitor's pointer to MMUSR3 or to
+				;;; a Junk word if MMUSR3 is not present.
+	BMI	20$		;;;Address >= 100000, not to worry.
+	MOV	R0,R1		;;;Address < 100000.  Obviously we don't
+				;;; have an MMUSR3 and furthermore, the
+				;;; Junk word might have linked to a place
+				;;; that will screw us up if we cram it
+				;;; (This could happen to you!)  So,
+				;;; we will point to our own "Junk" word,
+				;;; being the "saved value of MMUSR3" word.
+20$:	BIC	#44,(R1)	;;;Turn off D-space and UMRs if present	;009
+	MOV	(R1),(R0)	;;;Save the value of MMUSR3 (or Junk).
+	MOV	R1,-(R0)	;;;Save the address of MMUSR3 (or Junk).
+	RETURN			;;;Kind of fun, wasn't it?
+
+GLOBAL	<MMU22W>
+
+.SBTTL	Non-root memory dump routine
+
+;+
+; XCRASH		Write extended memory section to the crash file
+;
+; Data passed:		R2 = Address/64. of the section to write.
+;			R3 = Length/64. (bytes) of the section to write.
+;
+; Calling sequence:	CALL XCRASH
+;
+; Data returned:	None
+;			R0    = Same as passed
+;			R1-R5 = Undefined.
+;
+; Note:
+;	At some point this routine should be updated to make use of the
+;	new capability of bootstraps to access any physical memory.
+;	Dumping from high memory could be done by using a UMR if needed,
+;	or by giving the dumper the actual 18 or 22 bit address.  This
+;	would eliminate the move code below, as well as the bus reset
+;	stuff that was done earlier.
+;-
+
+XCRASH:	PUSH	R0		;;;Save the mainline index register.
+	MOV	R2,-(SP)	;;;Put memory MMU address into (SP).
+	CALL	DCNBLK		;;;Calculate block number to write this	;014
+				;;; segment based on the stored DCN	;014
+	MOV	R3,R1		;;;Get total segment length in slivers	;014
+	CALL	NEWDCN		;;;Update DCN for next segment 		;014
+10$:	MOV	#SEGAPR,R1	;;;Get the number of 64 byte pieces of
+				;;; memory that can be mapped by APR6.
+	CMP	R3,R1		;;;Is there less than full APRs worth left?
+	BHI	20$		;;;No, so do a full APR transfer.
+	MOV	R3,R1		;;;Yes, so transfer only the remainder.
+;
+;	Move from non-root memory into low memory for the bootstrap writer
+;
+20$:	MOV	(SP),@#KISAR6	;;;Scratch-map APR6 to this extended memory.
+	MOV	R1,R4		;;;Copy the size and
+	ASH	#3,R4		;;; make it into word count / 4.
+	MOV	#AP6BAS,R0	;;;Start where we pointed APR6.
+	MOV	#LOCORE,R2	;;;Copy to the buffer in low core.
+	MOV	R2,R5		;;;And remember the buffer address.
+30$:	MOV	(R0)+,(R2)+	;;;Transfer the data
+	MOV	(R0)+,(R2)+	;;; four words at a time.
+	MOV	(R0)+,(R2)+
+	MOV	(R0)+,(R2)+
+	SOB	R4,30$		;;;Back for another set of four.
+	ADD	R1,(SP)		;;;Point past what we just copied.
+	SUB	R1,R3		;;;And subtract what was just moved.
+	MOV	R3,-(SP)	;;;Save count of what's left in the segment.
+	CALL	WRILOW		;;;Write out a section of low memory.
+	MOV	(SP)+,R3	;;;Restore count of what's left in segment.
+	BNE	10$		;;;Something left, go do it.
+	TST	(SP)+		;;;All through with MMU addresses in (SP).
+	POP	R0		;;;Restore the register for our caller.
+	RETURN			;;;Return for more punishment.
+
+.SBTTL	Write a section of low memory to disk
+
+;+
+; WRILOW		Write a section of low memory out to disk.
+;
+; Data passed:		R1 =  Number of MMU units to write.
+;			R5 -> Physical address to write from.
+;
+; Calling sequence:	CALL WRILOW
+;
+; Data returned:	R0-R5 = Undefined.
+;-
+.ENABL	LSB
+
+WRILOW:	ASH	#5,R1		;;;Convert MMU length (slivers) to a word count.
+	MOV	R1,B.TWC+O	;;;Put the word count in the boot writer.
+	MOV	R5,B.MEML+O	;;;Put the starting address in the boot.
+	CLR	B.MEMH+O	;;; high order = 0
+	MOV	MI.BKL,B.BLKL+O	;;;Set block number in crash file to	;014
+	MOV	MI.BKH,B.BLKH+O	;;; write to (high and low words)	;014
+	ADD	#377,R1		;;;Round up the word count		;014
+	CLRB	R1		;;; to the next block			;014
+	SWAB	R1		;;;Get block count			;014
+	ADD	R1,MI.BKL	;;;Set up for next block write		;014
+	ADC	MI.BKH		;;; Adjust for overflow			;014
+	CMP	B.NAME+O,#"DL	;;;First, are we booted from RL01/RL02?	;012
+	BNE	10$		;;;No, not an RL??? controller.		;012
+	BIT	#XC$QBU,@#X.CON	;;;Second, are we on a Q-Bus system?	;012
+	BEQ	10$		;;;No, not an RLV1? controller.		;012
+	BIT	#XC$22,@#X.CON	;;;Finally, are we using 22-bit addr?	;012
+	BEQ	10$		;;;No, not an RLV12 controller.		;012
+	MOV	B.CSR+O,R0	;;;Get booted controller CSR address.	;012
+	CLR	RLBE(R0)	;;;Make sure BA extension bits are clear;012
+10$:	CALL	B.READ+O	;;;Trundle off to the dump writer,	;012
+				;;; WE ASSUME THE DUMP WRITER
+				;;;  MAY CLOBBER ANY AND ALL REGISTERS.
+	BCC	20$		;;;Write error?				; 006
+	HALT			;;;Yes, halt.				; 006
+20$:	RETURN			;;;Return (or continue from halt)	; 006
+
+.DSABL	LSB
+
+GLOBAL	<X.CON>								;012
+
+.SBTTL	Calculate DCN of where next segment begins
+
+;+
+; NEWDCN		Calculate DCN of where next segment begins
+;
+; Data passed:		R1 	= Number of MMU units (slivers) to write
+;			MI.SCS 	= Clustersize of system disk
+;
+; Calling sequence:	CALL NEWDCN
+;
+; Data returned:	R0 = new DCN
+;			MI.DCN = new DCN
+;-
+.ENABL	LSB
+
+NEWDCN:	ADD	#7,R1		;;;Round up the sliver count		;014
+	ASH	#-3,R1		;;;Convert slivers to block count	;014
+	ADD	MI.SCS,R1	;;;Round up the block count
+	DEC	R1		;;; to the next device cluster boundary.
+	CLR	R0		;;;(Prepare for the DIVide instruction.)
+	DIV	MI.SCS,R0	;;;Then calculate the number of DCNs.
+	ADD	R0,MI.DCN	;;;Compute the DCN for the next section	;014
+	RETURN			;;;All done				;014
+
+
+.DSABL	LSB
+
+.SBTTL	Convert the current DCN to a block number
+
+;+
+; DCNBLK		Convert the current DCN to a block number
+;
+; Data passed:		MI.DCN = Current DCN
+;
+; Calling sequence:	CALL DCNBLK
+;
+; Data returned:	R1 = MI.BKL = Block number (LOW order bits) 
+;			R0 = MI.BKH = Block number (HIGH order bits) 
+;-
+.ENABL	LSB
+
+DCNBLK:	MOV	MI.DCN,R0	;;;Get current DCN
+	MUL	MI.SCS,R0	;;;Convert to LBN
+	BPL	10$		;;;Did we pick up a sign		; 006
+	ADD	MI.SCS,R0	;;;Yes, convert to unsigned		; 006
+10$:	MOV	R1,MI.BKL	;;;Set low order block number		;014
+	MOV	R0,MI.BKH	;;;Set high order block number		;014
+	RETURN			;;;Return				;014
+
+.DSABL	LSB
+
+	.END

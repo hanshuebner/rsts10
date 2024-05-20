@@ -1,0 +1,160 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element MCALL.MAC
+;  *3    18-AUG-1986 11:24:12 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:33:28 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:40:40 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element MCALL.MAC
+	.NLIST							;Edit Level 00
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	MCALL	- .MCALL Processor for MACRO-11
+	.SBTTL	MCALL	- .MCALL Processor for MACRO-11
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Too many people to list here
+;
+;   Created:	From the dust and dirt
+;
+;  Abstract:	MCALL - This module contains the driver code for
+;		.MCALL, and for the automatic MCALL feature.
+;
+;  Prefix files:	CONFIG,GENMC
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;--
+
+
+;	System Library "MCALLS"
+
+.IF	NDF,RT11		;If not RT-11
+
+	.MCALL	FDBDF$
+
+; Misc data needed by 'SCNLIB' under RSX-11
+
+	.PSECT	MIXED,D,RW
+
+MNCNT::	.BLKW	1		;Count of entries in library
+MCLPNT::.BLKW	1		;Saved .MCALL list pointer
+
+; Generate library file dummy FDB (Definition will be overlaid)
+
+	.PSECT	SMLFDB,D,GBL,OVR
+
+SMLFDB::FDBDF$			;Allocate FDB at lowest point
+
+.ENDC;	NDF,RT11		;If not RT-11
+
+	PURE	PUREI,I
+
+
+.SBTTL	MCALL	- Driver routine for .MCALL
+
+;+
+; MCALL
+; This routine is entered when the .MCALL syntax is found in
+; an expression.
+;-
+.ENABL LSB
+
+MCALL::	ZAP	MCLLST		;Clear out the MCALL roll
+	CALL	SMLTST		;Build name list, return R0=# Undefines
+	BEQ	30$		;Branch if none, done.
+	TST	PASS		;Else, check if undefined, and PASS<>1
+	BEQ	5$		;Branch if pass 1, OK.
+	ERROR	U		;Else indicate undefined macro names
+	BR	30$		;
+
+5$:	CLR	-(SP)		;Make room for stack flag.
+10$:	CALL	INISML		;Open next .MLB/.MAC file in list
+	BEQ	15$		;Branch if done, not found.
+	CALL	SCNLIB		;Else verify and process library file
+	BNE	10$		;.MCALL Unsatisfied, open next library
+	BR	20$		;Skip error route.
+
+15$:	INC	@SP		;Indicate not found.
+20$:	CALL	FINSML		;Close library file
+	MOV	(SP)+,R0	;R0 <> 0 Says not found.
+30$:	CLR	SMLLVL		;Reset level count
+	CLR	ENDFLG		;Ditto for end flag
+	RETURN			;Return to the caller.
+
+
+.SBTTL	AUTMCL	- Automatic .MCALL processor
+;+
+; AUTMCL
+; This routine is called from the STMNT processor, just before
+; a expression is evaluated as a .WORD xxx. We look though the
+; MACRO LIBRARIES, attempting to find the expression as a macro.
+;
+;-
+
+AUTMCL::ZAP	MCLLST		;Clear out the MCALL roll
+	APPEND	MCLLST		;Insert the symbol to be looked up
+	INC	SMLLVL		;Set for one macro to be found
+
+.IF	NDF,XEDCDR
+
+	MOVB	CDRSAV,LINBUF+72. ;Restore column 72
+
+.ENDC;	NDF,XEDCDR
+
+	MOV	#LINBUF,R1	;Point to line buffer
+	MOV	#LINSAV,R2	; and line save buffer
+	CALL	MOVBYT		;Save the source line
+	MOV	CHRPNT,-(SP)	;Save the line pointer
+	CALL	5$		;Find the OPCODE given in MACRO libs.
+	MOV	(SP)+,CHRPNT	;Restore line pointer
+
+	MOV	#LINSAV,R1	;Point to save buffer
+	MOV	#LINBUF,R2	; and line buffer
+
+.IF	DF,XEDCDR		;If no card support
+	CALLR	MOVBYT		;Restore source line, return to caller (STMNT)
+
+.IFF;	DF,XEDCDR		;If no card support
+
+	CALL	MOVBYT		;Restore source line
+	MOVB	LINBUF+72.,CDRSAV ;Save column 72
+	BIT	#ED.CDR,EDMASK	;Card mode enabled?
+	BNE	40$		;No
+	CLRB	LINBUF+72.	;Yes, set EOL at column 72
+40$:	RETURN			;Return to caller	(STMNT)
+
+.ENDC;	DF,XEDCDR		;If no card support
+
+.DSABL LSB
+
+
+	.END

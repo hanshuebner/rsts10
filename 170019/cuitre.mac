@@ -1,0 +1,505 @@
+.INCLUDE	/CMN:COMMON.MAC/
+.LIBRARY	/CUI:CUIMAC.MLB/
+.INCLUDE	/CUI:CUIPFX.MAC/
+TITLE	CUITRE,<CUI Parse Tree Manager>,0A,10-MAY-91,CEK/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR CUITRE
+;+
+;
+;  001	CEK  16-APR-82	Added edit history
+;  002	CEK  16-APR-82	Removed @# notation
+;  003	CEK  30-APR-82	Changed ORG statements
+;  004	CEK  30-APR-82	Combined NXT.NODE with FET.NODE.
+;  005	CEK  30-APR-82	Changed name from DCLTRE to CUITRE
+;  006	CEK  25-SEP-82	Restructured internals
+;  007	JFM  29-MAR-83	FET.NEXT no longer requires a level so recursive calls
+;			will logically do the right thing.
+;  008	JFM  12-MAY-83	Fixed typo.
+;  009	JFM  08-MAY-84	Save position of successfully fetched node
+;  010	JFM  11-MAY-84	Fetch fails if no left son (poor fellow)
+;
+;			[RSTS/E V9.7]
+;  011	JFM  16-Sep-88	Added U$FETK routine and support to fetch the first
+;			or subsequent keyword arguments from a list
+;-
+
+;+
+;
+; MODULE DESCRIPTION:
+;
+; CUITRE.MAC -- CUI parse tree primitives
+;
+; There are two parse trees:  PARMTRE is parameters and parameter
+; qualifiers and their arguments.  QUALTRE is command qualifiers.
+;
+; The layout of a node is defined in CUIPFX.MAC.
+;-
+
+	.PSECT	CUITRE,RO,REL,LCL,CON
+	DEFORG	CUITRE
+
+;Tree header structure
+
+	.DSECT
+T.ROOT:	.BLKW			;Root node of tree.  
+	.ASSUME	N.LSON EQ 0	;This node has only two fields: N.LSON and 
+				; N.RBROTHER.
+	.BLKW
+	.ASSUME	N.RBROTHER EQ 2
+T.CRNT:	.BLKW			;Pointer to current node of tree 
+				; (ie most recently fetched or created node).
+T.LVL:	.BLKW			;Level of current node of tree.
+				;(Root is at level 0.)
+T.SIZ:				;Size of structure.
+
+.SBTTL	Variables 
+	TMPORG	IMPURE
+PARMTREE::.BLKB	T.SIZ		;Header of parameter tree.
+QUALTREE::.BLKB	T.SIZ		;Header of qualifier tree.
+CRNTTREE::.BLKW			;Address of current tree's header (i.e.
+				;#PARMTREE or #QUALTREE).
+	UNORG
+
+.SBTTL	U$ITRE--Initialize CUITRE.
+;+
+; U$ITRE--Initialize CUITRE.
+;
+; CALLING SEQUENCE:
+;	CALL	U$ITRE
+;
+; OUTPUTS:
+;	(QUALTREE+T.LVL) = 0. I.e. deepest node in QUALTREE is root, which
+;			is at level 0.
+;	(PARMTREE+T.LVL) = 0. (See previous.)
+;	(QUALTREE+T.ROOT+T.LSON) = 0.  I.e. root of QUALTREE has no son.
+;	(PARMTREE+T.ROOT+T.LSON) = 0.  (See previous.)
+;	(QUALTREE+T.CRNT) -> QUALTREE+T.ROOT I.e. root of QUALTREE is current.
+;	(PARMTREE+T.CRNT) -> PARMTREE+T.ROOT I.e. root of QUALTREE is current.
+;	(CRNTTREE) undefined.  
+;-
+
+.ENABL	LSB
+
+U$ITRE::
+	.ASSUME ROOT.LVL EQ 0	;Root is at level 0.
+	CLR	PARMTREE+T.LVL	;First node of PARMTREE is at root level.
+	MOV	#PARMTREE+T.ROOT,PARMTREE+T.CRNT
+				;Current node is the root.
+	CLR	PARMTREE+T.ROOT+N.LSON
+				;Root has no son.
+	MOV	#1,PARMTREE+T.ROOT+N.RBROTHER
+				;Root has no parent and no brother.
+	.ASSUME	ROOT.LVL EQ 0	;Root is at level 0.
+	CLR	QUALTREE+T.LVL	;First node of QUALTREE is at root level.
+	MOV	#QUALTREE+T.ROOT,QUALTREE+T.CRNT
+				;Current node is the root.
+	CLR	QUALTREE+T.ROOT+N.LSON
+				;Root has no son.
+	MOV	#1,QUALTREE+T.ROOT+N.RBROTHER
+				;Root has no parent and no brother.
+	CLR	CRNTTREE	;There is no current tree.
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	CRE.NODE--Create a node of a parse tree.
+;+
+; CRE.NODE--Create a node of a parse tree.  
+;
+; If no level is specified, then
+; the CRE.NODE creates a child of
+; the (previous) most recently fetched or created node in the tree.  
+; If a level is specified, then CRE.NODE creates the new node at that level.
+; In that case, the new node 
+; is either a child of the (previous) most recently fetched
+; or created node in the tree, or a child of an ancestor (parent,
+; grandparent, etc) of the (previous) most recently fetched or created node
+; in the tree.
+;
+; INPUTS:
+;	"tree"	is	QUALTREE or PARMTREE.  It indicates which tree
+;		the node will belong to.  If "tree" is not specified,
+;		CRNTTREE is used.
+;	"tag"	=	the symbolic tag of this node.  Default is 0.
+;	"txtpos" =	text position of syntax element represented by
+;		this node.  
+;	"level"	=	a constant giving the level of the node to create.
+;		"level" must be greater than zero.  "level" can be at most
+;		one greater than the level of the current node.
+;
+; USAGE:
+;	CRE.NODE [TREE=tree]
+;		[,TAG=tag]
+;		[,LEVEL=level]
+;		,TXTPOS=txtpos
+;
+; OUTPUTS:
+;	R0	=	return status:
+;		0	normally
+;		XCDCOR	(?Maximum memory exceeded)
+;	CRNTTREE =	QUALTREE or PARMTREE, whichever this statement
+;			referenced.  This is the "sticky default tree".
+;	R1	->	newly created node.  The caller is responsible
+;			for setting up the other fields of the node.
+;	The new node is the rightmost child
+;		of its parent.  
+;	T.LVL is the level of the new node.
+;	T.CRNT of the current tree points to the newly created node.
+;-
+
+.MACRO	CRE.NODE TREE=0,TAG=#0,LEVEL=#0,TXTPOS
+	.MCALL	CALB
+	.IIF	B <TXTPOS>	.ERROR	;Text position required.
+	CALBX	U$CREN <#TREE,TAG,LEVEL,TXTPOS>
+	.IIF	DIF <TREE>,<0>	.GLOBL	TREE
+	.ENDM	CRE.NODE
+
+; VARIABLES:
+; R1	->	newly created node or its parent
+; R2	->	tree header
+; R3	=	level of parent of new node
+; R4	->	a node
+
+.ENABL	LSB
+
+U$CREN::SUBR	<TREE,TAG,LEVEL,TXTPOS>
+	MOV	TREE(R5),R2	;Was a tree specified?
+	IFZE			;If not then
+	MOV	CRNTTREE,R2	;  Use current tree.
+	ENDIF		
+	.ASSERT	R2 NE #0
+	MOV	R2,CRNTTREE	;Whichever tree we're using becomes current
+				;tree.
+	MOV	LEVEL(R5),R3	;Was a level specified?
+	IFNZ			;If so then
+	DEC	R3		;  Get level of desired node's parent.
+	.ASSERT	R3 LE T.LVL(R2)	;  Desired node is at most one level deeper
+				;  than last fetched or created node in 
+				;  this tree.
+	ELSE			;Else
+	MOV	T.LVL(R2),R3	;  Get level of last fetched or created node
+				;  in this tree.
+	ENDIF
+	CALL	PATH		;Point R1 at parent of new node.
+	MOV	R1,R4		;Point R4 at parent of new node.
+	CALBX	U$ALLO <#N.SIZ>	;Allocate a node.
+	BCS	30$		;That failed. Quit.
+				;Now R1 -> new node.
+	MOV	TXTPOS(R5),N.TXTPOS(R1)
+				;Remember text position of syntax element.
+	MOV	TAG(R5),N.TAG(R1);Tag the new node.
+	MOV	R4,N.RBROTHER(R1);New node has no right brother, 
+				;so point to its parent.
+	BIS	#1,N.RBROTHER(R1);Set low bit to indicate a parent pointer.
+	.ASSUME	N.LSON EQ 0	;N.LSON field is at offset 0 from R4.
+	TST	(R4)		;Does its parent already have kids?
+	IFZE			;If not then
+	.ASSUME	N.LSON EQ 0
+	MOV	R1,(R4)		;  New node is an only child.
+	ELSE			;Else new node becomes the rightmost
+				;  child.
+	.ASSUME	N.LSON EQ 0
+	MOV	(R4),R4		;  Point at leftmost child.
+20$:	BIT	#1,N.RBROTHER(R4); Does this node have a right brother?
+	IFZE			;  If so then
+	MOV	N.RBROTHER(R4),R4;   Keep going.
+	BR	20$
+	ENDIF			;  Now R4 -> rightmost brother.
+	MOV	R1,N.RBROTHER(R4); New node is to the right of rightmost
+				;  brother.
+	ENDIF
+	INC	R3		;Get level of new node.
+	MOV	R1,T.CRNT(R2)	;Mark this as the current node.
+	MOV	R3,T.LVL(R2)	;Note level of current node.
+	MOV	R1,TOS.R1(SP)	;Give pointer back to caller.
+30$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	FET.NODE--Fetch a node of a parse tree.
+;+
+; FET.NODE--Fetch a node of a parse tree.
+;
+; If TAG= is specified, then FET.NODE fetches a node that has
+; the specified tag;  TAG= defaults to zero, that is, to no tag.
+;
+; If no level is specified, then
+; the FET.NODE fetches a child of
+; the most recently fetched or created node in the tree.  
+; If a level is specified, then the FET.NODE fetches a node at that level.
+; In that case, the node fetched by FET.NODE is either a child of the 
+; (previous) most recently fetched
+; node in the tree, or a child of an ancestor (parent,
+; grandparent, etc) of the (previous) most recently fetched node
+; in the tree.
+;
+; If more than one child of the particular parent matches the requested 
+; tag, then FET.NODE fetches the first matching node.  To fetch
+; the second and subsequent matching nodes, use FET.NEXT.
+;
+; INPUTS:
+;
+;	"tree"	is	QUALTREE or PARMTREE.  It indicates which tree
+;		the node to fetch belongs to.  If it is omitted, CRNTTREE
+;		is used.
+;	"tag"	=	the symbolic tag of the node to fetch.  
+;	"level"	=	a constant giving the level of the node to fetch.
+;		"level" must be greater than zero.  "level" can be at most
+;		one greater than the level of the most recently 
+;		fetched or created node.
+;
+; USAGE:
+;	FET.NODE [TREE=tree]
+;		[,TAG=tag]
+;		[,LEVEL=level]
+;
+; OUTPUTS:
+;	R0	=	return status:
+;		0	indicates success.
+;		-1	if no node with the given tag was found.
+;	CRNTTREE =	QUALTREE or PARMTREE, whichever this statement
+;			referenced.  This is the "sticky default tree".
+;	R1	->	specified node.  
+;-
+
+.MACRO	FET.NODE TREE=0,TAG=#0,LEVEL=0
+	.MCALL	CALB
+	CALBX	U$FET <#TREE,TAG,#LEVEL>
+	.IIF	DIF <TREE>,<0>	.GLOBL	TREE
+	.ENDM	FET.NODE
+
+.SBTTL	FET.NEXT--Fetch a node of a parse tree.
+;+
+; FET.NEXT--Fetch a node of a parse tree.
+;
+; If TAG= is specified, then FET.NODE fetches a node that has
+; the specified tag;  TAG= defaults to zero, that is, to no tag.
+;
+; If no level is specified, then FET.NEXT fetches a child of
+; the most recently fetched or created node in the tree.  
+; If a level is specified, then the FET.NEXT fetches a node at that level.
+; The node fetched by FET.NEXT is either a child of the 
+; (previous) most recently fetched
+; node in the tree, or a child of an ancestor (parent,
+; grandparent, etc) of the (previous) most recently fetched node
+; in the tree.  
+;
+; If more than one child of the particular parent matches the requested 
+; tag, then FET.NEXT fetches the first matching node, or,
+; if one of the matching nodes is the most recently fetched or created
+; node or an ancestor of it, then the node fetched by FET.NEXT
+; is the "next" matching child.  (And if there are no more matching
+; children, then FET.NEXT fails.)
+;
+; INPUTS:
+;
+;	"tree"	is	QUALTREE or PARMTREE.  It indicates which tree
+;		the node to fetch belongs to.  If it is omitted, CRNTTREE
+;		is used.
+;	"tag"	=	the symbolic tag of the node to fetch.  
+;	"level"	=	a constant giving the level of the node to fetch.
+;		"level" must be greater than zero.  "level" can be at most
+;		one greater than the level of the most recently 
+;		fetched or created node.
+;
+; USAGE:
+;	FET.NEXT [TREE=tree]
+;		[,TAG=tag]
+;		[,LEVEL=level]
+;
+; OUTPUTS:
+;	R0	=	return status:
+;		0	indicates success.
+;		-1	if no node with the given tag was found.
+;	CRNTTREE =	QUALTREE or PARMTREE, whichever this statement
+;			referenced.  This is the "sticky default tree".
+;	R1	->	specified node.  
+;-
+
+.MACRO	FET.NEXT TREE=0,TAG=#0,LEVEL=0
+	.MCALL	CALB
+	CALBX	U$FETN <#TREE,TAG,#LEVEL>
+	.IIF	DIF <TREE>,<0>	.GLOBL	TREE
+	.ENDM	FET.NEXT
+
+; R2	->	tree header
+; R3	=	level of node we're fetching
+; R4	=	level of parent of node we're fetching
+; (SP) = 0	=> we're fetching first node (U$FET)
+; (SP) = -1	=> we're fetching next node (U$FETN)
+
+.ENABL	LSB
+
+
+U$FETK::SUBR	<TREE,TAG,LEVEL>					;011
+	PUSH	#1		;Flag we're fetching 1st keyword or arg	;011
+	BR	2$							;011
+
+U$FET::	SUBR	<TREE,TAG,LEVEL>
+	CLR	-(SP)		;Flag that we're fetching first node.
+	BR	2$
+
+U$FETN::SUBR	<TREE,TAG,LEVEL>
+	PUSH	#-1		;Flag that we're fetching next node.
+2$:	MOV	TREE(R5),R2	;Was a tree specified?
+	IFZE			;If not then
+	MOV	CRNTTREE,R2	;  Use current tree.
+	ENDIF			;End if
+	.ASSERT	R2 NE #0
+	MOV	R2,CRNTTREE	;Whichever tree we're using becomes current tree
+	MOV	LEVEL(R5),R3	;Was a level specified?
+	IFZE			;If not then
+	MOV	T.LVL(R2),R3	;  Get level of most recently fetched
+				;  or created node.
+	INC	R3		;  Get level of desired node.
+	ENDIF			;End if
+5$:	CMP	R3,T.LVL(R2)	;Is the desired node deeper than the most
+				;recently fetched or created node?
+	IFGT			;If so then
+				;  We will search children of current node.
+	MOV	T.CRNT(R2),R1	;  Point R1 at current node.
+	MOV	N.LSON(R1),R1	;  Point at leftmost child of current node,
+				;  if any.
+	BZE	20$		;  No children.  Fail.
+	ELSE			;Else
+	CALL	PATH		;  Point R1 at node on path between
+				;  current node and root that is at same
+				;  level as desired node.
+	TST	(SP)		;  Are we fetching first or next matching node?
+	BEQ	6$		;  First nonkeyword.			;011
+	BGT	55$		;  First keyword.			;011
+	CMP	N.TAG(R1),TAG(R5); Next. Does node we just fetched have same 
+				;  tag as desired node?
+	BNE	6$		;  No. So fetch first matching node after all.
+				;  Yes. We will search the node's right 
+				;  brothers.
+55$:	MOV	N.RBROTHER(R1),R1; Point at next right brother.		;011
+	BR	10$		;  Go search.
+
+6$:				;  We will search all of the node's brothers.
+	CALL	U$PARENT	;  Point R1 at the node's parent.
+	MOV	N.LSON(R1),R1	;  Point R1 at the node's leftmost brother.
+	BEQ	20$		;  Was no left son ... quit.
+	ENDIF			;End if
+
+; Now R1 -> first node to search for match.  R1's low bit set if
+; there are no nodes to search.
+
+10$:	BIT	#1,R1		;Have we run out of nodes to search?
+	BNZ	20$		;Yes. Fail.
+	TST	(SP)		;Are we searching for arg or keyword?	;011
+	BLE	12$		;Branch if argument			;011
+	CMP	N.TAG(R1),#-1	;Multiple keyword tag?			;011
+	BEQ	14$		;Branch if multiple			;011
+	BR	15$		;Otherwise we found it			;011
+
+12$:	CMP	N.TAG(R1),TAG(R5);Have we found desired node?		;011
+	IFNE			;If not then
+14$:	MOV	N.RBROTHER(R1),R1; Point at node's right brother.	;011
+	BR	10$		;  Continue.
+	ENDIF			;End if
+
+; Now R1 -> desired node 
+; R3 = level of desired node
+
+15$:	MOV	R1,U.NODE	;Save position of current node		;011
+	MOV	R1,T.CRNT(R2)	;Mark this as the current node.
+	MOV	R3,T.LVL(R2)	;Note level of current node.
+	MOV	R1,TOS.R1+2(SP)	;Give pointer back to caller.
+	BR	30$		;Return.
+
+20$:	CMP	R3,#CQA.LVL	;Because of recursion, it's possible that
+				;we tried a level too deep.  Try one less deep.
+				;But let's make sure that we are no deeper than
+				;command qualifier argument level (level 2). 
+	BLT	25$		;We're not.  Give up.
+	DEC	R3		;Let's try using a LOWER level.
+	BR	5$		;Go to where we tried deeper level.
+	
+25$:	COM	R0		;Flag error.
+30$:	POP			;Discard scratch location.
+	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<U.NODE>
+
+.SBTTL	PATH - Find a node on path to current node.
+;+
+; PATH - find a node on path to current node.
+;
+; CRNTTREE ->	current tree header
+; R3	   =	level of desired node.  <= level of current node.
+;
+; CALL	PATH
+;
+; R1	->	node at specified level, on path between 
+;		current node and root.
+;-
+
+.ENABL	LSB
+
+PATH:	PUSH	R2		;Save R2
+	MOV	CRNTTREE,R1	;Point at header of current tree.
+	MOV	T.LVL(R1),R2	;Get level of current node.
+	MOV	T.CRNT(R1),R1	;Point at current node.
+	.ASSERT	R3 LOS R2	;Desired node is no deeper than current node.
+	BR	20$		;Check level
+10$:	CALL	U$PARENT	;Get R1's parent.
+	DEC	R2		;It is closer to the root.
+20$:	CMP	R2,R3		;Have we reached desired level?
+	BHI	10$		;No, go up a level
+	POP	R2		;Restore R2
+	RETURN			;Return
+
+.SBTTL	U$PARENT -- Get a node's parent
+;+
+; U$PARENT -- Get a node's parent
+;
+; INPUTS:
+;	R1	->	node whose parent is to be fetched
+;
+; CALL	U$PARENT 
+;
+; OUTPUTS:
+;	R1	->	parent
+;
+; The parse tree is a so-called "threaded tree".  Each node contains
+; a pointer to its right brother, but the rightmost son of a given
+; parent contains a pointer to the parent.  The low bit of the N.RBROTHER
+; field is set to indicate that the node is a rightmost brother.
+;-
+
+.ENABL	LSB
+
+U$PARENT::
+10$:	MOV	N.RBROTHER(R1),R1;Point to its right brother or its parent.
+	BIT	#1,R1		;Is this a brother?
+	BZE	10$		;Yes.  Continue looking for rightmost brother.
+	BIC	#1,R1		;No, we've passed rightmost brother.
+				;Now R1 -> parent.
+	.ASSERT	R1 NE #0	;Root has no parent;  blow up if anyone
+				; asks for root's parent.
+	RETURN
+
+.DSABL	LSB
+.END

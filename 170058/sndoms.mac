@@ -1,0 +1,432 @@
+.INCLUDE	%CMN:COMMON%
+TITLE	SNDOMS,<OMS MESSAGE SENDER>,0A,10-MAY-91,DBM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR XMIT
+;+
+;
+;  001	DBM  23-Sep-82	CREATION - And it was about time!
+;
+;-
+
+.SBTTL	MACROS - SUCK IN NEEDED MACROS
+
+	.LIBRARY	%SYSTEM:PBSMAC%
+
+	.MCALL	BITDEF,QUEDEF,SAVREG,LOT,XMTBLK,XMITM,.ASCIC,SPLCMD,PBSCON
+
+	PBSCON
+	SPLCMD
+	BITDEF
+	QUEDEF
+	XMTBLK
+	LOT
+
+;+
+; THREAD - Access a thread
+;
+; The THREAD macro is used to access a threaded routine. It does a .EVEN
+; to be sure the thread address is on an even boundry, then does a .WORD
+; of the routine entry point.
+;-
+
+
+.MACRO	THREAD	NAME
+.EVEN
+	.WORD	NAME
+.ENDM	THREAD
+
+.MACRO	ENDTHR
+.EVEN
+	.WORD	RTS$PC
+.ENDM	ENDTHR
+
+.SBTTL	Threaded routines/Register conventions
+;+
+;    Register	Usage
+;	R0    Available for private use.
+;	R1 -> Job record
+;	R2    Scratch
+;	R3    Scratch
+;	R4 -> Thread list
+;	R5 -> Message buffer
+;-
+	.PSECT	THREAD,RO,CON
+
+.SBTTL	TASCIC	Threaded .ASCIC
+
+TASCIC:	MOV	(R4)+,R2		; Pick up .ASCIC string pointer
+	.BR	CASCIC			; Copy it into the buffer
+
+.SBTTL	CASCIC	Copy .ASCIC string
+
+CASCIC:	MOVB	(R2)+,R3		; Get length of string
+	BR	CASCII			; Join common string copy
+
+.SBTTL	IASCIC	In-line .ASCIC thread
+
+IASCIC:	MOVB	(R4)+,R3		; Get length of string
+	MOV	R4,R2			; Copy pointer to string
+	ADD	R3,R4			; Adjust thread pointer
+	.BR	CASCII			; Begin the copy
+
+.SBTTL	ASCII	Copy ASCII text
+
+CASCII:	MOVB	(R2)+,(R5)+		; Move a character
+	SOB	R3,CASCII		; Loop until done
+	INC	R4			; Round up to next...
+	BIC	#1,R4			;  word boundary
+	JMP	@(R4)+			; On to next thread
+
+.SBTTL	SUBTHR	Perform a threaded subroutine
+
+SUBTHR:	MOV	(R4)+,R3		; Fetch address of threaded subroutine
+	MOV	R4,-(SP)		; Save current thread pointer
+	MOV	R3,R4			; Copy new thread pointer
+	CALL	@(R4)+			; Go execute the new thread list
+	MOV	(SP)+,R4		; Restore old thread pointer
+	JMP	@(R4)+			; Back to thread land
+
+RTS$PC:	RETURN				; End of thread, return to caller
+
+
+.SBTTL	NUM$R1	Convert number in R1 to ASCII
+.SBTTL	NUM$R3	Convert number in R3 to ASCII
+
+NUM$R1:	MOV	R1,R3			; Copy R1 into scratch register
+NUM$R3:	MOV	R4,-(SP)		; Save R4 for a little bit
+	CALLX	BIN2D			; Convert R3 to ASCII
+	MOV	(SP)+,R4		; Restore thread pointer
+	JMP	@(R4)+			; On to next thread
+
+.SBTTL	EOJTHR	Put EOJ status text into buffer
+
+EOJTHR:	MOV	R1,-(SP)		; Save R1
+	MOV	#1,R0			; Assume we'll need an RMS error msg
+	MOV	EJ.STS(R1),R1		; Get the status of the entry
+	BMI	10$			; RMS error are < 0
+	INC	R0			; Set function for PBS status text
+10$:	CALLX	GETTXT			; Go get the status text
+	MOV	R2,R3			; Any message?
+	BNE	20$			; Yep.
+	MOV	#UNKTXT,R2		; Nope.  Say status is unknown
+	MOV	(SP)+,R1		; Restore R1
+	BR	CASCIC			; And go copy the text
+
+20$:	MOV	R1,R2			; Move text source into R2
+	MOV	(SP)+,R1		; Restore R1
+	BR	CASCII			; Copy the string into the buffer
+
+.SBTTL	QUETYP	Move queue type (Print/Batch) into message buffer
+
+QUETYP:	MOV	#PRTTXT,R2		; Assume print type
+	CMPB	SU.QUE(R1),#QT$PRI	; Was it?
+	BEQ	CASCIC			; Yes, go copy the string
+	MOV	#BATTXT,R2		; Nope, it's batch
+	BR	CASCIC			; So go copy that string instead
+
+.SBTTL	PPNTHR	Build [p,pn] text into message buffer
+
+PPNTHR:	MOV	R5,R2			; Copy buffer pointer into R2
+	MOV	R1,-(SP)		; Save R1
+	MOV	SU.PPN(R1),R1		; Get p,pn in R1
+	CALLX	BLDPPN			; Build the [p,pn] text
+	ADD	R1,R5			; Adjust R5 for length of text
+	MOV	(SP)+,R1		; Restore R1
+	JMP	@(R4)+			; On to next thread
+
+.SBTTL	SEQTHR	Convert sequence number of entry to ASCII
+
+SEQTHR:	MOV	SU.SEQ(R1),R3		; Get the sequence number in R3
+	BR	NUM$R3			; Go convert it to ASCII
+
+.SBTTL	QUETHR	Move queue name into message buffer
+.SBTTL	ENTTHR	Move entry name into message buffer
+
+	.ENABL	LSB
+
+QUETHR:	MOV	#SU.QNL,R2		; Pick up offset to queue name length
+	BR	10$			; Join common code
+
+ENTTHR:	MOV	#SU.NML,R2		; Pick up offset to entry name length
+	.BR	10$			; Join common code
+
+10$:	ADD	R1,R2			; Make R2 a pointer to .ASCIC string
+	BR	CASCIC			; Go copy it into message buffer
+
+.SBTTL	SRVTHR	Build server device text into buffer
+
+SRVTHR:	MOV	#SU.DVL,R2		; Pick up offset to server name length
+	ADD	R1,R2			; Make R2 a pointer to .ASCIC string
+	MOV	R2,-(SP)		; Save the pointer for a little bit
+	CALLX	CLRXRB			; Clear out the XRB
+	MOVB	(R2),@#XRB+XRLEN	; Set length of string
+	MOVB	(R2)+,@#XRB+XRBC	; Two places
+	MOV	R2,@#XRB+XRLOC		; Set location of string
+	.FSS				; Run in through FSS
+	MOV	(SP)+,R2		; Restore .ASCIC string pointer
+	TST	@#XRB+XRBLK		; Valid RSTS/E device?
+	BMI	CASCIC			; Nope, copy string as is from buffer
+	MOVB	#'_,(R5)+		; Put in leading underscore
+	MOVB	@#FIRQB+FQDEV,(R5)+	; First character of device name
+	MOVB	@#FIRQB+FQDEV+1,(R5)+	; Second character of device name
+	MOVB	@#FIRQB+FQDEVN,R3	; Get the device unit number
+	MOV	R4,-(SP)		; Save R4 for a little bit
+	CALLX	BIN2D			; Convert unit number to ASCII
+	MOV	(SP)+,R4		; Restore R4
+	.BR	COLTHR			; Jump to colon thread
+
+.SBTTL	COLTHR	Add a colon (:) to the message buffer
+
+COLTHR:	MOVB	#':,(R5)+		; Put the colon in the buffer
+	JMP	@(R4)+			; On to next thread
+
+.SBTTL	NEWLIN	Put a <CR><LF> into the buffer
+
+NEWLIN:	MOVB	#15,(R5)+		; Stick in a <cr>
+	MOVB	#12,(R5)+		;  and now a <lf>
+	JMP	@(R4)+			; On to next thread
+
+.SBTTL	MSGTXT	Text for assembly into message buffer
+
+	.PSECT	MSGTXT,RO,CON
+
+PRTTXT:	.ASCIC	<Print >
+BATTXT:	.ASCIC	<Batch >
+ENTTXT:	.ASCIC	<entry >
+EN2TXT:	.ASCIC	<entries >
+SRVTXT:	.ASCIC	<server >
+STLTXT: .ASCIC	< stalled>
+STRTXT:	.ASCIC	< started>
+CMPTXT:	.ASCIC	< completed>
+DELTXT:	.ASCIC	< deleted from queue>
+ISTXT:	.ASCIC	<is>
+ARETXT:	.ASCIC	<are>
+UNKTXT:	.ASCIC	<Unknown>
+
+.SBTTL	THREADS	Threads for the actual messages
+.SBTTL	SRVSUB	Thread list for entry 'event' on server message
+
+	.EVEN
+
+SRVSUB:	THREAD	SUBTHR			; Threaded subroutine
+	 .WORD	STSSUB			; To output the entry spec and status
+	THREAD	IASCIC
+	 .ASCIC	< on >			; " on "
+	THREAD	TASCIC
+	 .WORD	SRVTXT			; "server "
+	THREAD	SRVTHR			; Server name
+	THREAD	NEWLIN			; <cr><lf>
+	ENDTHR
+
+.SBTTL	ENDTHR	Thread list for end messages
+
+ENDTHR:	THREAD	SUBTHR			; Subroutine thread
+	 .WORD	SRVSUB			; Entry completed on server
+	THREAD	IASCIC
+	 .ASCIC	<Exit status = > 	; "Exit status = "
+	THREAD	EOJTHR			; EOJ status
+	THREAD	NEWLIN			; <cr><lf>
+	ENDTHR				; End of message
+
+.SBTTL	OFLTHR	Thread list for device off-line message
+
+OFLTHR:	THREAD	SUBTHR			; Subroutine thread
+	 .WORD	SRVSUB			; Entry stalled on server
+	THREAD	TASCIC
+	 .WORD	PRTTXT			; "Print "
+	THREAD	IASCIC
+	 .ASCIC	<device >		; "device "
+	THREAD	SRVTHR			; Server name
+	THREAD	IASCIC
+	 .ASCIC	< must be put on-line to continue>
+	THREAD	NEWLIN			; <cr><lf>
+	ENDTHR				; End of message
+
+.SBTTL	DELTHR	Thread list for entry deleted message
+
+DELTHR:	THREAD	SUBTHR			; Threaded subroutine
+	 .WORD	STSSUB			;  to output the entry spec and status
+	THREAD	NEWLIN			; <cr><lf>
+	ENDTHR
+
+STSSUB:	THREAD	QUETYP			; Queue type ("Print "/"Batch ")
+	THREAD	TASCIC
+	 .WORD	ENTTXT			;  "entry "
+	THREAD	SEQTHR			; Sequence number
+	THREAD	IASCIC
+	 .ASCIC	< >			; " "
+	THREAD	QUETHR			; Queue name
+	THREAD	COLTHR			; ":"
+	THREAD	PPNTHR			; [p,pn]
+	THREAD	ENTTHR			; Entry name
+	THREAD	TASCIC
+ENTSTS:	 .WORD	0			; Current status
+	ENDTHR				; End of subroutine thread
+
+.SBTTL	FRMTHR	Thread list for FORMS_WAIT message
+
+FRMTHR:	THREAD	IASCIC
+	 .ASCIC	<There >		; "There "
+	THREAD	TASCIC
+IS$ARE:	 .WORD	0			; "is/are"
+	THREAD	IASCIC
+	 .ASCIC	< currently >		; " currently "
+	THREAD	NUM$R1			; Number of FORMS_WAIT entries
+	THREAD	IASCIC
+	 .ASCIC	< print >
+	THREAD	TASCIC
+ENTRYS:	 .WORD	0			; "entry /entries "
+	THREAD	IASCIC
+	 .ASCIC	<in a FORMS_WAIT state>	; "in a FORMS_WAIT state"
+	THREAD	NEWLIN			; <cr><lf>
+	ENDTHR				; End of message
+
+.SBTTL	CMPTHR	Thread list for compression message
+
+CMPTHR:	THREAD	IASCIC
+	 .ASCIC	<Work file compression would be performed now>
+	THREAD	NEWLIN			; <cr><lf>
+	ENDTHR				; End of message
+
+.SBTTL	OMSMSG	Message buffer for Operator Request Packet
+
+	.EVEN
+	.ENABL	LSB
+
+OMSMSG:	.WORD	0			; Link to next send packet
+10$:	.WORD	0			; Length of this packet
+	.BYTE	2			; Two targets
+	.BYTE	0			; Retry counter
+20$:	.WORD	0			; Length of broadcast message
+
+.ASSUME	10$-OMSMSG EQ XMITLN		; Check header alignment
+.ASSUME	20$-OMSMSG EQ XMITAL		; Check header alignment
+
+; Target #1 - OMS
+
+TARG1:	.BYTE	4			; Send URP/ORP command packet
+	.BYTE	2			; REQUEST command
+	.BYTE	BIT7+LO.OMS		; Local object type for OMS
+	.BLKB0	5			; Reserved
+
+; Target #2 - Broadcast to owners p,pn
+
+TARG2:	.BYTE	0			; Broadcast message
+	.BYTE	0			; Storage area for current job
+	.WORD	0			; Storage for starting buffer offset
+	.WORD	0			; Storage for current buffer offset
+	.WORD	0			; Storage area for owner's p,pn
+
+; Operator Request Packet
+
+ORPPKT:	.BYTE	3			; /[NO]REPLY field
+	.BYTE	0			; No reply is required
+
+	.BYTE	4			; /FACILITY field
+	.ASCIC	<PBS>			; Ours is PBS
+
+	.EVEN				; Fill byte if needed
+TXTFLD:	.BYTE	1			; Text field
+TXTLEN:	.BYTE	0			; Text field length
+OMSTXT:	.BLKB0	160.			; Room for text of message
+
+	.EVEN
+
+.SBTTL	SNDOMS	OMS/Notify routines
+.SBTTL	SNDCMP	Send compression message to OMS
+.SBTTL	SNDFRM	Send FORMS_WAIT message to OMS
+.SBTTL	SNDDEL	Send entry deleted notify message
+.SBTTL	SNDOFL	Send print server off-line message
+.SBTTL	SNDSTR	Send entry start message
+.SBTTL	SNDEND	Send entry end message
+
+	.PSECT	SNDOMS,RO,CON
+	.ENABL	LSB
+
+SNDCMP::SAVREG				; Save the world
+	MOV	#CMPTHR,R4		; Pick up thread list pointer
+	BR	5$			; Join common code path
+
+SNDFRM::SAVREG				; Save the world
+	MOV	#FRMTHR,R4		; Pick up thread list pointer
+	MOV	#ARETXT,IS$ARE		; Set up for more than one entry...
+	MOV	#EN2TXT,ENTRYS		;  in both places that need it
+	CMP	R1,#1			; How many entries are there?
+	BNE	5$			; Other than one, go build message
+	MOV	#ISTXT,IS$ARE		; Just one, change message around...
+	MOV	#ENTTXT,ENTRYS		;  so that it looks right
+5$:	MOV	#-1,TARG2		; Can't do /NOTIFY with this message
+	MOV	#4+<2*400>,TARG1	; But we must send to OMS
+					;  (Send URP/ORP, command=REQUEST)
+	BR	40$			; Build and send the message
+
+SNDDEL::SAVREG				; Save the world
+	MOV	R4,R1			; Copy job record ptr into common reg
+	MOV	JB.PPN(R1),SU.PPN(R1)	; Put [p,pn] where we'll need it
+					; (Yes, we're destroying the job copies
+					;  field, but the record will soon be
+					;  deleted anyways)
+	MOV	#DELTHR,R4		; Pick up thread list pointer
+	MOV	#DELTXT,R5		; Store status as " deleted from Q"
+..NOMS::BR	10$			; Build and send the message
+					; (NOP this if deletes don't go to OMS)
+	MOV	#-1,TARG1		; Don't send this to OMS
+	BR	20$			; Build and send the message
+
+SNDOFL::SAVREG				; Save the world
+	MOV	#STLTXT,R5		; Store " stalled" as status text
+	MOV	#OFLTHR,R4		; Pick up thread list pointer
+	BR	10$			; Join common code
+
+SNDSTR::SAVREG				; Save the world
+	MOV	#STRTXT,R5		; Store " started" as status text
+	MOV	#SRVSUB,R4		; Pick up thread list pointer
+	BR	10$			; Build, and send the message to OMS
+
+SNDEND::SAVREG				; Save the world
+	MOV	#CMPTXT,R5		; Store " completed" as status text
+	MOV	#ENDTHR,R4		; Pick up thread list pointer
+	.BR	10$			; Go build the message
+
+10$:	MOV	#4+<2*400>,TARG1	; Send this to OMS
+					;  (Send URP/ORP, command=REQUEST)
+20$:	MOV	R5,ENTSTS		; Set up status pointer
+30$:	MOV	#-1,TARG2		; Assume /NONOTIFY
+	BIT	#JB$NTF,SU.FLG(R1)	; Is it really /NOTIFY?
+..NTFY::BEQ	40$			; Nope, so don't set up for broadcast
+	CLR	TARG2			; 2nd target is /NOTIFY message
+	MOV	SU.PPN(R1),TARG2+XMITPN	; Set up target [p,pn]...
+	MOV	#<<TXTFLD-1>-ORPPKT>,TARG2+XMITSO ; and starting offset
+40$:	MOV	#OMSTXT,R5		; Set up pointer to message buffer
+	CALL	@(R4)+			; Call into the thread list
+	CLRB	(R5)			; Zero fill byte if needed
+	SUB	#OMSTXT,R5		; Compute length of message text
+	MOVB	R5,TXTLEN		; Store length for text field
+	ADD	#<OMSTXT-OMSMSG>,R5	; Compute total length of message
+	MOV	R5,OMSMSG+XMITAL	; Store actual length of message
+	INC	R5			; Now round up to next word boundary
+	BIC	#1,R5			; Ensure message ends on word boundary
+	MOV	R5,OMSMSG+XMITLN	; Store length in XMIT header
+	XMITM	#OMSMSG			; Queue the message up for transmission
+	RETURN				; All done
+
+	.END

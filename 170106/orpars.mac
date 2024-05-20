@@ -1,0 +1,553 @@
+.INCLUDE "CMN:COMMON.MAC"
+.INCLUDE "CMN:KERNEL.MAC"
+.INCLUDE "SYSTEM:CMNDEF.MAC"
+
+.TITLE	ORPARS ORP processing module
+
+	; PARAMETER LIST:
+	;			None
+
+	;
+	; Module constants
+	;
+STAREM	=:10.			; First reminder index value
+MAXREM	=:3600.			; Maximum number of second before a reminder 
+PNDMAX	=:255.			; Maximum pending request slot number
+FACLEN	=:6			; Maximun length of facility name
+; Pull in global error codes
+
+.GLOBL	BADNAM,NOROOM,NOSUCH,NODEVC,PRVIOL,LINERR,FMTERR,BDNERR,SUBERR,NEDERR
+.GLOBL	FIELDE,FUNERR,NOTOPN
+
+	.PSECT	OMSCMN,D,RW,GBL,REL,OVR
+	.EVEN
+EVNTIM:		.BLKW 2		; The next action time string
+CFMERR:		.BLKW		; Returned error number
+CFMCOD:		.BLKW		; The field code causing the error (random if
+				; no error)
+SLTNUM:		.BLKW		; Currently active request slot
+ORPBUF:		.BLKB 512.	; The Operator Request Packet (ORP)
+STPING:		.BLKW 1		; STOPPING OMS command flag
+STPOMS:		.BLKW 1		; /[NO]ABORT qualifier flag
+OMSCMD:		.BLKB		; The orp's command
+INDLVL:		.BLKB		; Debugging indent level
+		.BLKW		; Just some filler for now
+SLOT:		.BLKW PNDMAX	; OMS.SYS slot table
+
+	.PSECT	CMNDEF,D,RW,GBL,REL,OVR
+	.=CMNDEF		; Make sure we're at beginning
+		.BLKW		; Variable JUNK in CMNDEF.MAC
+		.BLKW		; Beginning of firqb (unused here)
+SNDSUB:		.BLKB 1		; Firqb subfunction code
+SNDJOB:		.BLKB 1		; Job number which made the request
+RTNRCV:				; Receiver name for confirmation
+SNDPPN:		.BLKW 1		; Ppn of job which made the request
+SNDKBN:		.BLKB 1		; Kb # of job which made the request
+		.BLKB 5		; Unused in this module
+SNDLEN:		.BLKW 1		; Length of packet
+		.BLKW 3		; Unused in this module
+SNDPRV:		.BLKB 8.	; Sender's privilege mask
+SNDPRM:				; Beginning of the parameter string
+RTNCTX:				; Request's context value for reply
+SNDCMD:		.BLKB 1		; OMS command
+		.BLKB 1		; Second byte of RTNCTX
+RTNERR:				; error number for reply
+SNDRTN:		.BLKW 1		; Confirmation receiver name
+RTNCOD:		.BLKW 1		; The request number goes here for a reply
+RTNSTS:		.BLKB 1		; Status of request
+		.BLKB 1		; Reserved SET TO ZERO BEFORE RETURNING
+SNDCTX:				; Request context value
+RTNJOB:		.BLKB 1		; Job number of replying operator
+RTNKBN:		.BLKB 1		; Key board number of replying operator
+RTNPPN:		.BLKW 1		; PPn of replying operator
+
+
+	.PSECT	OMSREP,D,RW,GBL,REL,OVR
+	.EVEN
+
+OMSREP:		.BLKB	RECSIZ
+
+	.PSECT	IMPURE,D,RW,LCL,REL,OVR
+	.EVEN
+
+ORPEND:	.BLKW			; End of ORP (DATA$)
+REQUIR:	.BLKW			; Required fields for specified command
+PRVMSK:	.BLKW 4			; Holder for orp priv mask
+STPFLG:	.BLKW			; /[NO]ABORT stop flag (Temporary)
+SETSTS:	.BLKB			; Packet set status location
+CLRSTS:	.BLKB			; Packet clear status location
+DESCRP:	.BLKW			; Descriptor block for GETDAT call
+DSPLEN:	.WORD	4		; Length of the string pointed to 
+INVFLG:	.BLKW			; Invert flag for GETDAT
+DELTA:	.WORD	MAXREM/STAREM	; Initial delta for reminder time
+
+	.BSECT
+		.BLKB	.	; 0  Bit 0 -- Reserved
+FL$TXT:		.BLKB	.	; 2  Bit 1 -- Request/Reply Text flag
+FL$SEQ:		.BLKB	.	; 4  Bit 2 -- Request sequence number flag
+FL$REP:		.BLKB	.	; 8  Bit 3 -- [NO]REPLY qualifier flag
+FL$FAC:		.BLKB	.	; 16 Bit 4 -- Facility flag
+FL$ML:		.BLKB	.	; 32 Bit 5 -- Message level flag
+FL$ABO:		.BLKB	.	; 64 Bit 6 -- [NO]ABORT qualifier flag
+
+
+	.PSECT	PURE
+	.EVEN
+BITWRD:
+	.WORD   000001		; BIT	 0
+	.WORD   000002		; BIT	 1
+	.WORD   000004		; BIT	 2
+	.WORD   000010		; BIT	 3
+	.WORD   000020		; BIT	 4
+	.WORD   000040		; BIT	 5
+	.WORD   000100		; BIT	 6
+        .WORD   000200		; BIT	 7
+	.WORD   000400		; BIT	 8
+	.WORD   001000		; BIT	 9
+	.WORD   002000		; BIT	10
+	.WORD   004000		; BIT	11
+	.WORD   010000		; BIT	12
+	.WORD   020000		; BIT	13
+	.WORD	040000		; BIT	14
+	.WORD	100000		; BIT	15
+
+		; Field routine address table
+	.EVEN
+FLDSUB:				;   FIELD		ROUTINE ADDRESS
+	.WORD	177777		; 0 reserved		-1
+	.WORD	ORPTXT		; 1 TEXT 		ORPTXT
+	.WORD	ORPSEQ		; 2 REQUEST ID		ORPSEQ
+	.WORD	ORPREP		; 3 /[NO]REPLY		ORPREP
+	.WORD	ORPFAC		; 4 FACILITY		ORPFAC
+	.WORD	ORPLVL		; 5 MESSAGE LEVEL	ORPLVL
+	.WORD	ORPABO		; 6 /[NO]ABORT		ORPABO
+
+		; Post packet processing routine address table
+	.EVEN
+PSTPKT:				; COMMAND		ROUTINE ADDRESS
+	.WORD	NOPCMD		; 0 NOP			NOPCMD
+	.WORD	REPCMD		; 1 REPLY		REPCMD
+	.WORD	REQCMD		; 2 REQUEST		REQCMD
+	.WORD	OPRCMD		; 3 SET OPER		OPRCMD
+	.WORD	STPCMD		; 4 STOP OPERATOR	STPCMD
+
+		; Valid field table
+	.EVEN
+VALFLD:					;   COMMAND	    VALID FIELDS
+	.WORD	0			; 0 NOP		 No valid fields
+	.WORD	FL$TXT!FL$SEQ		; 1 REPLY	 Text and Sequence #
+	.WORD	FL$TXT!FL$REP!FL$FAC	; 2 REQUEST	 Text,[NO]REPLY,Facility
+	.WORD	FL$ML			; 3 SET OPER	 Message level
+	.WORD	FL$FAC!FL$ABO		; 4 STOP/OPER	 Facility,[NO]ABORT
+
+		; Required fields table (required for command specified)
+	.EVEN
+REQFLD:					;   COMMAND	   REQUIRED FIELDS
+	.WORD	0			; 0 NOP		 No field required
+	.WORD	FL$SEQ			; 1 REPLY	 Sequence #
+	.WORD	FL$TXT			; 2 REQUEST	 Text
+	.WORD	FL$ML			; 3 SET OPER	 Message level
+	.WORD	0			; 4 STOP/OPER	 No field required
+
+	.EVEN
+	.PSECT	ORPARS
+	.ENABL LSB
+
+ORPARS::
+	MOV	#<RECSIZ/2>,R0		; R0 -> # of words in a request record
+	MOV	#OMSREQ,R1		; R1 -> first word of request record
+	MOV	#OMSREP,R4		; R4 -> First word of reply record
+10$:	CLR	(R1)+			; Clear out a word
+	CLR	(R4)+			;  and here too
+	SOB	R0,10$			; Do the whole request/reply records
+
+	CLR	SLTNUM			; Assume active slot is zero
+	CLR	CFMERR			; Start with no error
+	MOV	#<<PTCL.R*400>+PTCL.V>,REQVER	; Load version and rev number
+.ASSUME	REQREV	EQ <REQVER + 1>		; Check alignment
+
+	MOV	#INVFLG,-(SP)		; Build parameter block on stack
+	MOV	SP,INVFLG		; <> 0 = Normal format
+	MOV	#DESCRP,-(SP)		; Invert flag and string descriptor
+	MOV	#REQDAT,DESCRP		; Point descriptor to right place
+	MOV	#2,-(SP)		; Passing two parameters
+	MOV	SP,R5			; Point to them with R5
+	CALLX	GETDAT			; Load the date and time of the request
+	ADD	#6,SP			; POP junk off the stack
+
+	MOVB	SNDJOB,REQJOB		; Save request Job number * 2
+	ASRB	REQJOB			; Make it *1
+	MOV	SNDPPN,REQPPN		; Save requestor's [P,PN]
+	MOVB	SNDKBN,REQ.KB		; Save requestor's KB number
+	MOV	SNDLEN,ORPEND		; Get ORP length
+
+	MOV	#SNDPRV,R0		; R0->Save priv mask location
+	MOV	#PRVMSK,R2		; R2->Sender's priv mask
+20$:	CMPB	SNDSUB,#377		; Did they do a send without privs?
+	BNE	21$			; No.  Go save priv mask
+	CLR	(R0)			; Yes.  Zero the priv mask
+21$:	MOV	(R0)+,(R2)+		; Save it
+	CMP	R0,#SNDPRM		; Looking at the parameter field?
+	BLO	20$			; No.  Do another word
+	MOVB	(R0)+,OMSCMD		; Yes. Save the command value for later
+	INC	R0			; Nothing in this byte
+	MOV	#REQRTN,R2		; R2->Record's return recvr name loc.
+30$:	MOV	(R0)+,(R2)+		; Save request's Receiver Id.
+	CMP	R0,#SNDCTX		; Are we done?
+	BLOS	30$			; Nope, 
+.ASSUME	REQCTX	EQ <REQRTN + 6>		; Check alignment
+
+	CLR	R0
+	BISB	OMSCMD,R0		; R0 = Command code
+	CMP	R0,#OC.BAD		; Command code value to large?
+	BHIS	100$			; Yes, so error and exit
+	ASL	R0			; R0 = offset into VALFLD and REQFLD
+	MOV	REQFLD(R0),REQUIR	; Get required fields for this command
+	MOV	#ORPBUF,R1		; R1 -> the start of request packet
+	ADD	R1,ORPEND		; Calculate ending address
+
+40$:	CMP	R1,ORPEND		; Are we still in the packet space
+	BEQ	60$			; No, so we're done with the ORP
+	BHI	120$			; or, field extended beyond end of ORP
+	BIT	#1,R1			; Are we at a word boundary?
+	BEQ	50$			; Yes, look at the field
+	INC	R1			; Point to next byte of ORP
+	BR	40$			; Make sure we're still in the buffer
+
+50$:	MOVB	(R1),CFMCOD		; Save field code in case of error
+	MOVB	(R1)+,R2		; Save field code byte value in R2
+	BEQ	40$			; Fill char, on to next byte
+	CMP	R2,#OC$BAD		; Field code value to large?
+	BHIS	110$			; Yes, so error and exit
+	ASL	R2			; Offset for BITWRD and FLDSUB
+	BIT	BITWRD(R2),VALFLD(R0)	; Valid field for specified command?
+	BEQ	100$			; No, so error and exit
+	BIC	BITWRD(R2),REQUIR	; Field specified is no longer required
+	CALL	@FLDSUB(R2)		; Go to field processing routine
+	TST	CFMERR			; Any errors yet?
+	BEQ	40$			; No, do the next field
+	BR	200$			; Yes, get out
+
+
+60$:	TST	REQUIR			; All required fields specified?
+	BEQ	150$			; Yes, so on to post packet processing
+	MOV	#NEDERR,CFMERR		; No, ?Not enough data for command
+	BR	200$			; Common exit
+
+100$:	MOV	#FUNERR,CFMERR		; ?Arguments don't match
+	BR	200$			; Common exit
+
+110$:	MOV	#SUBERR,CFMERR		; ?Illegal field code error
+	BR	200$			; Common exit
+
+120$:	MOV	#FIELDE,CFMERR		; ?Field extended past end of packet
+	BR	200$			; Common exit
+
+150$:	CALL	@PSTPKT(R0)		; Post processing routine for command
+	
+200$:	RETURN				; Back to caller
+
+	.DSABL LSB
+
+
+.SBTTL	ORPTXT	- PROCESS TEXT PARAMETER (OPTEXT = Field code 1)
+
+	.ENABL	LSB
+
+ORPTXT:	CLR	R3			; Set up for byte move
+	BISB	(R1)+,R3		; Get field length
+	BEQ	30$			; Zero.  Get out now
+	MOV	REQLEN,R4		; Get previous request length
+	ADD	R3,R4			; R4 = Text length after this field
+	CMP	R4,#REQSIZ		; Will text string be to long?
+	BHI	20$			; Yes, so error before return
+	MOV	R4,REQLEN		; No, save new length in request record
+	SUB	R3,R4			; R4 = correct offset
+	ADD	#REQTXT,R4		; R4-> next load address
+
+10$:	MOVB	(R1)+,(R4)+		; Copy text out of field into string
+	SOB	R3,10$			; Subtract 1 from the length count
+	BR	30$			; exit
+
+20$:	MOV	#LINERR,CFMERR		; ?No room for data in text field
+
+30$:	RETURN				; R1 points to next field code
+
+	.DSABL	LSB
+
+
+.SBTTL	ORPSEQ	- PROCESS REQUEST ID PARAMETER (ORPSEQ Field code = 2)
+
+	.ENABL	LSB
+
+ORPSEQ:	MOV	#BDNERR,CFMERR		; Assume error
+	CMPB	(R1),#STSMSK		; Is status value too large?
+	BHIS	20$			; Yes!  That's an error
+	BITB	(R1),#STSMSK		; Any status bits set?
+	BEQ	20$			; Nope!  That's an error.
+	MOVB	(R1),REQSTS		; Save the status type
+10$:	ASRB	(R1)			; Was LSB bit set? (Shift into carry)
+	BCC	10$			; No, do it till we find one
+	BNE	20$			; Yes, More than one bit set, so error
+	INC	R1			; R1-> sequence number	
+	CMP	(R1),#REQMAX		; Is it greater than maximum id?
+	BHI	20$			; Yes, so error
+	CLR	CFMERR			; Set no error
+	MOV	(R1)+,REQNUM		; No, save the sequence(id) number
+20$:	RETURN				; go back to calling routine
+
+	.DSABL	LSB
+
+
+.SBTTL	ORPREP	- PROCESS /REPLY FIELD (ORPREP Field code = 3)
+
+	.ENABL	LSB
+
+ORPREP:	MOVB	#ML.MSG,REQTYP		; Request record type key=message
+	TSTB	(R1)+			; Is it 0 (/NOREPLY)?
+	BEQ	10$			; Yes, so we're done
+	MOV	#NOTOPN,CFMERR		; Set ?I/O channel not open
+	TST	STPING			; Is there a stop in progress?
+	BNE	10$			; Yes, so exit
+	INCB	REQTYP			; No, so request record type key=request
+	CLR	CFMERR			; finish-up
+
+10$:	RETURN
+
+	.DSABL	LSB
+
+
+.SBTTL	ORPFAC	- PROCESS /FACILITY PARAMETER (OPFCLY = 4)
+
+	.ENABL	LSB
+
+ORPFAC:	MOV	#REQFAC,R4		; R4-> address of saved facility name
+	CLR	R3			; Prepare to move in a byte
+	BISB	(R1)+,R3		; Is the length of facility name zero?
+	BEQ	15$			; Yes, go clear it out
+	CMP	R3,#FACLEN		; Is facility name too long?
+	BLOS	10$			; No, so load it up
+	MOV	#LINERR,CFMERR		; Yes, ?No room for data in text field
+	BR	30$			; Exit
+
+10$:	MOVB	(R1)+,(R4)+		; Save facility name a byte at a time
+	SOB	R3,10$			; Subtract 1 from the length count
+
+15$:	MOV	#<REQFAC+FACLEN>,R3	; Point to end of facility field
+	SUB	R4,R3			; See how much was unused
+	BEQ	30$			; All was used, get out now
+
+20$:	CLRB	(R4)+			; Clear out a byte
+	SOB	R3,20$			; Do the rest of the field
+
+30$:	RETURN				; R1 points to next field code
+
+	.DSABL	LSB
+
+
+.SBTTL	ORPLVL	- PROCESS REQUEST LEVEL PARAMETER OR /KEEP (ORPLVL Field code=5)
+
+	.ENABL	LSB
+
+ORPLVL:	INC	R1			; Skip past reserved byte
+	MOV	(R1),SETSTS		; Save set status flag bits
+.ASSUME CLRSTS EQ <SETSTS+1>		; Check alignment
+	BIT	#^C<<ML.ALL*400>+ML.ALL>,(R1)+	; Any bits set that aren't allowed?
+	BEQ	10$			; No.  Exit
+	MOV	#BDNERR,CFMERR		; Not 0, 1, 2 or 3 so load error
+10$:	RETURN
+
+	.DSABL	LSB
+
+
+.SBTTL	ORPABO	- PROCESS /ABORT (ORPABO Field code = 6)
+
+	.ENABL	LSB
+
+ORPABO:	CLR	STPFLG			; /NOABORT flag value is zero
+	TSTB	(R1)+			; Is it /NOABORT (flag=0)?
+	BEQ	20$			; Yes, so we're done
+	COM	STPFLG			; No, so /ABORT flag value is -1
+
+20$:	RETURN
+
+	.DSABL	LSB
+
+
+.SBTTL	NOPCMD	- Post packet processing for the NOP command
+
+NOPCMD:	RETURN				; No post processing required for nop
+
+
+.SBTTL	REQCMD	- Post packet processing for the REQUEST command
+
+	.ENABL	LSB
+
+REQCMD:	CMPB	REQTYP,#ML.REQ		; Is this a REQUEST/REPLY command?
+	BNE	40$			; No, so on to the next check
+
+	MOV	#DELTA,-(SP)		; Build parameter block on stack
+	MOV	#INVFLG,-(SP)		; Delta time, invert flag,
+	CLR	INVFLG			; FALSE = invert
+	MOV	#DESCRP,-(SP)		; and string descriptor
+	MOV	#REQACT,DESCRP		; Point descriptor to right place
+	MOV	#3,-(SP)		; Passing three parameters
+	MOV	SP,R5			; Point to them with R5
+	CALLX	GETDAT			; Load the date and time of the request
+	ADD	#10,SP			; POP junk off the stack
+
+	MOVB	#STSPEN,REQSTS		; A new request must be pending
+	MOVB	#STAREM,REQREM		; Load first reminder index value
+	TSTB	REQRTN			; Did they specify a confirm receiver?
+	BNE	50$			; Yes, so on to the next check
+	MOV	#FMTERR,CFMERR		; ?Data format error
+	BR	60$			; All done
+
+40$:	MOVB	#ML.MSG,REQTYP		; Request type is message
+50$:	MOV	REQNUM,CFMCOD		; Load sequence number for confirmation
+	CALL	FACCHK			; Check out the facility name
+	BCS	60$			; Oops got an error in facility check
+	CALL	ASNSEQ			; Get a new sequence number
+60$:	RETURN				; Back to caller
+
+	.DSABL	LSB
+
+
+.SBTTL	STPCMD	- Post packet processing for the STOP OPERATOR_SERVICES command
+
+STPCMD:	TSTPRV	SWCTL,PRVMSK		; Does requester have swctl priv?
+	BEQ	NOPRIV			; No.
+	CALL	FACCHK			; Check out any facility name
+	BCS	10$			; Error, so quit
+	MOV	STPFLG,STPOMS		; Set STOP.OMS variable for BP2
+	MOV	#177777,STPING		; Set flag to disable request/reply
+10$:	RETURN				; All done
+
+
+.SBTTL	REPCMD	- Post packet processing for the REPLY command
+
+REPCMD:	MOVB	#<ML.REP!ML.REQ>,REQTYP	; Set type = reply for a REPLY cmd
+	MOV	#<SLOT+2>,R4		; R4-> first entry of slot table
+	MOV	#PNDMAX,R3		; R3-> highest slot number available
+5$:	CMP	(R4)+,REQNUM		; Does this slot's seq# equal request#?
+	BEQ	10$			; Yes, now we can continue
+	SOB	R3,5$			; No, look at all slots in use
+	MOV	#NOSUCH,CFMERR		; Request is not pending
+	BR	20$			; All done
+
+10$:	SUB	#SLOT+2,R4		; R4 = Slot # * 2
+	ASR	R4			;             * 1
+	MOV	R4,SLTNUM		; Return slot # of request
+	MOV	#<RECSIZ/2>,R0		; R0 -> # of words in a request record
+	MOV	#OMSREQ,R1		; R1 -> first word of request record
+	MOV	#OMSREP,R4		; R4 -> First word of reply record
+15$:	MOV	(R1)+,(R4)+		; Copy a word from here to there
+	SOB	R0,15$			; Do the whole request/reply record
+	TSTPRV	OPER,PRVMSK		; Does replier have oper priv?
+	BEQ	NOPRIV			; No.
+20$:	RETURN				; Yes.  All done
+
+
+.SBTTL	OPRCMD	- Post packet processing for the SET OPERATOR_SERVICES command
+
+OPRCMD:	TSTPRV	SWCFG,PRVMSK		; Does requester have swcfg priv?
+	BEQ	NOPRIV			; No.
+	BISB	SETSTS,OMSSTS		; Yes, Set keep level bits
+	BICB	CLRSTS,OMSSTS		; Clear Nokeep level bits
+	MOV	#INVFLG,-(SP)		; Build parameter block on stack
+	MOV	SP,INVFLG		; <> 0 = Normal format
+	MOV	#DESCRP,-(SP)		; Invert flag and string descriptor
+	MOV	#OMSACT,DESCRP		; Point descriptor to right place
+	MOV	#2,-(SP)		; Passing two parameters
+	MOV	SP,R5			; Point to them with R5
+	CALLX	GETDAT			; Set date and time OMS last modified
+	ADD	#6,SP			; POP junk off the stack
+	RETURN				; Exit
+
+
+.SBTTL	NOPRIV	- Return ?Protection violation error
+
+NOPRIV:	MOVB	#PRVIOL,CFMERR
+	RETURN
+
+
+.SBTTL	FACCHK	- Check for valid facility name
+
+FACCHK:	MOV	#<REQFAC+FACLEN>,R4	; R4-> address + length of facility
+	MOV	#FACLEN,R3		; R3-> Length of facility name field
+20$:	TSTB	-(R4)			; Is this byte of facility name null?
+	BNE	35$			; No, Facility name is not all nulls
+	MOVB	#40,(R4)		; Yes, so make byte a space
+	SOB	R3,20$			; Check out entire field
+	MOV	#"US,(R4)+		; First 2 bytes of facility are "US"
+	MOV	#"ER,(R4)		; Last 2 bytes of facility are "ER"
+	BR	70$			; Changed facility name from null to
+					;  USER, so we can go back now
+	; Check for legal facility name
+30$:	DEC	R4			; Next byte to be check
+35$:	CMPB	(R4),#'9		; Character's ASCII value higher than 9?
+	BHI	40$			; Yes, so let's go make it upper case
+	CMPB	(R4),#'0		; Character's ASCII value lower than 0?
+	BLO	60$			; Yes, Illegal character error
+	SOB	R3,30$			; No, so check out the next byte
+	BR	50$			; All alpha numeric, check privileges
+
+40$:	BICB	#240,(R4)		; Clear 8th bit and make upper case
+	CMPB	(R4),#'Z		; Character's ASCII value higher than Z?
+	BHI	60$			; Yes, Illegal character error
+	CMPB	(R4),#'A		; Character's ASCII value lower than A?
+	BLO	60$			; Yes, Illegal character error
+	SOB	R3,30$			; No, so check out the next byte
+
+50$:	TSTPRV	SEND,PRVMSK		; Does deleter have SEND priv?
+	BNE	70$			; Yes.  Everthing's okay
+	MOV	#OC$FAC,CFMCOD		; Facility field caused the error
+	SEC				; Ensure C-bit is set
+	BR	NOPRIV			; Set PRVIOL error and return
+
+60$:	MOV	#BADNAM,CFMERR		; ?Bad name error
+	MOV	#OC$FAC,CFMCOD		; Facility field caused the error
+	BR	80$			; Signal error and return
+
+70$:	TST	(PC)+			; Facility name is OK
+80$:	SEC				; Facility name is invalid
+	RETURN				; Back to caller
+
+ASNSEQ::
+	CMP	OMSNUM,#REQMAX		; At maximum request number?
+	BLO	10$			; No, don't start over
+	CLR	OMSNUM			; Yes, start counting all over again
+10$:	INC	OMSNUM			; Bump sequence count by one
+	MOV	#<SLOT+2>,R4		; R4-> first entry of slot table
+	MOV	#PNDMAX,R3		; R3-> highest slot number available
+20$:	CMP	(R4),OMSNUM		; Does this slot's seq# equal request#?
+	BEQ	ASNSEQ			; Yes, go try another sequence number
+	CMPB	REQTYP,#ML.REQ		; No.  Is this a REQUEST/REPLY record?
+	BNE	30$			; No.
+	TST	(R4)+			; Yes.  Is this slot in use?
+	BNE	30$			; Yes.
+	TST	SLTNUM			; No.  Already found empty slot?
+	BNE	30$			; Yes.
+	MOV	R4,R2			; No.  Copy pointer to slot + 2
+	SUB	#SLOT+2,R2		; R2 = Slot # * 2
+	ASR	R2			;             * 1
+	MOV	R2,SLTNUM		; Return slot number for request
+30$:	SOB	R3,20$			; No, look at all slots in use
+	CMPB	REQTYP,#ML.REQ		; Is this a REQUEST/REPLY record?
+	BNE	40$			; No.  On with the show.
+	TST	SLTNUM			; Did we find an available slot?
+	BNE	40$			; Yes, everything's fine.
+	MOV	#NOROOM,CFMERR		; Uh oh!  All 255 slots are in use!?
+	BR	50$			; So quit now
+
+40$:	MOV	OMSNUM,REQNUM		; Load next sequence number
+	MOV	#OMSINT,-(SP)		; Pointer to output buffer
+	MOV	#INVFLG,-(SP)		; Pointer to slot number
+	CLR	INVFLG			; Slot number is zero (header)
+	MOV	#2,-(SP)		; Passing two parameters
+	MOV	SP,R5			; Point to them with R5
+	CALLX	PUTSYS			; Update the header
+	ADD	#6,SP			; POP junk off the stack
+50$:	RETURN				; Back to caller
+	
+	.END

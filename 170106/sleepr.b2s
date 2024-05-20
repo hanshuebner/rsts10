@@ -1,0 +1,217 @@
+1	SUB SLEEPR
+	!		PROGRAM		: OMS.TSK			 &
+	!		PACKAGE		: OMS				 &
+	!		MODULE		: SLEEPR.B2S			 &
+	!		VERSION		: V10.1
+	!		EDIT		: A
+	!		EDIT DATE	: 10-MAY-91
+	!		START DATE	: 25-SEP-89			 &
+	!****************************************************************& 
+	!								 & 
+	!		  C O P Y R I G H T				 & 
+	!								 & 
+	!								 & 
+	!		      Copyright (C) 1983, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.		 & 
+	!								 & 
+	!								 & 
+	! This software is furnished under a license and may be used and & 
+	! copied  only  in accordance with the terms of such license and & 
+	! with the  inclusion  of  the  above  copyright  notice.   This & 
+	! software  or  any  other copies thereof may not be provided or & 
+	! otherwise made available to any other person.  No title to and & 
+	! ownership of the software is hereby transferred.		 & 
+	!								 & 
+	! The information in this software is subject to change  without & 
+	! notice  and should not be construed as a commitment by Digital & 
+	! Equipment Corporation.					 & 
+	!								 & 
+	! DIGITAL assumes no responsibility for the use  or  reliability & 
+	! of its software on equipment that is not supplied by DIGITAL.	 & 
+	!								 & 
+	!****************************************************************&
+
+
+	OPTION TYPE = EXPLICIT
+
+	%INCLUDE "SYSTEM:CMNDEF.B2S"
+	%INCLUDE "SYSTEM:OMSCMN.B2S"
+
+	MAP (SLPWRK)				&
+		STRING	CURRENT.TIME = 6%
+
+	MAP (SLPWRK)				&
+		WORD	CURR.DATE,		&
+		WORD	CURR.TIME,		&
+		BYTE	CURR.SEC
+
+	DECLARE	WORD			! &
+					! &
+		RETRY,			! Retry count for reminder processing &
+		I,			! Loop index counter &
+		PM.CNT,			! OMS receiver's pending message count &
+		SLP.TIME,		! Sleep time value &
+		SEC2MID			! No action keys found flag
+
+
+ SLEEPR_START:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("SLEEPR Entered",1%)			!  Tell'em they're here
+    %END %IF
+
+	CALL GETDAT BY REF			! Get current date/time	      &
+		(CURRENT.TIME BY DESC, TRUE)	! Normal RSTS format
+	SEC2MID =CURR.SEC + 60% *(CURR.TIME -1%)! Number of seconds til midnight
+	SEC2MID = MAXINT IF (SEC2MID < 0%)	! Set to maximum if too large
+	SLP.TIME = 0%				! Default sleep time
+	IF (CURR.DATE <> STAMP.DATE)		! If the date changed 
+	THEN					! Then
+	   GOSUB TIME_STAMP 			!  Do time stamp processing
+	ELSE					! ELSE (date didn't change)
+	  CALL GETDAT BY REF			!  Get current date/time      &
+		(CURRENT.TIME BY DESC, FALSE)	!    (Key format)
+	  IF (CURRENT.TIME >= EVENT.TIME)	!  If timer has expired	      &
+	  OR UPD.ACT				!  or we need to update timer
+	  THEN					!  THEN
+	    GOSUB EVENT_TIME			!   Do reminder time processing
+	  ELSE					!  ELSE
+	    GOSUB SLEEP_TIME			!    Calculate time to sleep
+	  END IF				!  End (timer processing)
+	END IF					! End (date change check)
+
+
+ SLEEP_LOC:
+
+	SLEEP (SLP.TIME OR (BITVAL(15%) AND SLP.TIME <> 0%))	! Zzzzz...
+	GOTO SLEEPR_END				! All done in here
+
+15000	! Subroutines
+
+ TIME_STAMP:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("Time stamp processing",0%)	!  Tell'em they're here
+    %END %IF
+
+	STAMP.DATE = CURR.DATE			! Load stamp date
+	GOTO TIME_STAMP_END UNLESS KEEP.MSG	! Done if messages aren't kept
+
+	OMSREQ = OMSINT				! Load default OMS string
+	CALL GETDAT BY REF			! Get current date and time &
+		(REQ.DTM BY DESC, TRUE)		!  RSTS normal format
+	REQ.TYP = ML.MSG			! Record type is message
+	REQ.STS = 0%				! Status is undefined
+	REQ.FLG = FLG.BEL			! Ring a bell
+	REQ.TXT = LEFT$(OMS.TXT, OMS.LEN) + " time stamp"
+	REQ.LEN = LEN(TRM$(REQ.TXT))		! Gotta save the text length
+	CALL ASNSEQ BY REF			! Assign the next sequence #
+	CALL PUTREQ BY REF (OMSREQ)		! Store it in the log file
+
+ TIME_STAMP_END:
+
+	RETURN
+
+ SLEEP_TIME:
+    %IF %DEBUG %THEN
+	JUNK = DBG("Making sleep calculations",0%)	!  Tell'em they're here
+    %END %IF
+
+	IF (EVENT.DAT = MAXINT)			! Anything to wait for?
+	THEN
+    %IF %DEBUG %THEN
+	   JUNK = DBG("No event time to wait for",0%)
+    %END %IF
+	   SLP.TIME = SEC2MID			! No, sleep 'til midnight
+	   RETURN				!   Don't stick around
+	END IF
+
+	! Amount of time to sleep is:
+	!
+	!  Seconds to next minute, + 
+	!  60 * (mins to midnight - expired timer {in mins to midnight})
+	!  OR maximum amount (If date differs or amount too large)
+	!  OR seconds to midnight (If calculated sleep time goes past midnight)
+
+	CALL GETDAT BY REF			! Get current date and time &
+		(CURRENT.TIME BY DESC, TRUE)	!  RSTS normal format
+	SLP.TIME = CURR.SEC			! Sleep time =secs to next min &
+	   + 60% * ((CURR.TIME -1%)		! + 60 * (mins to midnight &
+	   - (1440% - SWAP%(EVENT.TIM)))	! - expired timer) &
+	  OR (CURR.DATE <> SWAP%(EVENT.DAT))	!  Or max amount if date differs
+	SLP.TIME = MAXINT IF (SLP.TIME < 0%)	! Sleep time= max if too large
+	SLP.TIME = SEC2MID			! Sleep time= secs to midnight &
+		IF (SEC2MID < SLP.TIME)		!  If sleep time past midnight
+    %IF %DEBUG %THEN
+	   JUNK = DBG("Sleeping for"+NUM$(SLP.TIME)+"seconds",0%)
+    %END %IF
+	RETURN					! Back to caller
+
+ EVENT_TIME:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("Reminder time processing",0%)	!  Tell'em they're here
+    %END %IF
+
+	EVENT.DAT = MAXINT			! Search for lowest event date
+	EVENT.TIM = MAXINT			! Search for lowest event time
+
+	FOR SLOT.NUM = 1% TO PND.MAX		! Check each pending request
+
+	  IF PNDREQ(SLOT.NUM)			! Is this one pending?
+	  THEN
+	    CALL GETSYS BY REF (SLOT.NUM,OMSREQ)! Yes, look up request record
+
+	    IF (CURRENT.TIME >= REQ.ACT)	!   Has its timer expired?
+	    THEN
+	      GOSUB SEND_REMINDER		!   Yes, send reminder
+	    END IF
+
+	    IF (REQ.ACT < EVENT.TIME)		!   Is action time earlier?
+	    THEN
+	      EVENT.TIME = REQ.ACT		!   Yes, use it
+	    END IF
+	  END IF
+
+	NEXT SLOT.NUM				! On to next request slot
+	UPD.ACT = FALSE				! Event time is now correct
+	RETURN					! All done
+
+
+ SEND_REMINDER:
+
+	CFM.ERR = 0%				! No errors for reminders
+	CFM.FLD = REQ.NUM			! Load confirmation sequence #
+	REP.LEN = 0%				! No reply text
+	REP.STS = REQ.STS			! Status is still pending
+	REP.JOB = 0%				! Signal reminder message
+	REP.PPN = 0%				! [p,pn] isn't used
+	CALL BRDCST				! Broadcast to operators
+						! Sets up REP.KB
+
+	OMS.CMD = OC.NOP			! Zonk last command executed
+	CALL SNDCFM				! Send the reminder message
+	IF (REQ.NUM <> 0%)			! Is request still active?
+	THEN
+	  IF (REQ.REM > 1%)			! Yes, reminder index at min?
+	  THEN
+	    REQ.REM = (REQ.REM - 1%)		!   No, adjust reminder index
+	  END IF
+	  CALL GETDAT BY REF			!   Set next reminder time &
+		(REQ.ACT BY DESC, FALSE,	!     Key format, &
+			REM.MAX / REQ.REM)	!     Delta time
+	  CALL PUTSYS BY REF(SLOT.NUM, OMSREQ)	!   Update work file entry
+	ELSE
+	  EVENT.TIM, EVENT.DAT = MAXINT		! No, so zonk the action time
+	END IF
+
+	RETURN					! Back to caller
+
+
+ SLEEPR_END:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("SLEEPR Exit",-1%)			!  Tell em we're leaving
+    %END %IF
+
+	SUBEND

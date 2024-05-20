@@ -1,0 +1,587 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+TITLE	MAPSUB,<Mapped monitor subroutines>,0K,04-JUN-92,KPH/WRM/FEK
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR MAPSUB
+
+;+
+;
+;			[RSTS/E V9.4]
+;  000  KPH  12-Jan-87	Creation - I don't know, it must have been the roses...
+;
+;			[RSTS/E V9.6]
+;  001  WRM  08-Jan-88	Complete re-ordering to add APR masked EXTK$ directive
+;
+;			[RSTS/E V10.0]
+;  002  WRM  26-Sep-89	Make MSDS$ work (supervisor D-space overmap)
+;			Fix I-space precedence to match D-space
+;
+;			[RSTS/E V10.1]
+;  003	FEK  21-May-92	Clear old flags from high byte of APRMSK
+;-
+
+	DEFORG	MAPSUB
+
+.SBTTL	Map a user job
+
+;+
+; SETMDE - Set up a job's MDEs
+;
+;	R0 = Job # * 2
+;
+;	CALL	SETMDE
+;
+;	Job's MDEs are set up.
+;
+;	JCMHGH is set to lowest address-1 in run-time system
+;	JCMLOW is set to highest I-space address in low-segment
+;	JCMDLO is set to highest D-space address in low-segment
+;	JCMFLG is set to job's current mapping state
+;
+;-
+
+	JM.SMK = 77400	;supervisor data mask for MSDS$			;002
+
+	TMPORG	GENDSP,14
+	 .WORD	SETMDE
+	UNORG
+
+
+SETMDE:	nop			;
+	REGSCR			;Save all registers
+	MAP	PUSH,APR=6,DATA	;And DPAR6 mapping
+	CALLX	MAPJCR		;Map caller's JCR entry
+	CLR	SWTBLK		;CLEAR D APR PROTECTION MASK IN LOW CORE ;001
+	CLRB	JCAPRM(R1)	;Clear D apr mask in job structure	;001
+	CMPB	JOB,TOS.R0+2(SP)	;are we the "JOB"?
+	BEQ	2$		;yes, we assumed as much
+	BIS	#MWN.NJ,SWTBLK	;no, remember that for later
+2$:	MOV	JOBTBL(R0),R0	;And get pointer to job's JDB
+	ADD	#JDMCTL+M.PHYA,R0 ;Point to job's physical address
+	MOV	R0,-(SP)	;save copy of JDB pointer		;001
+	MOVB	JCISIZ(R1),R5	;Get size of job's I-space area
+	MOV	R1,R2		;Copy JCR pointer
+	ADD	#JCMLOW,R2	;And point to JCMLOW			;001
+	ASH	#11.,R5		;Convert K to high legal Addr+1
+	DEC	R5		; Now, high address+0
+	MOV	R5,(R2)+	;And store as the max address
+	MOV	R5,(R2)+	; In both D and I area
+
+; Note: The assumption that JCMDLO eq JCMLOW+2 is in TBL.MAC
+
+; R0 -> Job's JDB entry @ M.PHYA
+; R1 -> Job's JCR entry
+; R2 -> Job's JCR entry @ JCMFLG
+;									;001+
+; Note: The assumption that JCMFLG eq JCMDLO+2 is in TBL.MAC
+
+10$:	BIC	#<JM.SIS!JM.UDS>,(R2)+	;Initialize mapping flags	;002
+				;but preserve supervisor mapping	;002
+				;also cleared in rundown (SCH)		;002
+				;including  D-apr protection flags
+;****** Zero user I space
+
+; We will now clear out all APRs in user I space.
+
+;	R2 ->JCMDE  (base of USR-I)
+	ADD	#MDSIZE,R2	;skip apr0 we know it will be used
+	MOV	#8.-1,R4	;set word count -1 of USR-I MDE's
+20$:
+	MOV	#ZERO,(R2)+	;No, set an address of zero
+	;use monitors 0 memory m.phya cell def in tbl for consistantance
+.ASSUME	MDADDR	EQ	0
+	CLR	(R2)+		;With an offset of zero
+.ASSUME	MDOFF	EQ	MDADDR+2
+	CLR	(R2)+		;And a description of zero
+.ASSUME	MDDESC	EQ	MDOFF+2
+.ASSUME	MDSIZE	EQ	MDDESC+2
+	SOB	R4,20$		;count APR's while looping..
+
+; D can be skipped because 1st indication of I&D 
+; will cause copy of I over D set.
+
+GLOBAL	<JOBTBL,JCMDE,JCMLOW,ZERO,SWTBLK>
+GLOBAL	<JCMDE,JCMFLG,ZERO,JCMDLO>
+
+
+;**** allocate job space User -I apr's
+25$:	MOV	R1,R2		;Copy JCR pointer
+	ADD	#JCMDE,R2	;And point to JCMLOW
+	MOVB	JCHDRS(R1),R4	;Get job header size
+	ASH	#11.-6,R4	;Convert job header size to slivers
+	MOVB	JCISIZ(R1),R3	;get job I space size in k words
+	MOV	#0,-(SP)	;set to not set D apr protection
+; Note: The assumption that JCMDE eq JCMFLG+2 is in TBL.MAC
+
+.ASSUME	MOUSRI	EQ	0	;Point to user mode I-space MDEs
+	CALL	SETMAP		;Set up the mapping now
+
+; We have set up the MDEs for all of the APRs being used by the job's
+; I-space portion.
+
+; ***** job space user D
+	MOV	R1,R2		;point to top of JCR
+	ADD	#JCMDE+MOUSRD,R2	;point to first D space MDE
+
+; The I-space APRs mapping the user job image have been set up. We will now
+; map the data space part of the user's job image, if any.
+;
+;	R0 -> JDB @ JDMCTL+M.PHYA
+;	R1 -> Job's JCR entry
+;	R2 -> JCR @ start of D-space MDEs
+;	R4 =  Offset within job's address space of D-space
+;	R5 =  Value to load into description register for 4K, R/W
+;		R4,R5 left setup by SETMAP during I pass
+
+;	Note:	if non /ID any task expansion must include I space w/ D
+
+30$:	MOVB	JCDSIZ(R1),R3 	;Get size of job's D-space
+	BEQ	35$		;Job isn't using I&D space
+	BIS	#JM.UDS,JCMFLG(R1) ;D-space on, ergo turn on I&D
+	CALL	I2DCPY		;first D use possible, must copy
+	MOV	#1,(SP)		;Set to protect from D apr0 up
+	MOV	R3,R5		;Copy size of D-space area
+	ASH	#11.,R5		;And convert into size in bytes
+	DEC	R5		;Now get highest mapped address in D-space
+	MOV	R5,JCMDLO(R1)	;And set it in the JCR
+.ASSUME	MOUSRD	EQ	<MOUSRI+<8.*MDSIZE>> ;Point to D-space MDEs
+	CALL	SETMAP		;Set up the mapping
+
+; We have now set up the MDEs which are used by the job's D-space portion.
+; We have mapped the user job image (both I&D space).
+									;002+
+; We will now look
+; at resident libraries being used by the job.
+; Note that if job /ID but using overmapped I&D lib, D will be picked
+; 	up in MAPWN2 processing unless protected D from EXTM$
+
+; ****** map Libraries w/ UIS set	(if I&D also implied UD)
+;	R0 -> JDB @ JDMCTL+M.PHYA
+;	R1 -> Job's JCR entry
+
+35$:	MOV	R0,R3		;Save copy of ->JDB
+	MOVB	JDJBNO-<JDMCTL+M.PHYA>(R0),R0 ;And get job number
+	MOV	@DPAR6,R2	;Get mapping for job's JCR entry
+	CALLX	WINSUB,R5	;Check for each window
+	 BR	1100$		;Using the routine below
+	BR	40$		;don't undo this,can't be a JMP 110$ due to
+				;return incremented by 2 for exit switch
+1100$:	JMP	110$		;now JMP ok
+
+; We have now mapped all the User-I space resident libraries 
+; being used by the job.						;002-
+
+; ****** map Libraries w/ UDS set	(if I&D also implied UD)
+
+40$:	TST	(SP)+		;Remove set protection flag from stack	;002
+	MOV	(SP)+,R0	;Retrive Copy of JDB pointer		;002
+	MOV	R0,R3		;Copy pointer to JDB @ JDMCTL+M.PHYA
+	MOVB	JDJBNO-<JDMCTL+M.PHYA>(R0),R0 ;And get job number
+	MOV	@DPAR6,R2	;Get mapping for job's JCR entry
+	CALLX	WINSUB,R5	;Check for each window
+	 BR	112$		;Using the routine below
+
+
+; ****** map Libraries w/ SIS set (supr) (SI and copy UD->SD of affected)
+
+	MOVB	JDJBNO-<JDMCTL+M.PHYA>(R3),R0 ;And get job number
+	CALLX	WINSUB,R5	;Check for each window
+	 BR	114$		;Using the routine below
+	MOV	R3,R0		;Copy pointer to JDB @ JDMCTL+M.PHYA
+;
+; ***** RTS set up
+
+;	R1 -> Job's JCR entry
+;	R0 -> JDB @ JDMCTL+M.PHYA
+;
+; Job's JCR entry is mapped
+	TSTB	<1+JCMFLG>(R1)	;is super turned on or MSDS mask set?	;002
+	BEQ	50$		;no - that's fine			;002
+	BMI	50$		;yes but is super on (that's ok)	;002
+	BIC	#JM.SMK,JCMFLG(R1) ;no not on, so remove MSDS mask	;002	
+50$:	MOV	JDRTS-<JDMCTL+M.PHYA>(R0),R0 ;Get pointer to RTS block	;002
+	MOVB	R.KSIZ(R0),R3	;Get K size of the RTS
+	MOV	R3,R5		;Replicate the K size and
+	ASH	#11.,R5		;  form the lowest legal
+	NEG	R5		;   address
+	MOV	R5,JCMHGH(R1)	;    of RTS
+	BEQ	90$		;Whoops, it's the null RTS...
+	MOV	R3,R4		;Copy size of RTS
+	ASH	#11.-6,R4	;And make it into MMU slivers
+	MOV	(PC)+,R5	;Get: 4K and R-O
+	 .BYTE	2,128.-1	; ...
+	BIT	#PF.RW,R.FLAG(R0) ;Really read/write?
+	BEQ	60$		;Nope, leave it R-O
+	MOV	(PC)+,R5	;Yep, get: 4K and R/w
+	 .BYTE	4+2,128.-1	; ...
+60$:	ADD	#R.MCTL+M.PHYA,R0 ;Point to RTS @ physical address
+	MOV	R1,R2		;Copy pointer to JCR entry
+	ADD	#JCMDE+MOUSRI+<8.*MDSIZE>,R2 ;And point to end of I-space MDEs
+
+; Set up the MDEs for the job's run-time system
+;
+; R0 -> RTS block @ Physical address
+; R1 -> Job's JCR entry
+; R2 -> JCR just past the MDE for User I-space APR 7
+; R3 =  Size of RTS in K-words
+; R4 =  Size of RTS in MMU slivers
+; R5 =  Description register contents (4K, {RO | R/W})
+
+70$:	MOV	R5,-(R2)	;Load description of this APR
+.ASSUME	MDDESC	EQ	<MDSIZE-2>
+	SUB	#200,R4		;Back up offset by 4K words
+	MOV	R4,-(R2)	;And load the offset in the MDE
+.ASSUME	MDOFF	EQ	<MDDESC-2>
+	MOV	R0,-(R2)	;Now load the base address pointer
+.ASSUME	MDADDR	EQ	<MDOFF-2>
+	BIT	#JM.UDS,JCMFLG(R1)	;Using I&D space?
+	BEQ	80$		;No, not this time
+	MOV	R0,MDADDR+<MOUSRD-MOUSRI>(R2) ;Yes, load base address pointer
+	MOV	R4,MDOFF+<MOUSRD-MOUSRI>(R2) ;And offset value
+	MOV	R5,MDDESC+<MOUSRD-MOUSRI>(R2) ;And description register
+80$:	SUB	#4,R3		;Done?
+	BGT	70$		;No, more to do
+	BEQ	100$		;Yes, exactly a 4K multiple
+	ADD	#4,R3		;Yes, correction needed, get size in K again
+	ASH	#<11.-6>+8.,R3	;Now get in slivers in high byte
+	SUB	R3,R5		;Now update slivers in description register
+	ADD	(PC)+,R5	;And update:
+	 .BYTE	10,1		; expansion direction, length
+	MOV	R5,MDDESC(R2)	;And move it into the MDE
+	BIT	#JM.UDS,JCMFLG(R1)	;Need to fix data space?
+	BEQ	100$		;No, not this time
+	MOV	R5,MDDESC+<MOUSRD-MOUSRI>(R2) ;Yes, so fix it
+	BR	100$		;and continue
+
+90$:	DEC	JCMHGH(R1)	;Set max high to -1 for null RTS
+100$:
+
+; ****** clean up and exit
+	
+	MOVB	SWTBLK,JCAPRM(R1) ;copy D-apr protection mask from low core
+	CALL	I2DCPY		;copy I over D except where protected
+	BIT	#MWN.NJ,SWTBLK	;are we the running JOB?
+	BNE	105$		;no,leave APRMSK to him
+	CLR	APRMSK		;Clear out any old flags		;003
+	MOVB	SWTBLK,APRMSK	;yes, it's ours so update		;003
+105$:	MAP	POP,APR=6,DATA	;Restore DPAR6 mapping
+	MAP	@#KISAR5,APR=5,DATA ;And DPAR5 mapping
+	RETURN			;We're done
+
+GLOBAL	<JCMDE,DPAR6,JCMFLG,JCMHGH,APRMSK>
+
+
+; This subroutine is called to map each window this job has.
+;
+; R0 -> WDB @ description of job
+; R1 -> Job's JCR entry
+; R2 =  MMU value to map job's JCR entry
+; R3 -> JDB @ JDMCTL+M.PHYA
+;
+; FIP pool is mapped. This routine is mapped into I-space only.
+;
+; This routine must preserve R0, R1, R2, R3, and R5. R4 is scratch.
+
+110$:
+	BIT	#WS$UIS,(R0)	;This time set up user-I space
+	BNE	120$		;yes I continue
+	RETURN			;Not I space, try again
+
+112$:	BIT	#WS$UDS,(R0)	;this time test Data space
+	BEQ	125$		;No, not this time
+	BIT	#WS$UIS,(R0)	;yes, but data only
+	BEQ	120$		;yes, do for data space only
+	RETURN			;no, look to next window
+
+114$:	BIT	#WS$SIS,(R0)	;this time test Supermode
+	BEQ	125$		;no,return for last time
+120$:	TST	(R0)		;Any mapped window here?
+.ASSUME	WS$MAP	EQ	100000					
+	BMI	MAPWN2		;Yes, go enter in the MDE
+125$:	RETURN			;No, 
+;									;001-
+
+
+.SBTTL	Mapping subroutines
+
+;+
+; SETMAP - Set up mapping for a contiguous section
+;
+;	R0 -> Base address to set up mapping for
+;	R1 -> JCR region
+;	R2 -> MDE entries to initialize
+;	R3 =  Size to map, in K-words
+;	R4 =  Offset from base address
+;
+;	SP->	return address
+;	2(SP)->	protection mask set value for D-apr
+;
+;	CALL	SETMAP
+;
+;	R1->  JCR region
+;	R2 -> Just past last MDE entry used
+;	R3 =  Undefined
+;	R4 =  Offset just past entity mapped
+;	R5 =  Undefined
+;	SP->	protection  mask value 
+;-
+
+SETMAP:	MOV	(PC)+,R5	;Get value for description register
+	 .BYTE	4+2,128.-1	; which is 4K, R/W
+10$:	MOV	R0,(R2)+	;Set the pointer to base address
+.ASSUME	MDADDR	EQ	0
+	MOV	R4,(R2)+	;Set the offset from the base
+.ASSUME	MDOFF	EQ	MDADDR+2
+	MOV	R5,(R2)+	;And set the description
+.ASSUME	MDDESC	EQ	MDOFF+2
+.ASSUME	MDSIZE	EQ	MDDESC+2
+	BISB	2(SP),SWTBLK	;set protection APR code to input value
+	ASL	2(SP)		;advance protection code to next APR
+	ADD	#200,R4		;Update the offset for the 4K words
+	SUB	#4,R3		;Mapped all of I-space yet?
+	BGT	10$		;No, more do to
+	BEQ	20$		;Yes, exactly a 4K multiple
+	ASH	#11.-6,R3	;No, get number of slivers to un-map
+	ADD	R3,R4		;Get the offset to the beginning of D-space
+	ASH	#10,R3		;Get offset in the high byte
+	ADD	R3,MDDESC-MDSIZE(R2) ;And update the description
+20$:	RETURN			;And we're done
+
+;+
+; MAPWIN - Update MDEs for an address window and re-map the job
+; MAPWN2 - Update MDEs for an address window
+;
+;  Calling job is JOB for MAPWIN
+;
+;	R0 -> WDB @ W$NAPR
+;	R1 -> Job's JCR entry
+;	R2 =  MMU value to map job's JCR entry
+;	R3 -> JDB @ JDMCTL+M.PHYA
+;
+;	CALL	MAPWIN		(Used for .PLAS directive)
+;	CALL	MAPWN2
+;
+;	R4 =  Undefined
+;
+; All other registers are preserved.
+;
+; This routine is used to set up the MDEs to describe resident libraries.
+; If a job is using a resident library, it will be set up to use I&D
+; space since windows can exist in seperate spaces. Also, if there
+; are any supervisor mode windows, we will set up for the use of
+; supervisor mode.
+;
+;	very local flags
+	MWN.D=100000	;data pass in progress
+	MWN.FP=40000	;force D-APR protection on
+	MWN.PR=20000	;was prev apr forced on
+	MWN.NJ=10000	;we are not the "JOB"
+;-
+
+MAPWIN::
+	MOV	APRMSK,SWTBLK	;Copy protection mask to save spot
+	CALL	MAPWN2		;do LIB mapping
+	JMP	USRSET		;go synchr. memory mapping
+
+MAPWN2:	MOV	R5,-(SP)	;Get a scratch register
+	BIT	#XC$IDS,X.CON	;Does this system have I&D space?
+	BEQ	20$		;No, not this time
+	MAP	R2,APR=6,DATA	;Yes, map job's JCR entry
+	BIT	#JM.UDS,JCMFLG(R1) ;Is this 1st experience w/ D-space?
+	BNE	20$		;No, we should be ok
+	BIS	#JM.UDS,JCMFLG(R1) ;going for LIB,so turn on I&D
+	CALL	I2DCPY		;make sure rest of D space up todate
+20$:	MAP	FIPPOL		;Map FIP pool for WDBs
+	MOVB	(R0),R5		;Get base APR to begin
+	CLR	-(SP)		;make a word cell
+	MOVB	BITBYT(R5),(SP) ;put bit repr of base apr 		;001
+.ASSUME	W$NAPR	EQ	0
+	MUL	#MDSIZE,R5	;Now convert into MDE index
+	ADD	#JCMDE+MOUSRI,R5 ;Get offset to MDE in user mode I-space
+	ADD	R1,R5		;Now point to MDE itself
+	BIT	#WS$UIS,(R0)	;Should we map it into I-space?
+	BEQ	30$		;No, not this time
+	CALL	60$		;Yes, go set it up
+30$:	ADD	#MOUSRD-MOUSRI,R5 ;Bias for user-mode D-space
+	BIT	#WS$UDS,(R0)	;Should we map it into D-space?
+	BEQ	40$		;No, not this time
+	BIS	#MWN.D,SWTBLK	;set doing data flag			;001
+	BIT	#WS$UIS,(R0)	;is this a D only request		;001
+	BNE	35$		;no - force bit left as 0		;001
+	BIS	#MWN.FP,SWTBLK	;yes - set force protection on		;001
+35$:	CALL	60$		;Yes, go do it
+	BIC	#<MWN.D+MWN.FP+MWN.PR>,SWTBLK	;turn all flags off	;001
+40$:	ADD	#MOSUPI-MOUSRD,R5 ;Bias for supervisor mode I-space
+	BIT	#WS$SIS,(R0)	;How about supervisor mode I-space?
+	BEQ	50$		;No, not this time
+	CALL	60$		;Yes, go do it
+	MAP	R2,APR=6,DATA	;Map caller's JCR entry
+	BIS	#JM.SIS,JCMFLG(R1) ;And turn on supervisor mode
+50$:	TST	(SP)+		;clear stack of APR bit rep
+	MAP	R2,APR=6,DATA	;Map caller's JCR entry
+	MOVB	SWTBLK,JCAPRM(R1) ;store away changes, USRSET will update mask
+	MAP	FIPPOL		;Map FIP pool for WDBs
+	MOV	(SP)+,R5	;Restore scratch register
+	RETURN			;We're done
+
+GLOBAL	<USRSET,X.CON,JCMFLG,JCMDE,SWTBLK,BITBYT,APRMSK>
+
+	
+; We come here to map each window
+;
+; R0 -> WDB @ W$NAPR
+; R1 -> JCR
+; R2 =  JCR mapping value
+; R3 =  JDB @ JDMCTL+M.PHYA
+; R4 =  Scratch
+; R5 -> Lowest MDE for mode being used
+
+
+; SP -> return address
+; 2(SP)-> base apr bit mask
+
+60$:	MOV	W$NLIB(R0),R4	;Get region id
+	CMP	R4,#RIDMEM	;Mapping physical memory?
+	BLO	80$		;No, this is a regular region
+.ASSUME	RIDMIN	EQ	RIDMEM
+.ASSUME	RIDMEM	EQ	-4
+	BEQ	70$		;Yes, physical memory, set that up
+.ASSUME	RIDHDR	EQ	-2
+	MOV	R3,R4		;No, job header, set base address
+	BR	90$		;And join up
+
+70$:	MOV	#ZERO,R4	;Physical memory, set base address
+	BR	90$		;And join up
+
+80$:	MOV	(R4),R4		;Get LIB block pointer and flags
+	BIC	#^C<WA$LIB>,R4	;Get only LIB block pointer now
+	ADD	#R.MCTL+M.PHYA,R4 ;Now point to physical address
+
+; R0 -> WDB @ W$NAPR
+; R1 -> JCR 
+; R2 =  MMU value to map JCR
+; R3 -> JDB @ JDMCTL+M.PHYA
+; R4 -> LIB @ R.MCTL+M.PHYA (or equivalent)
+; R5 -> Base MDE to use
+
+90$:	MOV	R0,-(SP)	;Get some scratch registers
+	MOV	R1,-(SP)	; ...
+	MOV	R3,-(SP)	; ...
+	MOV	R5,-(SP)	; ...
+	MOV	W$NBYT(R0),R1	;Get length of region to map in bytes
+	MOV	(PC)+,R3	;Get: 4K and R-O
+	 .BYTE	2,128.-1
+	BIT	#WS$WRT,(R0)	;Really read/write?
+	BEQ	100$		;Nope, leave it R-O
+	MOV	(PC)+,R3	;Yes, get 4K and read/write
+	 .BYTE	4+2,128.-1
+100$:	MOV	W$NOFF(R0),R0	;Now get the initial offset
+	MAP	R2,APR=6,DATA	;Map the JCR to load the MDEs
+
+; At this point, we are going to set up the MDEs for this window
+;
+; R0 =  Initial offset to map
+; R1 =  Length to map in bytes
+; R2 =  MMU value to map caller's JCR entry
+; R3 =  Value to load into description register
+; R4 =  Address of base address
+; R5 -> MDE entry to load
+; SP -> R5, R3, R1, R0, ...
+; 12(SP)->bit rep of current apr					;001+
+;
+; Caller's JCR entry is mapped
+
+110$:	BIT	#MWN.D,SWTBLK	;is this a D pass?
+	BEQ	118$		;no skip these checks				
+	BIC	#MWN.PR,SWTBLK	;Clear hystersis of protection
+	BIT	#MWN.FP,SWTBLK	;force protection or follow protection
+	BEQ	115$		;follow
+	BISB	12(SP),SWTBLK	;set D par protection for this apr
+	BR	117$		;go advance bitmask and continue
+
+115$:	BITB	12(SP),SWTBLK	;is this apr protected already?
+	BEQ	117$		;no, adv apr mask & update D mde's
+	ADD	#MDSIZE,R5	;step R5 over protected mde
+	BIS	#MWN.PR,SWTBLK	;set hystersis of protection
+	ASL	12(SP)		;advance apr mask to APR+1 mask
+	BR	119$		;step over mde update
+
+117$:	ASL	12(SP)		;Apr mask to APR+1 mask
+118$:	MOV	R4,(R5)+	;Load the base address
+.ASSUME	MDADDR	EQ	0
+	MOV	R0,(R5)+	;And the offset
+.ASSUME	MDOFF	EQ	<MDADDR+2>
+	MOV	R3,(R5)+	;And the description register
+.ASSUME	MDDESC	EQ	<MDOFF+2>
+.ASSUME	MDSIZE	EQ	<MDDESC+2>
+119$:	ADD	#200,R0		;Update the offset for the next window
+	SUB	#<200*100>,R1	;Is there more to do?
+	BHI	110$		;Yes, go for it
+	BEQ	120$		;No, and we are done
+	BIT	#MWN.PR,SWTBLK	;was last apr protected?
+	BNE	120$		;yes, skip correction
+	ASH	#<-<11.-5>>+8.,R1 ;Correction, get -(slivers) in high byte
+	ADD	R1,-(R5)	;And update the MDE
+.ASSUME	MDDESC	EQ	<MDSIZE-2>
+120$:	MOV	(SP)+,R5	;Restore registers
+	MOV	(SP)+,R3	; ...
+	MOV	(SP)+,R1	; ...
+	MOV	(SP)+,R0	; ...
+	MAP	FIPPOL		;Restore FIP pool mapping
+	RETURN			;And exit
+
+
+	; I2DCPY copies all user I space APR's to user D space
+	; except where a protection bit is set in SWTBLK
+	; protection mask layout: bit 0=APR0 thru bit 7=APR7
+
+	; R1 -> JCR top
+	; CALL I2DCPY
+	; R5 undefined on exit						;002
+
+	
+I2DCPY:	BIT	#JM.UDS,JCMFLG(R1) ;Is job using I&D space yet?
+	BEQ	I2DEXT		;NO, no need to set it up now
+I2DFRC:	BIT	#XC$IDS,X.CON	;Does I&D exist on machine?
+	BEQ	I2DEXT		;no, prevent copy always
+	MOV	R4,-(SP)	;preserve R4				;002
+	MOV	R1,R4		;Copy JCR pointer
+	ADD	#JCMDE+MOUSRD,R4 ;And point to user mode D-space MDEs
+	MOV	#1,R5 		;set apr mask bit to APR 0
+10$:	BIT	R5,SWTBLK	;is this apr protected?
+	BNE	20$		;yes,skip copy
+	MOV	<MOUSRI-MOUSRD>(R4),(R4)+ ;Copy a MDE word
+	MOV	<MOUSRI-MOUSRD>(R4),(R4)+ ;Copy a MDE word
+	MOV	<MOUSRI-MOUSRD>(R4),(R4)+ ;Copy a MDE word
+	BR	30$		;skip compensation
+
+20$:	ADD	#MDSIZE,R4	;step over this D-mde
+30$:	ASLB	R5		;set apr bit mask to next higher
+	BCC	10$		;no over flow, continue checking
+	MOV	(SP)+,R4	;restore				;002
+I2DEXT:	RETURN			;yes, Exit I to D copy
+
+GLOBAL	<ZERO>
+
+.END
+
+

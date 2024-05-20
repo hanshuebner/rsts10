@@ -1,0 +1,21 @@
+;
+;	PBSMGR.CMD
+;
+;	COPYRIGHT (c) 1982, 1984
+;	DIGITAL EQUIPMENT CORP., MAYNARD, MASS.
+;
+;	TKB command file to build PBSMGR.TSK V9.0
+;
+;	Build using:
+;
+;		CUSP resident library CSP100
+;		RMS resident library RMSRES
+;		(libraries are clustered)
+;
+SYSTEM:PBSMGR,LST:PBSMGR/MA/CR/-SP,SYSTEM:PBSMGR=SYSTEM:PBSMGR/MP
+TASK=PBSMGR
+UNITS=12
+ASG=SY:5:6:7:8:9:10:11:12
+CLSTR=CSP100,RMSRES:RO
+EXTTSK=1232
+//

@@ -1,0 +1,1685 @@
+.INCLUDE	%CMN:COMMON%
+.LIBRARY	%SYSTEM:PBSMAC%
+.LIBRARY	%LB:RMSMAC%
+.NLIST
+.INCLUDE	%SYSTEM:QMDEF%
+.LIST
+TITLE	QMURP,<QMAN USER REQUEST PACKET PROCESSOR>,0A,10-MAY-91,PRL/KCG/TJK/DBM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for QMURP
+
+;+
+; Edit	By   Date	Reason
+;
+;  000	KCG  23-Apr-84	Creation for Version 9.0
+;  001	PRL  23-Apr-84	Fix miscellaneous bugs
+;  002	PRL  02-Apr-84	Return FIELDE error if field overflows
+;  003	PRL  03-Apr-84	Return error if job count = 0
+;  004	PRL  05-May-84	Fix bug in URPLOG routine
+;			Pass default filetype to CHKFSS
+;			Use ALLOC value to compute packet size
+;  005	PRL  07-May-84	Handle default flags for logfile correctly
+;			Define new Logfile fields
+;  006	PRL  09-May-84	Change edit mask to trim /PARAMETERS string
+;			Rename URPAFL -> URPAFS, URPBFL -> URPBFS
+;			Move URPFLD, URPERR tables from QDEF.MAC
+;			Use MOVBYT macro
+;  007	PRL  10-May-84	Change DFLREQ references to QTYTBL
+;  008	PRL  14-May-84	Build default log file-spec if none specified
+;  009	PRL  15-May-85	Fix bug copying priv mask into job packet
+;			Fix wrong field length for FC$LQF
+;  010	PRL  16-May-84	Add new /OWNER field (FC$OWN)
+;			Renumber existing fields
+;  011	PRL  17-May-84	Reference GACNT, WACNT as globals
+;  012	PRL  18-May-84	Init default logfile flags after pass 1
+;  013	PRL  24-May-84	Redesign URP processor to use 2-pass dispatching
+;			Fix /OWNER field to replace sender's PPN & privs
+;  014	PRL  26-May-84	Init OWNPPN and OWNPRV fields in impure area
+;			Update OWNxxx fields for /OWNER (not sender's)
+;  015	PRL  25-Sep-84	Change ER$MEM error to ER$PLG in URPERT table
+;  016	PRL  27-Sep-84	Fix to work as its own .OBJ file
+;  017	PRL  05-Oct-84	Remove "no default forms for queue" error code
+;  018	PRL  30-Oct-84	Check for valid queue type using QT$BAD
+;  019	KCG  16-Jan-85	Remove /LOG_DELETE default for printing of log files
+;  020	PRL  26-Jan-85	Remove /USER field in URPs
+;  021	PRL  20-Feb-85	Fix FC$BFS to not use default file type
+;  022	PRL  21-Feb-85  Add FC$HLD (/HOLD flag field)
+;  023  TJK  26-Jul-85  Fix /LOG_QUEUE field
+;  024	PRL  20-Jan-86	Add (undocumented) FC$TAP field
+;  025	PRL  06-Jan-86	Fix default log file PPN to be owner's (not caller's)
+;
+;			[RSTS/E V9.6]
+;  026	DBM  18-Feb-88	Add /[NO]WRAP support
+;
+;			[RSTS/E V10.0]
+;  027	DBM  20-Jul-89	Add /[NO]NOTIFY support
+;  028	DBM  29-Mar-90	Fix /OWNER processing
+;
+;-
+
+.SBTTL	QMURP	- INITIALIZE QMURP PSECT
+
+	.PSECT	QMURP,RO,CON		;init QMURP psect
+
+.SBTTL	URPFLD	- MACRO TO DEFINE ENTRY IN URP FIELD TABLE
+
+;+
+; The macro URPFLD is used to define an entry in the User Request Packet
+; field table.
+;
+; The format of URPFLD is
+;
+;	URPFLD	fldnam,fldcod,fldlen[,fldtyp=0][,fldad1][,fldad2]
+;
+; where
+;
+;	fldnam	is the symbolic name of this field.
+;
+;	fldcod	is the unique code (1-255) assigned to this field.
+;
+;	fldlen	is the length of this field, in bytes.  For variable-
+;		length fields, LEN is 0, and the length is assumed to
+;		be (length byte)+2.  The length byte is assumed to
+;		always immediately follow the field code byte.
+;
+;	fldtyp	is the type (print or batch) of this field.  If the
+;		field is allowed for any type, then TYP should be 0.
+;		If this arg is not specified, then 0 is assumed.
+;
+;	fldad1	is the address to dispatch to during pass 1 of the
+;		URP processing.  If 0, then the field is ignored
+;		during pass 1.  If this arg is not specified, then
+;		0 is assumed.
+;
+;	fldad2	is the address to dispatch to during pass 2 of the
+;		URP processing.  If 0, then the field is ignored
+;		during pass 2.  If this arg is not specified, then
+;		0 is assumed.
+;
+;-
+
+	.MACRO	URPFLD	FLDNAM,FLDCOD,FLDLEN,FLDTYP=0,FLDAD1=0,FLDAD2=0
+FLDNAM	= FLDCOD			;  define field code
+	 .EVEN				;  ensure entries are word aligned
+	 .BYTE	FLDCOD			;  field code
+	 .BYTE	FLDLEN			;  field length
+	 .BYTE	FLDTYP			;  request type
+	 .BYTE				;  (reserved)
+	 .WORD	FLDAD1			;  pass 1 routine
+	 .WORD	FLDAD2			;  pass 2 routine
+	.ENDM	URPFLD			;end URPFLD macro
+
+.SBTTL	URPERR	- MACRO TO DEFINE ENTRY IN RMS/URP ERROR CODE TABLE
+
+;+
+; The macro URPERR is used to define an entry in the RMS/URP error code
+; conversion table.
+;
+; The format of URPERR is
+;
+;	URPERR	rms,urp,fld
+;
+; where
+;
+;	rms	is the RMS error code (word)
+;	urp	is the corresponding URP error code (byte)
+;	fld	is the coressponding URP field code (byte)
+;-
+
+	.MACRO	URPERR	RMS,URP,FLD=0	;define URPERR macro
+	  .WORD	RMS			;  RMS error code
+	  .BYTE	URP			;  URP error code
+	  .BYTE	FLD			;  FLD field code
+.GLOBL	URP
+	.ENDM	URPERR			;end URPERR macro
+
+.SBTTL	UT.xxx	- DEFINE OFFSETS IN URP FIELD TABLE ENTRY
+
+	.DSECT	,CREF
+
+UT.COD:	.BLKB				; +0 -> URP field code byte
+UT.LEN:	.BLKB				; +1 -> URP field length byte
+UT.TYP:	.BLKB				; +2 -> URP field type byte
+	.BLKB				; +3 (reserved)
+UT.AD1:	.BLKW				; +4 -> URP field pass 1 addr
+UT.AD2:	.BLKW				; +6 -> URP field pass 2 addr
+	.EVEN				;ensure even length
+UTSIZ	= .				;length of URP table entry
+
+.SBTTL	URPTBL	- DEFINE USER REQUEST PACKET FIELD TABLE
+
+;+
+;
+; Each table entry consists of the following:
+;
+;	+0	UT.COD	(byte) Field code
+;	+1	UT.LEN	(byte) Field length (0=variable)
+;	+2	UT.TYP	(byte) Field type (0=any)
+;	+3		(byte) (RESERVED)
+;	+4	UT.AD1	(word) Dispatch address for pass 1
+;	+6	UT.AD2	(word) Dispatch address for pass 2
+;
+; A null entry (FC$XXX) marks the end of the table.
+;
+;-
+
+	.SAVE
+	.PSECT	PURE
+	.EVEN
+
+URPTBL:					;start of URP fields table
+
+	URPFLD	FC$ENT,1.,0,0,0,URPENT		; /NAME (1.)
+	URPFLD	FC$QUE,2.,0,0,0,URPQUE		; /QUEUE (2.)
+	URPFLD	FC$OWN,3.,4,0,URPOWN,0		; /OWNER (3.)
+	URPFLD	FC$PRI,4.,2,0,0,URPPRI		; /PRIORITY (4.)
+	URPFLD	FC$JBC,5.,2,QT$PRI,0,URPJBC	; /JOB_COUNT (5.)
+	URPFLD	FC$FRM,6.,0,QT$PRI,0,URPFRM	; /FORMS (6.)
+	URPFLD	FC$AFT,7.,6,0,0,URPAFT		; /AFTER (7.)
+	URPFLD	FC$PGL,8.,6,QT$PRI,0,URPPGL	; /PAGE_LIMIT (8.)
+	URPFLD	FC$CPL,9.,4,QT$BAT,0,URPCPL	; /CPU_LIMIT (9.)
+	URPFLD	FC$TML,10.,4,QT$BAT,0,URPTML	; /TIME_LIMIT (10.)
+	URPFLD	FC$PRM,11.,0,QT$BAT,URPPRM,URPPRM ; /PARAMETERS (11.)
+	URPFLD	FC$HLD,12.,2,0,0,URPHLD		; /HOLD flag (12.)	;021
+	URPFLD	FC$LFF,13.,2,QT$BAT,0,URPLFF	; /LOG_FILE flag (13.)
+	URPFLD	FC$LFS,14.,0,QT$BAT,0,URPLFS	; /LOG_FILE file-spec (14.)
+	URPFLD	FC$LQF,15.,2,QT$BAT,0,URPLQF	; /LOG_QUEUE flag (15.)
+	URPFLD	FC$LQN,16.,0,QT$BAT,0,URPLQN	; /LOG_QUEUE name (16.)
+	URPFLD	FC$LDF,17.,2,QT$BAT,0,URPLDF	; /LOG_DELETE flag (17.)
+	URPFLD	FC$NTF,18.,2,0,0,URPNTF		; /NOTIFY flag (18.)	;027
+	URPFLD	FC$TAP,127.,2,QT$PRI,0,URPTAP	; TAP flag (127.)	;024
+	URPFLD	FC$AFS,128.,0,0,URPAFS,URPAFS	; ASCII File-spec (128.)
+	URPFLD	FC$BFS,129.,16,0,URPAFS,URPBFS	; Binary File-spec (129.)
+	URPFLD	FC$CVT,130.,2,QT$PRI,0,URPCVT	; /CONVERT flag (130.)
+	URPFLD	FC$COP,131.,2,QT$PRI,0,URPCOP	; /COPIES (131.)
+	URPFLD	FC$DEL,132.,2,0,0,URPDEL	; /DELETE flag (132.)
+	URPFLD	FC$FEE,133.,2,QT$PRI,0,URPFEE	; /FEED flag (133.)
+	URPFLD	FC$FLP,134.,2,QT$PRI,0,URPFLP	; /FLAG_PAGES flag (134.)
+	URPFLD	FC$TRN,135.,2,QT$PRI,0,URPTRN	; /TRUNCATE flag (135.)
+	URPFLD	FC$RAP,136.,2,QT$PRI,0,URPRAP	; /WRAP flag (136.)
+
+	URPFLD	FC$XXX,0,0,0,0,0		; end of field table (0.)
+
+	.RESTORE
+
+.SBTTL	URPERT	- DEFINE RMS ERROR CODES -> URP ERROR/FIELD CODES TABLE
+
+;+
+;
+; This table contains each of the RMS error codes returned by the DEFJOB
+; routine in QMAN.  Each table entry consists of 4 bytes:
+;
+;		+0	word	RMS error code from DEFJOB
+;		+2	byte	RSTS error code to return
+;		+3	byte	URP field code to return
+;
+; The last entry in the table contains a 0 in the RMS error word.
+;
+;-
+
+	.SAVE
+	.PSECT	PURE
+
+URPERT::				;Define URPERT table:
+	URPERR	ER$RNF,NOSUCH,FC$QUE	; Queue name not found or no default
+	URPERR	ER$DNR,NOROOM,FC$QUE	; Queue is closed/marked for deletion
+	URPERR	ER$PRV,PRVIOL,FC$QUE	; Queue is privileged
+	URPERR	ER$RLK,INTLCK,0		; Queue file is locked - retry
+	URPERR	ER$IOP,BDNERR,FC$PRI	; Priority exceeds queue's maximum
+	URPERR	ER$PLG,BDNERR,FC$PGL	; Page limit exceeds queue's maximum
+	URPERR	ER$ISI,BDNERR,FC$CPL	; CPU limit exceeds queue's maximum
+	URPERR	ER$IRC,BDNERR,FC$TML	; Time limit exceeds queue's maximum
+	URPERR	ER$BKS,NOSUCH,FC$LQN	; Log file print queue not found
+	URPERR	ER$BKZ,NOSUCH,FC$LQN	; No default print queue for log file
+	URPERR	ER$BOF,NOROOM,FC$LQN	; Log file print queue closed/deleted
+
+	URPERR	0,EOF,0			;end of URPERT table
+
+	.RESTORE
+
+.SBTTL	DEFINE URP FLAG BITS
+
+;+
+;
+; The following flag bits are defined for URP processing and are
+; set/cleared in the URPFLG word of QMAN's impure area.
+;
+;-
+
+	.BSECT	,NOCREF
+
+	.BLKB	.		;      1 = (reserved)
+	.BLKB	.		;      2 = (reserved)
+	.BLKB	.		;      4 = (reserved)
+	.BLKB	.		;     10 = (reserved)
+	.BLKB	.		;     20 = (reserved)
+	.BLKB	.		;     40 = (reserved)
+	.BLKB	.		;    100 = (reserved)
+	.BLKB	.		;    200 = (reserved)
+	.BLKB	.		;    400 = (reserved)
+	.BLKB	.		;   1000 = (reserved)
+	.BLKB	.		;   2000 = (reserved)
+	.BLKB	.		;   4000 = (reserved)
+	.BLKB	.		;  10000 = (reserved)
+	.BLKB	.		;  20000 = (reserved)
+	.BLKB	.		;  40000 = (reserved)
+UF$FIL:	.BLKB	.		; 100000 = ASCII/Binary File-spec field found
+
+.SBTTL	URP	- PROCESS USER REQUEST PACKET (URP)
+
+;+
+;
+; URP::
+;
+; Inputs:	R0 =  Function bits table
+;		R5 -> Impure area
+;		  URPTYP(R5) (byte) Request type (1=print,2=batch)
+;		  URPRCV(R5) (6byt) Rcvr ID for confirmation or null
+;		  URPCTX(R5) (word) Context word for confirmation or 0
+;
+; Call:		JSR	PC,URP
+;
+;
+; Return:	C=0 job packet created (MSGPTR/MSGLEN)
+;		C=1 no job packet created
+;		    URPERR(R5) contains URP error code
+;		    URPFLD(R5) contains code of field causing error
+;		All registers preserved
+;
+; Note:
+;
+; This is a two-pass dispatcher.  The job packet buffer is allocated
+; afterpass 1.  The data from most URP fields is copied into the job
+; packet during Pass 2.  An exception is the /OWNER field, which
+; is processed during pass 1.  The /PARAMETER, ASCII file-spec and
+; Binary file-spec fields are processed during pass 1 to update the
+; size of the job packet, and during pass 2 to actually copy data
+; into the job packet fields.
+;
+;-
+
+	.PSECT	QMURP			;start of QMURP psect
+
+	.ENABL	LSB
+
+URP::	NOP
+	SAVREG				;save all regs
+
+; Initialize for URP processing
+
+	MOV	PPN(R5),OWNPPN(R5)	;init sender's PPN as owner's
+	MOV	R5,R0			;get base of impure area
+	ADD	#PRIV,R0		;R0 -> sender's priv mask
+	MOV	R5,R1			;get base of impure area
+	ADD	#OWNPRV,R1		;R1 -> owner's priv mask
+	MOVSTR	R0,R1,#<PRVSIZ*2>	;init sender's privs as owner's
+	CLR	R0			;show no job def packet yet
+	MOV	#HD.LEN+JB.LEN,R4	;init length of job packet
+	EVEN	R4			;make sure we begin on a word addr
+	CLR	URPFLD(R5)		;show no field yet
+	CLR	URPFLG(R5)		;and clear all flag bits
+
+; Ensure request type is valid
+
+	MOV	#FUNERR,URPERR(R5)	;init error for invalid type
+	MOVBYT	URPTYP(R5),R1		;get URP type
+	BEQ	105$			;zero, so error
+	CMPB	R1,#QT$BAD		;is this a valid queue type?	;018
+	BHIS	105$			;no, so error
+
+; Allocate logfile block for batch jobs
+
+	CMPB	R1,#QT$BAT		;is this a batch request
+	BNE	5$			;no, so continue
+	ADD	#LG.SPL+FIL.LEN,R4	;yes, allocate max logfile block
+
+; Initialize defaults by request type
+
+5$:	DEC	R1			;make type 0-based
+	MUL	#QTYSIZ,R1		;compute offset to entry
+	ADD	#QTYTBL,R1		;R1 -> entry block for type
+	MOVB	(R1)+,URPJCP(R5)	;save default no. job copies
+.ASSUME	QT.JCP	EQ	0		;ensure job copies is first in block
+	MOVB	(R1)+,URPFCP(R5)	;save default no. file copies
+.ASSUME	QT.FCP	EQ	QT.JCP+1	;ensure file copies follows job copies
+	MOV	(R1)+,URPFFG(R5)	;save default file flags word
+.ASSUME	QT.FFG	EQ	QT.FCP+1	;ensure flag word follows file copies
+	MOV	(R1),URPFTY(R5)		;save default filetype
+.ASSUME	QT.FTY	EQ	QT.FFG+2	;ensure filetype word follws flag word
+
+; Start next pass
+
+10$:	CLR	URPFLD(R5)		;clear current field code
+	CLR	URPFLN(R5)		;clear current field length
+	CLR	URPERR(R5)		;clear field error code
+	MOV	URPPTR(R5),R1		;R1 -> start of URP buffer
+
+; Process next URP field
+
+20$:	ADD	URPFLN(R5),R1		;point to next field
+	EVEN	R1			;ensure next field on word boundary
+25$:	CMP	R1,URPEND(R5)		;is this byte in the buffer?
+	BHI	90$			;no, so skip to end pass
+	MOVBYT	(R1),R2			;get field's code value		;006
+.ASSUME	UT.COD	EQ 0			;esnure code is first in table
+	BNE	30$			;non-zero, so continue
+	TST	(R1)+			;point to next word
+	BR	25$			;and try next byte
+
+30$:	MOV	R2,URPFLD(R5)		;save code for current field
+	CALL	CHKCOD			;valid code?
+	BCC	40$			;yes, continue
+	MOV	#SUBERR,URPERR(R5)	;no, return SUBERR error
+	BR	105$			;and exit
+
+40$:	INC	R2			;skip over field code byte
+.ASSUME	UT.LEN	EQ UT.COD+1		;ensure length follows code byte
+	MOVB	(R2)+,R3		;get field length
+.ASSUME	UT.TYP	EQ UT.LEN+1		;ensure type follows length byte
+	BNE	50$			;fixed-length, so skip to length check
+	INC	R1			;point to length byte in field
+	CMP	R1,URPEND(R5)		;is length byte outside buffer?
+	BLOS	45$			;no, so continue		;002
+43$:	MOV	#FIELDE,URPERR(R5)	;yes, return FIELDE error	;002
+	BR	105$			;and skip to error		;002
+
+45$:	MOVBYT	(R1),R3			;load variable field length	;006
+	ADD	#2,R3			;include length byte & code byte
+	DEC	R1			;restore R1 to start of field
+50$:	MOV	R3,URPFLN(R5)		;save this field's length
+	ADD	R1,R3			;compute start addr of next field
+	DEC	R3			;R3 -> last byte in current field
+	CMP	R3,URPEND(R5)		;does field fit inside buffer?
+	BHI	43$			;no, so error
+	TST	R0			;is this pass 1?		;013
+	BEQ	55$			;yes, so do type check		;013
+	CMP	(R2)+,(R2)+		;no, so point to pass 2 addr	;013
+.ASSUME	UT.AD1	EQ UT.TYP+2		;ensure pass 1 addr follows type ;013
+.ASSUME	UT.AD2	EQ UT.TYP+4		;ensure pass 2 follows pass 1	;013
+	BR	60$			;and skip to dispatch		;013
+
+55$:	MOV	(R2)+,R3		;get request type for field
+.ASSUME	UT.AD1	EQ UT.TYP+2		;ensure pass 1 addr follows type ;013
+	BEQ	60$			;applies to any, so continue
+	CMPB	R3,URPTYP(R5)		;correct type for this field?
+	BEQ	60$			;yes, so continue
+	MOV	#FUNERR,URPERR(R5)	;no, return FUNERR error
+	BR	105$			;and skip to error handler
+
+60$:	TST	(R2)			;any addr for this pass?	;013
+	BEQ	20$			;no, so on to next field	;013
+	CLR	URPERR(R5)		;yes, show no error
+	CALL	@(R2)			;and dispatch to routine
+	BCS	105$			;error, so skip to exit
+	BR	20$			;no error, so on to next field
+
+; End-of-pass processing
+
+90$:	TST	R0			;any job def packet defined yet?
+	BNE	130$			;yes, so we finished pass 2
+
+; End-of-pass-1 processing
+
+	CMP	R4,#512.		;no, is required packet too large?
+	BLOS	100$			;no, continue
+	MOV	#VCSERR,URPERR(R5)	;yes, return VCSERR error
+	BR	105$			;and skip to error handler
+
+100$:	MOV	R4,R1			;get length of job def packet
+	GETBUF	R0,R1,CLEAR		;allocate job def packet buffer
+	BCC	110$			;got it, so continue
+	MOV	#NOBUFS,URPERR(R5)	;no room, so return NOBUFS error
+105$:	JMP	200$			;and fail
+
+110$:	MOV	R0,MSGPTR(R5)		;save job def packet address
+	MOV	R1,MSGLEN(R5)		;and buffer length
+	ADD	#HD.LEN,R0		;R0 -> job def packet (past header)
+	MOVB	URPJCP(R5),JB.COP(R0)	;init no. job copies for pass 2
+	MOV	OWNPPN(R5),JB.PPN(R0)	;load owner's PPN		;010
+	PUSH	<R0,R1>			;save some work regs		;010
+	MOV	R0,R1			;get base of job packet		;009
+	ADD	#JB.PRV,R1		;R1 -> priv mask field		;009
+	MOV	R5,R0			;get base of impure area	;009
+	ADD	#OWNPRV,R0		;R0 -> owner's priv mask	;009
+	MOVSTR	R0,R1,#<PRVSIZ*2>	;copy owner's priv mask
+	POP	<R1,R0>			;restore work regs		;010
+	MOV	R0,R4			;get base of packet past header
+	ADD	#JB.LEN,R4		;R4 -> start of var area
+	EVEN	R4			;make sure var area is word aligned
+	CMPB	URPTYP(R5),#QT$BAT	;is this a batch request?
+	BNE	125$			;no, so continue
+	CLR	(R4)			;yes,clear logfile flag bits	;012
+;	BIC	#FF$QLG,(R4)		;default don't queue logfile	;012
+;	BIC	#FF$DEL,(R4)		;default don't del queued log	;012
+.ASSUME	LG.FLG	EQ 0			;assume flag word is first	;012
+	MOV	R4,R2			;get logfile block addr
+	SUB	R0,R2			;convert addr to an offset
+	MOV	R2,LOGBLK(R5)		;and save in impure area
+	MOV	R2,JB.LOG(R0)		;load offset into packet
+	ADD	#LG.SPL+FIL.LEN,R4	;update pointer past max logfile block
+	EVEN	R4			;make sure next block is word aligned
+125$:	MOV	R0,URPFLB(R5)		;get base of packet past header
+	ADD	#JB.FIL,URPFLB(R5)	;save addr of offset to 1st file
+	JMP	10$			;and start pass 2
+
+; End-of-pass-2 processing
+
+130$:	TST	URPFLG(R5)		;did we see any file-spec fields?
+	BMI	140$			;yes, so continue
+.ASSUME	UF$FIL	EQ	100000		;ensure flag is sign bit
+	MOV	#NEDERR,URPERR(R5)	;no, return NEDERR error
+	BR	200$			;exit with error
+
+140$:	MOV	MSGPTR(R5),R0		;get base of job packet
+	MOVB	#P.VER,HD.VER(R0)	;load version no.
+	MOVB	#UQ.JOB,HD.CMD(R0)	;load job def command code
+	TSTB	URPRCV(R5)		;did sender want a confirmation?
+	BEQ	150$			;no, so skip loading request word
+	MOVB	#3,HD.RTQ(R0)		;yes, show URP return by rcvr ID
+150$:	ADD	#HD.LEN,R0		;point past header fields
+	MOVB	URPTYP(R5),JB.QUE(R0)	;load reqest type
+	TSTB	JB.NML(R0)		;do we have an entry name?
+	BNE	180$			;yes, continue
+	MOV	R0,R1			;no, get base of message
+	ADD	#JB.NML,R1		;R1 -> entry name block
+	MOVBYT	JB.QUE(R0),R3		;get entry type
+	DEC	R3			;make it 0-based
+	MUL	#QTYSIZ,R3		;compute offset into job table
+	ADD	#QTYTBL+QT.NML,R3	;R3 -> default entry name length
+	MOVBYT	(R3)+,R2		;R2 = length of string to copy
+.ASSUME	QT.NAM	EQ	QT.NML+1	;ensure name string follows length
+	MOVB	R2,(R1)+		;copy name length into packet
+.ASSUME	JB.NAM	EQ	JB.NML+1	;ensure follows length byte
+	MOVSTR	R3,R1,R2		;copy name string into packet
+180$:	CMPB	JB.QUE(R0),#QT$BAT	;is this a batch entry		;009
+	BNE	190$			;no, so continue		;009
+	MOV	JB.LOG(R0),R1		;yes, get offset to log block	;008
+	BEQ	190$			;none, so skip building default	;008
+	ADD	R0,R1			;convert offset to address	;008
+	ADD	#LG.SPL,R1		;R1 -> log file-spec length	;008
+	TSTB	(R1)			;any log-file spec defined?	;008
+	BNE	190$			;yes, so don't build default	;008
+	MOV	R0,R1			;no, get base of job packet	;008
+	ADD	#JB.NML-1,R1		;R1 -> entry name block -1	;008
+	CALL	URPLFS			;fake it as a log file-spec fld	;008
+	BCC	190$			;succeeded, so continue		;008
+	MOV	#FC$LFS,URPFLD(R5)	;failed, so return FC$LFS field	;008
+	BR	200$			;and fail			;008
+
+; Exit with carry set/clear
+
+190$:	TST	(PC)+			;clear carry for success
+200$:	SEC				;set carry for error
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+GLOBAL	<QTYTBL,FUNERR,SUBERR,VCSERR,NOBUFS,NEDERR,FIELDE>
+
+.SBTTL	URPENT	- PROCESS /NAME FIELD (FC$ENT = 1.)
+
+;+
+;
+; URPENT:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPENT
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPENT:	PUSH	R1			;save pointer to start of field
+	TSTB	(R1)+			;skip over code field
+	MOV	R0,R3			;get start of job def packet
+	ADD	#JB.NML,R3		;R3 -> entry name block
+	MOV	#2+4,R2			;no all-numerics or special chars
+	CALLX	CPYNAM			;copy entry name into packet
+	BCC	10$			;success, so exit happy
+	MOV	#BADNAM,URPERR(R5)	;error, return BADNAM error
+10$:	POP	R1			;restore pointer
+	RETURN				;exit with status set
+
+	.DSABL	LSB
+
+GLOBAL	<BADNAM>
+
+.SBTTL	URPQUE	- PROCESS /QUEUE FIELD (FC$QUE = 2.)
+
+;+
+;
+; URPQUE:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPQUE
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPQUE:	PUSH	R1			;save pointer to start of field
+	TSTB	(R1)+			;skip over code field
+	MOV	R0,R3			;get start of job def packet
+	ADD	#JB.QNL,R3		;R3 -> queue name block
+	CLR	R2			;allow null name and all numerics
+	CALLX	CPYNAM			;copy the name into packet
+	BCC	10$			;success, so exit happy
+	MOV	#BADNAM,URPERR(R5)	;error, return BADNAM error
+10$:	POP	R1			;restore pointer
+	RETURN				;exit with status set
+
+	.DSABL	LSB
+
+GLOBAL	<BADNAM>
+
+.SBTTL	URPOWN	- PROCESS /OWNER FIELD (FC$OWN = 3.)
+
+;+
+;
+; URPOWN:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPOWN
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPOWN:	PUSH	<R0,R1>			;save work regs
+	MOV	2(R1),R1		;R1 = PPN of owner
+	BEQ	40$			;[0,0], so ignore the field
+	CMP	R1,PPN(R5)		;same as sender's?
+	BEQ	40$			;yes, so ignore this field
+	BIT	#^C<377>,R1		;destination account = [0,x]?	;028
+	BEQ	25$			;yes, can't do that!		;028
+	MOV	R5,R2			;Get base of impure area	;028
+	ADD	#PRIV,R2		;R2 -> sender's priv mask	;028
+	SETPRV	PPN(R5),R2		;Install privs of sender	;028
+	CALLX	CLRFQB			;Clear out the FIRQB		;028
+	MOVB	#UU.CHK,@#FIRQB+FQFUN	;Check access rights		;028
+	MOV	R1,@#FIRQB+FQPPN	;...to this [p,pn]		;028
+	.UUO				;Do it				;028
+	MOV	@#FIRQB+FQERNO,R3	;Save the result		;028
+	SETPRV	#0,R2			;Restore our privs		;028
+	TSTB	R3			;User has accounting access?	;028
+	BMI	20$			;Yes, on with the show		;028
+	MOV	#PRVIOL,URPERR(R5)	;no, return PRVIOL error
+	BR	50$			;and fail
+
+20$:	CALLX	CLRFQB			;clear FIRQB
+	MOVB	#UU.ATR,FIRQB+FQFUN	;load UU.ATR function code
+	MOVB	#-1,FIRQB+FQFIL		;load flag to read account attribute
+	MOVB	#2,FIRQB+FQSIZM		;load read password attribute
+	MOV	R1,FIRQB+FQPPN		;load PPN of account to check
+	.UUO				;try to get PPN's authorized privs
+	TSTB	FIRQB			;any error?
+	BEQ	30$			;no, so continue
+25$:	MOV	#NOSUCH,URPERR(R5)	;yes, return NOSUCH error
+	BR	50$			;and exit with error
+
+30$:	MOV	R1,OWNPPN(R5)		;save new PPN as owner's
+	MOV	#FIRQB+FQNAM1+2,R0	;R0 -> PPN's authorized priv mask
+	MOV	R5,R1			;get base of impure area
+	ADD	#OWNPRV,R1		;R1 -> owner's priv mask
+	MOVSTR	R0,R1,#<PRVSIZ*2>	;save priv mask as owner's
+40$:	TST	(PC)+			;clear carry for success
+50$:	SEC				;set carry for error
+	POP	<R1,R0>			;restore work regs
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+GLOBAL	<GACNT,WACNT>							;011
+GLOBAL	<PRVIOL,NOSUCH>
+
+.SBTTL	URPPRI	- PROCESS /PRIORITY FIELD (FC$PRI = 4.)
+
+;+
+;
+; URPPRI:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPPRI
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPPRI:	MOVB	1(R1),JB.PRI(R0)	;copy priority into job def packet
+	CLC				;clear carry for success
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	URPJBC	- PROCESS /JOB_COUNT FIELD (FC$JBC = 5.)
+
+;+
+;
+; URPJBC:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPJBC
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPJBC:	MOVB	1(R1),R2		;copy job count byte into R2
+	BEQ	10$			;zero, so ignore the field
+	MOVB	R2,JB.COP(R0)		;copy job count into fixed packet
+10$:	CLC				;clear carry for success
+	RETURN				;exit
+
+	.DSABL	LSB
+
+GLOBAL	<BDNERR>
+
+.SBTTL	URPFRM	- PROCESS /FORMS FIELD (FC$FRM = 6.)
+
+;+
+;
+; URPFRM:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPFRM
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPFRM:	PUSH	R1			;save pointer to start of field
+	TSTB	(R1)+			;skip over code field
+	MOV	R0,R3			;get start of job def packet
+	ADD	#JB.FML,R3		;R3 -> form name block
+	CLR	R2			;allow null name, all-numerics
+	CALLX	CPYNAM			;copy forms name into packet
+	BCC	10$			;success, so exit happy
+	MOV	#BADNAM,URPERR(R5)	;error, return BADNAM error
+10$:	POP	R1			;restore pointer
+	RETURN				;exit with status set
+
+	.DSABL	LSB
+
+GLOBAL	<BADNAM>
+
+.SBTTL	URPAFT	- PROCESS /AFTER FIELD (FC$AFT = 7.)
+
+;+
+;
+; URPAFT:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPAFT
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPAFT:	PUSH	R1			;save field address
+	TST	(R1)+			;skip to after date field
+	MOV	(R1)+,JB.ADA(R0)	;copy after date into packet
+	BNE	10$			;non-zero, go validate it
+	.DATE				;zero, get current date
+	MOV	XRB+0,JB.ADA(R0)	;load current date into packet
+	BR	40$			;and go check after time
+
+10$:	CALLX	CLRFQB			;clear the FIRQB
+	MOVB	#UU.CNV,FIRQB+FQFUN	;load function code
+	MOV	JB.ADA(R0),FIRQB+4	;load after date
+	.UUO				;get date string
+	MOV	#FIRQB+FQNAM1,R2	;get start addr of string
+20$:	TSTB	(R2)			;end of string?
+	BEQ	40$			;yes, so validate after time
+	CMPB	(R2)+,#'X		;no, any X in string (00-XXX-00)?
+	BNE	20$			;no, continue with next character
+30$:	MOVB	#BDNERR,URPERR(R5)	;yes, return BDNERR error
+	BR	70$			;and exit with error
+
+40$:	TST	(R1)			;any after time specified?
+	BNE	50$			;yes, so go validate it
+	MOV	#1440.-1,JB.ATI(R0)	;no, so use inverted 11:59 pm
+...ATI == . - 4			;** PATCH ** default after time value
+	BR	60$			;and exit happy
+
+50$:	CMP	(R1),#1440.		;is time value in range 1-1440?
+	BHI	30$			;no, exit with error
+	MOV	#1440.,R2		;yes, load minutes in a day
+	SUB	(R1),R2			;compute minutes SINCE midnight
+	MOV	R2,JB.ATI(R0)		;and copy value in packet
+60$:	TST	(PC)+			;clear carry for success
+70$:	SEC				;set carry for error
+	POP	R1			;restore field addr
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+GLOBAL	<BDNERR>
+
+.SBTTL	URPPGL	- PROCESS /PAGE_LIMIT FIELD (FC$PGL = 8.)
+
+;+
+;
+; URPPGL:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPPGL
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPPGL:	MOV	2(R1),JB.PGL(R0)	;copy page limit lsb into job def packet
+	MOV	4(R1),JB.PGM(R0)	;copy page limit msb into job def packet
+	CLC				;clear carry (success)
+	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	URPCPL	- PROCESS /CPU_LIMIT FIELD (FC$CPL = 9.)
+
+;+
+;
+; URPCPL:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPCPL
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPCPL:	MOV	2(R1),JB.CPU(R0)	;copy CPU limit into job def packet
+	CLC				;clear carry (success)
+	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	URPTML	- PROCESS /TIME_LIMIT FIELD (FC$TML = 10.)
+
+;+
+;
+; URPTML:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPTML
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPTML:	MOV	2(R1),JB.TIM(R0)	;copy time limit into job def packet
+	CLC				;clear carry (success)
+	RETURN				;exit
+
+	.DSABL	LSB
+
+.SBTTL	URPPRM	- PROCESS /PARAMETERS FIELD (FC$PRM = 11.)
+
+;+
+;
+; URPPRM:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPPRM
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPPRM:	EVEN	R4			;ensure next packet addr is even
+	TST	R0			;is this pass 2?
+	BNE	10$			;yes, so copy parameter into packet
+	ADD	URPFLN(R5),R4		;no, so update job packet length
+	BR	20$			;and exit happy
+
+10$:	MOV	R1,R3			;use copy of field addr
+	PUSH	<R0,R4,R5>		;save work regs for CVT$$
+	INC	R3			;point to length byte
+	MOVBYT	(R3)+,R4		;R4 = paramter string length	;006
+	MOV	R3,R5			;R5 -> parameter string
+	MOV	#4!10!20!40!200!400!1000,R0 ;trim the string:
+					;    4 = discard del, nulls, delimiters
+					;   10 = discard leading spaces/tabs
+					;   20 = reduce spaces/tabs to 1 space
+					;   40 = convert lowercase to uppercase
+					;  200 = discard trailing spaces/tabs
+					;  400 = don't trim quoted chars
+					; 1000 = discard all chars < 40
+	CALLX	CVT$$			;edit the string
+	MOV	R4,R2			;R2 = trimmed string length
+	POP	<R5,R4,R0>		;restore regs
+	TST	R2			;anything left in string?
+	BEQ	20$			;no, exit happy (nothing to do)
+	MOV	R4,JB.PAR(R0)		;yes, load next free addr into packet
+	SUB	R0,JB.PAR(R0)		;convert addr to an offset
+	MOVB	R2,(R4)+		;copy name length into packet
+.ASSUME	PB.PML	EQ	0		;ensure string length byte is first
+.ASSUME	PB.PMS	EQ	PB.PML+1	;ensure string follows length byte
+	MOVSTR	R3,R4,R2		;copy parameter string into packet
+	ADD	R2,R4			;add length to var area pointer
+20$:	CLC				;clear carry (success)
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	URPHLD	- PROCESS /HOLD FLAG FIELD (FC$HLD = 12.)		;021
+
+;+
+;
+; URPHLD:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPHLD
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPHLD:	TSTB	1(R1)			;is field flag non-zero?
+	BEQ	10$			;no, then it's a /NOHOLD
+	BIS	#JB$HLD,JB.FLG(R0)	;yes, so set hold bit in flag
+	BR	20$			;and exit
+
+10$:	BIC	#JB$HLD,JB.FLG(R0)	;clear hold bit in flag
+20$:	CLC				;clear carry for success
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	URPLFF	- PROCESS /LOG_FILE FLAG FIELD (FC$LFF = 13.)
+
+;+
+;
+; URPLFF:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPLFF
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPLFF:	TSTB	1(R1)			;is field flag non-zero?
+	BEQ	10$			;no, then it's a /NOLOGFILE
+	MOV	LOGBLK(R5),JB.LOG(R0)	;yes, so load offset to logfile block
+	BR	20$			;and exit
+
+10$:	CLR	JB.LOG(R0)		;show no offset to logfile block
+20$:	CLC				;clear carry for success
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	URPLFS	- PROCESS /LOG_FILE FILE-SPEC FIELD (FC$LFS = 14.)
+
+;+
+;
+; URPLFS:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPLFS
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPLFS:	PUSH	R1			;save work reg
+	INC	R1			;yes, R1 -> URP log file-spec length
+	MOV	#^RLOG,R2		;load default log filetype	;004
+...DLT	== .-2			;** PATCH ** default log filetype
+	MOV	OWNPPN(R5),R3		;load default PPN (owner's)	;025
+	CALLX	CHKFSS			;check for valid file-spec
+	BCC	20$			;valid, so continue
+10$:	MOV	#BADNAM,URPERR(R5)	;invalid, return BADNAM error
+	BR	50$			;and exit with error
+
+20$:	PUSH	<R4,R5>			;save work regs for UNFSS
+	MOV	LOGBLK(R5),R5		;get offset to logfile block
+	MOV	R5,JB.LOG(R0)		;and load into job packet
+	ADD	R0,R5			;convert offset to address
+	ADD	#LG.SPL,R5		;R5 -> log file-spec length
+	MOV	R5,R2			;save addr of file-spec length
+	INC	R5			;point to 1st char of file-spec
+.ASSUME	LG.SPC	EQ	LG.SPL+1	;ensure filespec follows byte
+	MOV	#FIL.LEN,R4		;load max file-spec length
+	CALLX	UNFSS			;build complete file-spec
+	BCC	30$			;no error, so continue
+	POP	<R5,R4>			;error, so restore regs
+	BR	10$			;and skip to error handler
+
+30$:	NEG	R4			;negate bytes remaining
+	ADD	#FIL.LEN,R4		;now actual length of file-spec
+	MOVB	R4,(R2)			;and load into length byte
+	POP	<R5,R4>			;restore regs
+40$:	TST	(PC)+			;clear carry (success)
+50$:	SEC				;set carry (error)
+	POP	R1			;restore reg
+	RETURN				;exit
+
+	.DSABL	LSB
+
+GLOBAL	<BADNAM>
+
+.SBTTL	URPLQF	- PROCESS /LOG_QUEUE FLAG FIELD (FC$LQN = 15.)
+
+;+
+;
+; URPLQF:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPLQF
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPLQF:	MOV	LOGBLK(R5),R3		;get saved offset to logfile block
+	ADD	R0,R3			;R3 -> logfile block      ;023
+	BIC	#FF$QLG,(R3)		; assume nolog_queue      ;023
+	TSTB	1(R1)			; is field flag non-zero? ;023
+	BEQ	10$			; no - then /NOLOG_QUEUE  ;023
+	BIS	#FF$QLG,(R3)		;set "queue logfile" flag
+.ASSUME	LG.FLG	EQ	0		;ensure flag word first in block
+10$:	CLC				;clear carry for success
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+GLOBAL	<BADNAM>
+
+.SBTTL	URPLQN	- PROCESS /LOG_QUEUE NAME FIELD (FC$LQN = 16.)
+
+;+
+;
+; URPLQN:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPLQN
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPLQN:	PUSH	R1			;save pointer to start of field
+	MOV	LOGBLK(R5),R3		;get saved offset to logfile block
+	ADD	R0,R3			;convert offset to address
+	BIS	#FF$QLG,(R3)		;set "queue logfile" flag
+.ASSUME	LG.FLG	EQ	0		;ensure flag word first in block
+	TST	(R3)+			;R3 -> logfile queue name length byte
+.ASSUME	LG.QNL	EQ	LG.FLG+2	;ensure queue name length follows flag
+	TSTB	(R1)+			;skip over code field in URP
+	CLR	R2			;allow null name and all numerics
+	CALLX	CPYNAM			;copy the name into logfile block
+	BCC	10$			;success, so exit happy
+	MOV	#BADNAM,URPERR(R5)	;error, return BADNAM error
+	BR	20$			;and fail
+
+10$:	TST	(PC)+			;clear carry for success
+20$:	SEC				;set carry for error
+	POP	R1			;restore pointer
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+GLOBAL	<BADNAM>
+
+.SBTTL	URPLDF	- PROCESS LOGFILE DELETE FLAG FIELD (FC$LDF = 17.)
+
+;+
+;
+; URPLDF:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPLDF
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPLDF:	MOV	LOGBLK(R5),R3		;get saved offset to logfile block
+	ADD	R0,R3			;R3 -> logfile block
+	TSTB	1(R1)			;is URP delete flag zero?
+	BEQ	10$			;yes, so go clear the DELETE bit
+	BIS	#FF$DEL,(R3)		;no, so set DELETE bit in logfile flag
+.ASSUME	LG.FLG	EQ	0		;ensure flag word is first in block
+	BR	20$			;and join common
+
+10$:	BIC	#FF$DEL,(R3)		;clear DELETE bit in logfile flag
+.ASSUME	LG.FLG	EQ	0		;ensure flag word is first in block
+20$:	CLC				;clear carry for success
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	URPNTF	- PROCESS /[NO]NOTIFY FLAG FIELD (FC$NTF = 18.)
+
+;+
+;
+; URPNTF:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPNTF
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPNTF:	TSTB	1(R1)			;Is field flag non-zero?	;027
+	BNE	10$			;Yes.  Set NOTIFY bit in flags	;027
+	BIC	#JB$NTF,JB.FLG(R0)	;No.  Clear NOTIFY bit in flags	;027
+	BR	20$			; and exit			;027
+
+10$:	BIS	#JB$NTF,JB.FLG(R0)	;Set NOTIFY bit in flags	;027
+20$:	CLC				;Clear carry for success	;027
+	RETURN				; and exit			;027
+
+	.DSABL	LSB
+
+.SBTTL	URPTAP	- PROCESS (UNDOCUMENTED) TAP FLAG FIELD (FC$TAP = 127.)	;024+
+
+;+
+;
+; URPTAP:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPTAP
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPTAP:	TST	ALWTAP			;is TAP special features on?
+	BNE	10$			;yes, so continue
+	MOV	#SUBERR,URPERR(R5)	;no, return invalid field error
+	BR	40$			;and skip to failure exit
+
+10$:	TSTB	1(R1)			;is field flag non-zero?
+	BNE	20$			;yes, so set TAP bit in job flag
+	BIC	#JB$TAP,JB.FLG(R0)	;no, so clear TAP bit in flag
+	BR	30$			;and exit
+
+20$:	BIS	#JB$TAP,JB.FLG(R0)	;set TAP bit in job flag
+30$:	TST	(PC)+			;clear carry for success
+40$:	SEC				;set carry for failure
+	RETURN				;exit
+
+	.DSABL	LSB
+
+GLOBAL	<ALWTAP,SUBERR>							;024-
+
+.SBTTL	URPAFS	- PROCESS URP ASCII FILE-SPEC FIELD (FC$AFS = 128.)
+
+;+
+;
+; URPSTP:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPAFS
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPAFS:	PUSH	R1			;save pointer to file-spec field
+	EVEN	R4			;ensure next var area addr is a word
+	TST	R0			;is this pass 2?
+	BNE	5$			;yes, so process the field
+	ADD	#FB.SPC+FIL.LEN,R4	;no, so update job packet length
+	BR	50$			;and exit happy
+
+5$:	INC	R1			;R1 -> file-spec length byte
+	MOV	URPFTY(R5),R2		;R2 =  default filetype		;004
+	MOV	PPN(R5),R3		;R3 =  default PPN (user's)	;025
+	CALLX	CHKFSS			;check for valid file-spec
+	BCC	30$			;valid, so continue
+20$:	MOV	#BADNAM,URPERR(R5)	;invalid, return BADNAM error
+	BR	60$			;and exit
+
+30$:	TSTB	JB.NML(R0)		;do we have an entry name already?
+	BNE	35$			;yes, so no need to build default
+	MOV	#FIRQB+FQNAM1,R2	;no, point to (RAD50) filename
+	CALLX	BLDENT			;try to build entry name from filename 
+35$:	PUSH	<R4,R5>			;save regs for UNFSS
+	MOV	R4,R5			;get address of file-spec block
+	ADD	#FB.SPL,R5		;R5 -> file-spec length byte
+	MOV	R5,R2			;save the length addr for later
+	INC	R5			;now point to 1st char of file-spec
+.ASSUME	FB.SPC	EQ	FB.SPL+1	;ensure string follows length byte
+	MOV	#FIL.LEN,R4		;load max file-spec length
+	CALLX	UNFSS			;build complete file-spec
+	BCC	40$			;no error, so continue
+	POP	<R5,R4>			;error, restore regs
+	BR	20$			;and skip to error
+
+40$:	NEG	R4			;negate bytes remaining
+	ADD	#FIL.LEN,R4		;now actual length of file-spec
+	MOVB	R4,(R2)			;and load into file-spec length byte
+	MOV	R4,R3			;save length of file-spec
+	POP	<R5,R4>			;restore regs
+	MOV	URPFLB(R5),R2		;get pointer to last file-spec block
+	MOV	R4,(R2)			;update link to new file-spec block
+	SUB	R0,(R2)			;convert link to offset
+	MOV	R4,URPFLB(R5)		;save addr of new file-spec block
+	CLR	(R4)+			;zero offset to next file-spec block
+.ASSUME	FB.NXT	EQ	0		;ensure offset word is first
+	MOV	URPFFG(R5),(R4)+	;copy file flag word into job packet
+.ASSUME	FB.FLG	EQ	FB.NXT+2	;ensure flag word follows offset word
+	MOVB	URPFCP(R5),(R4)+	;load no. file copies
+.ASSUME	FB.COP	EQ	FB.FLG+2	;ensure copies word follows flag word
+	CLRB	(R4)+			;zero high byte of copies word
+.ASSUME	FB.SPL	EQ	FB.COP+2	;ensure next byte is file-spec length
+	INC	R4			;skip over file-spec length byte
+	ADD	R3,R4			;skip over file-spec string
+	BIS	#UF$FIL,URPFLG(R5)	;show we've seen a file-spec
+50$:	TST	(PC)+			;clear carry (success)
+60$:	SEC				;set carry (error)
+	POP	R1			;restore reg
+	RETURN				;exit
+
+	.DSABL	LSB
+
+GLOBAL	<BADNAM>
+
+.SBTTL	URPBFS	- PROCESS URP BINARY FILE-SPEC FIELD (FC$BFS = 129.)
+
+;+
+;
+; URPBFS:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPBFS
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPBFS:	PUSH	R1			;save pointer to file-spec field
+	TST	(R1)+			;R1 -> binary file-spec
+	CALLX	CLRFQB			;clear out the FIRQB
+	MOV	#FIRQB+FQPPN,R2		;R2 -> FQPPN
+	MOV	(R1)+,(R2)+		;copy PPN into FIRQB
+	MOV	(R1)+,(R2)+		;copy NAM1 into FIRQB
+	MOV	(R1)+,(R2)+		;copy NAM2 into FIRQB
+	MOV	(R1)+,(R2)		;copy TYP into FIRQB
+	MOV	#FIRQB+FQDEV,R2		;R2 -> FQDEV
+	MOV	(R1)+,(R2)+		;copy DEV into FIRQB
+	MOV	(R1)+,(R2)+		;copy DEVN into FIRQB
+	EVEN	R4			;ensure next var area addr is a word
+	PUSH	<R4,R5>			;save regs for UNFSS call
+	MOV	R4,R5			;get start of fake file-spec field
+	INC	R5			;point to length byte
+	MOV	R5,R2			;save addr of length byte
+	INC	R5			;now point to file-spec string
+.ASSUME	FB.SPC	EQ	FB.SPL+1	;ensure string follows length byte
+	MOV	#FIL.LEN,R4		;max chars needed for UNFSS
+	CALLX	UNFSS			;UNFSS the binary file-spec
+	BCC	10$			;valid, so continue 
+	POP	<R5,R4>			;invalid, restore saved regs
+	MOV	#BADNAM,URPERR(R5)	;return BADNAM error
+	BR	20$			;and exit
+
+10$:	NEG	R4			;negate free bytes count
+	ADD	#FIL.LEN,R4		;R4 = max length of ascii file-spec
+	MOVB	R4,(R2)			;save length of string
+	POP	<R5,R4>			;restore saved regs
+	MOV	R4,R1			;R1 -> fake file-spec field
+	CALL	URPAFS			;process our (ascii) filepspec field
+20$:	POP	R1			;restore pointer to field
+	RETURN				;exit
+
+	.DSABL	LSB
+
+GLOBAL	<BADNAM>
+
+.SBTTL	URPCVT	- PROCESS FILE-SPEC /CONVERT FIELD (FC$CVT = 130.)
+.SBTTL	URPDEL	- PROCESS FILE-SPEC /DELETE FIELD (FC$DEL = 132.)
+.SBTTL	URPFEE	- PROCESS FILE-SPEC /FEED FIELD (FC$FEE = 133.)
+.SBTTL	URPFLP	- PROCESS FILE-SPEC /FLAG_PAGES FIELD (FC$FLP = 134.)
+.SBTTL	URPTRN	- PROCESS FILE-SPEC /TRUNCATE FIELD (FC$TRN = 135.)
+.SBTTL	URPRAP	- PROCESS FILE-SPEC /WRAP FIELD (FC$RAP = 136.)
+
+;+
+;
+; URPCVT:
+; URPDEL:
+; URPFEE:
+; URPFLP:
+; URPTRN:
+; URPRAP:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPCVT
+;		JSR	PC,URPDEL
+;		JSR	PC,URPFEE
+;		JSR	PC,URPFLP
+;		JSR	PC,URPTRN
+;		JSR	PC,URPRAP
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPCVT:	MOV	#FF$ZER,R2		;load flag bit for /CONVERT
+	BR	10$			;and join common
+
+URPDEL:	MOV	#FF$DEL,R2		;load flag bit for /DELETE
+	BR	10$			;and join common
+
+URPFEE:	MOV	#FF$SKP,R2		;load flag bit for /FEED
+	BR	10$			;and join common
+
+URPFLP:	MOV	#FF$FHD,R2		;load flag bit for /FLAG_PAGES
+	BR	10$			;and join common
+
+URPRAP:	MOV	#FF$RAP,R2		;load flag bit for /WRAP	;026
+	BR	10$			;and join common		;026
+
+URPTRN:	MOV	#FF$TRN,R2		;load flag bit for /TRUNCATE
+	.BR	10$			;and join common
+
+10$:	TST	URPFLG(R5)		;have we seen a file-spec field yet?
+	BPL	20$			;no, so update default file flag
+.ASSUME	UF$FIL	EQ	100000		;ensure flag is sign bit
+	MOV	URPFLB(R5),R3		;yes, get last file-spec block addr
+	ADD	#FB.FLG,R3		;R3 -> file-spec's flag word
+	BR	30$			;and continue
+
+20$:	MOV	R5,R3			;get base of impure area
+	ADD	#URPFFG,R3		;R3 -> default file flag word
+30$:	TSTB	1(R1)			;is field flag byte non-zero?
+	BEQ	40$			;no, so clear the flag bit
+	BIS	R2,(R3)			;yes, so set the flag bit
+	BR	50$			;and exit
+
+40$:	BIC	R2,(R3)			;clear the flag bit
+50$:	CLC				;clear carry for success
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	URPCOP	- PROCESS FILE-SPEC /COPIES FIELD (FC$COP = 131.)
+
+;+
+;
+; URPCOP:
+;
+; Inputs:	R0 -> Start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4 -> next free byte in variable area
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,URPCOP
+;
+;
+; Return:	R0 -> start of job def packet (past header)
+;		R1 -> Start of current URP field
+;		R4    updated as necessary
+;		R5 -> Impure area
+;		All other registers are random
+;		C  =  0 if no error, 1 if error
+;		URPERR(R5) contains error code
+;
+;-
+
+	.ENABL	LSB
+
+URPCOP:	MOVB	1(R1),R2		;get file copies byte
+	BEQ	30$			;zero, so ignore this field
+	TST	URPFLG(R5)		;did we see a file-spec field yet?
+	BPL	10$			;no, so update default file copies
+.ASSUME	UF$FIL	EQ	100000		;ensure flag is sign bit
+	MOV	URPFLB(R5),R3		;yes, get last file-spec block addr
+	ADD	#FB.COP,R3		;R3 -> file-spec's file copies word
+	BR	20$			;and continue
+
+10$:	MOV	R5,R3			;get base of impure area
+	ADD	#URPFCP,R3		;R3 -> default file copies word
+20$:	MOVB	R2,(R3)			;save file copies value
+30$:	CLC				;clear carry for success
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+GLOBAL	<BDNERR>
+
+.SBTTL	CHKCOD	- CHECK FOR VALID URP FIELD CODE
+
+;+
+;
+; CHKCOD:
+;
+; Inputs:	R2 =  field code to test
+;		R5 -> Impure area
+;
+; Call:		JSR	PC,CHKCOD
+;
+; Return:	C = 0 if valid code
+;		  R2 -> URP table entry for code
+;		C = 1 if invalid code
+;		All other registers preserved
+;
+;-
+
+	.ENABL	LSB
+
+CHKCOD:	PUSH	R2			;save a work reg
+	MOV	#URPTBL,R2		;R1 -> start of URP table
+10$:	TSTB	(R2)			;end of table?
+	BEQ	30$			;yes, so fail
+	CMPB	(R2),(SP)		;codes match?
+	BEQ	20$			;yes, so exit loop
+	ADD	#UTSIZ,R2		;no, point to next entry	;010
+	BR	10$			;and try again
+
+20$:	MOV	R2,(SP)			;fix stack to return entry addr
+	TST	(PC)+			;clear carry for success
+30$:	SEC				;set carry for error
+	POP	R2			;restore R2
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+	.END

@@ -1,0 +1,506 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:FLDEF/
+.INCLUDE /CMN:HDRDEF/
+TITLE	SLN,<LOGICAL NAME, CCL ADD/REMOVE>,0I,31-JAN-92,MHB/ABC/SRM/WJS/FEK/GPK/BSB/FRL/DRP/KPH/WRM
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR SLN
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001  SRM  10-Sep-81	Incorporate FIP Pool breadboard code.
+;  002	WJS  24-Nov-82	Fix CCL "@" vs "`", cleanup, allow "specials"
+;  003	WJS  09-Dec-82	Code-review changes
+;  004	FEK  12-JAN-83	Make sure UU.DIE does the proper type logout
+;  005	WJS  14-Feb-83	Disallow 8-bit chars, "%", and "&" in CCL keywords
+;
+;				[RSTS V9.0]
+;  006	GPK  28-Mar-83	Multiple privileges
+;  007	BSB  22-Jul-83  Add PFB cleanup 
+;  008	GPK  20-Sep-83	Add SYSMGR privilege
+;  009  FRL  30-Jan-84  Place system-wide logicals in XBUF,increase length, 
+;			  allow $ in non-first place and add list subfunction 
+;  010	DRP  09-Apr-84	Add logged-in quota support
+;  011	GPK  20-Apr-84	Privilege name changes
+;  012  FRL  16-Oct-84  /REPLACE qualifier for ADD
+;  013	GPK  08-Feb-85	Disallow $ CCL add/remove; remove DCL in UU.DIE
+;
+;			[RSTS V9.1]
+;  014	KPH  30-Mar-85	Add resident SATT support
+;  015  KPH  20-Aug-85	Add auto-restart feature
+;
+;			[RSTS V9.2]
+;  016  KPH  09-Aug-85	Add job control region
+;
+;			[RSTS V9.6]
+;  017	KCG  26-May-88	Shutdown LAT in UU.DIE
+;
+;			[RSTS V9.7]
+;  018  WRM  15-Mar-89	Fix UU.DIE problem with modes being lost
+;			Fix LATDIE call problem
+;
+;			[RSTS V10.0]
+;  019  WRM  15-Oct-89	Add extended logical features
+;  020  WRM  27-Jul-90	Source clr fix for error report on deas/sys
+;
+;			[RSTS V10.1]
+;  021	DRP  22-Jan-91	Don't allow placement of logical in disk logical
+;			list, i.e. problem fixed by patch 3.7.3.
+;			General cleanup of the system logical routines.
+;  022	FEK  26-Dec-91	Set date/time of last dismount (UU.DIE)
+;-
+
+FQFSRT	SLN
+
+.SBTTL	LOGICAL NAME ADD/REMOVE/CHANGE/LIST
+
+;+
+; UU.SLN - LOGICAL NAME ADD/REMOVE/CHANGE/LIST.				;009
+;
+;	R4 -> FIRQB (copy in the work block)
+;		FQFIL  =  -1 => CHANGE DISK LOGICAL NAME
+;			   0 => REMOVE
+;		           1 => ADD SYSTEM LOGICAL NAME
+;			   2 => LIST Nth LOGICAL (system)		;019
+;			   4 => add long system logical			;019
+;
+;		FQSIZM =   0 => /NOREPLACE, 1 => /REPLACE [add long]	;019
+;		FQPPN  =  PPN [ADD], N [LIST. On return has PPN]	;009
+;		FQNAM1 =  LOGICAL NAME (3 WORDS)			;009
+;		FQSIZ  =  0 => /NOREPLACE, 1 => /REPLACE [ADD]		;012
+;		FQDEV,FQDEVN = PHYSICAL NAME [ADD & CHANGE]
+;
+;	On return from LIST, FQCLUS =  -1 => DISK WAS NOT MOUNTED	;009
+;	On return from ADD, FQSIZ = 0 => NEW LOGICAL, => 1 REPLACED LOGICAL ;012
+;-
+
+	UUOENT	SLN		;ADD/REMOVE/CHANGE/LIST LOGICAL NAME	;012
+
+.ENABL	LSB								;009
+
+	NOP	;we all know why this is here
+	BICB	#^C<LG$RPL>,FQSIZM(R4)	;clear for internal flags	;019
+.ASSUME	LG$RPL	EQ	1	;to match call definition		;019
+	BISB	#LG$SYS,FQSIZM(R4)	; note the difference		;019
+	MOV	R4,R5		;COPY THE FIRQB POINTER AND
+	ADD	#FQNAM1,R5	; INDEX TO THE LOGICAL NAME
+	CMPB	FQFIL(R4),#4	;IS IT a priv add long syste logical?	;019
+	BEQ	10$		;YES					;009
+	CMPB	FQFIL(R4),#2	;is it one of the other priv'd cmds?	;019
+	BPL	20$		;no- allow to proceed unhindered	;019
+10$:	MOV	R5,-(SP)	;Save R5				;010
+	CALLX	CHKPRV,R4	;Check for privs			;010
+	 .BPRIV	INSTAL							;010
+	BCS	50$		;Error if no privs			;010
+	MOV	(SP)+,R5	;Restore R5				;010
+20$:	MAP	FIPPOL		;don't need user map WRKBLK=FIRQB	;019
+	MOVB	FQFIL(R4),R0	;GET SUBFUNCTION CODE			;009
+	INC	R0		;CONVERT TO DISPATCH OFFSET		;009
+	CMP	R0,#5		;LEGAL (0 <= x < 7) CODE? 		;019
+	BHI	50$		;NO 					;009
+	ASL	R0		;CONVERT OFFSET TO WORDS		;009
+	ADD	R0,PC		;DISPATCH				;009
+	 BR	CHANGE							;009
+	 BR	30$							;021
+	 BR	ADD							;009
+	 BR	LIST							;009
+	 BR	50$		;illegal from fip			;019
+	 BR	ADDLNG		;new long system logicals		;019
+
+30$:	JMP	REMOVE		;Branch didn't reach			;021
+
+40$:	ERROR	BADNAM		;NO, GIVE ERROR				;009
+
+50$:	ERROR	BADFUO		;ILLEGAL SUBFUNCTION CODE		;009
+
+.DSABL	LSB								;021
+
+.ENABL	LSB								;021
+
+LIST:	MOV	@#SYSLOG,R3	;get the system list top pointer	;019
+	CLR	FQCLUS(R4)	;LIST, CLEAR RETURN FLAG		;009
+	MOV	FQPPN(R4),R1	;GET N					;009
+	CMP	R1,#<<SYSLOG-DSKLOG>/DL$SIZ> ;WHAT IS THE Nth LOGICAL?	;009
+	BHIS	20$		;IT IS A SYSTEM LOGICAL			;009
+	ASL	R1		;DISK LOGICAL, IS IT MOUNTED?		;009
+	BIT	#UC.MNT,UNTCNT(R1) ;(R1 HAS FIP UNIT NUMBER * 2)	;009
+	BEQ	10$		;YES					;009
+	DEC	FQCLUS(R4)	;NO, INDICATE NOT MOUNTED		;009
+10$:	MUL	#DL$SIZ/2,R1	;CALCULATE OFFSET INTO TABLE (/2 FROM ASL) ;009
+	ADD	#DSKLOG,R1	;  AND INDEX THE ENTRY DIRECTLY		;009
+	MOV	(R1)+,(R5)+	;RETRIEVE LOGICAL NAME			;009
+.ASSUME	DL$NAM	EQ	0						;009
+	MOV	(R1)+,(R5)+ 	; ALL THREE				;009
+	MOV	(R1)+,(R5)	; WORDS					;009
+	MOV	(R1)+,FQDEV(R4) ;RETRIEVE PHYSICAL DEVICE NAME		;009
+.ASSUME	DL$DEV	EQ	DL$NAM+6					;009
+	MOV	(R1),FQDEVN(R4)	;RETRIEVE UNIT NUMBER AND FLAG		;009
+.ASSUME	DL$NUM	EQ	DL$DEV+2					;009
+	CLR	FQPPN(R4)	;DISK, SO NO PPN			;009
+	RETURN			;ALL DONE				;009
+
+20$:	SUB	#<<SYSLOG-DSKLOG>/DL$SIZ>,R1 ;SYSTEM LOGICAL, ADJUST OFFSET ;009
+	INC	R1		;set count from 1 not 0			;019
+	MOV	#LG$SYS,R0	;set to system list
+	CALLM	LISTLG,EMTAP5	;go get the data			;019
+	Map	FIPPOL		;make the master happy			;019
+	RETURN
+
+.DSABL	LSB								;021
+
+.ENABL	LSB								;021
+
+CHANGE:	CMP	(R5),#^R$	;LEGAL FIRST CHARACTER			;012
+	BLO	10$		;YES					;012
+	CMP	(R5),#^R0	;MAYBE...				;012
+	BLO	50$		;NO					;021
+10$:	CALLMI	SEARCH,EMTAP5	;CHECK FOR DOUBLE LOGICAL NAMES
+	BCC	30$		;NAME FOUND, "IN USE" ERROR
+	MAP	FIPPOL		;RESTORE MAPPING			;021
+	CALLX	GUN,R5		;REASS, ENSURE VALID DISK		;012
+	 BR	20$		;IT IS A MOUNTED DISK DEVICE		;021
+	 BR	40$		; ELSE INFORM CALLER			;012
+
+20$:	TSTB	@#FIPGEN	;GENERAL DISK SPECIFIED?		;021
+	BNE	40$		;YES, INFORM CALLER			;012
+	MUL	#DL$SIZ/2,R0	;MULTIPLY UNIT*2 FOR TABLE OFFSET	;009
+;NEXT THREE LINES RELY ON PREVIOUS .ASSUME'S FOR DL$ CONSTANTS
+	MOV	(R5)+,DSKLOG(R1) ;NOW SET THE (NEW) LOGICAL		;021
+	MOV	(R5)+,DSKLOG+2(R1) ; NAME IN THE TABLE			;009
+	MOV	(R5),DSKLOG+4(R1) ; ALL THREE WORDS			;009
+	RETURN			;ALL DONE
+
+30$:	ERROR	INUSE		;DOUBLE LOGICAL NAMES CAN'T HAPPEN	;012
+
+40$:	ERROR	NODEVC		;NOT DISK OR GENERAL DISK		;012
+
+50$:	ERROR	BADNAM		;Illegal name				;021
+
+GLOBAL	<FIJOB,DSKLOG,SYSLOG,UNTCNT,FIPGEN>				;021
+
+.DSABL	LSB								;021
+
+.ENABL	LSB								;021
+
+ADD:	BIT	#1,FQSIZ(R4)	;is replace flag set?			;019
+	BEQ	10$		;no					;019
+	BISB	#LG$RPL,FQSIZM(R4) ;move to new location		;019
+10$:	CLR	FQSIZ(R4)	;and that's the way it use to be	;019
+ADDLNG:	TST	(R5)		;is any name present (must be one)	;019
+	BEQ	100$		;no - that's not good			;021
+	CMP	(R5),#^R$	;ADD, LEGAL FIRST CHARACTER?		;009
+	BLO	20$		;YES					;021
+	CMP	(R5),#^R0	;MAYBE...				;009
+	BLO	100$		;No					;021
+20$:	CLR	R0		;clear status				;019
+	BISB	FQSIZM(R4),R0	;set up status word			;019
+	MOVB	@#FIJOB,R3	;must ID has a FIP job to search	;019
+	CALLMI	SEARCH,EMTAP5	;find name in the requested area	;019
+	BCS	40$		;not found if C=1			;019
+	BITB	#LG$RPL,R0	;is replace set?			;019
+	BEQ	80$		;no -that's not easy
+	BIT	#LG$DSK,R0	;was it a Disk?				;019
+	BEQ	30$		;no-					;019
+	CLR	(R2)+		;yes- then trash the disk list entry	;019
+	CLR	(R2)+		;   in favor of what will be the new	;019
+	CLR	(R2)		;   entry to be assigned		;019
+	BR	40$		;now go add it				;019
+
+30$:	BIT	#LG$LOW,R0	;found in low core,special case
+	BNE	80$		;disallow replace in low core		;019
+	MOV	FQPPN(R4),SL$PPN(R3)	;PPN replaced (R4->wrkblk here)	;019
+	MOV	FQDEVN(R4),SL$NUM(R3)	;unit # and flag		;019
+	MOV	FQDEV(R4),SL$DEV(R3)	;device name			;019
+	BR	70$		;exit with stack even			;021
+
+40$:	CLR	R2		;this will be new entry (no fill in)	;019
+	BIT	#LG$SYS,R0	;is it a system add?			;019
+	BNE	50$		;yes					;019
+	MOV	@#JHULOG,R3	;no then get user list top		;019
+	BR	60$		;all set go add it on the mountain	;019
+
+50$:	MOV	@#SYSLOG,R3	;system- so get its top pointer		;019
+60$:	CALLM	LOGADD,EMTAP5	;put in chain pointed by R3		;019
+	BCS	90$		;if c=1 the no buffers- failed		;019
+70$:	MAP	FIPPOL		;re-map FIP and exit as done		;021
+	RETURN			;SUCCEEDED, ALL DONE NOW		;021
+
+
+80$:	ERROR	INUSE		;DOUBLE LOGICAL NAMES CAN'T HAPPEN
+
+90$:	ERROR	NOBUFS		;NO MORE BUFFER SPACE LEFT		;009
+
+100$:	ERROR	BADNAM		;Illegal name				;021
+
+.DSABL	LSB								;021
+
+.ENABL	LSB								;021
+
+REMOVE:	CLR	R0		;properly organize it			;021
+	MOV	#LG$SYS,R0	;set up status for search		;019+
+	CALLMI	SEARCH,EMTAP5	;find name in the requested area	;019
+	BCS	60$		;Doesn't exist				;021
+10$:	BIT	#LG$DSK,R0	;WAS IT A DISK LOGICAL?			;021
+	BEQ	20$		;NO, 20$				;009
+	CLR	(R2)+		;YES, SO CLEAR OUT THE LOGICAL		;009
+	CLR	(R2)+		; NAME , ALL THREE			;009
+	CLR	(R2)		; WORDS, AND				;009
+	BR	50$		;EXIT					;009
+
+20$:	MOV	R2,R5		;save the prev buffer address		;019
+	CALLM	ZAPALG,EMTAP5	;make sub-block go away			;019
+	BNE	50$		;?not zero, more data in buffer,keep it	;019+
+	MOV	R5,R4		;retrieve prev buffer contorted addr	;019
+	TST	R4		;if =0, discarding buffer at top of lst	;019
+	BNE	30$		;no- not top of list			;019
+	MOV	@#SYSLOG,R4	;YES,	{READY TO RETURN CURRENT}	;009
+	MOV	(R3),@#SYSLOG	;	HEAD:=NEXT(CURRENT)		;009
+	BR	40$		;	RETURN CURRENT			;009
+
+30$:	MOV	(R3),R2		;NO,		SAVE NEXT(CURRENT)	;009
+	CALLX	MAPBUF		;		MAP PREVIOUS		;009
+	MOV	(R3),R4		;		{READY TO MAP CURRENT}	;009
+	MOV	R2,(R3)		;		NEXT(PREV):=NEXT(CURRENT) ;009
+	CALLX	MAPBUF		;		MAP CURRENT		;009
+40$:	MOV	#100,(R3)	;RETURN CURRENT CHUNK TO POOL		;009
+	BUFFER	RETURN		;					;009
+	DEC	@#USETBL+UT.LOG	;DECREMENT MONITOR'S COUNTER		;012
+50$:	MAP	FIPPOL		;RESTORE MAPPING			;012
+	RETURN			;EXIT TO LOCAL CALLER			;012
+
+60$:	ERROR	NOSUCH		;Logical does not exist			;021
+
+GLOBAL	<SYSLOG,BITBYT,USETBL,FIQUE,UNTCNT>				;012
+
+.DSABL	LSB								;021
+FQFEND									;009
+
+FQFSRT									;009
+
+.SBTTL	SHUTUP THE SYSTEM
+
+;+
+; UU.DIE - SHUTUP THE SYSTEM.
+;
+;	R4 -> FIRQB
+;		FQFIL
+;			BIT 0 = If set, automatically restart RSTS
+;-
+
+	UUOENT	DIE,SHUTUP	;Shutup the system			;011
+
+.ENABL	LSB
+
+	CMP	@#JOBCNT,#1*400+1 ;# LOGINS AND MAX # LOGINS BOTH AT 1??
+	BNE	40$		;NO, ERROR				;015
+	MOVB	FQFIL(R4),-(SP)	;Save the shutup/restart flag		;018
+	TST	@#LATAP5	;Is LAT loaded?				;017
+	BMI	10$		;No, don't shut it down			;017
+	PUSH	R4		;Save our firqb pointer			;017
+	FCALL	LATDIE		;Cancel all LAT sessions		;017
+	POP	R4		;Restore our firqb pointer		;017
+10$:	FCALL	CLNPFB		; Yep, get rid of those first		;007
+				;Returns inline if no log file is open
+				;Starts UU.DIE over if a log file was opened
+	MOV	#UNTCNE,R2	;YES, SO GET POINTER TO CHECK DISK(S)	;016
+20$:	CMP	R2,#UNTCNT	;DONE?
+	BLOS	50$		;YES
+	BIT	-(R2),#UC.MNT!UC.CNT ;NO, IS THIS DISK MOUNTED?
+	BMI	20$		;NOT MOUNTED, SO O.K.
+.ASSUME	UC.MNT	EQ	100000
+	BNE	30$		;MOUNTED, BUT OPEN FILES IS BAD
+	CMP	R2,@#DEVPTR-2	;MOUNTED & NO OPENS, THE SYSTEM DISK?
+	BEQ	20$		;SYSTEM, THEN STILL O.K.
+30$:	CMP	R2,@#DEVPTR-2	;System disk?				;013
+	BNE	40$		;No, so open files means failure	;013
+	BIT	#UC.CNT-1,(R2)	;Just one open file?			;013
+	BNE	40$		;No, can't handle that			;013
+	MOV	@#DEFKBM,R3	;Point to default KBM block		;013
+	CMP	R3,@#RTSLST	;Is it the primary RTS?			;013
+	BEQ	40$		;Yes, some random open file then	;013
+	REGSAV			;Save registers				;013
+	FCALL	REMDIE		;Remove RTS block for me please		;013
+	REGRES			;Restore registers			;013
+	BIT	#UC.CNT,(R2)	;No open files now?			;013
+	BEQ	20$		;Yes, that's what we expected		;013
+40$:	ERROR	BADFUO		;NOPE, FATAL TYPE ERROR
+
+50$:	MOV	#2,FQFIL(R4)	; Do logout full clean up (with no quotas)
+	FCALLI	$UUOTBL+<UU.BYE-UU$MIN*2> ;NOW CALL LOGOUT
+55$:	MOVB	@#SYSUN2,R1	;Get the FUN * 2 of the system disk	;014
+	TST	DSKQPT(R1)	;Any QTBs still allocated?		;014
+	BEQ	60$		;No, that's good			;010
+	CRASH			;Yes, should never happen		;010
+
+60$:	FCALL	UNLSAT		;Unload SATT if it is loaded		;014
+	MOV	@#FIJBDA,R1	;Pick up JDB pointer for job		;014
+	TSTB	JDIOST(R1)	;Did an error occur removing the SATT?	;014
+	BNE	70$		;Yes, don't mark the disk clean		;014
+	MOVB	@#SYSUN2,R1	;Get the FUN * 2 of the system disk	;022
+	BIT	#UC.WLO,UNTCNT(R1) ;Write locked system disk?		;022
+	BNE	70$		;What a strange life it is...		;022
+	CALLX   WOMSAT          ;WOMP OUT ANY SAT			;010
+	CALLX	READPL		;READ THE PACK LABEL
+	BIC	#UC.MNT,@#FIBUF+PSTAT ;SAY DISK NOT DIRTY NOW
+	MOV	@#DATE,@#FIBUF+MNTDAT ;Set last dismount date		;022
+	MOV	@#TIME,@#FIBUF+MNTTIM ;Set last dismount time		;022
+	CALLX	WRITE		;WRITE IT BACK OUT
+70$:	ASRB	(SP)+		;Should we do a restart?		;015
+	BCS	80$		;Yes, go do it				;015
+	JMPX	RELOAD		;No, reload INIT			;015
+
+80$:	CALLX	JMPM,R5,<CRAAP5,GOREST>	;Go restart the system		;015
+
+GLOBAL	<JOBCNT,UNTCNE,UNTCNT,DEVPTR,$UUOTBL,FIBUF,FIJBD2,CLNPFB>	;007
+GLOBAL	<SYSUN2,DSKQPT,RTSLST,DEFKBM,REMDIE,UNLSAT,FIJBDA,GOREST,CRAAP5> ;015
+GLOBAL	<LATAP5,LATDIE,DATE,TIME>					;022
+
+.DSABL	LSB
+
+.SBTTL	CCL COMMAND ADD/DELETE
+
+;+
+; UU.CCL - CCL COMMAND ADD/DELETE.
+;
+;	R4 -> FIRQB
+;		FQFIL  =  0   => ADD
+;		          <>0 => DELETE
+;		+5     =  LENGTH OF UNIQUE IN COMMAND [ADD]
+;		FQPPN  =  PPN OF PROGRAM [ADD]
+;		FQNAM1 =  FILE NAME OF PROGRAM (2 WORDS) [ADD]
+;		FQEXT  =  EXTENSION OF PROGRAM [ADD]
+;		FQSIZ  =  COMMAND IN ASCIZ (UP TO 9. CHARS)
+;		FQDEV,FQDEVN = DEVICE OF PROGRAM [ADD]
+;		FQCLUS =  PROGRAM PARAMETER WORD [ADD]
+;-
+
+	UUOENT	CCL,INSTAL,SYNC	; CCL add/delete			;011
+
+.ENABL	LSB
+
+	MOV	FQCLUS(R4),FQNENT(R4) ; Move CHAIN parameter into place
+	MOV	R4,R5		; Copy FIRQB pointer
+	ADD	#FQSIZ,R5	; Point to the string start
+	MOV	R5,R3		; Copy pointer to string
+	MOV	#FQDEV-FQSIZ,R1	; Number of characters in string part
+10$:	TSTB	(R3)		; More in string?
+	BEQ	70$		; Null byte -> we have picked up the command
+	CMPB	(R3),#'A+40	; Possible lowercase letter (low check) ?
+	BLO	20$		; No, too low -> continue
+	CMPB	(R3),#'Z+40	; Maybe:  check high
+	BHI	60$		; Too high -> bad character, an error
+	BICB	#40,(R3)+	; Lowercase letter:  make it uppercase,
+	BR	50$		;   and accept the character
+
+20$:	CMPB	(R3),#'Z	; Possible uppercase letter (high check) ?
+	BHI	60$		; Too high -> bad character, an error
+	CMPB	(R3)+,#'@	; Maybe:  check low
+	BHIS	50$		; Uppercase letter (or "@") -> accept the character
+	DEC	R3		; Oops - didn't pass "letter" check:  put R3 back
+
+; Character is not a letter..
+
+	CMP	R3,R5		; Looking at first character ?
+	BNE	40$		; No -> do checks appropriate for "subsequent" chars
+
+; Not a letter, and first character -- it might be a "special"
+
+	CMPB	(R3)+,#'@	; Is it the always-allowable "special" ?
+	BEQ	30$		; Yes => go insure that it was alone
+	CMPB	-1(R3),#'#	; No:  well, is the other "special", then ? ;013
+	BNE	60$		; No, error				;013
+30$:	DEC	R1		; Indicate we've scanned one character
+	BICB	#^C<177>,(R3)	; Was the "special" a single character ?
+	BEQ	70$		; Yes => go declare the "special" CCL
+	BR	60$		; No => an error
+
+; Not a letter, and not first character -- it had better be a digit
+
+40$:	CMPB	(R3),#'0	; Too low ?
+	BLO	60$		; Yes -> bad character, an error
+	CMPB	(R3)+,#'9	; Not too low: check high
+	BHI	60$		; Yes -> bad character, an error
+
+; Acceptable character
+
+50$:	SOB	R1,10$		; Count down, and continue scan
+60$:	ERROR	BADNAM		; Error in name (including no-null-byte-found)
+
+70$:	MOVB	FQFIL+1(R4),R0	; Get length of unique part
+	BLE	60$		; Must be positive, non-zero!
+	ADD	#FQSIZ,R0	; Bias it by start of string area
+	MOV	R0,FQCLUS(R4)	; Temp save unique pointer (rel) in buffer
+	ADD	R1,R0		; Add unscanned part
+	CMP	R0,#FQDEV	; Is the unique part <= length of string?
+	BHI	60$		; No, it isn't
+	CALLX	CCLCHK		; Check for already existent CCL command
+	BEQ	80$		; Can't find any
+	TSTB	FQFIL(R4)	; It exists, is this add or delete?
+	BEQ	110$		; It is add - we can't do that
+	TSTB	(R5)		; It is delete, was command o.k.?
+	BNE	120$		; No, so say not found
+	MOV	(R0),(R1)	; Yes, so unlink the buffer
+	MOV	R0,R4		; Set up R4
+	BUFFER	RETSML		;  and pool it
+	RETURN			; Back from FIP
+
+80$:	TSTB	FQFIL(R4)	; Can't find command, add or delete?
+	BNE	120$		; Delete is an error
+	COMB	(R3)		; Set a byte of 377 as a stopper
+	MOV	R1,-(SP)	; Save prev link word pointer
+	CALLX	GUNSUB,R5	; What device type?
+	 ERROR	NODEVC		; Illegal device name
+	CMP	R0,#DEVOKB	; Is it a disk device?
+	BLT	90$		; Yes
+	ERROR	DEVNFS		; No, error
+
+90$:	TST	FQNAM1(R4)	; Was a filename supplied?
+	BEQ	60$		; No, error
+	MOV	R4,R5		; Remember his FIRQB
+	CALLX	GETFIP		; Get FIP buffer for CCL block (leave 20. free)
+	BCS	130$		; Couldn't get it
+	ADD	R4,FQCLUS(R5)	; Set up uniqueness word as a pointer
+	MOV	R4,R3		; Save CCL block pointer
+100$:	MOV	(R5)+,(R4)+	; Move FIRQB into CCL block
+	BIT	R4,#40-1	; More?
+	BNE	100$		; Yes, loop...
+	MOV	R3,@(SP)+	; Link the buffer into the chain
+	CLR	(R3)+		; Ensure link of 0 to more CCL commands
+	MOV	R3,(R3)		; Make abs pointer to the
+	ADD	#FQSIZ-FQJOB,(R3)+ ;  actual CCL command string
+	MOV	FQCLUS-FQFIL(R3),(R3) ; Move uniqueness pointer to here
+	RETURN			;  and exit
+
+110$:	ERROR	INUSE		; Attempt to add redundant CCL command
+
+120$:	ERROR	NOSUCH		; Attempt to delete non-existant CCL command
+
+130$:	ERROR	NOBUFS		; No buffers free for CCL command addition
+
+GLOBAL	<DEVOKB>
+
+.DSABL	LSB
+
+FQFEND
+
+.END

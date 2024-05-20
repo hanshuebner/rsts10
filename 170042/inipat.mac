@@ -1,0 +1,3077 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /INIT:INIPFX/
+TITLE	PATCH,<RSTS/E INIT - PATCH OPTION>,0A,10-MAY-91,ABC/MHB/SJM/CEK/PRL/MNB/WJS/DBM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR INIPAT
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	TG   16-Nov-80	Removed SPL and MARK from PST
+;  002  SRM  03-Aug-81  Add support for phase compression (SIL squish).
+;  003	SJM  27-Ooc-81	Remove error message for patching last word of module.
+;
+;  000  CEK  14-Jan-82  Creation - copied from V7.1-11
+;  001  CEK  14-Jan-82  Allow online patch to FIP overlay, overlay length,
+;			and patch audit mask for running monitor
+;  002  CEK  14-Jan-82	Change .EXT to .TYP in help message
+;  003  CEK  14-Jan-82	Fix double message with "Symbol not a valid instruction
+;			code"
+;  004	PRL  02-Mar-82	Fix EOF checking for block offset
+;  005  MNB  21-Feb-83  Change ".EXT" to ".TYP" in filename prompt
+;				[RSTS V9.0]
+;  006	WJS  26-Sep-83	Miscellaneous updates to PST
+;  007	DBM  06-Jan-84	Change <CR> to <LF> for VT200 support
+;  008  MNB  06-Feb-84  W$PT got renamed to W$PR (pending requests)
+;
+;				[RSTS V9.1]
+;  009	TPT  19-Mar-85	Add CMT changes
+;
+;				[RSTS V9.6]
+;  010  VAM  10-Dec-87	Add B.FLGS
+;
+;				[RSTS V9.7]
+;  011	KCG  16-Nov-88	Incorporate another overlay phase (OV2).
+;  012	DRP  29-Dec-88	Add KBX phase support.
+;-
+
+
+.SBTTL	MACROS FOR PATCH
+
+.MACRO	I.MESS
+	 TMPORG	PATTXT
+.NLIST	BEX
+.ENDM	I.MESS
+
+LOCASE=	20040
+HILO=	40
+LOHI=	20000
+
+.SBTTL	ORDER THE CSECTS
+
+	DEFORG	PAT
+	DEFORG	PATCTL
+	DEFORG	PATTXT
+	DEFORG	QFLAG
+	ORG	PAT
+
+.SBTTL	PATCH OPTION DRIVER
+
+.ENABL	LSB
+
+INIPAT::CALLX	CKOPT		;Is this option legal?
+	TSTB	(R1)		;Answer already given?
+	BNE	20$		;Yup, use it
+PATLUP:	CLR	QFLAG		;We are asking for a file name
+	CALLX	ASKER,R5	;Ask for file name
+	 .WORD	10$
+	 GENTXT
+	  .ASCII "Enter the NAME.TYP of the file in account [0,1] to patch."<200>
+	  .ASCII "Type '/N' after the name if the file is not a save image library."<200>
+	  .ASCII "Type <CR> to patch the currently installed SIL."<200>
+10$:	  .ASCIZ "File to patch? "
+	 UNORG
+	CMP	(R1),#'Z-100	;^Z ?
+	BNE	20$		;No
+	EXIT
+
+20$:	CLR	BADPAT		;Nothing wrong with this patch so far
+	CLR	SILFLG		;Assume it's a SIL
+	MOV	#-1,STBCOR	;No block of the STB is in core yet
+	MOV	#FQ...+FQEXT,R2 ;Point to file name in FIRQB
+	MOV	#^RSIL,(R2)	;Preset the installed SIL name
+	MOV	SILNAM+2,-(R2)
+	MOV	SILNAM,-(R2)
+	BEQ	30$		;No installed SIL
+	CMPB	(R1),#12	;There is one.  Does he want it?
+	BEQ	60$		;Yes, use it
+30$:	CALLX	RADINP		;Get 2 words of RAD50
+	MOV	R0,(R2)+	;Save in FIRQB
+	BEQ	40$		;No name
+	MOV	R3,(R2)+	;Both words of name
+	CMPB	(R1)+,#'.	;Is the separator correct?
+	BNE	40$		;No
+	CALLX	RADWRD		;Yes, get the extension
+	MOV	R0,(R2)+	;Put in FIRQB
+	TSTB	(R1)		;End of name?
+	BEQ	60$		;Yes, and it's a SIL
+	CMPB	(R1)+,#'/	;No, must be a /N there
+	BNE	40$		;No, error
+	CMPB	(R1)+,#'N
+	BNE	40$
+	TSTB	(R1)		;End of name?
+	BEQ	50$		;Yup, it's not a SIL
+40$:	MESSAG	<"Illegal file name"<200>>
+	BR	PATLUP		;Try again
+
+50$:	COM	SILFLG		;Turn on flag saying not a SIL
+60$:	MOV	#FQ...,R4	;Point to the FIRQB
+	CALLX	LOKFIL		;Look for the file
+	BCC	70$		;Got it
+	MESSAG	<"File not found"<200>>
+	BR	PATLUP
+
+70$:	MOV	#-1,MOVRBL	;Haven't modified a block of module OVR
+				; (if this is a monitor)
+	CLR	RESPAT		;Haven't patched any code in the resident
+				; monitor (if this is a monitor)
+	TST	SILFLG		;Is this a SIL?
+	BNE	80$		;No
+	CALLX	SILNDX,R5,<FQ...> ;Read the SIL index and check it
+	BEQ	80$		;It's a SIL
+	COM	SILFLG		;Not a SIL
+80$:	.BR	ASKMOD		;Go ask for module name
+
+.DSABL	LSB
+
+GLOBAL	<SILNAM>
+
+.SBTTL	GET MODULE NAME IF SIL BEING PATCHED
+
+.ENABL	LSB
+
+ASKMOD:	MOV	#2,DOTQ		;Don't allow dot or Q now
+	TST	SILFLG		;Is this a SIL?
+	BEQ	20$		;Yes
+	JMP	ASKBAS		;No, go ask for base address
+
+20$:	MOV	#SILBUF,R2	;R2 -> the SIL index
+	CMP	(R2)+,#1	;How many images?
+	BEQ	80$		;Only one image, don't bother to ask
+30$:	MESSAG	<"Module name? ">
+40$:	MOV	#2,QFLAG	;We are asking for a module name
+	CALLX	GETIN		;Get his response
+	CMP	(R1),#'Z-100	;^Z ?
+	BEQ	PATLUP		;Yup, get a new file name
+	CMPB	(R1),#'?	;Need help?
+	BNE	60$		;No, get the image name
+50$:	CALL	PRTSIL		;Go print the SIL index
+	MESSAG	<"Enter the name of the module in the SIL to be patched: ">
+	BR	40$		;And try again
+
+60$:	CMP	(R1),#12	;Line feed?
+	BEQ	80$		;Yes, use first module in SIL
+	CALLX	RADINP		;Convert name to radix 50
+	TSTB	(R1)		;Is that it?
+	BEQ	70$		;Yup
+	MESSAG	<"Invalid module name"<200>>
+	BR	30$		;Try again
+
+70$:	CALL	FNDMOD		;Find the module name in the SIL
+	BCS	20$		;No go
+80$:	CLR	MODOVR		;Assume module is not OVR
+	CLR	MODRST		; or RSTS
+	CMP	(R2),#^ROVR	;Is it OVR?
+	BNE	85$		;Nah
+	TST	2(R2)		;Maybe
+	BNE	85$		;Nope
+	COM	MODOVR		;Definately
+	BR	87$
+
+85$:	CMP	(R2),#^ROV2	;Is it OV2?				;011
+	BNE	86$		;Nah					;011
+	TST	2(R2)		;Maybe					;011
+	BNE	86$		;Nope					;011
+	MOV	#-2,MODOVR	;Definately				;011
+	BR	87$
+
+86$:	CMP	(R2),#^RRST	;Is it RSTS?
+	BNE	87$		;No
+	CMP	2(R2),#^RS	;Maybe
+	BNE	87$		;No
+	COM	MODRST		;Indubitably
+87$:	ADD	#SE.BLK,R2	;Point to data
+	MOV	(R2)+,R4	;R4 = start block of image
+	MOV	(R2)+,STBBLK	;Set up number of STB start block
+	MOV	(R2)+,STBCNT	;Set up number of items in the STB
+	MOV	(R2)+,R3	;R3 = start address of module
+	BIC	#1,R3		;Make PIC modules start at 0
+	MOV	R3,MINADR	;Start = minimum address
+	BIT	R3,#777		;Just a quick check
+	BEQ	90$		;It is a good number
+	MESSAG	<"Invalid SIL format"<200>>
+	JMP	PATLUP		;Get another file name
+
+90$:	MOV	R3,MAXADR	;Set up top address
+	CLR	BYTOFM		;Clear byte offset MSB
+	CLR	BYTOFL		; and LSB
+	MOVB	R4,BYTOFL+1	;Set byte offset/2
+	SWAB	R4
+	MOVB	R4,BYTOFM
+	ASL	BYTOFL		;Make real byte offset
+	ROL	BYTOFM
+	MOV	(R2)+,R3	;R3 = size of image in bytes
+	DEC	R3		;Max address = start + size - 1
+	ADD	R3,MAXADR
+	CMP	(R2)+,(R2)+	;Skip transfer and size on disk
+	MOV	(R2)+,BLKOVR	;Save starting overlay descriptor block
+	MOV	(R2)+,NUMOVR	;Save # of overlays
+	MOV	(R2)+,R4	;Take the module's starting word offset
+	ASL	R4		;And make it bytes
+	ADD	R4,BYTOFL	;Add in the starting offset
+	ADC	BYTOFM		; using double precision arithmetic
+	TST	MODOVR		;Are we patching module OVR?
+	BEQ	100$		;No
+	CMP	#-2,MODOVR	;Are we patching OV2?			;011
+	BNE	95$		;No, just plain ole OVR			;011
+	CALL	FNDSYM,R5	;Yes, find a symbol			;011
+	 .RAD50	/$$O2TS/	;Start of overlay table			;011
+	 .WORD	.$OVTS		;Save its value in .$OVTS		;011
+	CALL	FNDSYM,R5	;Find another one			;011
+	 .RAD50	/$$O2TE/	;End of overlay table			;011
+	 .WORD	.$OVTE		;Save its value in .$OVTE		;011
+	BR	110$							;011
+
+95$:	CALL	FNDSYM,R5	;Yes, find a symbol
+	 .RAD50	/$$OVTS/	;Start of overlay table
+	 .WORD	.$OVTS		;Save its value in .$OVTS
+	CALL	FNDSYM,R5	;Find another one
+	 .RAD50	/$$OVTE/	;End of overlay table
+	 .WORD	.$OVTE		;Save its value in .$OVTE
+	BR	110$
+
+100$:	TST	MODRST		;Are we patching module RSTS?
+	BEQ	110$		;No
+	CALL	FNDSYM,R5	;Yes, find a symbol
+	 .RAD50	/$$AUDS/	;Start of patch audit table
+	 .WORD	.$AUDS		;Save its value in .$AUDS
+	CALL	FNDSYM,R5	;Find another one
+	 .RAD50	/$$AUDE/	;End of patch audit table
+	 .WORD	.$AUDE		;Save its value in .$AUDE
+110$:	.BR	ASKBAS		;Go ask for base address
+
+.DSABL	LSB
+
+.SBTTL	GET BASE ADDRESS
+
+.ENABL	LSB
+
+ASKBAS:	MOV	#4,QFLAG	;We are asking for a base
+	CALLX	ASKER,R5
+	 GENTXT	<"Base address? ">
+	 GENTXT	<"Enter octal base address within module for patch? ">
+	CMPB	(R1),#'Z-100	;^Z?
+	BNE	20$		;No, try to translate it
+	TST	SILFLG		;Yes, if it's not a SIL
+	BNE	10$		; then ask for another file
+	CMP	SILBUF,#1	;Does it have more than 1 module?
+	BEQ	10$		;No
+	JMP	ASKMOD		;Yes, go ask for a module
+10$:	JMP	PATLUP		;Go ask for another file
+
+20$:	CLR	R2		;0 block offset is default
+	CLR	NUMFND		;Clear # of overlaid symbols found
+	CALL	GETEXP		;Parse answer as an expression
+	BCS	ASKBAS		;Error in symbol has been printed
+	TSTB	(R1)		;Is that the whole string?
+	BEQ	40$		;Yes, simple expression was found
+	CMPB	(R1)+,#':	;No, a ":" for block offset/overlay #?
+	BEQ	50$		;Yes
+30$:	MESSAGE	<"Invalid expression"<200>>,INVEXP
+	BR	ASKBAS		;Try again
+
+40$:	TST	SILFLG		;Is this a SIL?
+	BNE	NEWBAS		;No
+	CMP	NUMFND,#1	;Any overlay symbol(s) found?
+	BLO	NEWBAS		;No
+	BHI	30$		;Yes, but too many
+	MOV	OVRFND,R2	;Only one, get the overlay number
+	CMP	R2,NUMOVR	;Legal?
+	BLO	NEWBAS		;Yes
+	BR	30$		;No
+
+50$:	TST	SILFLG		;Is this a SIL?
+	BNE	60$		;No, allow ":" as block offset
+	CMP	R0,NUMOVR	;Yes, a legal overlay number?
+	BHIS	30$		;Nope, illegal, error
+60$:	MOV	R0,R2		;Copy the block offset
+	CALL	GETEXP		;Get actual base
+	BCS	ASKBAS		;Expression error
+	TSTB	(R1)		;End of string on expression?
+	BNE	30$		;No, expression error
+NEWBAS:	TST	SILFLG		;Is this a SIL?
+	BNE	90$		;No, do block offsetting
+	TST	NUMOVR		;Yes, any overlays?
+	BEQ	130$		;Nope
+	MOV	#-1,STBCOR	;Yep, we'll clobber the STB buffer
+	MOV	#FQ...+FQFCB,R1	;Get FCB pointer
+	MOV	BLKOVR,FCNVB(R1) ;Set starting overlay descriptor block number
+70$:	CMP	R2,#1000/10	;Another block?
+	BLO	80$		;No
+	INC	FCNVB(R1)	;Yes
+	SUB	#1000/10,R2	;Correct
+	BR	70$		; and loop...
+
+80$:	MOV	R0,-(SP)	;Save base address
+	MOV	#256.,R0	;Set word count
+	CALLX	READ.,R5,STBBUF	; and read descriptor block
+	MOV	(SP)+,R0	;Restore base address
+	ASH	#3,R2		;Form pointer
+	ADD	#STBBUF,R2	; to descriptor
+	MOV	(R2)+,R3	;Get base address
+	MOV	R3,MINADR	; and set as minimum address
+	ADD	(R2)+,R3	;Maximum + 1 = minimum + size
+	MOV	(R2)+,BYTOFM	;Set byte
+	MOV	(R2)+,BYTOFL	; offset
+	BR	120$		;Go set maximum and check base
+
+90$:	CLR	MINADR		;Minimum address is always 0
+	MOV	FQ...+FQFCB+FCSIZ,R3 ;Get size of file
+	SUB	R2,R3		;Is this beyond EOF?
+	BHI	100$		;No
+	MESSAG	<"Block offset beyond EOF"<200>>
+GSKBAS:	BR	ASKBAS
+
+100$:	CLR	BYTOFL		;Clear byte
+	CLR	BYTOFM		; offset
+	MOVB	R2,BYTOFL+1	;Set real byte offset/2
+	SWAB	R2
+	MOVB	R2,BYTOFM
+	ASL	BYTOFL		;Now make correct
+	ROL	BYTOFM
+	SWAB	R3		;Compute highest address
+	BNE	110$		;Greater than 128 blocks
+	ASL	R3		;Block # * 512
+	BCC	120$		;Not more than we can handle
+110$:	CLR	R3		;Set for maximum of 177777
+120$:	DEC	R3		;Highest legal address
+	MOV	R3,MAXADR
+130$:	CALL	CHKADR		;Check for base within bounds
+	BCS	GSKBAS		;Not there
+	MOV	R0,R4		;Save the base
+.DSABL	LSB
+
+.SBTTL	ASK FOR OFFSET
+
+.ENABL	LSB
+
+ASKOFF:	MOV	#6,QFLAG	;We are asking for an offset
+	CALLX	ASKER,R5
+	 GENTXT	<"Offset address? ">
+	 GENTXT	<"Enter octal offset address from base for patch? ">
+	CMPB	(R1),#'Z-100	;^Z?
+	BEQ	GSKBAS		;Yes, go back up to base question
+	CLR	R0		;Default is 0
+	CMP	(R1),#12	;Line feed?
+	BEQ	NEWOFF		;Yes, use 0
+	CALL	GETEXP		;Parse the offset as an expression
+	BCS	ASKOFF		;Error in symbol, try again
+	TSTB	(R1)		;Is that the whole thing?
+	BEQ	NEWOFF		;Yup, it's OK as a base
+	CALLX	MESSAG,R5,<INVEXP> ;Invalid expression
+	BR	ASKOFF		;Ask again
+
+NEWOFF:	MOV	R0,R5		;Copy offset
+	ADD	R4,R0		;Add base+offset
+	CALL	CHKADR		;Check the address
+	BCS	ASKOFF		;Not valid, try again
+	MESSAG	<" Base"<11>"Offset  Old     New?"<200>>
+	MOV	#-1,OLDBLK	;There is no block in the buffer
+	MOV	R4,-(SP)	;Turn on byte mode if either base
+	BIS	R5,(SP)		; or offset is odd
+	ROR	(SP)+		;Oddness in carry
+	ROR	BYTFLG		;If odd, set byte mode flag < 0
+	CLR	DOTQ		;Allow dot and Q as symbols
+	MOV	#PR.OCT,PRTFLG	;Print in octal
+
+.DSABL	LSB
+
+.SBTTL	MAIN PATCHING LOOP
+
+.ENABL	LSB
+
+10$:	MOV	R4,R0		;Copy the base
+	CALLX	OCTWRD		;Print it
+	CALLX	TYPTAB		;Do a tab
+	MOV	R5,R0		;Copy the offset
+	CALLX	OCTWRD
+	CALLX	TYPTAB
+	MOV	R5,R3		;Compute the word to peek at
+	ADD	R4,R3
+	MOV	R3,DOT		;Address is value of dot
+	SUB	MINADR,R3	;Find the offset distance
+	MOV	BYTOFM,R2	;Get MSB of base offset
+	ADD	BYTOFL,R3	; and add in LSB
+	ADC	R2		;  with any carry
+	MOV	R3,-(SP)	;Save LSB
+	ASHC	#-9.,R2		;Find block offset
+	MOV	(SP)+,R2	;Get back LSB
+	BIC	#^C<777>,R2	;Isolate offset within block in R2
+	CMP	R3,OLDBLK	;Is it already in the buffer?
+	BEQ	20$		;Yup, do not read
+	MOV	#FC...,R1	;Point to the FCB for read
+	MOV	R3,FCNVB(R1)	;Set the block number to read
+	MOV	#256.,R0	;Set word count of 1 block
+	CALLX	READ.,R5,DATABF ;And read data into DATABF
+	MOV	R3,OLDBLK	;Remember what's there
+20$:	ADD	#DATABF,R2	;R2 -> the data we want
+	MOV	R2,DATPTR	;Save pointer to data
+	BIT	R2,#1		;Is R2 odd somehow?
+	BEQ	30$		;No, use current byte/word flag
+	MOV	#-1,BYTFLG	;Yes, force byte mode
+30$:	TST	BYTFLG		;Byte mode?
+	BMI	40$		;Yes, go do it
+	;CLC			;C=0 from TST above
+	MOV	(R2),R0		;No, get the data word
+	BR	50$		;Go print it
+
+40$:	CLR	R0		;Clear the word for bisb
+	BISB	(R2),R0		;Get the data byte
+	SEC			;Flag as byte mode
+50$:	CALL	@PRTFLG		;Print it in the right mode
+
+GLOBAL	<FC...,SILBUF>
+60$:	MOV	R0,STAR		;Save current word contents
+	CALLX	TYPTAB
+	MOV	#QFLAG,R1	;Save the current context
+	MOV	#10,(R1)+	;We are asking for a data item
+	MOV	R4,(R1)+	;Save the base
+	MOV	R5,(R1)+	;Save the offset
+	MOV	BYTFLG,(R1)+	;Save the byte flag
+	MOV	DATPTR,(R1)+	;Save the data item pointer
+	CALLX	ASKER,R5	;Get the new data
+	 GENTXT	<"? ">
+	 GENTXT	<"Enter the new data as an octal expression? ">
+	CMPB	(R1),#'Z-100	;^Z (ask for new offset)
+	BEQ	ASKOFF		;Yup
+	CMPB	(R1),#'@	;Indirection?
+	BEQ	80$		;Yes, get new base or offset
+	CMP	(R1),#12	;Line feed?
+	BEQ	200$		;Yup, go to next word
+	CMP	(R1),#'^	;Uparrow?
+	BEQ	220$		;Yup, back up
+	CMPB	(R1),#'/	;Switch to word mode?
+	BNE	65$		;No
+	JMP	260$		;Yes
+65$:	CMPB	(R1),#'\	;No, switch to byte mode?
+	BNE	67$		;No
+	JMP	250$		;Yes
+67$:	CALL	GETEXP		;Get his reply as an expression
+	BCS	10$		;Error in symbol, try again
+	TSTB	(R1)+		;Whole line?
+	BEQ	150$		;Yup, go stuff it
+	TSTB	(R1)		;No, one trailing character is maximum
+	BNE	70$		;Too much at the end of the line
+	CMPB	-(R1),#'=	;Is it a request to print?
+	BEQ	230$		;Yes, go do it
+	CMPB	(R1),#'?	;Is it a request to verify?
+	BEQ	110$		;Yes, go do it
+70$:	CALLX	MESSAG,R5,<INVEXP> ;Tell him he's out of it
+	BR	10$		;Try again here
+
+80$:	MOV	#NEWBAS,-(SP)	;We will get a new base
+	CMPB	(R1)+,(R1)	;Skip the @, check for double @
+	BNE	90$		;Nope
+	INC	R1		;Yes, skip again
+	MOV	#NEWOFF,(SP)	; and set jump target
+90$:	TSTB	(R1)		;End of line?
+	BNE	100$		;No, use given expression
+	MOVB	#'Q,-(R1)	;Yes, use current contents
+100$:	CALL	GETEXP		;Get the new expression
+	MOV	(SP)+,R3	;Restore target address
+	BCS	240$		;Oops
+	TSTB	(R1)		;Whole line?
+	BNE	70$		;No
+	CLR	R2		;Preclear R2 for no block bias
+	JMP	(R3)		;Yes, go do it
+
+110$:	TST	BYTFLG		;Verify byte?
+	BPL	130$		;No, verify word
+	MOV	R0,R1		;Copy the data word
+	SWAB	R1		;Get the high byte
+	BEQ	120$		;Zero is ok
+	INCB	R1		;Else it must be -1 for a valid byte
+	BNE	160$		;Nope
+120$:	CMPB	R0,@DATPTR	;Check it
+	BR	140$		;Give an error if wrong
+
+130$:	CMP	R0,@DATPTR	;Check the word
+140$:	BEQ	200$		;Ok, continue
+	MESSAGE	<"Verification error"<200>>
+	EXIT			;Dead on this one
+
+150$:	TST	BYTFLG		;Byte mode?
+	BPL	180$		;No, word mode is easy
+	MOV	R0,R1		;Copy the data word
+	SWAB	R1		;Get the high byte
+	BEQ	170$		;Zero is ok
+	INCB	R1		;Else it must be -1 for a valid byte
+	BEQ	170$		;Ok
+160$:	MESSAGE	<"Truncation error - not a byte value"<200>>
+	BR	240$		;Try again
+
+170$:	CALL	CHKMON		;Check for an illegal monitor patch
+	BCS	183$		;Illegal.  Go flag it
+175$:	MOVB	R0,@DATPTR	;Legal, replace the byte
+	BR	190$		;And merge
+
+180$:	CALL	CHKMON		;Check for an illegal monitor patch
+	BCC	185$		;Legal
+183$:	MOV	#-1,BADPAT	;Flag it as a bad patch
+185$:	MOV	R0,@DATPTR	;A change! Make it in the buffer
+190$:	MOV	#FQ...+FQFCB,R1	;Point to FCB for rewrite
+	MOV	#256.,R0	;256 words
+	MOV	OLDBLK,FCNVB(R1) ;Set up proper block
+	CALLX	WRITE.,R5,DATABF ;Rewrite the data
+195$:	INC	OVFFLG		;Set flag to inhibit module overflow messge
+200$:	INC	R5		;Bump the offset by one
+	TST	BYTFLG		;Byte mode?
+	BMI	210$		;Yes, one is enough
+	INC	R5		;Else bump by 2
+210$:	MOV	R5,R0		;Compute resultant address
+	ADD	R4,R0		;In R0
+	CALL	CHKADR		;Is it in range?
+	MOV	#0,OVFFLG	;Clear flag to enable module overflow message
+				; preserving carry
+	BCC	240$		;Yup, more to do
+	JMP	ASKOFF		;No, ask for a new offset
+
+220$:	DEC	R5		;Back off the offset by 1
+	TST	BYTFLG		;Byte mode?
+	BMI	210$		;Yes, one was enough
+	DEC	R5		;Else back up a whole word
+	BR	210$		;And try more
+
+230$:	MESSAGE	<"Value = #">
+	CALLX	OCTWRD
+	MESSAGE	<", ">
+	CALLX	DECZER
+	MESSAGE	<"."<200>>
+240$:	JMP	10$		;Back to the main loop
+
+250$:	SEC			;Change to byte mode
+260$:	ROR	-(SP)		;Save the byte/word flag
+	INC	R1		;Skip the byte/word indicator
+	TSTB	(R1)+		;End of line?
+	BEQ	280$		;Yes, go change mode
+	TSTB	(R1)		;Only one more character is legal
+	BNE	300$		;Oops, invalid
+	MOV	#PR.OCT,-(SP)	;Assume the reset is to octal
+	CMPB	-(R1),#'O	;Is it?
+	BEQ	270$		;Yes
+	MOV	#PR.DEC,(SP)	;Decimal
+	CMPB	(R1),#'D	;Is it?
+	BEQ	270$		;Yes
+	MOV	#PR.RAD,(SP)	;RAD50
+	CMPB	(R1),#'%	;Is it?
+	BEQ	270$		;Yes
+	MOV	#PR.ASC,(SP)	;ASCII
+	CMPB	(R1),#''	;Is it?
+	BEQ	270$		;Yes
+	CMPB	(R1),#'"	;Is it?
+	BNE	290$		;No
+270$:	MOV	(SP)+,PRTFLG	;Reset the print mode
+280$:	MOV	(SP)+,BYTFLG	;Reset the byte/word mode
+	BR	240$		;Done
+
+290$:	TST	(SP)+		;Dump the print address
+300$:	TST	(SP)+		;Dump the flag
+	JMP	70$		;Give an error
+
+.DSABL	LSB
+
+.SBTTL	PRINTERS
+
+.ENABL	LSB
+
+PR.OCT:	BCS	10$		;Octal byte
+	JMPX	OCTWRD		;Octal word
+
+10$:	MESSAGE	<"   ">		;3 spaces
+	JMPX	OCTBYT		;Octal byte
+
+PR.DEC:	CALLX	DECPRT		;Print decimal value
+	MESSAGE	<".">		;Mark it
+	RETURN
+
+PR.RAD:	BCS	10$		;RAD50 byte is octal number
+	MESSAGE	<"  %">		;2 spaces, marker
+	JMPX	RADPRT		;Print RAD50 word
+
+PR.ASC:	MOV	R2,-(SP)	;Save R2
+	MOV	R0,R2		;Copy value for typers
+	BIC	#100200,R2	;Strip parity bits
+	BCC	40$		;Word mode
+	CMPB	R2,#40		;Is this printable?
+	BLO	30$		;No
+	MESSAGE	<%    '%>	;Yes, 4 blanks and a marker
+	CALLX	TYPE		;Type it
+20$:	MOV	(SP)+,R2	;Restore R2
+	RETURN
+
+30$:	MOV	(SP)+,R2	;Restore R2
+	BR	10$		;Do an octal byte
+
+40$:	CMPB	R2,#40		;Is the first byte printable?
+	BLO	80$		;No
+	CMP	R2,#400*40	;Yes, is the second printable?
+	BLO	60$		;No
+	MESSAGE	<%   "%>	;Yes, 3 spaces and a marker
+50$:	CALLX	TYPE2		;Type 2 characters
+	BR	20$		;Done
+
+60$:	MESSAGE	<%'%>		;Printable/non-printable
+	CALLX	TYPE		; comes out as 'XBNNN
+70$:	MESSAGE	<" ">		;Space
+	SWAB	R0		;Get the real second byte
+	CALLX	OCTBYT		;Do it
+	SWAB	R0		;Restore R0
+	BR	20$		;Done
+
+80$:	CALLX	OCTBYT		;First byte is non-printable
+	CLRB	R2		;Set high byte 0
+	SWAB	R2		;Make it work
+	CMP	R2,#40		;Second byte printable?
+	BLO	70$		;No
+	MESSAGE	<% '%>		;Yes, space it over
+	BR	50$		;Type it
+
+.DSABL	LSB
+
+.SBTTL	CHKMON - CHECK FOR ILLEGAL PATCH TO RUNNING MONITOR
+
+;+
+; CHKMON - Check for illegal patch to running monitor
+;
+; Because of timing problems, we impose the following restrictions on 
+; patches made online (under ONLPAT) to the running monitor:
+;  o a single patch cannot touch more than one FIP overlay
+;  o if a patch touches a FIP overlay it cannot touch anything else EXCEPT:
+;	- the patch audit table (bits indicating which patches are present)
+;	- OVRTBL, table of lengths of FIP overlays
+;
+; RUNMON<>0	if we're patching the running monitor
+; R4	=	base address of patch location
+; R5	=	offset address of patch location
+; MODOVR<>0	if we are patching OVR phase
+; MODRST<>0	if we are patching RSTS phase
+; .$OVTS =	start of monitor's overlay table
+; .$OVTE =	end of monitor's overlay table
+; .$AUDS =	start of patch audit table
+; .$AUDE =	end of patch audit table
+; MOVRBL =	block number of first block we patched in module OVR (other 
+;		than overlay table)
+;	= -1 	if no block of OVR has been patched
+; RESPAT <>0 	if we patched code in the resident monitor
+;		(ie not OVR) other than the patch audit table
+; OLDBLK =	block number of block we're patching
+;
+; CALL	CHKMON
+;
+; C=1		if error
+; MOVRBL	updated
+; RESPAT	updated
+;-
+
+.ENABL	LSB
+
+CHKMON:	REGSCR			;Save all registers
+	TST	RUNMON		;Are we online and patching the running 
+				; monitor?
+	BEQ	90$		;No, looks healthy
+	ADD	R5,R4		;Get address that we're patching
+	TST	MODOVR		;Are we patching module OVR?
+	BEQ	30$		;No
+	CMP	R4,.$OVTS	;Yes, are we patching overlay table?
+	BLO	10$		;No
+	CMP	R4,.$OVTE	;Maybe
+	BLO	90$		;Yes.  Return  //Should check RESPAT?//
+10$:				;No, we must be patching an overlay
+	TST	RESPAT		;Did we patch the resident monitor?
+	BNE	70$		;Yes.  Go print error message
+	CMP	MOVRBL,#-1	;Did we patch an overlay before?
+	BEQ	20$		;No
+	CMP	MOVRBL,OLDBLK	;Yes, is it same block we're patching now?
+	BEQ	90$		;Yes, no problem.  Return
+	MESSAG	<"Patch to module OVR too long for installed SIL"<200>>
+	BR	80$		;Return with error indication
+
+20$:	MOV	OLDBLK,MOVRBL	;Remember what block of module OVR we patched
+	BR	90$		;Return
+
+30$:	TST	MODRST		;Not patching OVR.  Are we patching RSTS?
+	BEQ	40$		;No
+	CMP	R4,.$AUDS	;Are we patching patch audit table?
+	BLO	40$		;No
+	CMP	R4,.$AUDE	;Maybe
+	BLO	90$		;Yes, no problem.  Return
+
+40$:	MOV	#-1,RESPAT	;We're patching the resident monitor
+	CMP	MOVRBL,#-1	;Did we patch anything in OVR?
+	BEQ	90$		;No.  Return
+
+70$:	MESSAG	<"Patch to installed SIL spans OVR and other module(s)"<200>>
+80$:	SEC			;Flag an error
+	BR	100$
+
+90$:	CLC			;No error
+100$:	RETURN		
+
+.DSABL	LSB
+
+.SBTTL	CHECK ADDRESS FOR BEING IN MODULE BOUNDS
+
+.ENABL	LSB
+
+CHKADR:	CMP	R0,MINADR	;Is it too low?
+	BLO	10$		;Yes
+	CMP	MAXADR,R0	;Is it too high?
+	BHIS	30$		;No, AOK, return C=0
+	TST	OVFFLG		;Should we print the text?
+	BNE	20$		;No
+	MESSAG	<"Address above module bounds"<200>>
+	BR	20$		;Return C=1
+
+10$:	TST	OVFFLG		;Should we print the text?
+	BNE	20$		;No
+	MESSAG	<"Address below module bounds"<200>>
+20$:	SEC
+30$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	FIND A MODULE IN THE SIL INDEX
+
+.ENABL	LSB
+
+FNDMOD:	MOV	#SILBUF,R2	;Point to start of SIL index
+	MOV	(R2)+,R4	;R4 = # of images in SIL
+10$:	CMP	R0,(R2)		;Is this the module?
+	BNE	20$		;No chance
+	CMP	R3,2(R2)	;Maybe?
+	BEQ	30$		;Got it
+20$:	ADD	#SE.LEN,R2	;Advance to next module
+	SOB	R4,10$		;If any
+	BR	DSKMOD		;See if it is for the disk module
+
+BADMOD:	MESSAG	<"Module not found in SIL"<200>>
+	SEC			;Return error indication
+30$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	TEST FOR OPTIONAL DISK MODULE
+
+.ENABL	LSB
+
+DSKMOD:	MOV	#OPTPHZ,R2	;R2 -> name of optional disk phase
+				;//Not optional any more//
+	CMP	R0,(R2)+	;Is this the optional disk phase?
+	BNE	BADMOD		;Nope, give error
+	CMP	R3,(R2)+	;Does the whole name match?
+	BNE	BADMOD		;Nope, give error
+	MOV	(R2)+,R0	;Yes, change module to RSTS
+	MOV	(R2),R3		;The whole name
+	BR	FNDMOD		;Make sure RSTS phase exists
+
+.DSABL	LSB
+
+	TMPORG	PATCTL
+
+OPTPHZ:	.RAD50	/DSK   /
+	.RAD50	/RSTS  /
+
+	UNORG
+
+.SBTTL	GET THE VALUE OF AN EXPRESSION
+
+.ENABL	LSB
+
+GETEXP:	CMP	SP,#I.STAK-200	;Stack too low?
+	BHI	10$		;No, it's ok
+	MESSAGE	<"Too many parentheses"<200>>
+	SEC
+	RETURN
+
+10$:	CLR	-(SP)		;Accumulator is 0 so far
+	CLR	R0		;Operation is initially addition
+20$:	MOV	OPTBL(R0),-(SP)	;Remember the operation
+	CALL	GETTRM		;Get the value of a term
+	BCC	30$		;Ok value
+	BIT	(SP)+,(SP)+	;Dump accumulator & operation
+	RETURN			; and return with C=1
+
+30$:	MOV	R1,40$		;Save R1 (not on stack)
+	CMP	2(SP),R0	;Set condition codes for logical ops
+	JMP	@(SP)+		;Call the operation, returning below
+OP.XXX:	MOV	(PC)+,R1	;Restore R1
+40$:	 .WORD	0
+	TSTB	1(R1)		;Could we possibly have an operand?
+	BEQ	70$		;No, don't even try for operator
+	MOV	#BINARY,R0	;Get binary operation table
+50$:	CMPB	(R1)+,(R0)+	;Is the next character an operation?
+	BNE	60$		;Not this one
+	CMPB	(R0),#40	;Is this a 2-character operation?
+	BEQ	90$		;Nope, so we found it
+	CMPB	(R0),(R1)	;Yes, do both characters match?
+	BEQ	80$		;Yes, go skip second in input string
+60$:	CMPB	-(R1),(R0)+	;No match. back up input ptr, next op
+	TSTB	(R0)		;No, any more operators?
+	BPL	50$		;Yup
+70$:	MOV	(SP)+,R0	;Get accumulated value in R0
+	RETURN			;Return, C=0 from TSTB
+
+80$:	INC	R1		;2-character op code, skip 2nd
+90$:	SUB	#BINARY+1,R0	;Correct the dispatch index
+	BR	20$		;Go save op-code, get a term
+
+; Note: Addition must be first
+;	Any 2-character operations must precede the corresponding
+;	1-character operations
+
+BINARY:	.ASCII	"+ - * / \ ! & # ^ <=>=<>= < > "<377>
+	.EVEN
+OPTBL:	.WORD	OP.ADD,OP.SUB,OP.MUL,OP.DIV,OP.REM,OP.OR,OP.AND,OP.XOR,OP.ASH
+	.WORD	OP.LE,OP.GE,OP.NE
+	.WORD	OP.EQ,OP.LT,OP.GT
+
+GLOBAL	<I.STAK>
+
+OP.SUB:	NEG	R0		;To subtract, add the negative
+OP.ADD:	ADD	R0,(SP)		;Add to the accumulator
+	BR	OP.XXX
+
+OP.MUL:	MUL	(SP),R0		;Multiply to get 2-word result
+100$:	MOV	R1,(SP)		;Result in R1 into accumulator
+	BR	OP.XXX
+
+OP.DIV:	MOV	(SP)+,R1	;Dividend to R1
+	MOV	R0,-(SP)	;Divisor onto the stack
+	CLR	R0		;Clear for divide
+	DIV	(SP),R0		;Divide
+	MOV	R0,(SP)		;Quotient to accumulator
+	BR	OP.XXX
+
+OP.REM:	MOV	(SP)+,R1	;Dividend to R1
+	MOV	R0,-(SP)	;Divisor onto the stack
+	CLR	R0		;Clear for divide
+	DIV	(SP),R0		;Divide
+	BR	100$		;Remainder to accumulator
+
+OP.OR:	BIS	R0,(SP)		;Logical OR
+	BR	OP.XXX
+
+OP.AND:	COM	R0		;A & B is A-(NOT B)
+	BIC	R0,(SP)		;Do the AND
+	BR	OP.XXX
+
+OP.XOR:	XOR	R0,(SP)		;Do the XOR
+	BR	OP.XXX
+
+OP.ASH:	MOV	(SP),R1		;Accumulator into register for ash
+	ASH	R0,R1		;Shift left argument
+	BR	100$		;Result in R1 to accumulator
+
+OP.EQ:	BEQ	120$		;Equality succeeds
+110$:	CLR	(SP)		;Failure returns 0
+	BR	OP.XXX		;Done
+
+OP.NE:	BEQ	110$		;Equality fails
+120$:	MOV	#1,(SP)		;Success returns 1
+	BR	OP.XXX
+
+OP.LE:	BEQ	120$		;EQ is ok
+OP.LT:	BLO	120$		;LO is ok
+	BR	110$		;Else fail
+
+OP.GE:	BEQ	120$		;EQ is ok
+OP.GT:	BHI	120$		;HI is ok
+	BR	110$		;Else fail
+
+
+.DSABL	LSB
+
+.SBTTL	GET A TERM VALUE
+
+.ENABL	LSB
+
+GETTRM:
+TRM.PL:	MOV	#UNARYS,R0	;Point to table of unary operators
+10$:	CMPB	(R1),(R0)+	;Is this an operator or flag?
+	BEQ	50$		;Yes, do what it says
+	TSTB	(R0)		;Done?
+	BPL	10$		;No
+	MOV	R1,-(SP)	;Remember the pointer
+	CALLX	DECINP		;Try first for a decimal number
+	CMP	R1,(SP)		;Did the pointer move?
+	BEQ	30$		;No, no leading digit, so must be symbol
+	CMPB	(R1)+,#'.	;Yes, but is there a decimal point here?
+	BNE	60$		;Nope, digit means it is an octal number
+	TST	(SP)+		;Valid decimal number, dump old text ptr
+20$:	CLC			;C=0 for a good term
+	RETURN
+
+30$:	TST	(SP)+		;Symbol should be here. dump text ptr
+	CALL	SYMBOL		;Parse a symbol
+	BCC	20$		;Got it, check for negation
+40$:	SEC			;Set the carry
+	RETURN			;Return with term error printed
+
+50$:	INC	R1		;Found an operator. Skip over it
+	SUB	#UNARYS+1,R0	;Compute operator index
+	ASL	R0		; as a word
+	JMP	@TERMTB(R0)	;Go do it
+
+
+TRM.MI:	CALL	GETTRM		;Unary minus. get its argument
+	BCS	40$		;Error, go away
+	NEG	R0		;Negate the term
+	BR	20$		;Return no error
+
+TRM.SG:	CALL	GETTRM		;Error check. get the argument
+	BCC	20$		;No error, that's OK
+	EXIT			;Exit on failure
+
+TRM.NO:	CALL	GETTRM		;Logical NOT. Get the term
+	BCS	40$		;Error, go away
+	COM	R0		;Complement the term
+	BR	20$		;Exit no error
+
+60$:	MOV	(SP)+,R1	;Restore pointer to octal number
+TRM.OC:	MOV	R1,-(SP)	;'#' indicates required octal numbr
+	CALLX	OCTINP		;Get octal numer
+	CMP	R1,(SP)+	;The pointer should have moved
+	BNE	20$		;It did, go negate if needed & exit
+	MESSAGE	<"Invalid number"<200>>
+	BR	40$		;Set carry & exit
+
+TRM.R5:	REGSAV			;Preserve registers
+	CALL	SYMWRD		;Get a word of symbol stuff
+	MOV	R3,TOS.R0(SP)	;Save value of rad50 word
+	CMP	R1,TOS.R1(SP)	;Did the pointer move?
+	BEQ	70$		;No, pass C=0 out of loop
+	SEC
+70$:	MOV	R1,TOS.R1(SP)	;Save new text pointer
+	CALLX	REGRES,R5	;Restore registers
+	BCS	20$		;Pointer moved, so we got something
+	MESSAGE	<"Invalid RAD50 character"<200>>
+	BR	40$		;Done
+
+TRM.Q1:	MOVB	(R1)+,R0	;Single quote, get one character
+	BNE	20$		;Not end of string
+80$:	MESSAGE	<"End of line in quotes"<200>>
+	BR	40$		;Exit with carry
+
+TRM.Q2:	MOVB	(R1)+,R0	;Get 2 ASCII bytes
+	BEQ	80$		;End of line is error
+	SWAB	R0		;Save it
+	BISB	(R1)+,R0	;Next byte
+	BEQ	80$		;EOL is evil
+	SWAB	R0		;First character back to low byte
+	BR	20$		;Check sign & exit
+
+TRM.LP:	CALL	GETEXP		;Get an expression
+	BCS	40$		;Error, return C=1
+	CMPB	(R1)+,#')	;Better be right paren
+	BEQ	20$		;Got it
+	MESSAGE	<"Unbalanced parentheses"<200>>
+	BR	40$		;Return error
+
+UNARYS:	.BYTE	'+,'-,'#,'%,'','",'(,'?,'\,377
+	.EVEN
+TERMTB:	.WORD	TRM.PL,TRM.MI,TRM.OC,TRM.R5,TRM.Q1,TRM.Q2,TRM.LP
+	.WORD	TRM.SG,TRM.NO
+
+.DSABL	LSB
+
+.SBTTL	FNDSYM - LOOK UP A SYMBOL IN STB OF CURRENT MODULE
+
+;+
+; FNDSYM - Look up a symbol in STB of current module
+;
+; STBBLK =	block offset in SIL for STB of current module
+; STBCNT =	# of symbols in STB of current module
+;
+; CALL FNDSYM,R5
+;  .RAD50  /symbol to look up/		;Two words of RAD50
+;  .WORD   <location to put symbol's value in>
+;
+; Specified location contains symbol's value, or 0 if symbol not found
+;-
+
+FNDSYM:	PUSH	<R1,R2,R4>
+	TST	SILFLG		;Is this a SIL?
+	BNE	40$		;No, exit with failure
+	MOV	STBBLK,R4	;R4 = block offset in SIL for STB
+	MOV	STBCNT,R2	;R2 = # of symbols in STB
+	MOV	#STBBUF,R1	;Point to buffer for STB
+10$:	CMP	R4,STBCOR	;Is the desired STB block in core?
+	BEQ	20$		;Yup
+	MOV	#FQ...+FQFCB,R1	;R1 -> FCB for read
+	MOV	R4,FCNVB(R1)	;Set block to read
+	MOV	#256.,R0	;Count to read
+	CALLX	READ.,R5,STBBUF
+	MOV	R4,STBCOR
+	MOV	#STBBUF,R1	;Point to buffer for STB
+20$:	CMP	(R5),(R1)	;Is this the symbol?
+	BNE	30$		;No
+	CMP	2(R5),2(R1)	;Maybe?
+	BEQ	50$		;Yes
+30$:	ADD	#10,R1		;Point to next symbol
+	CMP	R1,#STBBUF+1000	;End of buffer?
+	BLO	40$		;No
+	INC	R4		;Yup, bump block
+40$:	SOB	R2,10$		;Loop on all symbols
+	CLR	@4(R5)		;Symbol not found.  Return 0
+	BR	60$
+
+50$:	MOV	6(R1),@4(R5)	;Return the symbol value
+60$:	ADD	#6,R5		;Bump past args
+	POP	<R4,R2,R1>	;Restore regs
+	RETURN	R5
+
+ 
+.SBTTL	SYMBOL - LOOK UP A SYMBOL IN THE STB OF A SIL OR IN THE PST
+
+;+
+; SYMBOL - Look up a symbol in the STB of a SIL or in the PST
+;
+; R1	->	symbol to look up, in the form
+;			symbolname[@[modulename]]
+; STBBLK =	block offset in SIL for STB of current module
+; STBCNT =	# of symbols in STB of current module
+;
+; CALL	SYMBOL
+;
+; R0	=	symbol's value (random if not found)
+; R1	->	end of symbol
+; C=1	if	symbol not found
+;-
+
+.ENABL	LSB
+
+SYMBOL:	REGSCR			;Save up registers
+	CALL	SYMWRD		;Get first word of symbol
+	MOV	R3,-(SP)	;Save it
+	CALL	SYMWRD		;Get second word
+	MOV	(SP)+,R2	;R2/R3 = symbol in RAD50
+	CMP	R1,TOS.R1(SP)	;Did the pointer move?
+	BNE	10$		;Yup
+	MESSAG	<"Invalid character"<200>>
+	BR	140$
+
+10$:	MOV	R1,TOS.R1(SP)	;Save updated R1
+	MOV	STBBLK,R4	;R4 = block offset in SIL for STB
+	MOV	STBCNT,R5	;R5 = # of symbols in STB
+	TST	SILFLG		;Is this a SIL?
+	BEQ	20$		;Yes
+	CLR	R5		;No, so no symbols
+20$:	CMPB	(R1),#'@	;Is there a different module?
+	BNE	40$		;No, use current SIL module
+	MOV	R2,-(SP)	;Save symbol name
+	MOV	R3,-(SP)
+	MOV	R1,-(SP)	;Save current pointer
+	INC	R1		;Bump past the @
+	CALLX	RADINP		;Parse module name
+	CLR	R5		;Guess at force of PST
+	CMP	R1,(SP)		;Is the name null (force PST)?
+	BEQ	30$		;Yes, use only the PST, no symbols (C=0)
+	TST	SILFLG		;Really a SIL?
+	BNE	30$		;No, exit C=0 but see the "@" later
+	MOV	R1,(SP)		;Yes, re-save current pointer
+	CALL	FNDMOD		;And find the named module
+	MOV	SE.STB(R2),R4	;Get named module STB offset
+	MOV	SE.STN(R2),R5	; and symbol count
+30$:	MOV	(SP)+,R1	;Restore current pointer
+	MOV	(SP)+,R3	;Restore symbol name
+	MOV	(SP)+,R2	;Both words (clear stack)
+	BCS	140$		;Oops, we didn't find the module
+40$:	MOV	R1,TOS.R1(SP)	;Save updated R1
+	TST	R5		;Are there any symbols here at all?
+	BEQ	90$		;Nope, use only PST
+	MOV	#STBBUF,R1	;Point to buffer for STB
+	MOV	R4,STBSRT	; and remember starting STB block
+
+50$:	CMP	R4,STBCOR	;Is the desired STB block in core?
+	BEQ	60$		;Yup
+	MOV	#FQ...+FQFCB,R1	;R1 -> FCB for read
+	MOV	R4,FCNVB(R1)	;Set block to read
+	MOV	#256.,R0	;Count to read
+	CALLX	READ.,R5,STBBUF
+	MOV	R4,STBCOR	;Save block number in core
+	MOV	#STBBUF,R1	;And restore pointer
+60$:	MOV	6(R1),TOS.R0(SP) ;Get symbol value in returned R0
+	CMP	R2,(R1)		;Is this the symbol?
+	BNE	70$		;No
+	CMP	R3,2(R1)	;Maybe?
+	BEQ	150$		;Yup
+70$:	ADD	#10,R1		;On to next symbol
+	CMP	R1,#STBBUF+1000	;End of buffer?
+	BLO	80$		;Nope
+	INC	R4		;Yup, bump block
+80$:	SOB	R5,50$		;Loop on all symbols
+90$:	MOV	#PST,R1		;R1 -> permanent symbols
+	MOV	#PSTE-PST/6,R4	;R4 = number of symbols in PST
+	SUB	DOTQ,R4		;Disallow dot & Q if requested
+100$:	MOV	(R1)+,TOS.R0(SP) ;Set value in case this is it
+	MOV	(R1)+,R0	;R0 = low order ASCII
+	CMP	R3,(R1)+	;Do high order words match?
+	BNE	110$		;No
+	CMP	R0,R2		;Yes, do low words match?
+	BEQ	130$		;Yes, we got it!
+110$:	SOB	R4,100$		;Try for more
+	TST	SILFLG		;Not valid.  Choose an error message
+	BNE	120$		;Not a SIL, tell him not a valid symbol
+	MESSAG	<"Symbol not found in STB"<200>>
+	BR	140$		;Return w/ C=1
+
+120$:	MESSAGE	<"Symbol not a valid instruction code"<200>>
+	BR	140$		;Return w/ C=1
+
+130$:	TST	(PC)+		;Set C=0 for ok
+140$:	SEC			;Set C=1 for not found
+	RETURN			;Exit
+
+150$:	CMP	STBSRT,STBBLK	;Did we use current module's STB?
+	BNE	130$		;No
+	CMP	4(R1),NUMOVR	;Yes, legal overlay #
+	BHIS	130$		;No
+	INC	NUMFND		;Yes, count number we found
+	MOV	4(R1),OVRFND	; and remember the last one found
+	BR	130$
+
+.DSABL	LSB
+
+.SBTTL	CONVERT SYMBOL NAME TO RAD50 (WITH . AND $)
+
+.ENABL	LSB
+
+SYMWRD:	CLR	R3		;Clear symbol accumulator
+	CALL	10$		;Get a character
+	MOV	PC,-(SP)	;Set to return for a third, get a second
+10$:	MOVB	(R1),R2		;Next character in R2
+	SUB	#'9+1,R2	;Scale for number
+	ADD	#'9+1-'0,R2
+	BCC	40$		;Not a digit
+	ADD	#30.,R2		;Digit, scale up for range
+20$:	INC	R1		;Accept a character
+30$:	MUL	#50,R3		;Shift RAD50 accumulator
+	ADD	R2,R3		;Add next character
+	RETURN
+
+40$:	SUB	#'Z+1-'0,R2	;Scale for alpha
+	ADD	#'Z+1-'A,R2
+	BCC	60$		;Not alpha, either
+50$:	INC	R2		;Yup, get it into range
+	BR	20$		;And accept it
+
+60$:	MOV	#^R  $,R2	;Get dollar sign (RAD50)
+	CMPB	(R1),#'$	;Is this it?
+	BEQ	20$		;Yup, accept it
+	CMPB	(R1),#'.	;Maybe dot?
+	BEQ	50$		;Yup, INC R2 and accept it
+	CLR	R2		;Ah well, reject it and use 0
+	BR	30$
+
+.DSABL	LSB
+
+.SBTTL	PRINT THE DIRECTORY OF A SIL
+
+.ENABL	LSB
+
+PRTSIL:	REGSCR			;Save regs
+	MESSAG
+	 .ASCII	"Directory of SIL:"<200>
+.ASCIZ	" Name"<11>"Ident"<11>" Load"<11>" Size  Transfer"<11>"Total"<200>
+	 UNORG
+	CLR	-(SP)		;Clear total size
+	MOV	#SILBUF,R3	;Point to SIL directory
+	MOV	(R3)+,R4	;R4 = number of images
+10$:	MOV	(R3)+,R0	;Print name
+	CALLX	RADZER
+	MOV	(R3)+,R0
+	CALLX	RADZER
+	CALLX	TYPTAB		;Tab
+	MOV	(R3)+,R0	;Print ident
+	CALLX	RADZER
+	MOV	(R3)+,R0
+	CALLX	RADZER
+	ADD	#6,R3		;Skip start blk, STB blk, STB size
+	CALL	40$		;Type load address & size
+	CALL	50$		;Type xfer address
+	MOV	SE.SIZ-SE.SZD(R3),R1 ;Get the virtual size of the module
+	CLC			;And convert it to mmus being careful
+	ROR	R1		; not to extend the sign
+	ASH	#-5,R1
+	TST	(R3)		;Is there a size in blocks?
+	BEQ	20$		;No
+	MOV	(R3),R1		;Yes, use this size for overlaid programs
+	ASH	#3,R1		;But first convert to MMUs
+20$:	ADD	R1,(SP)		;Collect total size in blocks
+	TYPE	<11>		;Type a tab
+	MOV	(SP),R0		;Get size so far
+	ADD	#37,R0		;Round
+	ASH	#-5,R0		; and divide into K words
+	CMP	R0,#100.	;Spaces needed?
+	BHIS	30$
+	MESSAGE	<" ">
+	CMP	R0,#10.
+	BHIS	30$
+	MESSAGE	<" ">
+
+
+30$:	CALLX	DECZER		;Print
+	TYPE	<'K>		;K words
+	CALLX	TYPECR		;Next line
+	ADD	#6*2,R3		;Advance R3
+	DEC	R4		;Loop for all images
+	BEQ	35$		;(SOB is out of range)
+	JMP	10$
+35$:	TST	(SP)+		;Pop size counter
+	RETURN
+
+40$:	MOV	PC,-(SP)	;Call 50$ twice
+50$:	TYPE	<11>
+	MOV	(R3)+,R0	;Get next word
+	CALLRX	OCTWRD		;Print it
+
+.DSABL	LSB
+
+.SBTTL	DATA AREA
+
+	TMPORG	QFLAG
+
+QFLAG::	.BLKW0	5
+
+
+	TMPORG	PATCTL
+
+SILFLG:	.WORD	0		;<>0 if file being patched is not a SIL
+RUNMON::.WORD	0		;<>0 if patching the running monitor
+				; (always 0 in INIT PATCH option)
+BYTOFL:	.WORD	0		;Byte offset LSB
+BYTOFM:	.WORD	0		;Byte offset MSB
+NUMOVR:	.WORD	0		;# of overlay descriptors
+BLKOVR:	.WORD	0		;Starting block of descriptors
+NUMFND:	.WORD	0		;Number of overlaid symbol(s) found
+OVRFND:	.WORD	0		;Overlay # of last overlaid symbol found
+STBSRT:	.WORD	0		;Initial STB block looked at
+MINADR:	.WORD	0		;Minimum address
+MAXADR:	.WORD	0		;Maximum address
+OLDBLK:	.WORD	0		;Block number of block in DATABF
+STBBLK:	.WORD	0		;Starting block of STB for open module
+STBCNT:	.WORD	0		;Number of entries in the STB
+STBCOR:	.WORD	0		;STB block number in memory
+DATPTR:	.WORD	0		;Pointer to data to alter
+BYTFLG:	.WORD	0		;<0 means byte mode
+DOTQ:	.WORD	0		;Dot and Q allowed if 0, not if 2
+PRTFLG:	.WORD	PR.OCT		;Print mode dispatcher
+OVFFLG:	.WORD	0		;Disable overflow message if <> 0
+BADPAT::.WORD	0		;<>0 if bad patch
+DATABF:	.BLKW	256.		;Buffer for data from file
+STBBUF:	.BLKW	256.		;Buffer for paging STB into memory
+; The following cells apply if we're patching a monitor SIL
+.$OVTS:	.WORD	0		;Start of monitor's overlay table
+.$OVTE:	.WORD	0		;End of monitor's overlay table
+.$AUDS:	.WORD	0		;Start of patch audit table
+.$AUDE:	.WORD	0		;End of patch audit table
+MODOVR:	.WORD	0		;<>0 if we're currently patching module OVR
+MODRST:	.WORD	0		;<>0 if we're currently patching module RSTS
+MOVRBL:.WORD	-1		;Block number of first block we patched in 
+				; module OVR (other than overlay table).
+				; -1 if no block of OVR has been patched
+RESPAT:	.WORD	0		;<>0 if we patched code in the resident monitor
+				; (ie not OVR) other than the patch audit table
+
+.SBTTL	PERMANENT SYMBOL TABLE
+
+.MACRO	$	SYM
+	.WORD	SYM		;Value
+.DSABL	CRF
+$$$$$$	= .
+.NLIST
+	 .WORD	0,0		;Force 2 words of 0
+.LIST
+.	= $$$$$$
+	.RAD50	/SYM/		;RAD50 name
+.	= $$$$$$+4
+.ENABL	CRF
+.ENDM	$
+
+; COMMON/KERNEL/FLDEF/INIPFX definitions
+
+PST:
+
+$	AA.DAT
+$	AA.NAM
+$	AA.PAS
+$	AA.PRV
+$	AA.QT2
+$	AA.QUO
+$	ABFLGS
+$	AP.PRV
+$	AP5$OO
+$	AQ.CRL
+$	AQ.CRM
+$	AQ.DJB
+$	AQ.LIL
+$	AQ.LIM
+$	AQ.LOL
+$	AQ.LOM
+$	AQ.RSL
+$	AQ.RSM
+$	ASSFQ 
+$	ATRFQ 
+$	AT.CAP
+$	AT.CDA
+$	AT.EXP
+$	AT.KB 
+$	AT.LDA
+$	AT.LTI
+$	AT.MSK
+$	AT.NDL
+$	AT.NLG
+$	AT.NLK
+$	AT.NNT
+$	AT.NPW
+$	AT.PDA
+$	AT.PTI
+$	AUDHND
+$	A2.JOB
+$	A2.MSG
+$	A2.NDT
+$	A2.NTI
+$	A2.PWF
+$	A2.RIB
+$	BBAAP5
+$	BBASND
+$	BBAUNT
+$	BBDAP5
+$	BBDINT
+$	BBDOFF
+$	BBDSTA
+$	BBDUNT
+$	BBGIRB
+$	BBR$P1
+$	BBR$P2
+$	BBR.AC
+$	BBR.CP
+$	BBR.IO
+$	BBSTS 
+$	BC    
+$	BCBSIZ
+$	BCKDAT
+$	BCKTIM
+$	BF.AST
+$	BF.CNT
+$	BF.FSZ
+$	BF.LNK
+$	BF.OFF
+$	BF.SIZ
+$	BGBUFF
+$	BGQRET
+$	BITS  
+$	BQBGBU
+$	BQBRIN
+$	BQBUFR
+$	BQCACH
+$	BQDTDN
+$	BQDTFI
+$	BQDTRE
+$	BQDUMP
+$	BQDXCO
+$	BQFAST
+$	BQFILE
+$	BQFIP 
+$	BQFORC
+$	BQFRAM
+$	BQKBFM
+$	BQKBTI
+$	BQLAT 
+$	BQMMCO
+$	BQMMDN
+$	BQMSCO
+$	BQMSDN
+$	BQMTBU
+$	BQMTCO
+$	BQMTDN
+$	BQMUCO
+$	BQMUDN
+$	BQNODN
+$	BQNSP 
+$	BQPFB 
+$	BQPHCO
+$	BQRJID
+$	BQSCHE
+$	BQSWAP
+$	BQTIME
+$	BQTRN 
+$	BQTST1
+$	BQTST2
+$	BQTST3
+$	BQTST4
+$	BQUMR 
+$	BQWTDN
+$	BQXDDN
+$	BQXECO
+$	BQXHCO
+$	BQXMDN
+$	BUFHDR
+$	BYEFQ 
+$	BYTS  
+$	B.BLKH
+$	B.BLKL
+$	B.BOOT
+$	B.CSR 
+$	B.CSRU
+$	B.DATE
+$	B.DCS 
+$	B.FLGS
+$	B.FUNC
+$	B.JMP 
+$	B.MEMH
+$	B.MEML
+$	B.MMU 
+$	B.NAME
+$	B.PARM
+$	B.READ
+$	B.RFUN
+$	B.RSET
+$	B.SPEC
+$	B.SPFC
+$	B.TWC 
+$	B.UNIT
+$	B.VE04
+$	B.VE10
+$	B.WFUN
+$	B.XFER
+$	C     
+$	CALFIP
+$	CCREDO
+$	CDRHND
+$	CFGJOB
+$	CHECNT
+$	CHECTL
+$	CHEERL
+$	CHEERM
+$	CHEERR
+$	CHEHIT
+$	CHEMNT
+$	CH$BSZ
+$	CH$CTL
+$	CH$DAT
+$	CH$DLM
+$	CH$FLM
+$	CH$LIM
+$	CH$MOD
+$	CH$NXT
+$	CH$PAR
+$	CH$PRV
+$	CH$SEC
+$	CH$TAG
+$	CH$TIC
+$	CH$USM
+$	CH$WTG
+$	CI$CBF
+$	CI$DSK
+$	CI$NSP
+$	CLSFQ 
+$	CMTSIZ
+$	CM.AP6
+$	CM.AWS
+$	CM.BA6
+$	CM.BRM
+$	CM.BRS
+$	CM.CCT
+$	CM.CMD
+$	CM.COF
+$	CM.CRQ
+$	CM.CRT
+$	CM.CSR
+$	CM.DCT
+$	CM.DNE
+$	CM.FLG
+$	CM.HDR
+$	CM.ICS
+$	CM.IC6
+$	CM.IMK
+$	CM.IRG
+$	CM.QMR
+$	CM.QUE
+$	CM.RSP
+$	CM.UMR
+$	CM.UOF
+$	CM.VTR
+$	CM.WKA
+$	CONTXT
+$	CORCMN
+$	CO$CBF
+$	CO$DSK
+$	CO$NSP
+$	CPUERR
+$	CPUPIR
+$	CPUSID
+$	CPUSZL
+$	CPUSZM
+$	CPUTIM
+$	CPUUPB
+$	CRAFQ 
+$	CRBFQ 
+$	CREFQ 
+$	CRSVER
+$	CRTFQ 
+$	DALFQ 
+$	DATE  
+$	DCLFQ 
+$	DDASN 
+$	DDASY 
+$	DDAUX 
+$	DDAUXA
+$	DDBUFC
+$	DDCHND
+$	DDCNT 
+$	DDCONS
+$	DDDYNA
+$	DDFLAG
+$	DDHORC
+$	DDHORZ
+$	DDIDX 
+$	DDJBNO
+$	DDNET 
+$	DDNFS 
+$	DDPRVO
+$	DDRLO 
+$	DDSTAT
+$	DDSTS 
+$	DDTIME
+$	DDUNT 
+$	DDUTIL
+$	DDWLO 
+$	DEAFQ 
+$	DEBG11
+$	DECFQ 
+$	DIRFQ 
+$	DLNFQ 
+$	DL$DEV
+$	DL$NAM
+$	DL$NUM
+$	DL$SIZ
+$	DMCHND
+$	DMPHND
+$	DQS$OO
+$	DSKHND
+$	DSKMAX
+$	DSKSIZ
+$	DSK$P1
+$	DSK$P2
+$	DSPFQ 
+$	DSQCNT
+$	DSQCTO
+$	DSQERR
+$	DSQFAR
+$	DSQFBL
+$	DSQFBM
+$	DSQFUN
+$	DSQJOB
+$	DSQL3Q
+$	DSQMAL
+$	DSQMAM
+$	DSQMSC
+$	DSQOPT
+$	DSQOUN
+$	DSQPDA
+$	DSQPTO
+$	DSQPUN
+$	DSQRFN
+$	DSQSAV
+$	DSQSIZ
+$	DSQTOT
+$	DSQUNT
+$	DS.CSR
+$	DS.CTL
+$	DS.DCT
+$	DS.DVN
+$	DS.NCS
+$	DS.NUN
+$	DS.PKT
+$	DS.UNT
+$	DS.XXX
+$	DTAHND
+$	DTRFQ 
+$	DT2HND
+$	ELAFQ 
+$	EMLBRM
+$	EMLLND
+$	EMLLST
+$	EMLMFQ
+$	EMLMSD
+$	EMLNLG
+$	EMLNVR
+$	EMLPKC
+$	EMLQMS
+$	EMLQNL
+$	EMLQNV
+$	EMLQUU
+$	EMLRPQ
+$	EMLSEQ
+$	EMLTSZ
+$	EMTSIZ
+$	ENDINI
+$	EOVFQ 
+$	EP    
+$	ERC$CD
+$	ERC$CK
+$	ERC$CP
+$	ERC$CR
+$	ERC$DB
+$	ERC$DD
+$	ERC$DF
+$	ERC$DK
+$	ERC$DL
+$	ERC$DM
+$	ERC$DP
+$	ERC$DR
+$	ERC$DS
+$	ERC$DT
+$	ERC$DU
+$	ERC$DV
+$	ERC$DW
+$	ERC$DX
+$	ERC$DZ
+$	ERC$J0
+$	ERC$KB
+$	ERC$KT
+$	ERC$LP
+$	ERC$MM
+$	ERC$MS
+$	ERC$MT
+$	ERC$MU
+$	ERC$PA
+$	ERC$PF
+$	ERC$PP
+$	ERC$PR
+$	ERC$RI
+$	ERC$RJ
+$	ERC$T4
+$	ERC$UI
+$	ERC$XD
+$	ERC$XE
+$	ERC$XH
+$	ERC$XM
+$	ERC$XX
+$	ERC$XY
+$	ERRFQ 
+$	ETHHND
+$	EXIRDO
+$	EXTFQ 
+$	FBBSIZ
+$	FCAEXT
+$	FCBESZ
+$	FCBFCB
+$	FCBSIZ
+$	FCCTG 
+$	FCDLW 
+$	FCFLG 
+$	FCFUFD
+$	FCFVB 
+$	FCLLCK
+$	FCLOCK
+$	FCLUS 
+$	FCNVB 
+$	FCPT  
+$	FCRR  
+$	FCSIZ 
+$	FCSPUP
+$	FCUFND
+$	FCUPDT
+$	FCUSE 
+$	FCWCHK
+$	FCWND 
+$	FC$EXT
+$	FIRQB 
+$	FLGFRC
+$	FLGKB 
+$	FLGMOD
+$	FLGPOS
+$	FLGRND
+$	FMTFUN
+$	FP    
+$	FPPTXT
+$	FQADDR
+$	FQALLC
+$	FQBSIZ
+$	FQBUFL
+$	FQCLUS
+$	FQDEV 
+$	FQDEVN
+$	FQERNO
+$	FQEXT 
+$	FQFCB 
+$	FQFIL 
+$	FQFLAG
+$	FQFSIZ
+$	FQFUN 
+$	FQJOB 
+$	FQMODE
+$	FQNAM1
+$	FQNAM2
+$	FQNENT
+$	FQNPCL
+$	FQPFLG
+$	FQPPN 
+$	FQPREF
+$	FQPROT
+$	FQSIZ 
+$	FQSIZC
+$	FQSIZM
+$	FQSIZN
+$	FQSTAT
+$	FQSWIT
+$	FQTMP1
+$	FQTMP2
+$	FS.DSK
+$	FS.EXT
+$	FS.MKC
+$	FS.MKD
+$	FS.OLD
+$	FS.OPN
+$	FS.REQ
+$	F$ACNT
+$	F$CLUS
+$	F$FID 
+$	F$LINK
+$	F$NAM 
+$	F$PPN 
+$	F$PRIV
+$	F$PROT
+$	F$RCNT
+$	F$SIZL
+$	F$SIZM
+$	F$STAT
+$	F$UFND
+$	F$UNT 
+$	F$WCB 
+$	F$WFND
+$	F.FBNL
+$	F.FBNM
+$	F.UNT 
+$	GETSML
+$	IBMHND
+$	IDX$DB
+$	IDX$DF
+$	IDX$DK
+$	IDX$DL
+$	IDX$DM
+$	IDX$DP
+$	IDX$DR
+$	IDX$DS
+$	IDX$DU
+$	IDX$DV
+$	IDX$DW
+$	IDX$DZ
+$	IDX$MM
+$	IDX$MS
+$	IDX$MT
+$	IDX$MU
+$	IDX$..
+$	IDX.KB
+$	IDX.NL
+$	IDX.NO
+$	IDX.PK
+$	IDX.SY
+$	IDX.XE
+$	IDX.XH
+$	IFUN  
+$	IN    
+$	INT$OO
+$	IOBUF1
+$	IOBUF2
+$	IOSTS 
+$	IRBBFL
+$	IRBCHN
+$	IRBCON
+$	IRBDPT
+$	IRBEPT
+$	IRBFPT
+$	IRBFUN
+$	IRBMMU
+$	IRBMOD
+$	IRBNXT
+$	IRBSIZ
+$	IRBSTA
+$	IRB18L
+$	IRB18M
+$	JCALPP
+$	JCALPV
+$	JCAPRM
+$	JCAPRV
+$	JCASTQ
+$	JCASTS
+$	JCASTT
+$	JCAUXB
+$	JCBRST
+$	JCCEAP
+$	JCCEPC
+$	JCCER1
+$	JCCLOK
+$	JCCMDL
+$	JCCON 
+$	JCCPU 
+$	JCCPUM
+$	JCDCLW
+$	JCDEV 
+$	JCDRTS
+$	JCDSIZ
+$	JCEXST
+$	JCFXSZ
+$	JCHDRS
+$	JCISIZ
+$	JCKCT 
+$	JCKCTM
+$	JCMPTR
+$	JCNAME
+$	JCPFB 
+$	JCPRI 
+$	JCPRIV
+$	JCSIZM
+$	JCSIZN
+$	JCSPRV
+$	JCSPWN
+$	JCSWAP
+$	JCUFDR
+$	JCWPTR
+$	JDFLG 
+$	JDFLG2
+$	JDFLG3
+$	JDFLG4
+$	JDFSTM
+$	JDIOB 
+$	JDIOST
+$	JDJBNO
+$	JDJDB2
+$	JDMCTL
+$	JDPOST
+$	JDRESB
+$	JDRESQ
+$	JDRTS 
+$	JDSIZE
+$	JDWORK
+$	JFASTD
+$	JFBIG 
+$	JFCC  
+$	JFCEMT
+$	JFCTXT
+$	JFDINI
+$	JFFPP 
+$	JFGO  
+$	JFIOKY
+$	JFKILL
+$	JFLOCK
+$	JFNOPR
+$	JFPOST
+$	JFPPT 
+$	JFPRIV
+$	JFPRTY
+$	JFREDO
+$	JFRUN 
+$	JFSPCL
+$	JFSPRI
+$	JFSTAK
+$	JFSWPE
+$	JFSWPR
+$	JFSYS 
+$	JFSYST
+$	JF2CC 
+$	JM.SIS
+$	JM.UDS
+$	JOB   
+$	JOBDA 
+$	JOBF  
+$	JOBF3 
+$	JOBJCR
+$	JOBJC6
+$	JOBJD2
+$	JOBRTS
+$	JOBWDB
+$	JOBWRK
+$	JSBUF 
+$	JSFIP 
+$	JSTEL 
+$	JSTIM 
+$	JS.KB 
+$	JS.SY 
+$	J2ASTA
+$	J2ASTD
+$	J2BAT 
+$	J2CAPT
+$	J2FSPW
+$	J2ICF 
+$	J2IHDR
+$	J2KIL2
+$	J2LOG 
+$	J2NCHO
+$	J2NDAT
+$	J2NERR
+$	J2NET 
+$	J2PPN 
+$	J2PRVP
+$	J2SLAP
+$	J2SYSV
+$	J2VFY 
+$	J41ASY
+$	KDSAR0
+$	KDSAR5
+$	KDSAR6
+$	KDSDR0
+$	KEY   
+$	KISAR0
+$	KISAR5
+$	KISAR6
+$	KISDR0
+$	KMCHND
+$	LBCRAB
+$	LBCRAL
+$	LBCRAP
+$	LBDHPB
+$	LBDHPL
+$	LBDHPP
+$	LBDZPB
+$	LBDZPL
+$	LBDZPP
+$	LBEVLB
+$	LBEVLL
+$	LBEVLP
+$	LBEXPA
+$	LBFIPB
+$	LBFIPL
+$	LBFIPP
+$	LBFIXB
+$	LBFIXL
+$	LBFIXP
+$	LBFMSB
+$	LBFMSL
+$	LBFMSP
+$	LBFPLL
+$	LBFPLP
+$	LBGPKB
+$	LBGPKL
+$	LBGPKP
+$	LBISPE
+$	LBISPL
+$	LBISPP
+$	LBISPS
+$	LBJCRL
+$	LBJCRP
+$	LBKBXB
+$	LBKBXL
+$	LBKBXP
+$	LBLATB
+$	LBLATL
+$	LBLATP
+$	LBLEN 
+$	LBMCPL
+$	LBMCPP
+$	LBNFRL
+$	LBNODB
+$	LBNODL
+$	LBNODP
+$	LBNODS
+$	LBNSPB
+$	LBNSPL
+$	LBNSPP
+$	LBOVRL
+$	LBOVRP
+$	LBPTBB
+$	LBPTBL
+$	LBPTBP
+$	LBQNAB
+$	LBQNAL
+$	LBQNAP
+$	LBRDMB
+$	LBRDML
+$	LBRDMP
+$	LBRNDL
+$	LBRNDP
+$	LBSCRL
+$	LBSCRP
+$	LBSEGE
+$	LBSEGS
+$	LBSESB
+$	LBSESL
+$	LBSESP
+$	LBTERB
+$	LBTERL
+$	LBTERP
+$	LBTRNB
+$	LBTRNL
+$	LBTRNP
+$	LBUNAB
+$	LBUNAL
+$	LBUNAP
+$	LBVHPB
+$	LBVHPL
+$	LBVHPP
+$	LCK   
+$	LGDSKE
+$	LGDSKS
+$	LG$DEA
+$	LG$DOS
+$	LG$DSK
+$	LG$HLE
+$	LG$LOW
+$	LG$LST
+$	LG$L6 
+$	LG$L9 
+$	LG$NEW
+$	LG$NLG
+$	LG$RPL
+$	LG$SYS
+$	LG$UNR
+$	LG$USR
+$	LID   
+$	LKS   
+$	LOG$CK
+$	LOG$CP
+$	LOG$DB
+$	LOG$DF
+$	LOG$DK
+$	LOG$DL
+$	LOG$DM
+$	LOG$DP
+$	LOG$DR
+$	LOG$DS
+$	LOG$DU
+$	LOG$DV
+$	LOG$DW
+$	LOG$DZ
+$	LOG$J0
+$	LOG$KB
+$	LOG$KT
+$	LOG$PA
+$	LOG$PF
+$	LOG$RI
+$	LOG$SZ
+$	LOG$T4
+$	LOG$UI
+$	LOKFQ 
+$	LOWEND
+$	LPPN  
+$	LPTHND
+$	LS.DYN
+$	LS.LIB
+$	LS.NPC
+$	LS.UFL
+$	L.PPN 
+$	L.PROT
+$	L.STAT
+$	L3QLEN
+$	L3QSIZ
+$	MALNK 
+$	MAPFQ 
+$	MAPVER
+$	MBXHND
+$	MCBSIZ
+$	MCON  
+$	MCPU  
+$	MCP$P1
+$	MCP$P2
+$	MC.LCK
+$	MDADDR
+$	MDCN  
+$	MDDESC
+$	MDEV  
+$	MDOFF 
+$	MDPER 
+$	MDSIZE
+$	MEDSIZ
+$	MINDAT
+$	MKCT  
+$	ML.LCK
+$	ML.MON
+$	ML.NXM
+$	ML.RTS
+$	ML.USR
+$	ML.XBF
+$	MMSB  
+$	MMTMOT
+$	MMUSR0
+$	MMUSR1
+$	MMUSR2
+$	MMUSR3
+$	MNTDAT
+$	MNTTIM
+$	MOSUPI
+$	MOUSRD
+$	MOUSRI
+$	MSC$P1
+$	MSC$P2
+$	MTAFQ 
+$	MTAHND
+$	M.CTRL
+$	M.PHYA
+$	M.PNXT
+$	M.PPRV
+$	M.SIZE
+$	M.TSIZ
+$	N     
+$	NETFQ 
+$	NEXT  
+$	NONMSK
+$	NONRTS
+$	NSTORG
+$	NTFQMX
+$	NULHND
+$	N$G$$D
+$	ODATES
+$	ODEVIC
+$	OEXQTA
+$	OGACNT
+$	OGREAD
+$	OGWRIT
+$	OHWCFG
+$	OHWCTL
+$	OINSTA
+$	OJOBCT
+$	OMOUNT
+$	OOPER 
+$	OPBSCT
+$	OPNFQ 
+$	OP$AEX
+$	OP$APP
+$	OP$BLK
+$	OP$CCT
+$	OP$CHE
+$	OP$CSQ
+$	OP$CTG
+$	OP$DUD
+$	OP$INI
+$	OP$LNK
+$	OP$MDL
+$	OP$MOD
+$	OP$NGA
+$	OP$NOS
+$	OP$RO 
+$	OP$RR 
+$	OP$SPU
+$	OP$TEN
+$	OP$TOP
+$	OP$UPD
+$	OP$WLK
+$	OP$WUF
+$	OQBGBU
+$	OQBRIN
+$	OQBUFR
+$	OQCACH
+$	OQDTDN
+$	OQDTFI
+$	OQDTRE
+$	OQDUMP
+$	OQDXCO
+$	OQFAST
+$	OQFILE
+$	OQFIP 
+$	OQFORC
+$	OQFRAM
+$	OQKBFM
+$	OQKBTI
+$	OQLAT 
+$	OQMMCO
+$	OQMMDN
+$	OQMSCO
+$	OQMSDN
+$	OQMTBU
+$	OQMTCO
+$	OQMTDN
+$	OQMUCO
+$	OQMUDN
+$	OQNODN
+$	OQNSP 
+$	OQPFB 
+$	OQPHCO
+$	OQRJID
+$	OQSCHE
+$	OQSWAP
+$	OQTIME
+$	OQTRN 
+$	OQTST1
+$	OQTST2
+$	OQTST3
+$	OQTST4
+$	OQUMR 
+$	OQWTDN
+$	OQXDDN
+$	OQXECO
+$	OQXHCO
+$	OQXMDN
+$	ORDMEM
+$	ORDNFS
+$	OSEND 
+$	OSETPA
+$	OSHUTU
+$	OSWCFG
+$	OSWCTL
+$	OSYSIO
+$	OSYSMO
+$	OTFLOD
+$	OTFOR 
+$	OTHFOR
+$	OTHREV
+$	OTHSIH
+$	OTHSIM
+$	OTHSIO
+$	OTH.SZ
+$	OTMFLG
+$	OTMNAM
+$	OTMNUM
+$	OTMPPR
+$	OTM.SZ
+$	OTOLEN
+$	OTO.SZ
+$	OTREV 
+$	OTUNE 
+$	OUSER1
+$	OUSER2
+$	OUSER3
+$	OUSER4
+$	OUSER5
+$	OUSER6
+$	OUSER7
+$	OUSER8
+$	OUT   
+$	OVLY1 
+$	OVLY2 
+$	OWACNT
+$	OWREAD
+$	OWRTNF
+$	OWWRIT
+$	PARCSR
+$	PCKID 
+$	PDATES
+$	PDEVIC
+$	PEXQTA
+$	PFBFQ 
+$	PFBRDO
+$	PF.CSZ
+$	PF.EMT
+$	PF.KBM
+$	PF.NER
+$	PF.REM
+$	PF.RW 
+$	PF.SLA
+$	PF.1US
+$	PGACNT
+$	PGREAD
+$	PGWRIT
+$	PHWCFG
+$	PHWCTL
+$	PHZRND
+$	PINSTA
+$	PJOBCT
+$	PKBHND
+$	PKS   
+$	PKTSIZ
+$	PK.CSO
+$	PK.FLG
+$	PK.MXU
+$	PK.NAM
+$	PK.NUN
+$	PK.OFF
+$	PK.PRI
+$	PK.SIZ
+$	PLTHND
+$	PLVL  
+$	PMOUNT
+$	POPER 
+$	PPBSCT
+$	PPCS  
+$	PQBGBU
+$	PQBRIN
+$	PQBUFR
+$	PQCACH
+$	PQDTDN
+$	PQDTFI
+$	PQDTRE
+$	PQDUMP
+$	PQDXCO
+$	PQFAST
+$	PQFILE
+$	PQFIP 
+$	PQFORC
+$	PQFRAM
+$	PQKBFM
+$	PQKBTI
+$	PQLAT 
+$	PQMMCO
+$	PQMMDN
+$	PQMSCO
+$	PQMSDN
+$	PQMTBU
+$	PQMTCO
+$	PQMTDN
+$	PQMUCO
+$	PQMUDN
+$	PQNODN
+$	PQNSP 
+$	PQPFB 
+$	PQPHCO
+$	PQRJID
+$	PQSCHE
+$	PQSWAP
+$	PQTIME
+$	PQTRN 
+$	PQTST1
+$	PQTST2
+$	PQTST3
+$	PQTST4
+$	PQUMR 
+$	PQWTDN
+$	PQXDDN
+$	PQXECO
+$	PQXHCO
+$	PQXMDN
+$	PRDMEM
+$	PRDNFS
+$	PRIVSZ
+$	PR0   
+$	PR1   
+$	PR2   
+$	PR3   
+$	PR4   
+$	PR5   
+$	PR6   
+$	PR7   
+$	PS    
+$	PSEND 
+$	PSETPA
+$	PSHUTU
+$	PSTAT 
+$	PSWCFG
+$	PSWCTL
+$	PSYSIO
+$	PSYSMO
+$	PS.BAE
+$	PS.EVC
+$	PS.FIX
+$	PS.FLT
+$	PS.GPK
+$	PS.NUW
+$	PS.PRI
+$	PS.PVC
+$	PS.UWN
+$	PS.XBF
+$	PS.2VC
+$	PTMPPR
+$	PTPHND
+$	PTRHND
+$	PTUNE 
+$	PUSER1
+$	PUSER2
+$	PUSER3
+$	PUSER4
+$	PUSER5
+$	PUSER6
+$	PUSER7
+$	PUSER8
+$	PWACNT
+$	PWREAD
+$	PWRTNF
+$	PWWRIT
+$	P$BREM
+$	P$BUFA
+$	P$LINK
+$	P$PARM
+$	P$SKBN
+$	P$SNDR
+$	P$SPPN
+$	P$TYPE
+$	P.BAD 
+$	P.BPT 
+$	P.CC  
+$	P.CRAS
+$	P.DEXT
+$	P.EMT 
+$	P.FIS 
+$	P.FLAG
+$	P.FPP 
+$	P.IOT 
+$	P.ISIZ
+$	P.MSIZ
+$	P.NEW 
+$	P.OFF 
+$	P.RUN 
+$	P.SIZE
+$	P.STRT
+$	P.TRAP
+$	P.2CC 
+$	QDS$OO
+$	QNA$P1
+$	QNA$P2
+$	QTBCRL
+$	QTBCRM
+$	QTBDJB
+$	QTBENT
+$	QTBFLG
+$	QTBLIL
+$	QTBLIM
+$	QTBLOL
+$	QTBLOM
+$	QTBOPN
+$	QTBPPN
+$	QTBRSL
+$	QTBRSM
+$	QTBSIZ
+$	QTLINK
+$	QTSIZE
+$	Q.UPDC
+$	RDCI  
+$	RDOSIZ
+$	REDRDO
+$	RELFUN
+$	REMFQ 
+$	RENFQ 
+$	REQ   
+$	RETSML
+$	RETURN
+$	RFUN  
+$	RFUN.C
+$	RHAS  
+$	RHATA 
+$	RHBA  
+$	RHCLR 
+$	RHCS1 
+$	RHCS2 
+$	RHDLT 
+$	RHDPR 
+$	RHDRQ 
+$	RHDRY 
+$	RHDS  
+$	RHDT  
+$	RHDTE 
+$	RHER  
+$	RHERR 
+$	RHESET
+$	RHILF 
+$	RHILR 
+$	RHINH 
+$	RHMCPE
+$	RHMDPE
+$	RHMOH 
+$	RHMOL 
+$	RHMR  
+$	RHMXF 
+$	RHNED 
+$	RHNEM 
+$	RHNSA 
+$	RHOPI 
+$	RHPE  
+$	RHPGE 
+$	RHPIP 
+$	RHREAD
+$	RHRMR 
+$	RHSC  
+$	RHSPR 
+$	RHTAP 
+$	RHTRE 
+$	RHUNL 
+$	RHUNS 
+$	RHWC  
+$	RHWCHK
+$	RHWRIT
+$	RHWRL 
+$	RH7CH 
+$	RIDHDR
+$	RIDMEM
+$	RIDMIN
+$	RJEHND
+$	RMS1  
+$	RMS10 
+$	RMS11 
+$	RMS12 
+$	RMS13 
+$	RMS14 
+$	RMS15 
+$	RMS2  
+$	RMS3  
+$	RMS4  
+$	RMS5  
+$	RMS6  
+$	RMS7  
+$	RMS8  
+$	RMS9  
+$	RSTFQ 
+$	RUNFQ 
+$	RXDHND
+$	R.CNT 
+$	R.DATA
+$	R.DEXT
+$	R.FILE
+$	R.FLAG
+$	R.KSIZ
+$	R.LINK
+$	R.MCTL
+$	R.MSIZ
+$	R.NAME
+$	R.SIZE
+$	SATBF2
+$	SA.EVT
+$	SA.LCL
+$	SA.NCS
+$	SA.NET
+$	SA.NLC
+$	SA.PRV
+$	SA.SLB
+$	SA.XOF
+$	SA.1SH
+$	SCBSIZ
+$	SC$AEX
+$	SC$CHE
+$	SC$CSQ
+$	SC$CTG
+$	SC$DLW
+$	SC$EXT
+$	SC$LCK
+$	SC$LLK
+$	SC$RR 
+$	SC$SPU
+$	SC$UFD
+$	SC$UPD
+$	SC$USE
+$	SDSAR0
+$	SDSDR0
+$	SEGS  
+$	SEG.FH
+$	SEG.JH
+$	SISAR0
+$	SISDR0
+$	SL    
+$	SL$DEV
+$	SL$NAM
+$	SL$NUM
+$	SL$PPN
+$	SL$SIZ
+$	SL$SZS
+$	SO.BAT
+$	SO.EML
+$	SO.ERL
+$	SO.INI
+$	SO.MMN
+$	SO.MMX
+$	SO.NTR
+$	SO.OMS
+$	SO.OQM
+$	SO.PRT
+$	SO.QM 
+$	SO.SRV
+$	SO.URP
+$	SO.1MX
+$	SO.2QM
+$	SO.2SR
+$	SO.2UR
+$	SPCRDO
+$	STAFQ 
+$	SWP   
+$	SWR   
+$	SW.AUT
+$	SW.FRZ
+$	SW.LOG
+$	SYSVEE
+$	SYSVEL
+$	S$CLUS
+$	S$FLG 
+$	S$FVB 
+$	S$IDX 
+$	S$NVB 
+$	S$PT  
+$	S$SIZ 
+$	S$STS 
+$	S$UFND
+$	S$UNT 
+$	S$WND 
+$	S.ACCS
+$	S.BMAX
+$	S.JBNO
+$	S.LCNT
+$	S.LINK
+$	S.LLST
+$	S.LMAX
+$	S.MCNT
+$	S.MLST
+$	S.MMAX
+$	S.OBJT
+$	S.OMAX
+$	S.PQTA
+$	S.RCID
+$	S.SRBN
+$	T     
+$	TAPGVN
+$	TAPMIN
+$	TIMCLK
+$	TIME  
+$	TIMSEC
+$	TMO$OO
+$	TOYCSR
+$	TRUFQ 
+$	TTDC11
+$	TTDE11
+$	TTDH11
+$	TTDJ11
+$	TTDL11
+$	TTDZ11
+$	TTKL11
+$	TTPC11
+$	TTPI11
+$	TTPK11
+$	TTVH11
+$	TTXT11
+$	TTYHND
+$	UAA   
+$	UACNT 
+$	UADAT 
+$	UAR   
+$	UATYP 
+$	UCLUS 
+$	UC.CNT
+$	UC.DLW
+$	UC.LCK
+$	UC.MNT
+$	UC.NEW
+$	UC.NFS
+$	UC.NSH
+$	UC.ORO
+$	UC.OVR
+$	UC.PRI
+$	UC.RO 
+$	UC.TOP
+$	UC.WLK
+$	UC.WLO
+$	UDC   
+$	UDLA  
+$	UDSAR0
+$	UDSDR0
+$	UENT  
+$	UISAR0
+$	UISDR0
+$	ULNK  
+$	UL.BAD
+$	UL.BLO
+$	UL.CHE
+$	UL.CLN
+$	UL.CLO
+$	UL.ENO
+$	UL.USE
+$	UMPFQ 
+$	UMR$OO
+$	UNAM  
+$	UNIWIN
+$	UNLFUN
+$	UO.CLN
+$	UO.DP 
+$	UO.INI
+$	UO.NCD
+$	UO.NCF
+$	UO.NQT
+$	UO.TOP
+$	UO.WCF
+$	UO.WCU
+$	UPROT 
+$	UP.PRV
+$	UP.RPG
+$	UP.RPO
+$	UP.RPW
+$	UP.RUN
+$	UP.WPG
+$	UP.WPO
+$	UP.WPW
+$	URTS  
+$	USESIZ
+$	USIZ  
+$	USRLOG
+$	USRPPN
+$	USRPRT
+$	USRSP 
+$	USTAT 
+$	US.DEL
+$	US.NOK
+$	US.NOX
+$	US.OUT
+$	US.PLC
+$	US.UFD
+$	US.UPD
+$	US.WRT
+$	UTC   
+$	UTC.BK
+$	UTC.IG
+$	UTC.TM
+$	UT.LOG
+$	UT.OVR
+$	UT.PFB
+$	UT.QTS
+$	UT.QTX
+$	UT.SAT
+$	UT.WTB
+$	UT.WTH
+$	UUOFQ 
+$	UUOSLK
+$	UUOSSN
+$	UU$MAX
+$	UU$MIN
+$	UU.ACT
+$	UU.ASS
+$	UU.ATR
+$	UU.ATT
+$	UU.BCK
+$	UU.BYE
+$	UU.CCL
+$	UU.CFG
+$	UU.CHE
+$	UU.CHK
+$	UU.CHU
+$	UU.CLN
+$	UU.CNV
+$	UU.DAL
+$	UU.DAT
+$	UU.DEA
+$	UU.DET
+$	UU.DIE
+$	UU.DIR
+$	UU.DLU
+$	UU.DMP
+$	UU.ERR
+$	UU.FCB
+$	UU.FIL
+$	UU.HNG
+$	UU.JOB
+$	UU.KMC
+$	UU.LIN
+$	UU.LOG
+$	UU.LOK
+$	UU.MNT
+$	UU.NAM
+$	UU.NLG
+$	UU.NOT
+$	UU.ONX
+$	UU.PAS
+$	UU.POK
+$	UU.PPN
+$	UU.PRI
+$	UU.PRM
+$	UU.PRV
+$	UU.RAD
+$	UU.RTS
+$	UU.SLN
+$	UU.SPL
+$	UU.STL
+$	UU.SWP
+$	UU.SYS
+$	UU.TB1
+$	UU.TB2
+$	UU.TB3
+$	UU.TRM
+$	UU.USC
+$	UU.YLG
+$	UU.ZER
+$	UU.3PP
+$	V     
+$	WA$LIB
+$	WA$MAP
+$	WA$WRT
+$	WCBSIZ
+$	WC$AEX
+$	WC$CHE
+$	WC$CSQ
+$	WC$CTG
+$	WC$DLW
+$	WC$EXT
+$	WC$LCK
+$	WC$LLK
+$	WC$NFC
+$	WC$RR 
+$	WC$SPU
+$	WC$UFD
+$	WC$UPD
+$	WC$USE
+$	WERFUN
+$	WFUN  
+$	WFUN.C
+$	WHOCLN
+$	WINFQ 
+$	WRTRDO
+$	WS$MAP
+$	WS$SIS
+$	WS$UDS
+$	WS$UIS
+$	WS$WRT
+$	W$FCB 
+$	W$FLAG
+$	W$IDX 
+$	W$JBNO
+$	W$NAPR
+$	W$NBYT
+$	W$NLIB
+$	W$NOFF
+$	W$NSIZ
+$	W$NSTS
+$	W$NVBL
+$	W$NVBM
+$	W$NXT 
+$	W$PR  
+$	W$REN 
+$	W$STS 
+$	W$WCB 
+$	W$WND 
+$	W.ALIB
+$	W.LINK
+$	W.SIZE
+$	W.WIN1
+$	W.WIN2
+$	XC$CAC
+$	XC$CIS
+$	XC$DSP
+$	XC$ECC
+$	XC$FIS
+$	XC$FPP
+$	XC$IDS
+$	XC$NEM
+$	XC$OAT
+$	XC$PAM
+$	XC$QBU
+$	XC$UMR
+$	XC$22 
+$	XMSEGS
+$	XMTLEN
+$	XM.ADD
+$	XM.LEN
+$	XRB   
+$	XRBAP 
+$	XRBC  
+$	XRBCRA
+$	XRBEFN
+$	XRBLK 
+$	XRBLKM
+$	XRBPT 
+$	XRBSAV
+$	XRBSIZ
+$	XRBUSE
+$	XRCI  
+$	XRLEN 
+$	XRLOC 
+$	XRMOD 
+$	XRTIME
+$	Z     
+$	$     
+$	$TK25 
+$	$TSEND
+$	$TSU05
+$	$TSV05
+$	$TS05 
+$	$TS11 
+$	$TU80 
+$	$$$VER
+$	$$$$$ 
+$	$$$$$$
+$	$$$$$0
+$	$$$$$1
+$	$$$$$2
+$	.AST  
+$	.ASTX 
+$	.CCL  
+$	.CHAIN
+$	.CLEAR
+$	.CMDLN
+$	.CORE 
+$	.DATE 
+$	.ERLOG
+$	.EXIT 
+$	.FSS  
+$	.LOGS 
+$	.MESAG
+$	.NAME 
+$	.PEEK 
+$	.PFB  
+$	.PLAS 
+$	.POSTN
+$	.READ 
+$	.READA
+$	.RSX  
+$	.RTS  
+$	.RUN  
+$	.SET  
+$	.SLEEP
+$	.SPEC 
+$	.STAT 
+$	.TIME 
+$	.TTAPE
+$	.TTDDT
+$	.TTECH
+$	.TTNCH
+$	.TTRST
+$	.ULOG 
+$	.UUO  
+$	.WRITA
+$	.WRITE
+$	.XPEEK
+$	..PRW0
+$	..PRW1
+$	..PRW2
+$	..PRW3
+
+; Macro Permanent Symbol Table definitions
+
+$	MOV
+$	MOVB
+$	CMP
+$	CMPB
+$	BIT
+$	BITB
+$	BIC
+$	BICB
+$	BIS
+$	BISB
+$	ADD
+$	SUB
+$	CLR
+$	CLRB
+$	COM
+$	COMB
+$	INC
+$	INCB
+$	DEC
+$	DECB
+$	NEG
+$	NEGB
+$	ADC
+$	ADCB
+$	SBC
+$	SBCB
+$	TST
+$	TSTB
+$	ROR
+$	RORB
+$	ROL
+$	ROLB
+$	ASR
+$	ASRB
+$	ASL
+$	ASLB
+$	JMP
+$	SWAB
+$	MFPI
+$	MFPD
+$	MTPI
+$	MTPD
+$	LDFPS
+$	SXT
+$	NEGD
+$	NEGF
+$	STFPS
+$	STST
+$	CLRD
+$	CLRF
+$	TSTD
+$	TSTF
+$	ABSD
+$	ABSF
+$	HALT
+$	WAIT
+$	RTI
+$	RESET
+$	CLC
+$	SEC
+$	CLV
+$	SEV
+$	CLZ
+$	SEZ
+$	CLN
+$	SEN
+$	CCC
+$	SCC
+$	NOP
+$	CFCC
+$	SETD
+$	SETF
+$	SETI
+$	SETL
+$	RTT
+$	BPT
+$	IOT
+$	EMT
+$	TRAP
+$	BR
+$	BNE
+$	BEQ
+$	BGE
+$	BLT
+$	BGT
+$	BLE
+$	BPL
+$	BMI
+$	BHI
+$	BLOS
+$	BVC
+$	BVS
+$	BCC
+$	BHIS
+$	BCS
+$	BLO
+$	JSR
+$	XOR
+$	SOB
+$	RTS
+$	DIV
+$	MUL
+$	ASH
+$	ASHC
+$	FADD
+$	FSUB
+$	FMUL
+$	FDIV
+$	MULF
+$	MULD
+$	MODF
+$	MODD
+$	ADDF
+$	ADDD
+$	LDF
+$	LDD
+$	SUBF
+$	SUBD
+$	CMPF
+$	CMPD
+$	STF
+$	STD
+$	DIVF
+$	DIVD
+$	STEXP
+$	STCFI
+$	STCFL
+$	STCDI
+$	STCDL
+$	STCFD
+$	STCDF
+$	LDEXP
+$	LDCIF
+$	LDCID
+$	LDCLF
+$	LDCLD
+$	LDCDF
+$	LDCFD
+DOT:	.WORD	0
+	.RAD50	/.     /
+STAR:	.WORD	0
+	.RAD50	/Q     /
+PSTE:
+
+GLOBAL	<FQ...>
+
+ENDOVL	<PAT,PATCTL,PATTXT,QFLAG>,100
+
+.END

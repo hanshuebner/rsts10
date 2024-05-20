@@ -1,0 +1,822 @@
+EMTDEF	C$CL,<Do a .CCL>
+	MOV	R0,R2		; Get pointer to start of ASCIZ string
+	MOV	R0,R3		; Make two copies
+	DEC	R3		; Decrement it
+10$:	TSTB	(R2)+		; Check for the null on the end
+	BNE	10$		; Keep looking until we find it
+	DEC	R2		; Make the end pointer right
+	.CALLR	TRYCCL		; Attempt a CCL, return if not accomplished
+
+.SBTTL	TRYCCL - Execute a CCL Command for KMON and .DOCCL
+
+.ENABL	LSB
+
+;+
+; Tryccl - attempt to execute a CCL
+;
+;	R2 -> End of string
+;	R3 -> Beginning of string - 1
+;
+;	Call	TRYCCL
+;
+;	R0 =  Garbage
+;	R1 -> R/W area @ LIBPPN
+;
+;		- or -
+;
+;	Execution does not return if CCL command is valid
+;-
+
+TRYCCL:	MOV	SP,@#376	; Save the SP in case stack = user logs
+	MOV	#376,SP		; Set up a nice stack
+	CALL	XCHLOG		; Set up logicals in case CCL catches
+	MOV	#XRB,R0		; Get a pointer to XRB
+	MOV	R2,(R0)		; Compute command length
+	SUB	R3,(R0)		; End - start + 1 = end - (start - 1)
+	MOV	(R0)+,(R0)+	; Put in buffer size and word count
+	MOV	R3,(R0)		; Point to the command string
+	INC	(R0)
+	.PRIV,	.CCL		; Try it
+	BR	20$		; It failed! restore logicals and return
+
+EMTDEF	R$UN,<Do a .RUN>
+	CALL	SETFQ1		; Set up the FIRQB			;002
+	MOV	(R0)+,FIRQB+FQNENT ; Put in a line number
+RUNDOT:	MOV	SP,@#376	; Save the SP in case stack = user logs
+	MOV	#376,SP		; Set up a nice stack
+	CALL	XCHLOG		; Get logical assignments in place
+	.PRIV,	.RUN		; Try to RUN the program
+20$:	CALL	XCHLOG		; RUN failed, restore logs
+	MOV	(SP),SP		; Restore stack
+	RETURN			; Exit
+
+.DSABL	LSB
+
+KMCMD	MONRET,<MO\NITOR>,<Return to Personal Default RTS>
+KMCMD	MONRET,<EXIT\>,<Return to Personal Default RTS (synonym)>
+	.PRIV,	.TIME		; Get flags from monitor
+	TST	XRB+12		; Are we the default RTS?
+	BMI	10$		; If so, leave channels open
+	.SRESET			; If not, purge any temp files
+10$:	CALL	XCHLOG		; Restore the logical assignments
+	CLRB	CORCMN		; Empty out core common
+	CLR	FIRQB+FQNAM1	; RTS to go to is personal default
+	.PRIV,	.RTS		; If we fall through, we are the default
+
+;+
+; XCHLOG - Interchange logical table and prepare to exit RT11
+;
+;	CALL	XCHLOG
+;
+;	Logical tables interchanged (call again to fix them up)
+;	R1 -> R/W area @ LIBPPN
+;	XRB set up as follows:
+;		+0 - +6: per .STAT call
+;		+10:	LIBPPN value
+;		+12:	DEFPPN value
+;		+14:	Current size in k
+;-
+
+.ENABL	LSB
+
+XCHLOG:	MOV	R3,-(SP)	; Get working
+	MOV	R2,-(SP)	;  registers
+	MOV	#USRPPN,R1	; Point to the logicals
+	MOV	#LOGSIZ/2,R3	; Number of words to restore
+	MOV	SYSPTR,R2	; Point to the R/W area
+	ADD	#LOGTBL,R2	;	Table of logicals
+10$:	MOV	(R1),-(SP)	; Save the B+ logical word
+	MOV	(R2),(R1)+	; Copy the high core one to low core
+	MOV	(SP)+,(R2)+	; Copy the low core one to high core
+	SOB	R3,10$
+	MOV	R2,R1		; Copy pointer to LIB for caller
+	MOV	FIRQB,-(SP)	; Save error code
+	.PRIV,	.STAT		; Get current size
+	MOV	#XRB+10,R3	; Put additional parameters in XRB
+	MOV	(R3),JOBPPN-LIBPPN(R2) ; Ensure this job's PPN is set up
+	MOV	(R2)+,(R3)+	; XRB+10 = LIB
+	MOV	(R2)+,(R3)+	; XRB+12 = PPN
+	MOV	XRB,(R3)+	; XRB+14 = Current size
+	MOV	(SP)+,FIRQB	; Restore former FIRQB
+	MOV	(SP)+,R2	; Restore
+20$:	MOV	(SP)+,R3	;  registers
+	RETURN
+
+;+
+; CLRLOW - Clear low area, cancel existing program
+;
+;	CALL	CLRLOW
+;
+;	User-settable traps cleared
+;	User special parameters (R/W area +0 - +6) cleared
+;	Locations 40-52 cleared
+;-
+
+CLRLOW:	CALL	NOCONT		; Cannot continue from here
+	MOV	R3,-(SP)	; Get a working register
+	MOV	#SYSPTR,R3	; Clear out RT-11 parameter words
+30$:	CLR	-(R3)		; From SYSPTR
+	CMP	R3,#USERPC	;   down to
+	BNE	30$		;     USERPC
+	BR	20$		; Restore register and exit
+
+;+
+; KSTACK - set up the KMON's stack
+;
+;	R5 -> R/W area
+;
+;	CALL	KSTACK,R1
+;
+;	SP -> KMON stack
+;	R1 clobbered
+;-
+
+KSTACK:	MOV	R5,-(SP)	; Save  pointer to R/W area
+	ADD	#KMSTAK,(SP)	; Point to new stack
+	MOV	(SP)+,SP	; Set it
+	JMP	(R1)		; Return to caller
+
+.DSABL	LSB
+
+.SBTTL	CP.BAD - Field Traps to 4, 10, MMU, Parity, Stack Overflow, Swap Err
+
+.ENABL	LSB
+
+CP.BAD:	CMP	(SP),#2		; Insensitive trap from setup code?
+	BNE	10$		; No
+	CMP	4(SP),#FPUCHK	; Maybe. Is it really?
+	BEQ	100$		; Yes, return special
+10$:	TSTB	FIRQB		; "Go to DCL" command from ICFP?
+	BNE	15$		; No, skip
+	CLR	FIRQB+FQEXT	; Indicate just temporary RTS change
+	CALL	XCHLOG		; Put logicals back in their standard place
+	.PRIV,	.RTS		; Go to DCL (Monitor set up FQNAM1)
+	.PRIV,	.EXIT		; Give me a break!  Get out of here
+
+15$:	CHKERR	B.250		; Is it MMU violation?
+	BNE	20$		; No
+	CALL	TRAPS,R5,250	; Yes, reroute through vector at 250
+	BR	30$		; If no vector, give him a message
+
+20$:	CALL	SAVREG,R5	; Save the registers
+30$:	MOVB	FIRQB,R1	; And get the error code
+	.PRIV,	.STAT		; Find out our size
+	MOV	XRB+XRLEN,R0	; Get low seg size in k
+	ASH	#11.,R0		; Shift to compute top address
+	SUB	#RWSIZ,R0	; Move down to base of R/W area
+	MOV	R0,SYSPTR	; Restore 54 if he clobbered it
+	CMP	XRB+10,JOBPPN(R0) ; Is PPN in R/W area ok?
+	BNE	RWCLOB		; No, assume R/W area clobbered
+	MOV	6*2(SP),R2	; Get offending PC
+	CMP	R2,R0		; Too big (above user area)?
+	BLO	40$		; No, ok
+	CLR	TRAPAD(R0)	; Yes, do not reroute
+	CMPB	(PC),CCLTAG(R0)	; Have we been here recently?
+	BEQ	RWCLOB		; Yes, that's really grievous
+	MOVB	(PC),CCLTAG(R0)	; No, but set up recursion flag
+40$:	CMPB	R1,#B.10	; Test against trap to 10 code
+	BHI	90$		; Too big, print RSTS error
+	CMPB	#B.4,R1		; How about trap to 4?
+	BHI	90$		; No, print RSTS error
+	MOV	TRAPAD(R0),R5	; Get his intercept (note: C=1 if B.10)
+	BEQ	50$		; None, give our error message
+	BIC	R5,TRAPAD(R0)	; Clear his address
+	BR	RESRG1		; Pop registers, return to user
+
+50$:	BIT	#1,R2		; Odd PC error?
+	BNE	60$		; Yes, don't trap again on bit
+	BIT	-(R2),(R2)	; Was it a halt (this usually works)?
+	BEQ	70$		; Yes, say so
+60$:	BCS	80$		; Trap to 10
+	MONERR	<Trap to 4>
+
+70$:	MONERR	<Halt>
+
+80$:	MONERR	<Trap to 10>
+
+MONERC:	MOV	@(SP)+,R1	; Get error code to use, purge stack
+90$:	CALL	GETERR		; Get error message in FIRQB
+	CALL	MONERR,R2	; And give a monitor error
+	+	FIRQB+FQERNO+1
+
+100$:	BIC	(PC),CONFIG(R5)	; CFCC failed, so no FPU available
+.ASSUME	CONFIG	EQ	300
+	RTI			; Bye
+
+RWCLOB:	MOV	#USRSP,SP	; Terrible error, reset the stack
+	ASL	R1		; Double the error code
+	MOVB	R1,(SP)		; Remember it in a safe place in the key
+.ASSUME	KEY	EQ	USRSP
+	MOV	#RECOVR,R4	; Reenter with message
+	JMP	CPZAP		; And clean up all core
+
+.DSABL	LSB
+
+GLOBAL	<B.4,B.10>
+
+.SBTTL	CP.IOT - Field IOT Traps from Monitor
+
+CP.IOT:	CALL	TRAPS,R5,20	; Reroute trap to 20 (IOT)
+	MONERR	<IOT trap>	; Return here if he has no vector
+
+.SBTTL	CP.TRP - Field Trap Traps from Monitor
+
+CP.TRP:	CMP	(SP),#RT11	; Is this a trap from the emulator?
+	BLO	10$		; No, try for user reroute
+	MOV	(SP)+,R1	; Get monitor address
+	CMP	-(R1),(SP)+	; Point to TRAP instruction, dump old PS
+	MOVB	(R1),ERRBYT	; Set up RT-11 error byte
+	BIS	#1,<1+6+1>*2(SP) ; Set carry in user PS
+	RETURN			; Return to the user
+
+10$:	CALL	TRAPS,R5,34	; Reroute trap to 34 (TRAP)
+	MONERR	<TRAP trap>
+
+.SBTTL	CP.BPT - Field Breakpoint Traps from Monitor
+
+CP.BPT:	CALL	TRAPS,R5,14	; Reroute trap to 14 (BPT)
+	MONERR	<BPT trap>
+
+TRAPS:	MOV	@(R5)+,-(SP)	; Get his vector
+	BEQ	10$		; None - give an error
+	BIT	#1,(SP)		; Is it odd?
+	BNE	10$		; Yes, give an error
+	MOV	2(SP),-(SP)	; Save his R5
+	MOV	-(R5),R5	; Get vector location
+	MOV	2(R5),4(SP)	; Get his new PS
+	MOV	(SP)+,R5	; Restore R5
+	RTI			;  and give the trap to the user
+
+10$:	MOV	R5,(SP)+	; Dump user new PC
+	; BR	SAVREG		; Fall into register saver
+
+.SBTTL	Save & Restore Registers
+
+;+
+; SAVREG - Save registers
+;
+;	CALL	SAVREG,R5
+;
+;	All registers saved: SP -> R0, R1, ..., R5
+;	Carry unchanged
+;-
+
+SAVREG:	MOV	R4,-(SP)
+	MOV	R3,-(SP)
+	MOV	R2,-(SP)
+	MOV	R1,-(SP)
+	MOV	R0,-(SP)
+	MOV	5*2(SP),-(SP)	; Now resave R5 on stack top
+	RETURN	R5
+
+;+
+; RESREG - Restore registers
+;
+;	SP -> R0, R1, ..., R5
+;
+;	CALL	RESREG,R5
+;
+;	Registers restored, carry unchanged
+;-
+
+RESREG:	MOV	(SP)+,R0	; Remove old R5
+RESRG1:	MOV	(SP)+,R0
+	MOV	(SP)+,R1
+	MOV	(SP)+,R2
+	MOV	(SP)+,R3
+	MOV	(SP)+,R4
+RTSR5:	RETURN	R5
+
+.SBTTL	CP.FPP - Handle FPP Traps
+.SBTTL	CP.FIS - Handle FIS Traps
+
+;+
+; CP.FIS, CP.FPU - Field floating point traps from RSTS
+;
+;	If the user has a trap address set via .SFPA,
+;		the error is routed directly to him
+;		and the trap intercept is cancelled
+;	Otherwise, the '?M-FP Trap' error is generated
+;-
+
+CP.FPP:				; RSTS already did an STST -(SP)
+CP.FIS:	MOV	R5,-(SP)	; Get elbow room
+	MOV	SYSPTR,R5	; Point to R/W area
+	CMP	SP,R5		; Is the KMON running?
+	BHI	10$		; Yes, do not reroute the trap
+	MOV	FPADDR(R5),-(SP) ; Get intercept address
+	CLR	FPADDR(R5)	;   and no more
+	MOV	(SP)+,R5	; Test address
+	BEQ	10$		; None
+	BIT	#1,R5		; Odd?
+	BEQ	RTSR5		; No, return to his intercept
+10$:	MOV	(SP)+,R5	; Fix R5
+	BIT	#^C<17>,(SP)	; Is it an FPU trap (FEC = 0 to 17)?
+	BNE	20$		; If top of stack = address, then no
+	CMP	(SP)+,(SP)+	; If yes, dump the FEC and FEA
+20$:	CALL	SAVREG,R5	; Enter properly
+	MONERR	<FP trap>
+
+.SBTTL	CP.RUN - Handle RUN Entry Point
+
+.ENABL	LSB
+
+CPRUN2:	COMB	EXITMD(R5)	; No, exit to default RTS when done
+	BIT	#020000,@#R.PARM ; Does FQNENT value specify CCL hack?
+	BEQ	40$		; No, leave core common & TTY buffer alone
+	MOV	#CORCMN,R2	; Point to the CCL string
+	MOVB	(R2)+,R1	; Get length
+	BLE	40$		; Zero or negative is none
+10$:	DEC	R1		; Count down
+	BLE	40$		; Can't find the end, so no CCL
+	CMPB	(R2)+,#'/	; Is this a valid character in command?
+	BHI	10$		; Yes, keep looking
+	BLO	20$		; No, space terminator, eat it
+	CMPB	-(R2),(R1)+	; No, slash, recover it
+20$:	CMP	R1,#TTIBFL-2	; Is there room for line<cr><lf><ctrl/Z>?
+	BHIS	40$		; No, so no CCL
+	RORB	CCLTAG(R5)	; Set CCLTAG < 0 as a flag
+	MOV	R5,R0		; Point to teletype input buffer
+	ADD	#TTBUFP,R0	;  in read/write area
+	CLR	(R0)+		; Start of data is offset 0 in buffer
+	MOV	R1,(R0)		; Length is CCL length
+	ADD	#3,(R0)+	;  plus 3 for <cr><lf><ctrl/Z>
+30$:	MOVB	(R2)+,(R0)+	; Move in the string
+	SOB	R1,30$
+	MOVB	#CR,(R0)+
+	MOVB	#LF,(R0)+
+	MOVB	#'Z-100,(R0)+
+40$:	BIT	#040000,@#R.PARM+2 ; /DETACH flag in CCL command?
+	BEQ	50$		; No
+	INCB	CCLTAG(R5)	; Yes, set a flag
+50$:	CALL	SETC17		; Open RT11 channel 17
+	MOVB	#-17*2,FIRQB+FQFIL ; Set FIRQB to reset all but ch 17
+	CALL	DOFIP,R0,RSTFQ	; Call FIP to reset channels
+	CALL	@(SP)+		; Now enable ctrl-C traps
+	MOVB	FIRQB+FQNENT,R4	; Get the requested size (line #)
+	JMP	RUN1		; And start the RUN
+
+.DSABL	LSB
+
+.SBTTL	Set up Channel 17 for .RUN and .CHAIN
+
+;+
+; SETC17 - make RT11 channel 17 be open on RSTS ch 17
+;
+;	FIRQB set up with file just opened by monitor
+;	^C disabled
+;
+;	CALL	SETC17
+;
+;	Channel 17 open
+;	R0,R1 destroyed
+;	R2 -> FIRQB @ FQDEV
+;-
+
+.ENABL	LSB
+
+SETC17:	MOV	R5,R0			   ; R0 ->
+	ADD	#CHANNL+<<17-1>*CHANSZ>,R0 ;   RSTS channel 17
+	MOV	R0,CHNMAP+<17*2>(R5) ; Map RT channel 17 to RSTS channel
+	MOV	#CS$OPN+<17*2>,(R0)+ ; Set the channel open
+	CALL	CVTDVF		; Convert name in FIRQB to RT-11 form
+	MOV	R1,(R0)+	; Put device name into channel
+	MOV	#FIRQB+FQNAM1,R1 ; Point to the name of the program
+	MOV	(R1)+,(R0)+	; Set name into channel
+	MOV	(R1)+,(R0)+
+	MOV	(R1)+,(R0)+
+	MOV	FIRQB+FQPPN,(R0)+ ; Put PPN into channel
+	MOV	#17*2,(R0)+	; Say RSTS channel 17
+	MOV	FIRQB+FQFLAG,(R0)+ ; Set up the status word
+	RETURN
+
+.DSABL	LSB
+
+.SBTTL	Process CHAIN Entry
+
+CHAIN:	CALL	KSTACK,R1	; Set up the KMON stack
+	MOV	#CTRLCK,-(SP)	; Last thing to do is return to KMON
+	TST	@#4		; Check the GET/RUN/CHAIN flag
+	BEQ	10$		; If 0, the function is GET
+	MOV	#START1,-(SP)	; If <>0, RUN or CHAIN, so we must start
+10$:	MOV	#RUN0,-(SP)	; Before that, we must load the file
+	MOV	#ENCTLC,-(SP)	; Before that, we must enable ^c traps
+	MOV	#SETC17,-(SP)	; Before that, we must set up channel 17
+KEYCC:	MOV	#JFFPP,XRB	; Swap the FPU
+	.PRIV,	.SET		;  since RSTS turned this off
+	RORB	KEY		; Get the low byte of the key
+	ADC	NOCTLC(R5)	; Bump the ^C counter if ^C was hit
+	RETURN
+
+.SBTTL	Get New Core Size, Preserve R/W Area
+
+;+
+; NEWSIZ - Change size of program
+;
+;	R0 = Requested new size in k
+;
+;	CALL	NEWSIZ
+;
+;	R5 = New R/W area pointer
+;	If expanding, channels left open and relocated
+;	If shrinking, all channels closed
+;	All R/W area locations relocated if necesary
+;	Destroys R0, R1, R2, R3, FIRQB, XRB
+;	If shrinking, also destroys the stack: beware!
+;
+;	C=0 if successful
+;	C=1 if failed, and nothing moved
+;-
+
+.ENABL	LSB
+
+NEWSIZ:	CMP	R0,#2		; Want less than 2k?
+	BLO	IOBCME		; Yes, boot him
+	CMP	#28.,R0		; Want more than 28k?
+	BLO	IOBCME		; Yes, can't possibly get it
+	.PRIV,	.STAT		; Get current size
+	MOV	#XRB,R3		; Point to the XRB
+	MOV	(R3),R1		; Current size in k
+	MOV	R0,(R3)		; Set up for .CORE call
+	ASH	#11.,R0		; Convert to address
+	ASH	#11.,R1
+	MOV	#RWSIZ/2,R2	; Size of read/write area
+	CMP	R1,R0		; Compare the sizes
+	BEQ	90$		; Same size as now is easy
+	BLO	20$		; Trying to grow, leave R/W area alone
+	CALL	CLRLOW		; Turn off restartability
+	MOV	(R3),-(SP)	; Save new size
+	.SRESET			; Close all channels
+	MOV	(SP)+,(R3)	; Restore new size
+10$:	MOV	-(R1),-(R0)	; Copy the R/W area downward
+	SOB	R2,10$
+	MOV	(SP)+,R3	; Get return address
+	MOV	#400,SP		; Set an unkillable stack
+	MOV	R3,-(SP)	; And restore return address
+20$:	CALL	DSCTLC		; From here on, ^C is dangerous
+	.PRIV,	.CORE		; Get new size
+	TSTB	FIRQB		; Any errors?
+	BNE	100$		; Yes, return error
+	TST	R2		; R/W area moved?
+	BEQ	50$		; Yes, we shrank
+
+	MOV	R1,R3		; No, copy pointer to top of R/W area
+30$:	MOV	-(R1),-(R0)	; And move the R/W area
+	SOB	R2,30$		;  up to the new top of memory
+40$:	CLR	(R3)+		; Clear out the new memory
+	CMP	R3,R0		;  from top of old R/W area
+	BLO	40$		;   to bottom of new
+50$:	MOV	R0,SYSPTR	; Set new system pointer
+	MOV	R0,R5		; Set new R/W pointer
+	MOV	R0,$USRLC(R5)	; Set new fake USR location
+	SUB	R0,R1		; Bias is (old area)-(new area)
+	TST	DTAOWN(R5)	; Is the DECtape open now?
+	BEQ	60$		; Nope
+	SUB	R1,DTAOWN(R5)	; Yes, relocate pointer to owner's chan
+	SUB	R1,DTBUFP(R5)	;  and fix his buffer pointer
+60$:	MOV	R0,R2		; Point to channel mapping
+	ADD	#CHNMAP,R2
+	MOV	#20,R3		; There are 16. channels
+70$:	TST	(R2)		; Is this channel open?
+	BEQ	80$		; No
+	SUB	R1,(R2)		; Yes, relocate it
+80$:	TST	(R2)+		; Bump R2, C=0
+	SOB	R3,70$		; Repeat
+90$:	RETURN			; Return and re-enable ^C
+
+IOBCME:	SETERR	EDBMCE		; Set up bad core message
+100$:	SEC
+	RETURN			; Return error
+
+.DSABL	LSB
+
+.SBTTL	Continuation of New-entry User Setup
+
+;				"Well begun is half done."
+;
+;				 - Horace, "Epistles"
+
+; The R/W area is set up enough to allow
+; Recognition of ^C, although the ^C is deferred
+
+SETUP2:	CALL	KEYCC		; Set up ^C hit flag from uninterruptable
+	CALL	XCHLOG		; Get logical assignments into R/W area
+	CALL	CLRLOW		; Clean out low core
+	MOV	R5,$USRLC(R5)	; Set USR default low adrs
+	MOV	#SY.VER+<SY.UPD*400>,SYSVER(R5) ; Set up version number
+	MOV	#101100,CONFIG(R5) ; Set up CONFIG word
+	MOV	#000400,CONFG2(R5) ; And CONFG2 saying we do have EIS
+	MOV	#FIRQB+FQPPN,R0	; R0 -> incoming PPN
+	MOV	(R0),-(SP)	; Save it, since we gonna clobber it
+	MOV	#XRB,R2		; R2 -> XRB for FSS
+	MOV	#1,(R2)		; Scan one character
+	MOV	(R2)+,(R2)+	; Copy the 1
+	MOV	#DOLLAR,(R2)+	; Pointer to '$'
+	CLR	(R2)+		; Skip a word
+	CLR	(R2)+		; No user logical table, R2 -> XRB+12
+	MOV	FIRQB+FQPFLG,-(SP) ; Save the protection code and flag
+	.PRIV,	.FSS		; What does '$' mean?
+	MOV	(SP)+,FIRQB+FQPFLG ; Restore the protection code and flag
+	MOV	(R0),(R1)	; Whatever it is, set library PPN
+	MOV	(SP)+,(R0)	; Reset incoming PPN
+	.PRIV,	.DATE		; Get our own RTS name
+	BIS	(SP)+,(SP)+	; Is the previous RTS name = 0?
+	BNE	10$		; No, so not first entry from job setup
+	INC	PRVSIZ(R5)	; Yes, set flag for first setup entry
+10$:	INC	(SP)+		; Was previous RTS = this RTS? (XRB+6 = -1?)
+	BNE	20$		; No
+	MOV	(SP)+,(R1)+	; Yup, set library
+	MOV	(SP)+,(R1)+	; Set PPN
+	MOV	(SP)+,(R1)+	; And remember our old size
+20$:	CALL	KSTACK,R1	; Set up the KMON's stack
+
+	MOV	#ENCTLC,-(SP)	; Set address to notice ^C
+	CLR	R1		; Point to area for FPU check
+	MOV	(PC)+,(R1)+	; By doing a CFCC
+	 CFCC
+	MOV	(PC)+,(R1)	; Do the FPU check in the low seg
+	 RTS	PC		; (return from check)
+	CALL	-(R1)		; Call the checker
+FPUCHK:	MOV	(PC)+,(R1)+	; Set words 0 & 2 per RT-11 hack
+	 BIC	R0,R0
+	MOV	(PC)+,(R1)+
+	 EMT	350		; .EXIT
+	.PRIV,	.TTRST		; Reset ctrl/O
+	MOV	R4,-(SP)	; Return address is in R4
+	.CALLR	SETDAT		; Set up the date and return
+
+	TMPORG	TEXT
+DOLLAR:	.ASCII	"$"		; The library!
+	UNORG
+
+;+
+; SETDAT - Set up the RT-11 Date in R/W Area and Return It
+;
+;	CALL	SETDAT
+;
+;	R1 = RT11 format date
+;	XRB set up per .DATE
+;	R/W area @ $DATE = RT11 format date
+;
+;	Clobbers R0, R2, R3, FIRQB
+;-
+
+;				"Carpe Diem"
+;
+;				 - Horace, "Odes"
+
+SETDAT:	.PRIV,	.DATE		; Get RSTS date
+	MOV	XRB+XRLEN,R3	; R3 = RSTS date
+	CLR	R2		; Prepare for DIV
+	DIV	#1000.,R2	; Separate year and day
+	SUB	#2,R2		; R2 = year - 1972
+	CLR	R1		; Month number starts at 0
+10$:	MOVB	MONTAB(R1),R0	; R0 = length of next month (in days)
+	INC	R1		; Make month number correct (Jan=1, etc.)
+	CMPB	R0,#28.		; Doing February?
+	BNE	20$		; Nope
+	BIT	R2,#3		; Yes, is this a leap year?
+	BNE	20$		; Not a leap year
+	INC	R0		; This year, February has 29 days
+20$:	SUB	R0,R3		; Else subtract days in this month
+	BHI	10$		; Loop if more days left
+	ADD	R0,R3		; Correct for overrun
+	ASH	#5,R1		; Make space for day
+	ADD	R3,R1		; Insert day of month
+	ASH	#5,R1		; Now make space for year
+	ADD	R2,R1		; R1 = RT11 date words
+	MOV	R1,$DATE(R5)	; Set it in R/W area
+	RETURN
+
+	TMPORG	TEXT
+MONTAB:	.BYTE	31.,28.,31.,30.,31.,30.,31.,31.,30.,31.,30.,31.
+	UNORG
+
+.SBTTL	Disable/Enable ^C
+
+;+
+; DSCTLC - Disable ^C Temporarily
+;
+;	CALL	DSCTLC
+;	Carry unchanged, coroutine address on stack
+;	CALL	@(SP)+	or RETURN	to re-enable ^C
+;	Carry still unchanged
+;
+;	^C typed while disabled (NOCTLC >= 0) is honored
+;		when the re-enable is done
+;-
+
+.ENABL	LSB
+
+DSCTLC:	INC	NOCTLC(R5)	; Disable ctrl-C for now
+	BGT	30$		; Already disabled, ignore this
+	CALL	@(SP)+		; Call him back
+ENCTLC:	MOV	(SP),-(SP)	; Change JSR to interrupt vector
+	MOV	#174000,2(SP)	; UM.OLD+UM.NEW+PR0+RGSET1
+	ADC	2(SP)		; And preserve carry
+	MOV	R0,-(SP)	; Save R0
+	MOV	R5,R0		; Point to R/W area
+	ADD	#NOCTLC,R0	; Point to lockout word
+	DEC	(R0)		; Reenable traps
+	BPL	40$		; Oops, we have one pending
+10$:	MOV	(SP)+,R0	; Restore R0
+20$:	RTI			; Back to the program
+
+30$:	DEC	NOCTLC(R5)	; Undo the INC and ignore the call
+	CALL	@(SP)+		; Ignore request already active
+	RETURN
+
+.SBTTL	CP.CC - Handle ctrl/C Traps
+.SBTTL	CP.2CC - Handle 2 Fast ctrl/C Traps
+
+;+
+; ^C Intercept Routines
+;
+; 1)	^C typed during normal user processing or KMON main code
+;	causes an immediate derail to the KMON.
+;	If the user was interrupted (stack below R/W area),
+;	His registers, FIRQB, and XRB are saved in the R/W area
+;	And he is continuable.
+;
+; 2)	^C typed while ^C disable is active increments the ^C
+;	pending flag (NOCTLC) in the R/W area and is honored
+;	when the ^C is re-enabled.
+;
+; 3)	^C typed while in the start-up code (PC >= ^C handler)
+;	sets bit 0 of the key and exits.  This is because the
+;	R/W area might not be set up!
+;-
+
+CP.CC:
+CP.2CC:	BIS	#1,KEY		; Set flag into keyword
+	CMP	(SP),#CP.CC	; Was the code running uninterruptable?
+	BHIS	20$		; Yes, exit fast
+	MOV	R0,-(SP)	; Save R0
+	MOV	SYSPTR,R0	; Point to the
+	ADD	#NOCTLC,R0	;  ^C hold flag
+	INC	(R0)		; Enter ^C mode
+	BGT	10$		; It was >= 0, so ^C is left pending
+40$:	MOV	#-1,(R0)+	; Turn off ^C hold flag
+	CMP	SP,R0		; Is the KMON stack current?
+	BHI	50$		; Yes, do not reroute to user
+	MOV	(R0),-(SP)	; Save user intercept address
+	CLR	(R0)		; And reset it
+	MOV	(SP)+,R0	; R0 -> user's ^C routine
+	BNE	80$		; He has one, enter him
+50$:	MOV	(SP)+,R0	; Restore R0 for SAVREG
+	CALL	SAVREG,R5	; Save user's registers
+	MOV	SYSPTR,R5	; Point to R/W area
+	CLR	TTICNT(R5)	; Cancel buffered type-ahead
+	MOV	#FIRQB,R0	; Point to FIRQB (r0<>0 means soft exit)
+	CMP	SP,R5		; Is the stack in the R/W area?
+	BHIS	70$		; Yes, we didn't interrupt the user
+	ADD	#CTLCSP,R5	; Point to ^C save area
+	MOV	SP,(R5)+	; Save interrupted user's SP
+	MOV	#<FQBSIZ+XRBSIZ>/2,R1 ; Number of words to save
+60$:	MOV	(R0)+,(R5)+	; Save FIRQB and XRB
+	SOB	R1,60$
+70$:	JMP	E$XIT		; Return to KMON
+
+80$:	RETURN	R0		; Enter user ^C routine
+
+.DSABL	LSB
+
+.ENABL	LSB
+
+.SBTTL	CP.RUN Entry
+
+CP.RUN:	MOV	#CPRUN2,R4	; Point to continuation
+	BIT	#JFSYS,KEY	; Did we just get privileges?
+	BEQ	10$		; No
+	BIS	#100000,KEY	; Yes, clear out even if dropped later
+10$:	BIT	#100001,XRB	; Is this the .CHAIN entry?
+	BLE	50$		; No
+	MOV	SYSPTR,R5	; Yes, set R5 -> R/W area
+	CLR	NOCTLC(R5)	; Disable ^C for now
+	JMP	CHAIN		; Start up the CHAIN
+
+.SBTTL	CP.NEW - Handle New RT11 User
+
+CP.NEW:	MOV	#XRB+10,R0	; If new, don't clear XRB or FIRQB
+	MOV	#CPNEW2,R4	; Location of interruptable part
+	BIT	#JFNOPR,KEY	; Set Z=0 if logged out
+	BR	40$		; Logged out => clear XRB+10 to 776
+				; Logged in  => leave core common, logicals
+
+CPZAP:				; Enter here from recursive trapping
+20$:	MOV	#FIRQB,R0	; Clear out all low core (static reg)
+30$:	CLR	(R0)+		; Including core common & logicals
+	TSTB	R0		;  up to 1000
+40$:	BNE	30$		; Repeat until done (magic entry here!)
+
+.SBTTL	Set up Core for New Entry to RT11
+
+; SETUP initializes the R/W area and the system pointer
+; It is run uninterruptable (^C is ignored)
+; It continues at SETUP2, with a .STAT in the XRB
+
+50$:	MOV	#XRB+XRBSIZ,R1	; Remember entry parameters from XRB
+	MOV	#XRBSIZ/2,R2
+60$:	MOV	-(R1),-(SP)	; Save XRB on stack
+	SOB	R2,60$
+70$:	CLR	(R2)+		; Clear out low core from 0
+	CMP	R2,SP		;  up to the stack
+	BLO	70$		;   which is somewhere below 400
+	MOV	(SP),@#R.PARM+2	; Set up entry flags from XRB+0
+	BIC	#100000,-(R1)	; Trim sign bit from line number
+	CLR	R3		; Prepare R3 to save CSIFLG		;GMB022
+	CMP	(R1),#30500.	; Are we entering from DCL?		;GMB022
+	BNE	75$		; Nope, just continue "normally"	;GMB022
+	BIS	#NOSTK,R3	; Yes, we don't want sticky devices	;GMB022
+	MOV	#8192.,(R1)	; Continue with normal CCL entry	;GMB022
+75$:	MOV	(R1),@#R.PARM	; Save incoming line number for program	;GMB022
+	CMP	(R1),#30000.	; Is it big (entry magic for BASIC+)?
+	BLO	80$		; No
+	CLR	(R1)		; Yes, use 0 instead
+80$:	MOVB	(SP),R0		; Get possible /SIZE:n value from XRB+0
+	BIT	#020000,(SP)+	; Was there a /SIZE switch in CCL line?
+	BEQ	100$		; No
+	MOV	R0,R2		; Copy /SIZE value from switch
+	BPL	90$		; >0 means use that size!
+	MOVB	(R1),R2		; <0 means +n, so get size from line number
+	SUB	R0,R2		; Add /SIZE:+n value (was <0 as flag)
+90$:	MOVB	R2,(R1)		; Replace size flag in FQNENT
+100$:	TST	(R1)+		; Bump R1 to XRB
+110$:	.PRIV,	.STAT		; Set up as per current size
+	MOV	(R1),R5		; R5 = current size in k
+	MOV	#XRB+XRLOC,R0	; Point to maximum sizes
+	CMP	R5,(R0)+	; Are we below user private core max?
+	BLOS	130$		; Yes, we are OK
+	BIT	#JFBIG,KEY	; No, are we allowed to be big?
+	BEQ	120$		; No, go shrink
+	CMP	R5,(R0)+	; Yes, are we above this max?
+	BLOS	130$		; No, we are ok
+120$:	MOV	-(R0),(R1)	; Set shrink size
+	.PRIV,	.CORE
+	BR	110$		; And do it again
+
+130$:	ASH	#11.,R5		; R5 = current top of core
+	MOV	R5,R1		; Copy for clearing
+	SUB	#RWSIZ,R5	; R5 -> real R/W area
+140$:	CLR	-(R1)
+	CMP	R1,#1000	; Done?
+	BHI	140$		; No
+	MOV	R5,SYSPTR	; Set up system pointer
+	MOVB	R3,CSIFLG(R5)	; Set up CSI flags specified above	;GMB022
+	JMP	SETUP2		; And recognize ^C (to defer them)
+
+.DSABL	LSB
+
+.SBTTL	Text Region Fixup
+
+	ORG	TEXT
+
+	.EVEN
+
+	ORG	KMTEXT		; Put a zero byte at end of tables
+
+	.BYTE	0		; Stop the search
+
+.SBTTL	Vector Region
+
+.MACRO	VECTOR	AT,TO
+	ORG	VE,AT-P.OFF
+	.WORD	TO
+.ENDM	VECTOR
+
+	VECTOR	P.ISIZ,O.ISIZ	; Initial size
+	VECTOR	P.MSIZ,O.MSIZ	; Minimum size
+	VECTOR	P.SIZE,O.SIZE	; Maximum size
+	VECTOR	P.DEXT,O.DEXT	; Default extension for .RUN
+	VECTOR	P.FLAG,O.FLAG	; RTS flag word
+
+;				"All hope abandon, ye who enter here."
+;
+;				 - Dante Alighieri, "The Inferno"
+
+	VECTOR	P.FIS,	CP.FIS	; FIS errors
+	VECTOR	P.FPP,	CP.FPP	; FPP errors
+	VECTOR	P.BPT,	CP.BPT	; Breakpoint traps
+	VECTOR	P.IOT,	CP.IOT	; IOT traps
+	VECTOR	P.EMT,	CP.EMT	; EMT traps
+	VECTOR	P.TRAP,	CP.TRP	; TRAP traps
+	VECTOR	P.BAD,	CP.BAD	; Other baddies (traps to 4, 10, MMU)
+
+;				"Enter these enchanted woods,
+;				 You who dare."
+;
+;				 - George Meredith, "The Woods of Westermain"
+
+	VECTOR	P.CRAS,	CP.NEW	; (Obsolete)
+	VECTOR	P.STRT,	CP.NEW	; (Obsolete)
+	VECTOR	P.NEW,	CP.NEW	; New user entry
+	VECTOR	P.RUN,	CP.RUN	; RUN entry
+
+	VECTOR	P.CC,	CP.CC	; Ctrl-C
+	VECTOR	P.2CC,	CP.CC	; 2 fast ctrl-C's
+
+;				"Secret and self-contained,
+;				 and solitary as an oyster."
+;
+;				 - Charles Dickens, "A Christmas Carol"
+

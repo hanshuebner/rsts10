@@ -1,0 +1,212 @@
+.INCLUDE	%CMN:COMMON%
+TITLE	CVT$$,<MACRO CVT FUNCTION>,0A,10-MAY-91,RTW/PRL/KCG
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR CVT
+;+
+;
+;  001	PRL  07-Apr-84	Add CVT$$B routine for 8-bit support
+;  002	PRL  14-May-84	Rearrange mode checks so "reduce spaces/tabs"
+;			  precedes "discard all control chars"
+;  003	KCG  01-Mar-85	Add code to convert eight bit chars to upper case
+;
+;-
+
+;+
+; SET THE PSECT
+;-
+	.PSECT	PBSLIB,RO,CON
+
+;+
+; CVT$$  - TRIM A STRING
+; CVT$$A - TRIM EVERYTHING OFF A STRING
+; CVT$$B - TRIM EVERYTHING EXCEPT PARITY BIT				;001
+;
+; PIC
+; 
+; INPUT:
+;	R0 = TRIM MASK (IF CVT$$)
+;	R4 = LENGTH OF STRING
+;	R5 -> STRING
+;	CALL	CVT$$?
+; 
+; OUTPUT:
+;	R4 =  LEN OF STRING
+;	R5 -> ASCIZ STRING (MAY BE SHORTER) AT SAME PLACE
+;	MASK	TRIMS
+;	   1	DISCARD ALL PARITY BITS
+;	   2	DISCARD ALL SPACES & TABS
+;	   4	DISCARD CR LF FF ESC RO
+;	  10	DISCARD LEADING SPACES & TABS
+;	  20	REDUCE SPACES & TABS TO A SINGLE SPACE
+;	  40	CONVERT LC TO UC
+;	 100	CONVERT [ TO ( AND ] TO )
+;	 200	DISCARD TRAILING SPACES & TABS
+;	 400	PRESERVE QUOTED SUBSTRINGS
+;	1000	MODIFY 4 (IF ON) TO DISCARD ALL CHARACTERS < 40 OR =177
+; 
+; NOTE:
+;   AN EXTENSION TO THE DEFINITION OF QUOTED STRINGS HAS BEEN MADE.
+;   THE CHARACTERS PAIRS () <> AND [] ARE CONSIDERED TO BE QUOTES
+;   ALSO AND THE CHARACTERS WITHIN THEM WILL BE TREATED AS IF THEY
+;   WERE ' OR ".
+;-
+
+.ENABL	LSB
+
+CVT$$A::CALLX	SAVREG,R5	; this entry trims the world
+	MOV	#-1,R0		; set flag word to trim all
+	BR	10$
+
+CVT$$B::CALLX	SAVREG,R5	; this entry trims all except parity	;001
+	MOV	#-2,R0		; set flag to trim all except parity	;001
+	BR	10$		; and join common			;001
+
+CVT$$::	CALLX	SAVREG,R5	; save registers
+10$:	MOV	R4,-(SP)	; save length of string
+	MOV	R5,R4		; r4 -> output string
+	CLR	-(SP)		; not in quotes yet
+	MOVPIC	#220$,R1	; table of things to clear
+	ASH	#7,R0		; shift the mask
+	BCC	20$		; dump only junk bytes
+	CLR	R1		; dump all bytes < 40 or =177
+20$:	TST	2(SP)		; any more chars to edit?		;002
+	BEQ	180$		; no, so exit				;002
+	MOVB	(R5)+,R2	; get next byte in string		;002
+	DEC	2(SP)		; update byte counter			;002
+	BICB	R0,R2		; turn off parity if desired
+	TST	R0		; keep quoted bytes?
+	BPL	80$		; no, quotes are normal
+	TSTB	(SP)		; yes, are we within quotes?
+	BEQ	30$		; no
+	CMPB	R2,(SP)		; yes, is this the ending quote?
+	BNE	160$		; no
+	CLRB	(SP)		; yes, clear the inside flag
+	BR	160$		; and keep the closing quote
+
+30$:	CMPB	R2,#''		; start of quoted string?
+	BEQ	70$		; yes
+	CMPB	R2,#'<		; how about any of the brackets?
+	BEQ	40$
+	CMPB	R2,#'[
+	BEQ	50$
+	CMPB	R2,#'(
+	BEQ	60$		; if it gets past here, not bracketted.
+	CMPB	R2,#'"		; maybe this kind?
+	BEQ	70$		; yes
+	BR	80$		; no.
+
+;+
+; SET UP FOR ALTERNATE QUOTE CHARACTERS
+;-
+
+40$:	MOVB 	#'>,(SP)
+	BR	160$
+
+50$:	MOVB	#'],(SP)
+	BR	160$
+
+60$:	MOVB	#'),(SP)
+	BR	160$
+
+70$:	MOVB	R2,(SP)		; yes, start the quotation
+	BR	160$		; and keep the opening quote
+
+80$:	CMPB	R2,#40		; is this a space?
+	BEQ	90$		; yes
+	CMPB	R2,#11		; no, maybe a tab
+	BNE	100$		; nope
+90$:	BIT	R0,#2+10*200	; discard all and/or leading ones?
+	BNE	20$		; yes, discard this byte
+	BIT	R0,#20*200	; no, reduce spaces/tabs?
+	BEQ	100$		; no, so continue
+	MOVB	#40,R2		; yes, this will be a space
+	CMP	R4,5*2+2+2+2(SP); have we output anything yet?
+	BEQ	160$		; no, so output it
+	CMPB	R2,-1(R4)	; yes, is the preceding a space?
+	BEQ	20$		; yes, so discard this one
+	BR	160$		; no, so output it
+
+100$:	BIT	R0,#4*200	; discard terminators and junk?
+	BEQ	120$		; no
+	MOV	R1,R3		; yes, get the list pointer
+	BNE	110$		; discard only junk
+	CMPB	R2,#40		; discard all control characters
+	BLO	20$		; it is control, so discard it
+	CMPB	R2,#177		; is it a rubout?
+	BEQ	20$		; yes, so discard it too
+	BR	120$		; no, keep it for now
+
+110$:	CMPB	R2,(R3)+	; does the byte match the list?
+	BLO	110$		; no, keep checking
+	BEQ	20$		; yes, discard it
+	.BR	120$		; no, don't check further
+
+120$:	BIT	R0,#40*200	; convert lc to uc?
+	BEQ	140$		; no
+	CMPB	R2,#'A+40	; is it lc alpha?
+	BLO	140$		; no
+	CMPB	R2,#'Z+40	; maybe?
+	BLOS	130$		; yes, character is in range
+	CMPB	R2,#340		; is it lc eight bit?			;003
+	BLO	140$		; no					;003
+	CMPB	R2,#375		; higher than upper range?		;003
+	BHI	140$		; yes					;003
+130$:	BICB	#40,R2		; no, downcase it
+	BR	160$		; and output uc
+
+140$:	BIT	#100*200,R0	; convert [] to ()?
+	BEQ	160$		; no
+	CMPB	R2,#'[		; yes, is it [?
+	BEQ	150$		; yes
+	CMPB	R2,#']		; is it ]?
+	BNE	160$		; no
+	DECB	R2		; it is ], so ] = 135-64 = ) = 51
+150$:	SUB	#'[-'(,R2	; and         [ = 133-63 = ) = 50
+160$:	MOVB	R2,(R4)+	; output one byte to new string
+				; this point can bee used to remove
+				; unwanted characters. it is not
+				; currently used.
+170$:	BIC	#10*200,R0	; turn off leading space/tab
+	BR	20$		; loop for another byte
+
+180$:	TSTB	(SP)+		; were we inside quotes at the end?
+	BNE	210$		; yes, don't trim trailing stuff
+	ASL	R0		; no, do we discard trailing spaces/tabs?
+	BPL	210$		; no
+190$:	MOVB	-(R4),R2	; get last byte stored
+	CMP	R4,5*2+4(SP)	; back too far?
+	BLO	200$		; yes, return null string
+	CMPB	R2,#40		; no, is it space?
+	BEQ	190$		; yes, discard it
+	CMPB	R2,#11		; maybe tab?
+	BEQ	190$		; discard tab
+200$:	INC	R4		; keep last byte removed
+210$:	TST	(SP)+		; clean stack
+	SUB	5*2+2(SP),R4	; cal length of string
+	MOV	R4,4*2+2(SP)	; set for reg restore
+	RETURN
+
+220$:	.BYTE	177,33,15,14,12,0
+
+	.DSABL	LSB
+
+	.END

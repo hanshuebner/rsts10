@@ -1,0 +1,1029 @@
+2!		PROGRAM		: BACDSK.BAS
+5!		VERSION		: V10.1
+6!		EDIT		: A
+7!		EDIT DATE	: 10-MAY-91
+8!
+10		EXTEND
+11	! &
+	&
+	&
+	!	C O P Y R I G H T &
+	&
+	&
+  !		      Copyright (C) 1976, 1991 by &
+  !	        Digital Equipment Corporation, Maynard, Mass. &
+  !	&
+  !	&
+  !	This software is furnished under a license and may be used and &
+  !	copied  only  in accordance with the terms of such license and &
+  !	with the  inclusion  of  the  above  copyright  notice.   This &
+  !	software  or  any  other copies thereof may not be provided or &
+  !	otherwise made available to any other person.  No title to and &
+  !	ownership of the software is hereby transferred. &
+  !	&
+  !	The information in this software is subject to change  without &
+  !	notice  and should not be construed as a commitment by Digital &
+  !	Equipment Corporation. &
+  !	&
+  !	DIGITAL assumes no responsibility for the use  or  reliability &
+  !	of its software on equipment that is not supplied by DIGITAL. &
+  !	&
+  !******************************************************************* &
+	&
+
+20	! &
+	&
+	&
+	!	M O D I F I C A T I O N    H I S T O R Y &
+	&
+	&
+	&
+	! VER/ED	EDIT DATE	REASON &
+	! KMF 01	17-MAY-84	CHANGE VALUE OF A% &
+	! 				TO PRIV'D USER &
+	! &
+	&
+	&
+	&
+
+100	! &
+	&
+	&
+	!	G E N E R A L    D E S C R I P T I O N &
+	&
+	&
+!	THIS MODULE CREATES THE BACKUP FILE STRUCTURE ON A DISK TO BE &
+!	USED IN A BACKUP RUN.  THE DISK MUST EITHER BE A BACKUP DISK &
+!	ALREADY OR MUST BE A RSTS/E FILE STRUCTURED DISK.  THIS IS NEC- &
+!	ESSARY BECAUSE BAD BLOCK INFORMATION IS GATHERED FROM INFORMA- &
+!	TION IN BOTH THESE FILE STRUCTURES.  THIS PROGRAM ALSO HAS A RUN &
+!	ENTRY FOR THE PRIVILEGED USER TO ENABLE THE CREATION OF A BACKUP &
+!	DISK WITHOUT ACTUALLY RUNNING BACKUP.  IT IS THIS WAY THAT A &
+!	NON-PRIVILEGED USER CAN MAKE USE OF DISKS FOR BACKUP RUNS. &
+	&
+	&
+	&
+	&
+	! &
+	&
+	&
+	!	I / O    C H A N N E L S &
+	&
+	&
+!	CHANNEL #		USE &
+!	   1			WORK FILE &
+!	   6			DISK ACCESSES &
+	&
+	&
+	&
+	&
+	! &
+	&
+	&
+	!	V A R I A B L E S    D E F I N I T I O N S &
+	&
+	&
+!	VARIABLE NAME		USE &
+!	A$		ACCOUNT NUMBER STRING. &
+!	A%		ACCOUNT NUMBER. &
+!	B$		TEMP VAR FOR FILLING 'BAD CLUSTER'. &
+!	B$()		DISK BUFFER FIELD ARRAY FOR INITIALIZATION. &
+!	B1$		BAD BLOCK 1 DATA. &
+!	B1%()		ENTRY ARRAY FOR DISK ACCESSES. &
+!	B%()		CONVERSION ARRAY. &
+!	B2$		BAD BLOCK 2 DATA. &
+!	B3%		BAD BLOCK LIST POINTER. &
+!	B4%		BAD BLOCK ENTRY POINTER. &
+!	B9%		DISK BUFFER ENTRY POINTER. &
+!	B%		BACKUP DISK/RSTS DISK FLAG. &
+!	D7%		RATIO OF BACKUP CLUSTER SIZE TO DCS. &
+!	E%		ERROR VARIABLE. &
+!	E0%		ENTRY TYPE. &
+!	E1%		LABEL WRITE FAILURE COUNTER. &
+!	F%		SUCCESS FLAG. &
+!	F		REAL TO INTEGER CONVERSION VAR. &
+!	G%		SUCCESS FLAG. &
+!	I$		VERSION-EDIT. &
+!	I%		INDEX VAR. &
+!	I1%		INDEX VAR. &
+!	J$		JOB NUMBER STRING. &
+!	J%		JOB NUMBER. &
+!	L$		LABEL STRING. &
+!	L%		BAD BLOCK COUNTER. &
+!	L		BAD CLUSTRER CONVERSION VAR. &
+!	L5%		NUMBER OF ENTRIES IN BUFFER. &
+!	L6%		LAST BLOCK READ. &
+!	M		MAXIMUM CLUSTER NUMBER. &
+!	N1%		NUMBER OF BAD CLUSTERS. &
+!	N2%		USED IN COMPUTING N1%. &
+!	P0%		CURRENT RECORD POINTER. &
+!	P$		CHAIN MODULE NAME. &
+!	P1$		PROJECT &
+!	P2$		PROGRAMMER &
+!	P9%		PRESENT BLOCK IN BUFFER. &
+!	R%		PACKAGE STATUS WORD. &
+!	S()		BAD CLUSTER ARRAY. &
+!	S9%		FOR SORTING BAD CLUSTERS. &
+!	T		FOR SORTING BAD CLUSTERS. &
+!	T$		TEXT TO SEND. &
+!	T%		SEARCH STARTING FOR POSITIONING 'BAD CLUSTER'. &
+!	U8%		UNIT NUMBER. &
+!	W$		WORK FILE NAME. &
+!	ALL Z'S		TEMPORARY LOCAL WORK VARIABLES. &
+	&
+	&
+	&
+	! &
+	&
+	&
+	!	F U N C T I O N / S U B R O U T I N E    D E S C . &
+	&
+	&
+!	NAME		LINE	USE &
+!	10000			CONTROL SUBROUTINE. &
+!	11000			BAD BLOCK FILE MERGER. &
+!	12000			RSTS/E DISK BAD BLOCK INFO EXTRACTER. &
+!	14000			SORT ROUTINE. &
+!	14500			RUN ENTRY DIALOGUE. &
+!	FNF%		15200	FIELD THE DISK BUFFER. &
+!	FNB%		15300	STRING BUFFER ENTRY TO INTEGER ARRAY &
+!				CONVERTER. &
+!	FNL%		15500	FOLLOW A LINK WORD. &
+!	FNF		15600	INTEGER TO FLOATING POINT CONVERSION. &
+!	FNI%		15700	FLOATING POINT TO INTEGER CONVERSION. &
+!	FNP8%		15800	FIND A PLACE FOR THE BAD CLUSTER. &
+	&
+	&
+	&
+	! &
+	&
+	!	P A C K A G E    S U B R O U T I N E S &
+	&
+	! Name			Lines		Use &
+	! OPEN THE LISTING FILE	22500-22540	Ensure an open listing &
+	!					file &
+	! PROCESS ANY ERROR ON LIST FILE &
+	!			22550-22580	Process errors and &
+	!					minimize effect on &
+	!					program &
+	! PREPARE FOR DETACH	22600-22690	Do checks and manipulate &
+	!					flags preliminary to &
+	!					DETACH. &
+	! PRINT A LINE TO LIST FILE &
+	!			22700-22770	Print a line and trap &
+	!					errors. &
+	! CHECK FOR ATTACHED	22800-22830		Check KB: DDB for &
+	!					ATTACHed state &
+	! STATUS		22900-22990	Create a status report &
+	!					string. &
+	! LOG ERROR		23000-23090	Log an error on a record &
+	!					in the work-file. &
+	! ISSUE A MESSAGE	23100-23190	Issue a message to KB: &
+	!					or to OPSER. &
+	! GET/DECODE RESPONSE OR INTERRUPT COMMAND &
+	!			23200-23390	Get a (KB:) line or a &
+	!					(Send/Receive) message; &
+	!					Call the decoder; &
+	!					Process internal &
+	!					commands. &
+	! DECODE A LINE		23400-23490	Do a table-driven decode &
+	! PROCESS REQUESTS	23499-23790	A set of routines which &
+	!					perform additional &
+	!					parsing and processing &
+	!					of commands. &
+	&
+	&
+	&
+	! &
+	&
+	!	P A C K A G E    F U N C T I O N S &
+	&
+	! Name			Lines		Use &
+	! FNN$(A%)		25000		Return the unsigned &
+	!					value of A% as a string. &
+	! FNN(A%)		25010		Return the unsigned &
+	!					value of A% as a &
+	!					floating point value. &
+	! FNE$(E%,D%,P3%,P0%,E1%) &
+	!			25100-25140	Create an error message &
+	!					string from parameters. &
+	! FNR%(S$,L%)		25200-25250	Match a  keyword. &
+	! FNC1%(V0%,V1%,C%)	25300		Check for any flags &
+	!					indicating a request &
+	!					outstanding in the &
+	!					PRW/PCW combination &
+	!					given by V0%,V1%. &
+	! FNF0%(P0%,N$,D$)	25500-25690	Apply null default or &
+	!					default string to a File &
+	!					Descriptor Record. &
+	! FNP%(P0%,P%,S$,Y0%,Y1%) &
+	!			25800-25890	Turn a filename string &
+	!					into a File Descriptor &
+	!					Record. &
+	! FNU$(P0%,C$,Z%,Z0%)	25900-25970	Turn a File Descriptor &
+	!					Record into a filename &
+	!					string, with switches. &
+	! FNU0$(L%)		25980-25990	Return the NUM1$ of the &
+	!					low byte of L%, or &
+	!					'*', if the low byte is &
+	!					255. &
+	! FNO%(P0%,A0%,C0%)	26000-26090	Open the file described &
+	!					in (work-file) record &
+	!					P0% - drops and regains &
+	!					temporary privs. &
+	! FNA%			26100-26130 	Get the next free-list &
+	!					record. &
+	! FNA0%(P0%)		26200-26230	Put record P0% back &
+	!					into the free-list. &
+	&
+	&
+
+900	&
+	&
+	&
+	!	D I M E N S I O N    S T A T E M E N T S &
+	&
+
+901	DIM #1%, Z0%(32767%,31%) &
+	\ DIM #1%, Z0$(32767%)=64% &
+		! WORK FILE. &
+
+902	DIM B$(511%),B%(16%),B1%(7%) &
+		! THESE ARRAYS ARE USED TO MANIPULATE THE BUFFER. &
+
+904	DIM S(511%) &
+		! THIS ARRAY IS USED TO HOLD BAD CLUSTERS. &
+
+906	DIM Z%(30%) &
+		! THIS IS A UTILITY ARRAY. &
+	&
+
+999	&
+	&
+	&
+	!	M A I N    C O D E &
+
+1000	ON ERROR GOTO 19000 &
+		! SET UP STANDARD ERROR TRAP. &
+	\ Z$=SYS(CHR$(6%)+CHR$(-21%)+CHR$(255%)) &
+		! TEMPORARILY DROP PRIVILEGES. &
+
+1010	I$="BACDSK	V10.1-A" &
+			! SET UP HEADER LINE. &
+
+1020	PRINT I$;CHR$(9%);RIGHT(SYS(CHR$(6%)+CHR$(9%)+ &
+		CHR$(0%)),3%) IF E0%=0% &
+		! PRINT THE HEADER LINE. &
+	\ PRIV.OFF$=CHR$(6%)+CHR$(-21%)+CHR$(255%) &
+	\ PRIV.ON$=CHR$(6%)+CHR$(-21%)+CHR$(0%) &
+		! DEFINE STRINGS TO HANDLE PRIVILEGE. &
+
+1025	B$(1%)="" \ GOSUB 14500 IF E0%=0% &
+	\ GOTO 1040 IF F%<>0% &
+		! SEE IF THIS IS A VALID RUN ENTRY. &
+
+1030	CHANGE SYS(CHR$(12%)) TO Z% &
+	\ IF Z%(3%)+SWAP%(Z%(4%))<>15%*2% OR E0%<>2% THEN &
+		PRINT "?ILLEGAL ENTRY - PLEASE RUN THE RESTOR PROGRAM" &
+	\	GOTO 32767 &
+		! ILLEGAL ENTRY IF WE DIDN'T COME FROM A COMPILED FILE &
+		! OR NOT CHAINED. &
+
+1035	A5%=SWAP%(Z%(6%))+Z%(5%) &
+	\ Z$="SY" IF (Z%(26%) AND 1%)=0% &
+	\ Z$=CHR$(Z%(23%))+CHR$(Z%(24%))+NUM1$(Z%(25%)) IF Z%(26%) AND 1% &
+	\ CHANGE SYS(CHR$(6%)+CHR$(-10%)+Z$) TO Z% &
+	\ D5%=SWAP%(Z%(8%))+Z%(7%) &
+		! GET DEVICE AND ACCOUNT OF LAST OPENED FILE. &
+
+1040	OPEN W$ FOR INPUT AS FILE 1% &
+		! OPEN THE WORK FILE. &
+
+1100	&
+	&
+	&
+	!	C A L L    T H E    N E C E S S A R Y &
+	!		R O U T I N E S &
+
+1110	P0%=Z0%(0%,27%) UNLESS E0%=0% &
+	\ D$=FNU$(P0%,"",-1%,-1%) UNLESS E0%=0% &
+	\ G%=-1% &
+	\ GOSUB 10000 &
+	\ GOTO 1120 IF G%<>0% &
+	\ GOTO 1130 IF E0%=0% &
+	\ Z0%(0%,29%)=256% &
+	\ Z0%(0%,29%)=Z0%(0%,29%) OR 4096% IF E%=13% &
+	\ Z0%(0%,29%)=Z0%(0%,29%) OR 8192% IF E%=15% &
+	\ Z0%(0%,29%)=Z0%(0%,29%) OR 16384% IF E%=14% &
+	\ Z0%(0%,15%)=FNA% &
+	\ L$="BAD DISK" &
+	\ Z0$(Z0%(0%,15%))=LEFT(L$,64%) &
+	\ P1%=FNA% &
+	\ Z0%(P1%,1%)=Z0%(0%,13%) &
+	\ Z0%(0%,13%)=P1% &
+	\ Z0%(P1%,6%)=D5% &
+	\ Z0%(P1%,8%)=A5% &
+	\ Z0%(P1%,9%)=3243% &
+	\ Z0%(P1%,10%)=21380% &
+	\ Z0%(P1%,13%)=1% &
+	\ Z0%(P1%,14%)=12417% &
+	\ GOTO 9000 &
+		! GET THE CURRENT VOLUME INTO P0% &
+		! PUT IT IN STRING FORM INTO D$ &
+		! G% IS THE GOOD/NOGOOD FLAG. &
+		! GO DO THE FORMATTING. &
+		! AFTER ALL HAS BEEN DONE AT 10000, THEN IF WE ARE STILL &
+		! IN THE MONEY, GOTO 1120 TO FINISH UP. &
+		! OTHERWISE THIS IS A BAD DISK, AND WE MUST &
+		! SET UP THE CHAIN LIST BACK TO BACMNT. &
+		! GET OUT. &
+		! BACMNT WILL DISMOUNT THIS DISK AND ASK FOR ANOTHER &
+		! ONE. &
+
+1120	GOTO 9000 &
+		! IF SUCCESSFUL, GET OUT TO BACKTO. &
+
+1130	PRINT D$; &
+	\ PRINT " - TOO MANY BAD CLUSTERS." IF E%=13% &
+	\ PRINT " - HUNG OR WRITE LOCKED." IF E%=14% &
+	\ PRINT " - CAN'T WRITE LABELS." IF E%=15% &
+	\ GOTO 9000 &
+		! RUN ENTRY ERROR MESSAGES. &
+	&
+
+9000	&
+	&
+	&
+	!	C O M P L E T I O N    R O U T I N E S &
+
+9010	GOTO 32767 IF E0%=0% &
+
+9020	P0%=Z0%(0%,13%) &
+	\ IF P0%=0% THEN &
+		P$="" &
+	  ELSE	P$=FNU$(P0%,"",-1%,-1%) &
+	\	Z0%(0%,13%)=Z0%(P0%,1%) &
+	\	Z0%(P0%,1%)=0% &
+	\	Z%=FNA0%(P0%) &
+		! HOLD THE POINTER TO THE NEXT RECORD IN THE CHAIN LIST; &
+		! IF THE POINTER IS ZERO, THEN &
+		!	RETURN A NULL STRING; &
+		! ELSE	MAKE THE FILENAME STRING; &
+		!	TAKE THIS ONE OUT OF THE CHAIN LIST; &
+		!	RETURN THE RECORD TO THE FREE LIST. &
+
+9040	Z0%(0%,0%)=B0% IF B0%<>0% &
+	\ CLOSE Z% FOR Z%=1% TO 12% &
+	\ ON ERROR GOTO 19000 &
+	\ Z$=SYS(PRIV.ON$) &
+	\ CHAIN P$ LINE 31000 IF P$<>"" &
+	\ Z$=SYS(PRIV.OFF$) &
+	\ GOTO 32700 &
+		! RESTORE THE FREE-LIST POINTER AND THE PACKAGE STATUS &
+		!	WORDS TO THE WORK-FILE; &
+		! CLOSE OUT ALL THE FILES; &
+		! CHAIN TO NEXT PROGRAM. &
+		! IF WE ABORTED OR NO FILENAME IS SET UP, END THINGS. &
+	&
+	&
+
+10000	! THIS ROUTINE CONTROLS THE FORMATTING OF THE DISK. IT &
+	! DISPATCHES TO THE PROPER ROUTINES TO FORMAT A RSTS DISK &
+	! OR BACKUP DISK AND ALSO DOES ALL THE LABELLING AND ERROR &
+	! DECISION MAKING. &
+
+10010	ON ERROR GOTO 10200 &
+	\ B%=Z0%(P0%,22%) &
+	\ F9%=Z0%(P0%,17%)/512% &
+	\ OPEN D$ AS FILE 6% &
+	\ C1%=BUFSIZ(6%)/512% &
+	\ M=FNF(SWAP%(CVT$%(MID(SYS(CHR$(12%)),13%,2%)))-1%) &
+	\ S(Z%)=70000. FOR Z%=0% TO 511% &
+	\ IF B%<>0% THEN GOSUB 11000 &
+			ELSE GOSUB 12000 &
+		! SET THE ADDRESS OF THE BAD BLOCK FILE. THIS IS ZERO IF &
+		! THIS IS A RSTS DISK. &
+		! OPEN THE DISK NON-FILESTRUCTERED. &
+		! DEVICE CLUSTER SIZE IS STORED IN C1% &
+		! MAXIMUM DEVICE CLUSTER NUMBER IS STORED IN M. &
+		! DISPATCH TO THE PROPER ROUTINE DEPENDING ON WHETHER &
+		! THIS IS A RSTS OR A BACKUP DISK. &
+
+10020	ON ERROR GOTO 10200 &
+	\ GOTO 10100 IF E%<>0% &
+	\ GOTO 10050 IF B%<>0% &
+	\ E%=13% IF N1%+5%>511% &
+	\ GOTO 10100 IF E%<>0% &
+		! GET OUT IF WE HAVE HAD AN ERROR. &
+		! GOTO 10050 IF THIS IS A BACKUP DISK. &
+		! IF IT IS NOT, THEN GET OUT IF THE ADDITIONAL &
+		! 5 CLUSTERS (ALLOCATED FOR THE LABELS AND THE BAD BLOCK &
+		! CLUSTER) TAKES US OVER THE LIMIT. &
+
+10030	S(N1%)=1% &
+	\ S(N1%+1%)=13% &
+	\ S(N1%+2%)=M &
+	\ S(N1%+3%)=M-13% &
+	\ N1%=N1%+4% &
+	\ GOSUB 14000 &
+		! ADD THE LABELS AND SET UP TO FIND A PLACE FOR THE BAD &
+		! BLOCK CLUSTER. &
+
+10040	B%,Z0%(P0%,22%)=FNP8%(0%) &
+	\ S(N1%)=B% &
+	\ N1%=N1%+1% &
+	\ GOSUB 14000 &
+		! FIND A PLACE FOR THE BAD CLUSTER. &
+
+10050	FIELD #6%, 84% AS L$ &
+	\ T$="BACKUP543210"+RAD$(Z0%(P0%,9%))+RAD$(Z0%(P0%,10%))+ &
+		CVT%$(Z0%(P0%,20%))+CVT%$(Z0%(P0%,21%))+CVT%$(Z0%(P0%,8%))+ &
+		CVT%$(Z0%(P0%,11%))+CVT%$(0%)+CVT%$(0%)+ &
+		CVT%$(B%)+STRING$(6%,0%)+CVT%$(-1%) &
+	\ T$=T$+CVT%$(-1%) &
+	\ E1%=0% &
+	\ ON ERROR GOTO 10060 &
+	\ R%=1% &
+	\ FOR I%=1% TO 4% &
+		\ R%=13% IF I%=2% &
+		\ R%=FNI%(M) IF I%=3% &
+		\ R%=R%-13% IF I%=4% &
+		\ LSET L$=T$ &
+		\ PUT #6%, RECORD R% &
+		\ GET #6%, RECORD R%
+10055	NEXT I% &
+	\ ON ERROR GOTO 10200 &
+	\ GOTO 10070 &
+		! SET UP THE LABELS AND WRITE THEM. WE MUST SUCCEED &
+		! AT LEAST THREE TIMES OR WE FAIL. THE ERROR ROUTINE AT &
+		! 10060 MAKES THIS DECISION. &
+
+10060	E%=ERR &
+	\ RESUME 10100 IF E%<>13% &
+	\ E%=0% &
+	\ E1%=E1%+1% &
+	\ E%=15% IF E1%=2% &
+	\ RESUME 10100 IF E%<>0% &
+	\ RESUME 10055 &
+		! TRAP THE ERROR AND ACT ACCORDINGLY. &
+
+10070	D7%=F9%/C1% &
+	\ FOR I%=0% TO N1%-1% &
+	\	T=INT((S(I%))/D7%)*D7% &
+	\	FOR I0%=1% TO D7% &
+	\		Z%=0% &
+	\		Z%=-1% IF S(Z0%)=T FOR Z0%=0% TO N1%-1% &
+	\		WHILE Z%=0% &
+	\			E%=13% IF N1%>510% &
+	\			GOTO 10100 IF E% &
+	\			S(N1%)=T &
+	\			N1%=N1%+1% &
+	\			Z%=-1% &
+	\		NEXT &
+	\		T=T+1% &
+	\	NEXT I0% &
+	\ NEXT I% &
+		! EXPAND EACH BAD BLOCK IN THE LIST TO COVER A FULL &
+		!  CLUSTER ON THE BACKUP VOLUME. &
+
+10080	GOSUB 14000 &
+	\ Z0%(P0%,5%)=FNA% &
+	\ B3%,Z0%(P0%,4%)=FNA% &
+	\ B4%=6% &
+	\ GET #6%, RECORD B% &
+	\ FIELD #6%, (C1%*512%)/2% AS B1$, 2% AS B2$ &
+	\ LSET B2$=STRING$(LEN(B2$),0%) &
+	\ B$="" &
+	\ FOR I%=0% TO N1%-1% &
+		\ Z%=FNI%(S(I%)) &
+		\ B$=B$+CVT%$(Z%) &
+		\ Z0%(B3%,B4%)=Z% &
+		\ B4%=B4%+1% &
+		\ B3%,Z0%(B3%,1%)=FNA% IF B4%=32% &
+		\ B4%=6% IF B4%=32% &
+	\ NEXT I% &
+	\ B$=B$+CVT%$(0%) &
+	\ LSET B1$=B$ &
+	\ PUT #6%, RECORD B% &
+		! CREATE THE BAD BLOCK LISTS AND WRITE OUT THE BAD &
+		! BLOCK CLUSTER AFTER FILLING THE BUFFER WITH THE &
+		! BAD CLUSTER INFORMATION. &
+
+10090	ON ERROR GOTO 19000 &
+	\ RETURN &
+		! GET OUT. &
+
+10100	GOTO 19000 IF (E%<13%) OR (E%>15%) &
+	\ G%=0% &
+	\ GOTO 10090 &
+		! UNEXPECTED ERROR IF THE ERROR IS ANYTHING BUT: &
+		! 	13%=TOO MANY BAD CLUSTERS. &
+		! 	14%=HUNG OR WRITE LOCKED. &
+		! 	15%=CAN'T WRITE LABELS. &
+
+10200	E%=ERR &
+	\ RESUME 10100 &
+		! SET THE ERROR VARIABLE AND GO TO THE ERROR DISPATCHER. &
+	&
+
+11000	! THIS ROUTINE WILL TAKE A BACKUP DISK AND TAKE ITS BAD BLOCK &
+	! 1 FILE AND BAD BLOCK 2 FILE AND MERGE AND SORT THEM. IT SCANS &
+	! THE BAD BLOCK 2 LIST TO SEE WHICH CLUSTERS ARE REALLY BAD. &
+	! THE TWO LISTS ARE THEN MERGED AND SORTED INTO ASCENDING ORDER. &
+	! THE LABEL CLUSTERS AND THE BAD BLOCK CLUSTERS ARE ALREADY &
+	! INCLUDED IN THIS FINAL LIST. &
+
+11010	ON ERROR GOTO 11200 &
+	\ GET #6%, RECORD B% &
+	\ L5%=FNF%(C1%) &
+	\ N1%=0% &
+	\ FOR I%=((L5%+1%)/2%) TO L5% &
+		\ Z%=FNB%(I%) &
+		\ FOR I1%=0% TO 7% &
+			\ GOTO 11020 IF B1%(I1%)=0% &
+			\ S(N1%)=FNF(SWAP%(B1%(I1%))) &
+			\ N1%=N1%+1% &
+		\ NEXT I1% &
+	\ NEXT I% &
+		! PUT THE BAD BLOCK 2 CLUSTERS INTO S(). &
+
+11020	ON ERROR GOTO 11030 &
+	\ I1%=N1%-1% &
+	\ FOR I%=0% TO I1% &
+		\ GET #6%, RECORD FNI%(S(I%)) &
+		\ S(I%)=70000. &
+
+11025	NEXT I% &
+	\ ON ERROR GOTO 11200 &
+	\ GOSUB 14000 &
+	\ GOTO 11040 &
+		! FIND OUT WHICH OF THE BAD BLOCK 2 CLUSTERS WERE REALLY &
+		! BAD. SORT THE LIST AND CONTINUE. &
+
+11030	E%=ERR &
+	\ RESUME 11025 IF E%=13% &
+	\ RESUME 11090 &
+		! IF THE ERROR WAS 13% IT WAS REALLY A BAD CLUSTER. &
+
+11040	GET #6%,RECORD B% &
+	\ FOR I%=0% TO (((L5%+1%)/2%)-1%) &
+		\ Z%=FNB%(I%) &
+		\ FOR I1%=0% TO 7% &
+			\ GOTO 11050 IF B1%(I1%)=0% &
+				UNLESS (I%=0%) AND (I1%=0%) &
+			\ GOTO 11080 IF N1%>511% &
+			\ S(N1%)=FNF(SWAP%(B1%(I1%))) &
+			\ N1%=N1%+1% &
+		\ NEXT I1% &
+	\ NEXT I% &
+		! PUT THE BAD BLOCK 1 CLUSTERS INTO THE ARRAY. &
+
+11050	GOSUB 14000 &
+	\ GOTO 11090 &
+		! SORT THE ARRAY AND RETURN. &
+
+11080	E%=13% &
+	\ GOTO 11090 &
+		! TOO MANY BAD CLUSTERS. &
+
+11090	ON ERROR GOTO 19000 &
+	\ RETURN &
+		! RETURN &
+
+11200	E%=ERR &
+	\ RESUME 11090 &
+		! RETURN WITH E% SET ON ANY UNEXPECTED ERROR  AS THE &
+		! ROUTINE AT 10100 WILL HANDLE IT. &
+	&
+
+12000	! THIS ROUTINE WILL FORMULATE A LIST OF BAD DEVICE CLUSTERS BASED &
+	! ON THE INFORMATION FOUND IN THE OLD BADB.SYS FILE. &
+
+12005	ON ERROR GOTO 12200 &
+	\ OPEN D$ AS FILE 6%, RECORDSIZE 8192% &
+	\ GET #6%, RECORD 1% &
+	\ L5%=FNF%(16%) &
+	\ Z%=FNB%(0%) &
+	\ C8%=B1%(4%) &
+		! SET UP THE MFD LABEL ENTRY. &
+
+12010	GOTO 12190 IF B1%(0%)=0% &
+	\ B9%=FNB%(FNL%(B1%(0%))) &
+	\ GOTO 12010 IF B1%(1%)<>1% &
+	\ R%=B1%(7%) &
+	\ B9%=FNB%(FNL%(B1%(6%))) &
+	\ GET #6%, RECORD R% &
+	\ Z%=FNB%(0%) &
+		! WE MUST SEARCH FOR UFD [0,1]. &
+		! IF WE DON'T FIND IT WE EXIT. &
+		! IF WE DO FIND IT WE MUST FIND WHERE ITS FIRST CLUSTER &
+		! IS. &
+		! GET ITS FIRST CLUSTER AND SET UP THE LABEL ENTRY. &
+
+12020	GOTO 12190 IF B1%(0%)=0% &
+	\ B9%=FNB%(FNL%(B1%(0%))) &
+	\ GOTO 12020 IF (RAD$(B1%(1%))+RAD$(B1%(2%))+RAD$(B1%(3%)))<> &
+				"BADB  SYS" &
+	\ GOTO 12030 IF B1%(7%)=0% &
+	\ B9%=FNB%(FNL%(B1%(7%))) &
+	\ N1%=0% &
+	\ WHILE B1%(1%)<>0% &
+		\ FOR Z%=1% TO 7% &
+			\ GOTO 12030 IF B1%(Z%)=0% &
+			\ T=FNF(B1%(Z%)) &
+			\ S(N1%+I0%)=T+I0% FOR I0%=0% TO C8%/C1%-1% &
+			\ N1%=N1%+C8%/C1% &
+			\ GOTO 12030 IF N1%>511% &
+		\ NEXT Z% &
+		\ GOTO 12030 IF B1%(0%)=0% &
+		\ B9%=FNB%(FNL%(B1%(0%))) &
+	\ NEXT &
+		! WE THEN LOOK FOR BADB.SYS AND STORE ALL ITS RETRIEVAL &
+		! POINTERS IN S(). &
+
+12030	GOTO 12190 &
+
+12180	E%=13% &
+	\ GOTO 12190 &
+		! IF THERE ARE TOO MANY BAD CLUSTERS WE EXIT WITH AN &
+		! ERROR 13. &
+
+12190	OPEN D$ AS FILE 6% &
+	\ ON ERROR GOTO 19000 &
+	\ RETURN &
+		! RESET THE ERROR TRAP AND RETURN. &
+
+12200	E%=ERR &
+	\ RESUME 12190 &
+		! WE REALLY DON'T EXPECT ANY ERRORS HERE. &
+	&
+
+14000	S9%=-1% &
+	\ N3%=N1% &
+	\ WHILE S9% &
+		\ S9%=0% &
+		\ FOR Z1%=0% TO N1%-2% &
+			\ T=S(Z1%)-S(Z1%+1%) &
+			\ S(Z1%)=70000. IF T=0% &
+			\ N3%=N3%-1% IF T=0% &
+			\ IF T>0% THEN &
+				S9%=S9%+1% &
+				\ T=S(Z1%) &
+				\ S(Z1%)=S(Z1%+1%) &
+				\ S(Z1%+1%)=T
+14010		NEXT Z1% &
+	\	N1%=N3% &
+	\ NEXT
+14020	RETURN &
+		! THIS IS A ROUTINE WHICH SORTS S() IN ASCENDING ORDER. &
+	&
+
+14500	! THIS ROUTINE IS USED TO DERIVE THE INFO NEEDED FOR THE &
+	! SYSTEM MANAGER TO CREATE A BACKUP DISK WITHOUT RUNNING &
+	! $BACKUP. &
+
+14510	F%=0% &
+	\ Z$=SYS(PRIV.ON$) &
+	\ A%=PEEK(PEEK(PEEK(520%)+8%)+24%) &
+	\ A%=256%	! Force to [1,0] &
+	\ Z$=SYS(PRIV.OFF$) &
+	\ GOTO 14590 IF (SWAP%(A%) AND 255%)<>1% &
+	\ J%=(PEEK(518%) AND 255%)/2% &
+	\ J$=NUM1$(J%) &
+		! CHECK TO SEE IF THE USER IS PRIVELEGED TO DO THIS. &
+		! GET THE JOB NUMBER FOR THE TEMP WORK FILE. &
+
+14520	ON ERROR GOTO 14600 &
+	\ PRINT "DEVICE"; \ INPUT D$ &
+	\ CHANGE SYS(CHR$(6%)+CHR$(-10%)+D$) TO Z% &
+	\ IF Z%(26%)=0% OR (Z%(23%) AND Z%(24%))=0% OR &
+			(STATUS AND 255%)<>0% THEN &
+		PRINT "INVALID DEVICE OR NO UNIT NUMBER." &
+		\ GOTO 14520 &
+		! GET THE DEVICE AND UNIT NUMBER. &
+
+14530	OPEN D$ AS FILE 6% &
+	\ GET #6%,RECORD 1% &
+	\ PUT #6%,RECORD 1% &
+	\ GOTO 14540 &
+		! SEE IF WE CAN READ AND WRITE. &
+		! ALSO SEE IF THE DISK IS MOUNTED. &
+
+14535	PRINT D$; &
+	\ PRINT " - DISK SHOULD BE DISMOUNTED." IF ERR=10% &
+	\ PRINT " - CLUSTER 1 IS BAD." IF ERR=13% &
+	\ PRINT " - HUNG OR WRITE LOCKED." IF ERR=14% &
+	\ GOTO 14590 &
+		! FAILURE AT 14530 COMES HERE. &
+
+14540	FIELD #6%, 512% AS L$ &
+	\ GOTO 14550 IF LEFT(L$,12%)<>"BACKUP543210" &
+	\ B%=CVT$%(MID(L$,31%,2%)) &
+	\ GOTO 14560 &
+		! IF ITS A BACKUP DISK, GET THE BAD CLUSTER INTO B%. &
+
+14550	Z1$=MID(L$,13%,4%) &
+	\ CLOSE 6% &
+	\ Z2$=SYS(CHR$(6%)+CHR$(-10%)+D$) &
+	\ U8%=ASCII(MID(Z2$,26%,1%)) &
+	\ Z2$=MID(Z2$,23%,3%)+CHR$(255%) &
+	\ Z1$=SYS(CHR$(6%)+CHR$(3%)+STRING$(4%,0%)+Z1$+ &
+		STRING$(12%,0%)+Z2$) &
+	\ OPEN D$+"[0,1]BADB.SYS" AS FILE 6% &
+	\ CLOSE 6% &
+	\ Z1$=SYS(CHR$(6%)+CHR$(3%)+CHR$(2%)+STRING$(19%,0%)+Z2$) &
+	\ GOTO 14560 &
+		! CHECK TO SEE IF ITS A RSTS DISK. &
+
+14555	PRINT D$;" - "; &
+	\ PRINT "NEEDS TO BE DSKINTED." IF ERR=11% &
+	\ PRINT "NEEDS TO BE DISMOUNTED." IF ERR=13% &
+	\ PRINT CVT$$(RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(ERR)),3%),4%) &
+		IF ERR<>11% AND ERR<>13% &
+	\ GOTO 14590 &
+
+14560	CLOSE 6% &
+	\ PRINT "PROJ,PROG"; \ INPUT P1$,P2$ &
+	\ P$=P1$+","+P2$ &
+	\ Z%=INSTR(1%,P$,",") &
+	\ GOTO 14560 IF Z%=0% &
+	\ P1%=VAL(MID(P$,1%,Z%-1%)) &
+	\ P2%=VAL(RIGHT(P$,Z%+1%)) &
+	\ GOTO 14560 IF (P1%>254%) OR (P2%>254%) &
+	\ W$="BDSK"+J$+".TMP" &
+	\ OPEN W$ FOR OUTPUT AS FILE 1% &
+	\ Z0%(0%,Z%)=0% FOR Z%=0% TO 31% &
+	\ Z0%(0%,8%)=SWAP%(P1%) + P2% &
+	\ Z0%(0%,17%)=4096% &
+	\ Z0%(0%,22%)=B% &
+	\ F%=-1% &
+	\ CLOSE 1% &
+		! GET THE PROJ,PROG AND PUT IT INTO THE &
+		! NEWLY CREATED WORK FILE. &
+
+14590	ON ERROR GOTO 19000 &
+	\ GOTO 32767 UNLESS F% &
+	\ RETURN &
+
+14600	RESUME 32767 IF ERL=14520% AND ERR=11% &
+	\ RESUME 14520 IF ERL=14520% &
+	\ RESUME 14535 IF ERL=14530% &
+	\ RESUME 14555 IF ERL=14550% &
+	\ RESUME 14560 IF ERL=14560% &
+	\ RESUME 19000 &
+		! ERROR TRAP FOR THIS ROUTINE. &
+	&
+
+15200	DEF* FNF%(C%) &
+	\ C%=(512%*C%)/16%-1% &
+	\ FIELD #6%, 16%*Z1% AS Z$, 16% AS B$(Z1%) &
+			FOR Z1%=0% TO C% &
+	\ FNF%=C% &
+	\ FNEND &
+		! FIELD THE BUFFER INTO 16 BYTE ENTRIES. &
+	&
+
+15300	DEF* FNB%(B%) &
+	\ CHANGE B$(B%) TO B% &
+	\ FOR Z%=1% TO 15% STEP 2% &
+		\ B1%(Z%/2%)=B%(Z%)+SWAP%(B%(Z%+1%)) &
+	\ NEXT Z% &
+	\ FNB%=B% &
+	\ FNEND &
+		! TURN A STRING ENTRY FROM THE BUFFER INTO AN 8 WORD &
+		! INTEGER ARRAY. &
+	&
+
+15500	DEF* FNL%(B9%) &
+	\ IF (B9% AND 3584%)<>(P9% AND 3584%) THEN &
+			Z%=FNB%(31%) &
+			\ Z$=SYS(PRIV.ON$) &
+			\ L6%=PEEK(PEEK(PEEK(PEEK(520%))+12%)+6%)-1% &
+			\ Z$=SYS(PRIV.OFF$) &
+			\ PUT #6%, RECORD L6% &
+			\ GET #6%, RECORD B1%(1%+((B9% AND 3584%)/512%)) &
+		! THIS IS A FUNCTION WHICH WILL POINT TO THE ENTRY IN &
+		! THE BUFFER OF THE DESIRED LINK PASSED TO IT. THIS &
+		! STATEMENT WILL READ A NEW CLUSTER IF NECESSARY. &
+
+15510	Z%=0% &
+	\ Z%=8% IF B9%<0% &
+	\ Z%=Z%+((B9% AND 28672%)/4096%) &
+	\ P9%=B9% &
+	\ Z1%=Z%*32%+((B9% AND 496%)/16%) &
+	\ STOP IF Z1%>L5% &
+	\ FNL%=Z1% &
+	\ FNEND &
+		! WE NOW HAVE THE RIGHT DATA IN THE BUFFER, WE LET THE &
+		! FUNCTION RETURN AS THE ENTRY WITHIN THE BUFFER &
+		! POINTED TO BY THE LINK. &
+	&
+
+15600	DEF* FNF(I%) = (I% EQV 32767%) + 32768. &
+		! CHANGE AN UNSIGNED INTEGER INTO FLOATING POINT. &
+
+15700	DEF* FNI%(F) &
+	\ Z%=F IF F<32768. &
+	\ Z%=32767%+1%+(F-32768.) IF F>=32768. &
+	\ FNI%=Z% &
+	\ FNEND &
+		! CHANGE A FLOATING POINT NUMBER (PRESUMABLY LESS THAN &
+		! 65536.) TO AN UNSIGNED INTEGER. &
+	&
+
+15800	DEF* FNP8%(I%) &
+
+15810	Z2%=-1% &
+	\ WHILE Z2% &
+	\	I%=I%+1% &
+	\	Z2%=0% &
+	\	Z2%=-1% IF S(Z0%)=FNF(I%) FOR Z0%=0% TO N1%-1% &
+	\ NEXT &
+	\ Z2%=I% &
+		! FIND THE FIRST CLUSTER (STARTING WITH I%) WHICH IS &
+		!  NOT IN THE BAD BLOCK LIST. &
+
+15815	ON ERROR GOTO 15818 &
+	\ GET #6%, RECORD Z2% &
+	\ ON ERROR GOTO 10200 &
+	\ GOTO 15820 &
+		! CHECK TO SEE THAT THERE ARE NO BAD BLOCKS HERE. &
+
+15818	RESUME 15810 &
+		! TRY AGAIN IF THIS IS A BAD BLOCK. &
+
+15820	FNP8%=Z2% &
+	\ FNEND &
+		! SET THE RETURN VALUE TO THE STARTING DEVICE CLUSTER &
+		! NUMBER OF THE UFD. &
+	&
+
+19000	&
+	&
+	&
+	!	T R A P    F O R    U N H A N D L E D    E R R O R S &
+
+19010	RESUME 19020 &
+		! BE SURE TO CLEAR THE ERROR. &
+
+19020	Z$=SYS(PRIV.OFF$) IF LEN(PRIV.OFF$) &
+	\ E%=ERR IF E%=0% &
+	\ T$=RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(E% AND 63%)),4%) &
+	\ T$="?UNEXPECTED ERROR IN "+I$+" - "+T$+" AT LINE"+NUM$(ERL)+ &
+		" - FATAL" &
+	\ T$=T$+C9$+" ON 'CHAIN' TO '"+P$+"'" IF ERL=9040 &
+	\ PRINT T$ &
+		! SET UP TEXT OF ERROR MESSAGE; &
+		! PRINT IT OUT. &
+
+19030	RESUME 32700 &
+		! AND EXIT THE PROGRAM. &
+	&
+
+25900	DEF* FNU$(P0%,C$,Z%,Z0%) &
+	! FUNCTION :	FNU$	TURN A FILE DESCRIPTOR RECORD INTO &
+	!			AN OPENABLE FILENAME STRING. &
+	! PARAMETERS :	P0%	RECORD IN WORK-FILE TO CHANGE &
+	!		C$	DUMMY STRING TO USE IN CONSTRUCTING &
+	!			THE FILENAME STRING. &
+	!		Z%	FLAG WORD 2 FORMAT WORD SHOWING WHICH &
+	!			FIELDS IN THE RECORD TO CONVERT. &
+	!		Z0%	WORD SHOWING WHICH SWITCHES TO CONVERT &
+	!			(OF /MODE, /CLU, AND /FILESIZE). &
+	! RETURNS :	FUNCTION VALUE &
+	!			THE STRING TO USE IN AN OPEN. &
+	! USES :	FNU0$(L%) &
+
+25910	Z%=Z% AND Z0%(P0%,14%) &
+	\ Z%=Z% AND -3201% IF (Z0%(P0%,13%) AND 1914%)<>0% &
+		IF Z0%(P0%,14%)>0% &
+	\ C$="" &
+		! CREATE A WORD (Z%) WHICH HAS BITS SET FOR A FIELD ONLY &
+		! IF THAT FIELD IS BOTH REQUESTED AND PRESENT IN THE &
+		! DATA; &
+		! IF DEVICE IS NOT DISK, DT, MT, OR LOGICAL, DO NOT &
+		! RETURN FILENAME, EXTENSION; &
+		! INITIALIZE THE STRING TO NULL. &
+	&
+
+25920	C$=RAD$(Z0%(P0%,6%))+RAD$(Z0%(P0%,7%))+":" IF (Z% AND 4096%)<>0% &
+	\ C$=C$+"["+FNU0$(SWAP%(Z0%(P0%,8%)))+","+FNU0$(Z0%(P0%,8%))+ &
+		"]" IF (Z% AND 128%)<>0% &
+	\ C$=C$+RAD$(Z0%(P0%,9%))+RAD$(Z0%(P0%,10%)) IF (Z% AND 1%)<>0% &
+	\ C$=C$+"."+RAD$(Z0%(P0%,11%)) IF (Z% AND 8%)<>0% &
+	\ C$=C$+"<"+FNU0$(SWAP%(Z0%(P0%,12%)))+">" IF (Z% AND 3072%)<>0% &
+		! SET UP Z% AS BITS SET IN BOTH THE REQUESTED ENTRY &
+		! WORD AND THOSE SET IN THE ACTUAL FILENAME STRING. &
+		! IF DEV: REQ/EXSTS, MAKE IT; &
+		! IF [PPN] REQ/EXSTS, MAKE IT; &
+		! IF FILENAME REQ/EXSTS, MAKE IT; &
+		! IF .EXT REQ/EXSTS, MAKE IT; &
+		! IF <PROT> REQ/EXSTS, MAKE IT. &
+
+25930	Z0%=Z0% AND Z0%(P0%,15%) AND 14336% &
+	\ IF Z0%<>0% THEN &
+		C$=C$+"/CL:"+NUM1$(Z0%(P0%,18%)) IF (Z0% AND 2048%)<>0% &
+	\	C$=C$+"/MO:"+NUM1$(Z0%(P0%,16%)) IF (Z0% AND 4096%)<>0% &
+	\	C$=C$+"/FI:"+NUM1$(Z0%(P0%,19%)) IF (Z0% AND 8192%)<>0% &
+		! SET UP Z0% TO HOLD ONLY THE FLAGS SET BOTH IN THE &
+		! OPEERAND IN THE CALL AND IN THE RECORD POINTED TO; &
+		! PUT THE "/SWITCH:OPERAND" STRINGS INTO THE RETURNED &
+		! STRING IN THE ORDER: &
+		!	2048	CLUSTERSIZE &
+		!	4096	MODE &
+		!	8192	FILESIZE &
+
+25960	FNU$=C$ &
+		! SET FUNCTION VALUE. &
+
+25970	FNEND &
+
+25980	DEF* FNU0$(L%) &
+	\ L%=L% AND 255% &
+	\ IF L%=255% THEN FNU0$="*" ELSE FNU0$=NUM1$(L%) &
+		! TAKE THE LOW BYTE OF L%; &
+		! IF THAT BYTE IS 255, THEN &
+		!	RETURN '*'; &
+		! ELSE	RETURN NUM1$ OR BYTE. &
+
+25990	FNEND &
+	&
+	&
+	&
+
+26100	DEF* FNA% &
+		! RETURN SUBSCRIPT OF NEXT FREE INDEX ENTRY AND ZERO &
+		!  THAT ENTRY. &
+		! PARAMETERS:	NONE &
+		! RETURNS:	SUBSCRIPT OF THE FIRST ENTRY IN THE FREE &
+		!		SPACE LIST. &
+		! USES:	Z%	LOOP VARIABLE FOR ZEROING &
+		! NOTES:	USES FREE LIST POINTER OUT OF THE INDEX FILE &
+		!		HEADER TO GET SUBSCRIPT.  IF FL POINTER IS &
+		!		NEGATIVE, THAT PART OF THE FILE HAS NOT YET &
+		!		BEEN INITIALIZED, AND THE ROUTINE WILL GO TO &
+		!		DO IT. THEN THE ENTRY TO BE RETURNED IS ZEROED. &
+
+26110	B0%=Z0%(0%,0%) IF B0%=0% &
+	\ Z0%=B0% &
+	\ IF Z0%<0% THEN &
+		Z0%=-Z0% &
+	\	Z0%(Z%,1%)=Z%+1% FOR Z%=Z0% TO Z0%+7% &
+	\	Z0%(Z%,1%)=-Z%-1% &
+		! GET NEXT FREE LIST ENTRY; &
+		! IF SUBSCRIPT IS NEGATIVE, THIS ENTRY HAS NOT YET BEEN &
+		! TOUCHED, SO EXTEND A FEW. &
+
+26120	B0%=Z0%(Z0%,1%) &
+	\ Z0$(Z0%)="" &
+	\ FNA%=Z0% &
+		! ZERO OUT THE RETURNED ENTRY AND SET FUNCTION VALUE. &
+
+26130	FNEND &
+		! END OF FNA%. &
+	&
+
+26200	DEF* FNA0%(P0%) &
+
+26210	Z0%,Z2%=P0% &
+	\ Z0%=Z0%(Z0%,1%) WHILE Z0%(Z0%,1%)<>0% &
+	\ FOR Z%=2% TO 5% &
+	\	Z2%=P0% &
+	\	WHILE Z2%<>0% &
+	\		IF Z0%(Z2%,Z%)<>0% THEN &
+				Z3%=Z0%(Z2%,Z%) &
+	\			Z0%(Z2%,Z%)=0% &
+	\			Z0%,Z0%(Z0%,1%)=Z3% &
+	\			Z0%=Z0%(Z0%,1%) WHILE Z0%(Z0%,1%)<>0% &
+
+26220			Z2%=Z0%(Z2%,1%) &
+	\	NEXT &
+	\ NEXT Z% &
+	\ Z0%(Z0%,1%)=B0% &
+	\ B0%=P0% &
+	\ FNA0%=0% &
+
+26230	FNEND &
+	&
+
+31000	&
+	&
+	&
+	!	C H A I N    E N T R Y &
+
+31010	E0%=2% &
+	\ C$=SYS(CHR$(7%)) &
+	\ B%=CVT$%(C$) &
+	\ W$=RIGHT(C$,3%) &
+	\ GOTO 1000 &
+		! TAKE THE BASE FHR AND THE WORK-FILE &
+		! NAME OUT OF CORE COMMON AND GO TO WORK. &
+	&
+
+32700	IF E0% THEN &
+		Z$=SYS(PRIV.ON$) &
+	\	Z$=SYS(CHR$(6%)+CHR$(8%)+CHR$(J%)+STRING$(24%,0%)+CHR$(-1%)) &
+			IF J% AND (R% AND 16384%)=0% &
+		! KILL OUTSELVES IF WE ARE DETACHED. &
+
+32767	END

@@ -1,0 +1,837 @@
+.INCLUDE /CMN:COMMON.MAC/						;012
+.INCLUDE /CMN:KERNEL.MAC/						;012
+.INCLUDE /DSK:MSCPDF.MAC/						;012
+TITLE	BBRROT,<BBR ROOT>,0B,21-JUN-91,AJK/JHC/DBM/MND/TPT/VAM/FEK
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR BBRROT
+;+
+;
+;  000	AJK  04-NOV-81	This code was originally written by the RSX group
+;			and has since been RSTSified.
+;  001  AJK  02-APR-83  This code has a number of bugs.  I am rewriting areas
+;			that just don't work correctly during power
+;			failures.
+;  002	JHC  11-Jul-83	More bug fixes, and label changes for BBRDSP and
+;			Phase header.  Also some enhancements to simplify
+;			testing.  Add a global at no longer global $BBREP
+;			for ease of handling (..BBRE).
+;  003	JHC  01-Sep-83	Correct bad block reporting to error log so that
+;			bad blocks are reported. And other miscellaneous
+;			bug fixes.
+;  004	DBM  30-Aug-84	Source clear seq. 3.7.17
+;  005	MND  31-Oct-84	Update to DSA standard 1.4.0 (includes changes to
+;			Test pattern write w/compare and failure path when
+;			a REPLACE command fails).
+;  006	MND   3-Feb-85	Update for new CMT queue structure
+;  007	MND  18-May-85	Changes to merge BBR back with DUDSK
+;  008	TPT  12-Jun-85	Remove global reference to DEQUER
+;  009  VAM  23-Dec-85	Implement new BBR algorithm
+;			(thanks go to PKW from RSX-land for his help).
+;  010  VAM  13-Feb-86	More fixes to BBR algorithm.
+;			(Namely, hack for RC25).
+;  011  VAM  11-Mar-86	Yes, that's right - more BBR fixes
+;			(including removal of the above-mentioned RC25 hack).
+;			Brought to DSDF14-20 (Rev 1.5) and tested in CXO.
+;  012  VAM  27-Jul-86	Change calls to DUDSK subroutines to MCP phase.
+;			Add .INCLUDEs and INCLUDE for necessary modules.
+;			Also, change external calls to CALLXs.
+;  013  VAM  15-Jan-88	Supress error logging during Step 4 and Step 7.
+;			Change "LBN data lost" from status value to flag.
+;
+;			[RSTS V10.1]
+;  014	FEK  05-Mar-91	Add .ASSUMEs
+;-
+
+
+	.SBTTL	Special Definitions					;011
+
+WS.CMP	=1		; Tell $WTSAV to compare after writing.		;011
+WS.BOK	=2		; $WTSAV flag to ignore BBR flag on read.	;011
+
+
+
+	.SBTTL	BBR DESCRIPTION
+;+
+;
+; When a bad logical block is detected by the disk controller, this module will
+; allocate and substitute a replacement block for that bad logical block.   The
+; disk controller will, thereafter, automatically redirect all I/O from the bad
+; logical block to the replacement block.  This presents a logically contiguous
+; disk to the operating system.
+;
+; Also, whenever a disk is brought online to a host (MSCP definition of online),
+; BBR must check sector 0 of the Replacement Control Table (resident on the
+; disk) to see if a failure occurred  part way through bad block replacement.
+; If so, the saved BBR context data is obtained from sector 0 of the table, and
+; the  bad  block  replacement algorithm is then resumed.
+;
+; The complete description for this algorithm can be found in Section 7.5
+; of the DSA Disk Format Specification.
+;
+;-
+
+	INCLUDE	<BBRSUB>		;Make sure BBRSUB is around.	;012
+
+	DEFORG	BBRROT
+
+
+
+.SBTTL	BBR ENTRY POINT
+;+
+; $BBREP - BBR ENTRY POINT
+;
+; BBR is entered at this point whenever requested by DUDSK.
+; DUDSK requests BBR under the following conditions;
+;
+; 1) When the DU Class driver has been notified of a potentially Bad LBN.
+;
+; 2) When the DU Class driver is bringing a unit ONLINE. BBR must be
+;    checked to see if an LBN was in the process of being replaced and
+;    the process was interrupted due to hardware or software fault.
+;
+; 3) Requests in the "CMT+CMQUE" for a given controller are marked as
+;    being owned by BBR, but BBR was not active. This happens when a
+;    controller error forces the PORT driver to reinitialize the 
+;    controller when BBR is active. The DU Class driver will check for
+;    DSQs marked as waiting on BBR and reissue them at this entry point.
+;
+; INPUT:	Any DSQ requiring BBR should be queued into it's CMT
+;		request Queue with the R.BBR bit set in DSQSTS
+;
+; OUTPUT:	Bad Block is revectored and DSQSTS byte of the DSQ
+;		cleared so the I/O will be reissued.
+;
+; REGISTERS PRESERVED
+;-
+
+
+
+	TMPORG	BBRDSP,0	; set up the dispatch table		;002
+	.WORD	$BBREP		; to dispatch to here on CALLMI		;002
+	UNORG
+$BBREP:				; Entry name for an indirect mapped call;007
+BBREP::	NOP			; Entry name for a direct (no map) call	;011
+	REGSCR			; SAVE REGISTERS
+	MAP	PUSH,APR=6,DATA	; SAVE CURRENT APR6 VALUE
+	MAP	CMT+CM.BA6,APR=6,DATA ; MAP TO BBR WORK AREA
+	MOV	SP,$SPSAV	; SAVE SP AT ENTRY
+	.BR	NXTBBR		;					;006
+
+
+
+NXTBBR:	MOV	#1,R1		;-Start search at 1st controller.	;006
+	MOV	#CMT+CM.QUE,R5	;-R5 -> 1st controller request's Q ROOT	;006
+NXTCMT:	TSTB	CMT+CM.BRM	;-Does any other controller need BBR?	;006
+	BEQ	40$		;-No more controllers require BBR, exit.;006
+	BITB	R1,CMT+CM.BRM	;-Does this controller require BBR?	;006
+	BEQ	30$		;-No, on to next CMT			;006
+	MOV	R5,R4		;-Copy ROOT pointer			;006
+10$:	MOV	(R4),R4		;-Get next item in queue		;006
+	BEQ	20$		;-None there, look at next CMT		;006
+	BITB	#R.BBR,DSQSTS(R4);-Is this item waiting for BBR?	;006
+	BEQ	10$		;-No, look at next.			;006
+	BR	DOBBR		;-Yes, start the replacement		;006
+
+20$:	BICB	R1,CMT+CM.BRM	;-Controller nolonger has BBR requests	;006
+	BEQ	40$		;-No more controllers require BBR, exit.;006
+30$:	ASL	R1		;-Next controller			;006
+	ADD	#CMTSIZ,R5	;-Next CMT				;006
+	BR	NXTCMT		;-					;006
+
+40$:	CLR	CMT+CM.BRS	; CLEAR BBR STATUS WORD
+	CLR	$DSQ		; CLEAR CURRENT DSQ SAVE WORD
+	MAP	POP,APR=6,DATA	; MAP TO CCB AT ENTRY
+	RETURN			;
+
+GLOBAL	<CMT,BBRFLG>							;012
+
+
+
+;+
+;	Save Misc. information in BBR region
+;-
+DOBBR:	MOV	DSQBBL(R4),$BLBNL ; STORE BAD LBN ADDR, LOW ORDER
+	MOVB	DSQBBH(R4),$BLBNH ; .. HIGH ORDER
+	MOV	R4,$DSQ		; SAVE DSQ POINTER
+	MOVB	DSQPUN(R4),$UNIT; SAVE UNIT NUMBER
+	MOV	DSQUMT(R4),R5	; R5 -> UMT
+	MOV	(R5),$CMT	; SAVE CMT ADDR				;014
+	.ASSUME	UM.CMT	EQ	0
+	ADD	#CMT,$CMT	;
+	MOV	UM.UCB(R5),R3	; R3 -> UCB
+	MOV	R3,$UCB		; SAVE UCB ADDR
+	MOV	$CMT,R4		; R4 -> CMT
+	MOV	CM.COF(R4),R5	; R5 -> CCB
+	MOV	R5,$CCB		; SAVE CCB ADDR
+
+;+
+; 	Save UNIT specific parameters in BBR region
+;-
+	MAP	CM.AP6(R4),APR=6,DATA ; MAP TO CCB AREA
+	MOV	U.STAT(R3),-(SP); SAVE UNIT STATUS WORD ON STACK
+	MOV	U.RCTS(R3),-(SP); RCT SIZE ON STACK
+	MOV	U.TRCK(R3),-(SP); TRACK SIZE TO STACK
+	MOV	U.RBNS(R3),-(SP); RBN'S / TRACK
+	MOVB	U.RCTC(R3),-(SP); # OF RCT COPIES
+	MOV	U.UNSZ(R3),-(SP)  ; SAVE MAX LBN ON STACK
+	MOV	U.UNSZ+2(R3),-(SP);
+
+	MAP	CMT+CM.BA6,APR=6,DATA ; MAP TO BBR WORK AREA
+	MOV	(SP)+,$MXLBN+2	; STORE MAX LBN FOR UNIT
+	MOV	(SP)+,$MXLBN	;
+	MOVB	(SP)+,$RCTCP	; SAVE # OF RCT COPIES ON UNIT
+	MOV	(SP)+,$RBNPT	; SAVE RBN'S / TRACK
+	MOV	(SP)+,$TRKSZ	; SAVE # OF LBN'S PER TRACK
+	MOV	(SP)+,$RCTSZ	; SAVE REPLACEMENT CONTROL TABLE SIZE FOR UNIT
+	MOV	(SP)+,$USTAT	; SAVE UNIT STATUS
+;
+;	- Step 2 -
+;
+; (Yes, I know it should come AFTER Step 1, but it works OK here).
+;
+; Clear internal work area
+;
+	MOV	#$NRBNL,R0	; R0 -> INTERNAL WORK AREA
+10$:	CLR	(R0)+		; CLEAR LBN/RBN/OFFSET WORK AREAS
+	CMP	#$OLBNO,R0	; AT END OF WORK AREA?
+	BHIS	10$		; LOOP TILL DONE
+	CLRB	$RECUR		; Clear recursion counter.		;009
+	CLRB	$BDLBN		; Clear bad LBN flag.			;009
+	CLRB	$RECP2		; Clear Phase 2 recovery flag.		;009
+	CLR	BBRFLG		; Clear BBR error logging flag.		;009
+	CLR	$TMPRF		; Clear our internal flag.		;010
+	MOV	SP,$LGERR	; Make sure error logging is on for	;013
+				;  $DSKIO/$GENIO/$SUCIO.		;013
+
+;
+; Here, we get the absolute block number of the last used block of the
+; RCT (first copy).  This is used in $SRCH when we hit a null entry to
+; make sure that it's in the last RCT block.  In order to do this, we
+; calculate the last LBN in the user area of the disk, and give that
+; value to $HASH.
+;
+
+	PUSH	<$BLBNL,$BLBNH>	; Save the real bad LBN away.		;011
+	MOV	$MXLBN,$BLBNL	; Put maximum user LBN+1...		;011
+	MOV	$MXLBN+2,$BLBNH	;  ...into bad LBN address.		;011
+	SUB	#1,$BLBNL	; Subtract 1 to point it to the last	;011
+	SBC	$BLBNH		;  user LBN on the disk.		;011
+	CALLX	$HASH		; Hash into the last RCT block.		;012
+	MOV	$PLBNL,$MXRCL	; Save away the number of the last RCT	;011
+	MOV	$PLBNH,$MXRCH	;  block.				;011
+	POP	<$BLBNH,$BLBNL>	; Put the real bad LBN address back.	;011
+
+;+
+; This next two-liner represents a way in which to alter the handling of
+; "transient" bad blocks (that is, blocks that are not consistently bad, or
+; those that are only bad when certain data patterns are written to them).
+; If the value moved into $TRANS is zero, then the bad block will be
+; "innocent until proven guilty"; Step 7 will be performed on the block, and
+; the outcome of that step will determine whether or not to replace the block.
+; If the value is non-zero, then the bad block will be "guilty until proven
+; innocent"; if there is the slightest indication up until Step 7 that the
+; block is not 100% good, then Step 7 will not be performed at all and the
+; block will be replaced anyway.
+;-
+
+	MOV	#0,$TRANS	; Get transient handling option.	;011
+				; Default is to go easy on suspected	;011
+				;  bad blocks.				;011
+
+;
+; See if we are bringing a unit online.
+;
+
+	BIT	#US.OLP,$USTAT	; UNIT BEING BROUGHT ONLINE?
+	BEQ	READIT		; No, must be an actual bad block.	;011
+	BISB	#BS.ONL,BBRFLG+1; Tell error logger about online.	;011
+
+
+;
+;	- Step 1 -
+;
+; We are bringing a unit online.  We need to get a copy of RCT sector 0
+; and see if there's a partial replacement outstanding.
+;
+
+	MOV	#RCTFLG,R0	; Get address of RCT flag word.		;011
+	CALLX	$RDRC0		; Read RCT sector 0.			;012
+	BCS	50$		; If something is wrong, get out.	;011
+
+;
+; WE ARE BRINGING THE UNIT ONLINE.  WE HAVE TO READ THE SAVED DATA FOR
+; FOR THE LBN BEING REPLACED FROM RCT SEC1.
+; 
+
+	MOV	#$LBN,$DSKBF	; SET BUFFER ADDRESS
+	MOV	$MXLBN,$LBNL	; SET DISK ADDRESS, LOW ORDER
+	MOV	$MXLBN+2,$LBNH	; SET DISK ADDRESS, HIGH ORDER
+	ADD	#1,$LBNL	; POINT IT TO RCT SEC1; WHERE
+	ADC	$LBNH		; .. DATA FROM BAD LBN IS SAVED
+	CALLX	$MULRD		; Read sector 1 of table.		;012
+	BCC	20$		; IF CC OK
+	MOVB	#BF.RR1,BBRFLG	; Indicate the correct error.		;009
+	BR	50$		; And, get out.				;011
+
+;
+;	- Step 3 -
+;
+; See if we have to recover from a partially-completed BBR operation.
+;
+
+20$:	BIT	#RF.P1,(R0)	; Did we crash or something in Phase 1?	;009
+	BEQ	30$		; No, so go on.				;009
+	CALLX	$P1REC		; Otherwise, reset state for Phase 1	;012
+	BR	TSTPAT		;  and go do test patterns.		;009
+
+30$:	BIT	#RF.P2,(R0)	; How about Phase 2?			;009
+	BEQ	40$		; No, I guess not.			;009
+	CALLX	$P2REC		; If so, reset state for Phase 2	;012
+	JMP	RCTUPD		;  and go update the RCT.		;009
+
+40$:	JMP	COMXIT		; If none of the above, we don't really	;009
+				;  have a reason for being here, so	;009
+				;  just get out.			;009
+
+50$:	JMP	S18XIT		; Common jump for fatal exits.		;011
+
+;+
+; Note:  Write-back Cache is a controller implemented cache that permits
+;	 buffering of data within the controller before writing to disk
+;	 (a write-back cache). At present, this feature is not implemeted
+;	 in any hardware supported by RSTS. This feature should be
+;	 discouraged from use if implemented in any future controller.
+;+
+
+;
+;	- Step 4 -
+;
+; Read the data from the bad LBN.
+;
+; If any errors are encountered here or in Step 5, $BDLBN is incremented to
+; indicate thus.
+;
+
+READIT:	MOV	#$LBN,R1	; GET BUFFER ADDRESS
+	MOV	R1,$DSKBF	; SET BUFFER ADDRESS
+	MOV	#256.,R0	; GET NUMBER OF WORDS TO ZERO
+10$:	CLR	(R1)+		; CLEAR OUT THE BUFFER
+	SOB	R0,10$		; Keep going until we're done.		;009
+	MOV	$BLBNL,$LBNL	; $LBNL = LBN, LOW ORDER
+	MOV	$BLBNH,$LBNH	; $LBNH = LBN, HIGH ORDER
+	MOV	#OP.RD,$IOFUN	; Set function code.			;009
+	CLR	$IOMOD		; Don't inhibit ECC or error recovery.	;009
+	MOV	#4,R3		; Set read retry count.			;009
+20$:	CLR	$LGERR		; Suppress error logging for this I/O.	;013
+	CALLX	$DSKIO		; Try to read the bad block.		;012
+	BCC	50$		; If it succeeded, go update the RCT.	;009
+	INCB	$BDLBN		; Otherwise, say LBN is really bad.	;009
+	CMP	#ST.DAT,$IOST+2	; Was this a forced error?		;009
+	BEQ	30$		; If so, then don't bother to retry.	;009
+	SOB	R3,20$		; Otherwise, keep going.		;009
+30$:	BIS	#RF.FE,$TMPRF	; Indicate invalid data (forced error)	;009
+	BISB	#BS.GON,BBRFLG+1; Say we couldn't save data from LBN.	;013
+	BR	WSEC1		; Don't bother checking BBR flag.	;011
+
+;
+; Note: Since error correction and recovery are enabled in READIT, the block
+; in question may be bad even if the read was successful.  We check EF.BBR
+; (Bad Block Reported) to find out.
+;
+
+50$:	BITB	#EF.BBR,$IOST+1	; Did the hardware say 'Bad Block'?	;011
+	BEQ	WSEC1		; No, so neither will we.		;011
+	INCB	$BDLBN		; Otherwise, say it's really bad.	;011
+	.BR	WSEC1		; Go to the right place.		;011
+
+;
+;	- Step 5 -
+;
+; Write the data to sector 1 of each RCT copy.
+;
+
+WSEC1:	MOV	$MXLBN,$LBNL	; $LBNL = TABLE SECTOR 0 LBN, LOW ORDER
+	MOV	$MXLBN+2,$LBNH	; $LBNH = TABLE SECTOR 0 LBN, HIGH ORDER
+	ADD	#1,$LBNL	; FORM TABLE SECTOR 1 LBN, LOW ORDER
+	ADC	$LBNH		; ... AND HIGH ORDER
+	CALLX	$MULWT		; Perform multi-copy write of sector 1.	;012
+	BIS	#RF.P1,$TMPRF	; Say we're in Phase 1.			;009
+	BCC	PHASE1		; IF CC OK
+	MOVB	#BF.WR1,BBRFLG	; Say we couldn't do it.		;009
+	JMP	S18XIT		; And, go out.				;011
+
+;+
+;
+;	- Step 6 -
+;
+; Here, we're actually starting the bad block replacement process.
+; Update RCT sector 0 to indicate that we're in Phase 1.
+;-
+
+PHASE1:	MOV	#RCTFLG,R0	; GET ADDRESS OF SECTOR 0 FLAG WORD
+	CALLX	$RDRC0		; Now, read RCT sector 0.		;012
+	BCS	60$		; If something went wrong, die.		;011
+				; ($RDRC0 fills in the error code in	;011
+				;  BBRFLG for us).			;011
+	BIC	#<RF.BR!RF.FE!RF.P2>,(R0) ;Clean up RCTFLG a little.	;009
+	BIS	$TMPRF,(R0)+	; Remember status of saved data.	;009
+	TST	(R0)+		; Bump R0 to skip "reserved word".	;009
+	MOV	$BLBNL,(R0)+	; RECORD BAD LBN IN SECTOR 0 BUFFER
+	MOV	$BLBNH,(R0)+	; ... AND THE HIGH BITS
+	MOV	#$SEC0,$DSKBF	; SET BUFFER ADDRESS
+	MOV	$MXLBN,$LBNL	; SET LBN OF RCT SEC0
+	MOV	$MXLBN+2,$LBNH	; ...
+				; -- Here, Phase 1 flag is written to RCT
+	CALLX	$MULWT		; Write updated sector 0 back to disk.	;012
+	BCC	TSTPAT		; TEST LBN USING PATTERNS
+	MOVB	#BF.WR0,BBRFLG	; Say we couldn't write Sector 0.	;011
+	JMP	S17XIT		; Go try to update sector 0 anyway.	;011
+
+60$:	JMP	S18XIT		; If we couldn't read RCT sector 0,	;011
+				;  go off and die!!			;011
+
+;+
+;
+;	- Step 7 -
+;
+; Write/read/verify LBN data and complemented LBN data to suspected bad block.
+;
+;-
+
+	.ENABL	LSB							;009
+
+TSTPAT:	TST	$TRANS		; Do they want to test transients?	;011
+	BEQ	5$		; If so, go run test.			;011
+	TSTB	$BDLBN		; Do we already know this block is bad?	;009
+	BNE	RESDAT		; Yup, so don't bother testing it again.;009
+5$:	MOV	#256.,R1	; Set up to save user data.		;011
+	MOV	#$LBN,R0	; Address of user data buffer.		;009
+	MOV	#$RCTB1,R2	; Where we're gonna put it.		;009
+10$:	MOV	(R0)+,(R2)	; Copy the data...			;009
+	COM	(R2)+		; ...and complement it.			;009
+	SOB	R1,10$		; Mung until no good.			;009
+	MOV	$BLBNL,$LBNL	; Get address of bad LBN...		;009
+	MOV	$BLBNH,$LBNH	; ...both low and high order bits.	;009
+	MOV	#<MD.SER!MD.SEC>,$IOMOD					;011
+				; All of the read and write operations	;009
+				; in this section are performed with	;009
+				; Error Correction and Error Recovery	;009
+				; inhibited.				;009
+	CALL	50$		; First, we read the bad block 4 times.	;009
+TESTP2::BCC	15$		; Any problems?  If not, go on.		;009
+	MOVB	#BF.IRD,BBRFLG	; Say we failed the initial read.	;009
+	BR	150$		; And exit with error.			;009
+
+15$:	MOV	#8.,R2		; We go through the following 8. times.	;009
+20$:	MOV	#$LBN,$DSKBF	; Write out the original user data.	;009
+	BIC	#MD.ERR,$IOMOD	; This data is OK - no Forced Error.	;009
+	CALL	100$		; Now, do a write followed by multiple	;009
+				;  reads (to see if we get an error).	;009
+	BCC	25$		; No problem, so go on.			;009
+	MOVB	#BF.NOR,BBRFLG	; Otherwise, say we failed normal test.	;009
+	BR	150$		; Go restore original data.		;009
+
+25$:	MOV	#$RCTB1,$DSKBF	; Now, do the same thing, only we write	;009
+				;  the COMPLEMENT of the data this time	;009
+	BIS	#MD.ERR,$IOMOD	; Set Forced Error (to say that the	;009
+				;  block contains invalid data).	;009
+	CALL	100$		; And, do the write/reads thing again.	;009
+	BCC	30$		; No problem, so go on.			;009
+	MOVB	#BF.COM,BBRFLG	; Say we failed complemented data test.	;009
+	BR	150$		; And go punt.				;009
+
+30$:	SOB	R2,20$		; Do the whole thing 8 times.		;009
+	BR	RESDAT		; If we got here, test patterns ran OK	;009
+				;  so go restore the original data.	;009
+
+;
+;	Note:
+;
+;	If location TESTP2 is patched to a no-op (240), then TSTPAT will
+;	always indicate that the block under test is bad (specifically,
+;	it will return BF.IRD (Initial Read failure) in the BBR Failure
+;	Code byte).  This is used for BBR testing.
+;
+
+;
+;	This is our local 4-Reads routine.  It performs 4 reads
+;	using the $IOMOD values set up above (ECC and Error Recovery
+;	disabled).  The read data is put into $RCTBF, and not into the
+;	buffer containing saved or inverted LBN data, to avoid possible
+;	corruption.  On exit, the C bit will be set or cleared depending
+;	on errors.
+;
+
+50$:	PUSH	<R2>		; We need to count 4. read cycles.	;009
+	MOV	#4,R2		; Set up a little loop.			;009
+	MOV	#OP.RD,$IOFUN	; Also, set up for a read.		;009
+	MOV	#$RCTBF,$DSKBF	; Put the data into an unused buffer.	;011
+60$:	CLR	$LGERR		; Suppress error logging for this I/O.	;013
+	CALLX	$SUCIO		; Do some I/O, checking for BBR flag.	;012
+	BCS	70$		; If no errors, do it again.		;009
+	SOB	R2,60$		; Next pass, please.			;009
+	;CLC			; Everything OK; C is clear.		;011
+70$:	POP	<R2>		; Restore the old R2.			;009
+	RETURN			; And, go back.				;009
+
+
+;
+;	This is our local Write-Followed-By-4-Reads routine.  It performs
+;	a write using the already set-up $IOMOD parameters, and then calls
+;	the above 4-Reads routine to stress test the block.  Again, the C
+;	bit is used to indicate success or failure.
+
+100$:	MOV	#OP.WR,$IOFUN	; Set up for a write.			;009
+	CLR	$LGERR		; Suppress error logging for this I/O.	;013
+	CALLX	$SUCIO		; Do the I/O, checking BBR flag also.	;012
+	BCS	110$		; If it failed, punt.			;009
+	CALL	50$		; Now, do the 4-time read.		;009
+	BCS	110$		; If that failed, punt as well.		;009
+	;CLC			; Otherwise, everything's OK.		;011
+110$:	RETURN			; Go on back.				;009
+
+;
+;	Here's where we go if an error occurred in any of the above.
+;
+
+150$:	COMB	$BDLBN		; Say error during pattern testing.	;011
+	.BR	RESDAT		; Go try to put the data back anyway.	;009
+
+	.DSABL	LSB							;009
+
+;+
+;
+;	- Step 8 -
+;
+; Write saved data back to "bad" LBN - problem may have been transient
+;
+; At this point, $BDLBN may be in one of three states, each with a different
+; meaning;
+;		$BDLBN=0	No errors occurred in Steps 4 or 7.
+;		$BDLBN>0	An error occurred in Step 4.
+;		$BDLBN<0	An error occurred in Step 7.
+;-
+
+RESDAT:	MOV	#<WS.CMP!WS.BOK>,R0					;011
+				; Tell $WTSAV to do compare after write	;011
+				;  and that BBR flag is allowed on read.;011
+	CALLX	$WTSAV		; Write saved data back to LBN.		;012
+	BCC	10$		; If we did it, OK.			;009
+	MOVB	#BF.RES,BBRFLG	; Say we couldn't write saved data back.;009
+	BR	SCAN		; And, go replace the block.		;009
+
+10$:	TSTB	$BDLBN		; Any failures?				;011
+	BMI	SCAN		; Yes, Step 7 - go replace the block.	;011
+	BEQ	20$		; None - don't replace it.		;011
+				; If neither of the above, then a	;011
+				;  failure occurred in Step 4.		;011
+	TST	$TRANS		; Do they want to replace transients?	;011
+	BNE	SCAN		; Yes, so go replace it.		;011
+20$:	JMP	NOREP		; Otherwise, go report transient error	;011
+				;  and don't replace it.		;011
+;
+;	- Step 9 -
+;
+; Scan replacement control table and determine the RBN 
+;
+
+SCAN:	CALLX	$HASH		; Find where to begin the search.	;012
+SCAN1:	CMPB	$RECUR,#2	; Have we already been here twice?	;009
+	BNE	10$		; No, so proceed as planned.		;009
+	MOVB	#BF.RCU,BBRFLG	; Say we failed recursion count.	;009
+	BR	20$		; Sorry, Charlie!  No more RBNs.	;009
+
+10$:	INCB	$RECUR		; We will never pass this way again...	;009
+	CALLX	$SRCH		; Search the table for the RBN.		;012
+	BCC	PHASE2		; CARRY CLEAR, GO TO PHASE 2
+20$:	JMP	S16XIT		; RCT search failure!!  Bail out.	;011
+				; ($SRCH fills in BBRFLG for us).	;011
+
+;
+;	- Step 10 -
+;
+; Update sector 0 on the disk with the fact that we are in Phase 2
+;
+
+PHASE2:	BIC	#RF.P1,RCTFLG	; SHOW WE'VE GONE FROM PHASE 1
+	BIS	#RF.P2,RCTFLG	; ... TO PHASE 2 OF THE REPLACEMENT PROCESS
+	MOV	#URBNL,R0	; POINT TO NEW RBN SAVE AREA IN RCT SEC0
+
+	MOV	$NRBNL,(R0)+	; RECORD THE NEW RBN IN SECTOR 0
+	MOV	$NRBNH,(R0)+	; ...
+	MOV	$ORBNL,(R0)+	; RECORD THE OLD RBN (IF ANY) IN SECTOR 0
+	MOV	$ORBNH,(R0)	; ...
+
+	MOV	#$SEC0,$DSKBF	; PUT BUFFER ADDRESS IN DPB
+	MOV	$MXLBN,$LBNL	; PUT LBN FOR TABLE SECTOR 0 IN DPB
+	MOV	$MXLBN+2,$LBNH	; ...
+				; -- RCT phase 1 flag cleared, phase 2 flag set
+	CALLX	$MULWT		; Write updated sector 0 back to disk.	;012
+	BCC	RCTUPD		; GOOD WRITE, DO RCT UPDATE
+	MOVB	#BF.WR0,BBRFLG	; Say we couldn't do it.		;009
+	JMP	S16XIT		; GO TO FALURE EXIT, COULD NOT WRITE
+				; ... ANY OF THE SEC0 BLOCKS
+
+;
+;	- Step 11 -
+;
+; Update replacement control table with RBN
+;
+
+RCTUPD:
+	CALLX	$NEWBF		; Set up parameters for new RBN I/O.	;012
+				; R0 = $RCTBF
+	MOV	R0,$DSKBF	; SET BUFFER ADDRESS
+	CALLX	$MULRD		; Read sector in table of new RBN.	;012
+	BCC	5$		; Everything OK, go on.			;009
+	MOVB	#BF.RRT,BBRFLG	; Couldn't read an RCT sector.		;009
+	BR	50$		; Restore bad LBN and exit.		;009
+
+5$:	MOV	R0,R1		; GET BUFFER ADDRESS
+	ADD	$NLBNO,R1	; FORM RBN DESCRIPTOR ADDRESS
+	MOV	$BLBNL,(R1)+	; SET LBN ADDRESS(LO) IN NEW RBN DESCRIPTOR
+	MOV	$BLBNH,(R1)	; ... AND HIGH ORDER
+
+	BIC	#170000,(R1)	; CLEAR RBN FLAG BITS
+	BIS	#DF.ALL,(R1)	; INDICATE NEW RBN IS ALLOCATED AND
+				; ... IT IS PRIMARY
+	CMP	$PLBNO,$NLBNO	; ARE OFFSETS TO TO RBNS IN RCT LBN SAME?
+	BNE	10$		; NO, MUST BE SECONDARY
+	CMP	$PLBNL,$NLBNL	; IS PRIMARY RBN SAME AS NEW RBN?
+	BNE	10$		; NO
+	CMP	$PLBNH,$NLBNH	; IS IT?
+	BEQ	15$		; NO, IT MUST BE SECONDARY
+10$:	BIS	#DF.SEC,(R1)	; INDICATE NEW RBN IS SECONDARY	
+
+15$:	BIT	#RF.BR,RCTFLG	; IS THERE AN OLD RBN?
+	BEQ	40$		; IF EQ NO
+
+	CMP	$OLBNL,$NLBNL	; OLD RBN SECTOR = NEW RBN SECTOR?
+	BNE	20$		; IF NE NO
+	CMP	$OLBNH,$NLBNH	; MAYBE, HOW ABOUT HIGH ORDER?
+	BEQ	30$		; YES, THEY ARE THE SAME
+
+20$:	CALLX	$OLDBF		; Set up parameters for old RBN I/O.	;012
+				; R0 = $RCTB1
+	MOV	R0,$DSKBF	; SET BUFFER ADDRESS
+	CALLX	$MULRD		; Read sector in table of old RBN.	;012
+	BCC	30$		; Everything OK, go on.			;009
+	MOVB	#BF.RRT,BBRFLG	; Couldn't read an RCT sector.		;009
+	BR	50$		; Restore bad LBN and exit.		;009
+
+30$:	MOV	R0,R1		; GET BUFFER ADDRESS
+	ADD	$OLBNO,R1	; FORM RBN DESCRIPTOR ADDRESS
+	MOV	#DF.UNU,2(R1)	; INDICATE OLD RBN IS UNUSABLE
+	CLR	(R1)		; ...
+
+	MOV	R0,$DSKBF	; SET BUFFER ADDRESS
+	CALLX	$MULWT		; Write old RBN sector back to RCT.	;012
+	BCC	35$		; No errors, so go on.			;009
+	MOVB	#BF.WRT,BBRFLG	; Couldn't write an RCT sector.		;009
+	BR	45$		; UNAXIT is out of range from here...	;009
+
+35$:	CMP	$OLBNL,$NLBNL	; OLD RBN SECTOR = NEW RBN SECTOR?
+	BNE	40$		; IF NE NO  (corrected for V9.0) ;003JHC
+	CMP	$OLBNH,$NLBNH	; MAYBE, HOW ABOUT HIGH ORDER?
+	BEQ	REPLBN		; YES, THEY ARE THE SAME
+
+40$:	CALLX	$NEWBF		; Set parameters for new RBN I/O.	;012
+				; R0 = $RCTBF
+	MOV	R0,$DSKBF	; SET BUFFER ADDRESS
+	CALLX	$MULWT		; Write a sector back to the table.	;012
+	BCC	REPLBN		; If no errors, get out.		;009
+	MOVB	#BF.WRT,BBRFLG	; Couldn't write sector back to RCT.	;009
+45$:	BR	S15XIT		; Unallocate RBN and exit.		;011
+
+50$:	JMP	S16XIT		; Branch out of range kludge.		;011
+
+;
+;	- Step 12 -
+;
+; Replace bad LBN with RBN and write saved data in RBN
+;
+
+REPLBN:
+	MOV	#OP.RPL,$IOFUN  ; FUNCTION CODE = REPLACE
+	MOV	$NRBNH,$RPLBH	; PARAMETER 1 = RBN (HI)
+	MOV	$NRBNL,$RPLBL	; PARAMETER 2 = RBN (LO)
+	MOV	$BLBNH,$LBNH	; PARAMETER 3 = LBN (HI)
+	MOV	$BLBNL,$LBNL	; PARAMETER 4 = LBN (LO)
+	CLR	$IOMOD		; PARAMETER 5 = RBN TYPE (0=SEC, 1=PRI)
+				; ASSUME SECONDARY
+	CMP	$PLBNO,$NLBNO	; ARE OFFSETS TO RBNS IN RCT BLOCK SAME?
+	BNE	10$		; NO, MUST BE SECONDARY
+	CMP	$PLBNL,$NLBNL	; IS PRIMARY RBN SAME AS NEW RBN?
+	BNE	10$		; NO
+	CMP	$PLBNH,$NLBNH	; IS IT?
+	BNE	10$		; NO, IT MUST BE SECONDARY
+
+	MOV	#MD.PRI,$IOMOD	; INDICATE PRIMARY
+10$:	CALLX	$GENIO		; Perform the replace.			;012
+	BCS	RPLERR		; If bogus, exit with Replace error.	;011
+	TSTB	$RECP2		; Are we in a Phase 2 recovery?		;009
+	BNE	20$		; Yup, so skip Forced Error check	;009
+				;  (because we may have crashed after	;009
+				;  writing the data back into the RBN,	;009
+				;  thus clearing the Forced Error flag).;009
+	MOV	$BLBNH,$LBNH	; Point to the bad LBN (which is now	;009
+	MOV	$BLBNL,$LBNL	;  really the RBN) again.		;009
+	MOV	#$RCTBF,$DSKBF	; Point to an unneeded buffer area.	;009
+	MOV	#OP.RD,$IOFUN	; Set up to read the RBN.		;009
+	MOV	#<MD.ERR>,$IOMOD;Tolerate forced errors.		;011
+	CALLX	$DSKIO		; Read it.				;012
+	BCS	30$		; Any errors, go try for another RBN.	;010
+	CMP	#ST.DAT,$IOST+2	; If this is really an RBN, then we	;009
+				;  should have gotten a Forced Error	;009
+				;  (because all RBNs have the FE flag	;009
+				;  set during formatting).		;009
+	BNE	RPLERR		; If not, exit with Replace Error.	;011
+20$:	MOV	#<WS.CMP>,R0	; Tell $WTSAV to compare data, but that	;011
+				;  BBR flag is a no-no.			;011
+	CALLX	$WTSAV		; Write saved data to RBN.		;012
+	BCC	FINSZ		; IF CC OK
+30$:	JMP	SCAN1		; FAILED, SCAN FOR ANOTHER NEW RBN
+				; ... PRESENT NEW RBN WILL BECOME AN OLD RBN
+
+RPLERR:	CLR	R0		; Tell $WTSAV not to compare data.	;011
+	CALLX	$WTSAV		; Write saved data back to LBN.		;012
+	MOV	$DSQ,R4		; UNTOFL needs;	R4 -> DSQ		;009
+	MOV	$CCB,R5		;		R5 -> CCB		;009
+	MOV	$UCB,R3		;		R3 -> UCB		;009
+	CALMCP	UNTOFF		; Mark the unit as offline.		;012
+	BISB	#BS.OFL,BBRFLG+1; Say we took the unit offline.		;009
+	BIS	#US.OWL,U.STAT(R3); Tell driver to Write Protect the	;011
+				;   unit if someone brings it online.	;011
+	MOVB	#BF.RPL,BBRFLG	; Say Replace error.			;009
+	SETERR	HNGDEV,DSQERR(R4); Return 'Device hung' to caller.	;009
+	BR	S18XIT		; And get out.				;011
+
+;
+; Here's where we end up if a transient error occurred.  This simply
+; sets up BBRFLG for the error logger and then goes out the success
+; exit path.
+;
+
+NOREP:	MOVB	#BF.TRE,BBRFLG	; Say it was a transient error.		;011
+	.BR	FINSZ		; Make sure Step 13 is next.		;011
+
+;
+;	- Step 13 -
+;
+; Update table sector 0 to show we are finished replacing the LBN
+;
+
+FINSZ:	CALLX	$FINSZ		; Update RCT sector 0 for the last time.;012
+	BCS	S17XIT		; If something went wrong, get out.	;011
+	.BR	S14XIT		; Successful exit.			;011
+
+;+
+;	- Step 14 -
+;
+; Successful Exit!!
+;
+;-
+
+S14XIT:	BIT	#US.OLP,$USTAT	; Are we bringing a unit online?	;011
+	BNE	COMXIT		; Yup, so don't log an error packet.	;011
+	BISB	#BS.SUC,BBRFLG+1; Say we did it!			;011
+	BR	LOGERR		; And go log the packet.		;011
+
+;
+;	- Step 15 -
+;
+
+S15XIT:	CALLX	$UNALL		; Unallocate new RBN descriptor.	;012
+	.BR	S16XIT		; Make sure Step 16 is next.		;011
+
+;
+;	- Step 16 -
+;
+
+S16XIT:	CLR	R0		; Tell $WTSAV not to compare data.	;011
+	CALLX	$WTSAV		; Write saved data back to LBN.		;012
+	.BR	S17XIT		; Make sure Step 17 is next.		;011
+
+;
+;	- Step 17 -
+;
+
+S17XIT:	CALLX	$FINSZ		; Restore RCT sector 0 to virgin state.	;012
+	.BR	S18XIT		; Make sure Step 18 is next.		;011
+
+;
+;	- Step 18 -
+;
+
+S18XIT:	MOV	$DSQ,R4		; R4 -> current DSQ.			;011
+	TSTB	DSQERR(R4)	; Is there already an error there?	;011
+	BPL	LOGERR		; Yup, so don't mess with it.		;011
+	CLRB	DSQERR(R4)	; Otherwise, return a data error.	;011
+LOGERR:	CALLX	$ERPKT		; Go log an error packet.		;012
+COMXIT:	MOV	$CMT,R4		; R4 -> CMT
+	MOV	$CCB,R5		; R5 -> CCB
+	MOV	$UCB,R3		; R3 -> UCB OF UNIT
+	MOV	$DSQ,R2		; R2 -> CURRENT DSQ
+	MAP	CM.AP6(R4),APR=6,DATA ; MAP TO UNIT'S CCB
+	BIC	#<US.BBR!US.OLP>,U.STAT(R3) ; Say we're not in BBR.	;011
+	BIS	#US.ONL,U.STAT(R3) ; SET IN CASE WE WERE DOING ONLINE
+;	MOV	#CMT+CM.QUE,R1	; R1 -> Queue root.			;011
+;10$:	MOV	(R1),R1		; R1 -> NEXT DSQ
+;	BEQ	20$		; END OF QUEUE
+;	CMP	R1,R2		; IS THIS CURRENT DSQ?
+;	BEQ	10$		; YES, GET NEXT
+;	MOV	DSQUMT(R1),R5	; R5 -> UMT
+;	MOV	(R5),-(SP)	; (SP) = CMT OFFSET			;014
+;	.ASSUME	UM.CMT	EQ	0
+;	ADD	#CMT,(SP)	; (SP) -> CMT
+;	CMP	UM.UCB(R5),R3	; Is this DSQ for our current unit?	;011
+;	BNE	10$		; No - go check next DSQ.		;011
+;	BITB	#R.BBR,DSQSTS(R1); Is this DSQ waiting for BBR?		;011
+;	BEQ	10$		; No, so go check the next DSQ.		;011
+;	BIS	#US.BBR,U.STAT(R3) ; Otherwise, there are more BBR	;011
+;				   ;  requests outstanding for this	;011
+;				   ;  unit, so set BBR flag again.	;011
+;20$:	
+	MOV	R2,R4		; R4 -> CURRENT DSQ
+	CLRB	DSQSTS(R4)	; FORCE REDO OF I/O
+
+	CALL	@RELUMR		; RELEASE UMR'S IF ANY
+
+	TSTB	DSQERR(R4)	; REPLACEMENT FAILED?
+	BMI	EXT		; No.					;009
+TESTP3::NOP			; THIS NOP IS CHANGED TO A BREAK POINT
+				;   WHEN CHECKING OUT BBR ON A NEW CONTROLLER.
+				;   IT IS USED BY THE USER TO OBTAIN SUCH DATA
+				;   AS RCT SIZE, ETC., TO BE USED FOR RCT
+				;   CHECKING.  SEE DOCUMENTATION FOR BBR
+				;   CHECK OUT ON A NEW CONTROLLER.
+				;-R5-> CCB, R4-> DSQ			;006
+	CALMCP	IODONE		;-Dequeue request, Q to SYDLRG, etc.... ;012
+
+EXT:	MAP	CMT+CM.BA6,APR=6,DATA ; MAP TO BBR WORK AREA
+	JMP	NXTBBR		; TRY FOR ANOTHER MESSAGE FROM DUDSK
+
+GLOBAL	<RELUMR,QUEL3Q>							;012
+
+
+	.END
+

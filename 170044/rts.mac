@@ -1,0 +1,1757 @@
+.INCLUDE /CMN:COMMON/						;034
+.INCLUDE /CMN:KERNEL/						;034
+.INCLUDE /CMN:FLDEF/						;034
+TITLE	RTS,<RUN-TIME SYSTEM & RESIDENT LIBRARY>,0B,21-JUN-91,MHB/ABC/MJG/SRM/SJM/WJS/GPK/DRP/KPH/WRM/VAM/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR RTS
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	SRM  25-Mar-81	Add patch 3.5.16 into source.
+;  002  SJM  06-Apr-81  Added default KBM
+;  003  SJM  22-Apr-81  Fix remove user if remove rts
+;  004  SJM  12-Aug-81  Fix POKER for I&D space (POKE trhough D-space)
+;  005	WJS  29-Oct-82	New UUOENT for EMT Logger
+;
+;				[RSTS V9.0]
+;  006	GPK  28-Mar-83	Multiple privileges
+;  007	DRP  20-Sep-83	Added check for open count in RTSADD
+;  008  KPH  08-Dec-83	Added dynamic regions
+;  009  KPH  14-Dec-83	Don't allow adding 1US KBMs as default RTS
+;  010  MNB  22-Jan-84  Asynch changes to M.CTRL byte
+;  011	KPH  27-Jan-84	Make first overlay smaller (to make 010 fit)
+;  012  KPH  08-Mar-84	Restrict region names to valid file names
+;  013	GPK  19-Apr-84	Privilege name changes
+;  014	KPH  23-Apr-84	Allow setting PF.EMT in dynamic regions
+;  015	KPH  23-Oct-84	Changes for non-SLA libraries
+;			Size calculation for dynamic regions
+;  016	KPH  29-Nov-84	Bugfix in 015
+;			Hooks for supervisor mode libraries
+;  017	KPH  07-Feb-85	Remove load subfuction
+;			Remove set default KBM
+;			Disallow removal of the default KBM
+;			Changes for the monitor KBM
+;
+;			[RSTS V9.1]
+;  018	KPH  05-Apr-85	Remove primary RTS
+;
+;			[RSTS V9.2]
+;  019  KPH  25-Jul-85	Job control region
+;  020  KPH  03-Dec-85	Pass job # to LIBSUB
+;
+;			[RSTS V9.3]
+;  021  FRL  25-Mar-86	Large library support
+;  022  FRL  15-Apr-86	Large dynamic regions
+;  023  FRL  23-Apr-86	Bug fix -- check for illegal RTS/LIB sizes
+;  024  KPH  08-Jun-86	Fix library write access checking
+;  025  KPH  16-Oct-86	Fix infinite loops when installing 1K regions
+;
+;			[RSTS V9.5]
+;  026  WRM  05-Jun-87  Add unrestricted Floating Libraries
+;
+;			[RSTS V9.6]
+;  027  WRM  05-May-88	Bug fix in Install Library code
+;			Fix POKER to work in FIP pool area
+;
+;			[RSTS V9.7]
+;  028  WRM  09-Sep-88	make LIB region ID 0 legal for F77
+;  029  WRM   7-Oct-88	seperate Dynamic region priviledge testing
+;  030  VAM  05-Jan-89	Add online allocation/deallocation of virtual disk.
+;  031  JFM  03-Mar-89	Fix bug-virtual disk creation w/size a multiple of 256
+;
+;			[RSTS/E V10.0]
+;  032  WRM  10-Jul-89	Fix best fit flag for non-priviledged jobs
+;
+;			[RSTS/E V10.1]
+;  033	WRM  25-Nov-90	Fix faulty stack order for non-priv best fit flag
+;			Replace check on requested size
+;  034	DRP  24-JAN-91	Source clear patch 3.7.2.
+;			Cleanup the BLDMAP routine.
+;			Move MAXHOL routine and merge in MORCRE into
+;			CREGRN to save a whole overlay.
+;-
+
+FQFSRT	RTS	;Begin RTS0						;030
+
+.SBTTL	Add/Load/Remove/Unload Run-Time System, Resident Library, Virtual Disk
+
+
+;+
+; UU.RTS - Add/Load/Remove/Unload RTS, Resident Library, Virtual Disk
+;
+;
+;	R4 -> FIRQB
+;		FQERNO =  0 = Add RTS
+;			200 = Add with defaults from .SIL (*'ed in list)
+;			  2 = Reserved - was "load RTS"
+;			  4 = Remove RTS
+;			  6 = Unload RTS
+;			 10 = Library - Create region
+;			    = Reserved - was "set default KBM"
+;
+;		If bit 4 (octal 20) is set in FQERNO, then this is a
+;		Resident Library/Dynamic Region function.  They follow
+;		the same basic pattern as the RTS functions:
+;			 20 = Add resident library
+;			 22 = not used
+;			 24 = Remove resident library
+;			 26 = Unload resident library
+;			 30 = Create dynamic region
+;			 32 = Create/delete virtual disk
+;
+;		FQPPN  =  PPN of library [ADD]
+;		FQNAM1 =  Disk file name (2 WORDS)
+;		FQEXT  =  Load address (K number) [ADD/LOAD]
+;		FQSIZ  =  RTS maximum image size (P.SIZE) or
+;			  dynamic region/virtual disk size
+;		FQBUFL =  RTS minimum image size (P.MSIZ) [ADD*]
+;		FQMODE =  Bit 15   => Stay in memory [ADD/LOAD]
+;			  Bit  7   => Attach to job [CREATE*]
+;		          Bits 7-0 =  Order in list [ADD]
+;		FQFLAG =  Flags (P.FLAG) [ADD*]
+;		FQPFLG =  RTS runnable extension (P.DEXT) [ADD*]
+;		FQPROT =  LIB protection code [ADD]
+;		FQDEV,FQDEVN = Device to use [ADD]
+;-
+
+
+	UUOENT	RTS,,,LOGABL   ;RUN-TIME SYSTEM & RESLIB HANDLING	;029
+	; DYNPRV=INSTAL		;set up privilege for DYNAMIC REGIONs	;029
+		PDYNPRV=PINSTAL	;done here to centralize privs used in 	;029
+		ODYNPRV=OINSTAL	;this module				;029
+
+	NOP			;for debugging a FIP overlay		;029
+	CLR	@#TYPCRE	;Clear best-fit flag			;021
+	MOV	#NULRTS,R3	;Get pointer to first non-system RTS	;018
+	MOVB	FQERNO(R4),R0	;GET THE FUNCTION
+	CMPB	#30,R0		;is it create region call?		;029
+	BEQ	10$		;yes- privilege test done in create	;029
+	TSTPRV	INSTAL,@#FIPRVM	;no test rest for privilege		;029
+	  BEQ	70$		;if 0 not proper privileged		;029
+10$:	BITB	#20,R0		;Is this a resident library/dynamic	;030
+				; region/virtual disk function?		;030
+	BEQ	20$		;No, must be a RTS - go check the name.	;030
+	MOV	#LIBLST,R3	;GET ROOT OF RESIDENT LIBRARY LIST
+	TST	FQNAM1(R4)	;Is this an named dynamic region?	;030
+	BNE	20$		;Yes, so go check the name.		;030
+				;Otherwise, its an unnamed region...	;030
+	CMPB	R0,#30		;Are we creating a dynamic region?	;030
+				; (That, and the virtual disk, are the	;030
+				; only entities that can legally be	;030
+				; unnamed).				;030
+	BLO	70$		;No, if the function code is < 30,	;030
+				; they're doing something with a RTS	;030
+				; or library, so go give PRIVOL.	;030
+	BNE	170$		;And, if the function code is <> 30,	;030
+				; then they want to do something with	;030
+				; the virtual disk, so go handle that.	;030
+	FJMP	CRERGN		;If we get here, the function code = 30	;030
+				;Go off to create a region (unnamed).	;030
+
+;+									;030+
+;	Here if a named region was specified.
+;-									;030-
+
+20$:	MOV	R3,R5		;KEEP A PREVIOUS POINTER AND
+	MOV	(R5),R3		; GET NEXT IN THE LIST
+	BEQ	80$		;END OF LIST, MATCH NOT FOUND
+	CMP	FQNAM1(R4),R.NAME(R3) ;NAME MATCH?
+	BNE	20$		;NO
+	CMP	FQNAM1+2(R4),R.NAME+2(R3) ;REALLY MATCH?
+	BNE	20$		;NO
+	BIC	#^C<16>,R0	;TRIM FUNCTION TO EVEN LOW BITS.
+	CMP	R0,#10		;IS FUNCTION CODE IN RANGE?
+	BHI	70$		;NO SO GOTO PRIVIOL
+	ADD	R0,PC		;NOW DISPATCH ON FUNCTION
+30$:	 ERROR	FIEXST		;0, ADD (or create region), give error	;011
+	 RETURN			;2, NOP (was the load function)		;017
+	 BR	60$		;4, REMOVE				;011
+	 BR	50$		;6, UNLOAD
+	TSTB	L.STAT(R3)	;Is this a library function?		;008
+.ASSUME	LS.LIB	EQ	200
+	BMI	30$		;Yes, so create region, it exists	;011
+40$:	ERROR	BADFUO		;No, so give an error			;030
+
+50$:	FJMP	UNLOAD		;Off to the unload code			;011
+60$:	FJMP	REMOVE		;Off to the remove code			;011
+
+GLOBAL	<NULRTS,FIPRVM,LIBLST,TYPCRE,CSR.DV>				;030
+
+70$:	ERROR	PRVIOL		;General protection violation
+
+80$:	CMPB	#30,R0		;Not in list, is this create region?	;008
+	BNE	100$		;No, not this time			;008
+90$:	FJMP	CRERGN		;Go and create the region (named)	;008
+
+100$:	BITB	#16,R0		;Not in list, not create region, is it add?
+	BNE	160$		;NOT ADD (ADD=0), SAY CAN'T FIND IT
+	CALLX	GUN,R5		;CHECK DEVICE TYPE AND MOUNTED
+	  BR	110$		;DEVICE IS DISK
+	ERROR	DEVNFS		; ELSE ERROR
+
+110$:	MOV	#UC.CNT,R0	;Get maximum count of open files	;007
+	BIC	(R1),R0		;Are we at the limit?			;007
+	BNE	120$		;No					;007
+	ERROR	DTOOOF		;Yes, then issue an error		;007
+
+120$:	MOV	FQEXT(R4),-(SP)	;SAVE THE LOAD ADDRESS (IF ANY)
+	MOV	R4,R0		;COPY FIRQB POINTER AND
+	ADD	#FQPPN,R0	; INDEX TO PPN, FILENAME.EXT
+	MOV	#^RLIB,FQEXT(R4) ;SET .EXT AS ".LIB"
+	BITB	#20,FQERNO(R4)	;IS IT A RESIDENT LIBRARY ADD?
+	BNE	130$		;YES, SKIP NEXT
+	MOV	#^RRTS,FQEXT(R4) ;SET .EXT AS ".RTS"
+130$:	TST	(R0)		;HAS PPN BEEN SPECIFIED?
+	BNE	140$		;YES, DON'T OVERWRITE IT
+	MOV	(PC)+,(R0)	;SET PPN AS "[0,1]"
+	 .BYTE	1,0
+140$:	CALLX	SDU		;NOW TRY TO FIND IT
+	BCS	160$		;CAN'T BE FOUND, ERROR
+	MOV	R0,-(SP)	;Save name pointer			;013
+	MOV	(R0),R0		;Get PPN of file			;013
+	MOVB	UPROT(R5),R1	; and protection code			;013
+	CALLX	CHKACC		;Check access rights to file		;013
+	BIT	#DDRLO,R0	;Read access disallowed?		;013
+	BNE	70$		;Yes, so error				;013
+	MOV	(SP)+,R0	;Restore R0				;013
+	BUFFER	GETSML,,20.	;FOUND, TRY TO GET A BLOCK
+	BVC	150$		;WE GOT IT
+	ERROR	NOBUFS		; ELSE ERROR
+
+150$:	MOV	@#FIPUNT,-(SP)	;Save the Fip Unit Number		;007
+	FJMP	MORRTS		;Continue to add the RTS		;007
+
+160$:	ERROR	NOSUCH		;CAN'T FIND IT ERROR
+
+;+									;030+
+;	Here's where we come to check out the parameters for a virtual
+;	disk create.  If things go well, we then FJMP off to CREGRN
+;	to actually do the dirty work.
+;-									;030-
+
+170$:	TSTPRV	HWCFG,@#FIPRVM	;Are they privileged enough to do it?	;030
+	BEQ	70$		;Nope - go give 'Protection Violation".	;030
+	TST	FQSIZ(R4)	;Do they want to create one?		;030
+	BNE	180$		;Yes, follow the 'create' path.		;030
+	FJMP	RVDSK		;Otherwise, off to remove virtual disk.	;030
+
+180$:	TST	@#CSR.DV	;Does it already exist?			;030
+	BNE	30$		;Yes, give 'Name or account now exists'	;030
+	MOV	#100000,FQMODE(R4)					;030
+				;Virtual disk is always /STAY.		;030
+	BIC	#74000,FQSIZ(R4);Always clear Best-Fit flag, limit size	;033
+	BIS	#100000,FQSIZ(R4); ...and always use new addressing.	;030
+	MOV	FQEXT(R4),R3	;Get copy of address parameter.		;030
+	INC	R3		;Is it -1?				;030
+	BEQ	190$		;Yes, so let it go.			;030	
+	INC	R3		;Is it -2?				;030
+	BEQ	200$		;Yup, so it's illegal - go error.	;030
+190$:	FJMP	CRERGN		;Go off to create a region (unnamed)	;030
+
+200$:	ERROR	BADCNT		;'?Illegal byte count for I/O'		;030
+
+GLOBAL	<FIPUNT>							;007
+
+FQFEND
+
+FQFSRT		;Begin RTS1						;030
+.SBTTL	Create a dynamic region						;008+
+
+;+
+; CRERGN - Create a dynamic region
+;
+;	R0  = Subfunction code						;030+
+;	R4 -> Work block
+;		FQNAM1 =  Region name (zero for unnamed)
+;		FQEXT  =  Load address
+;		FQSIZ =  Size of region
+;			 If this is virtual disk create
+;				then size is entire word
+;			 else
+;			 If Bit 15 is set
+;				then size is low byte
+;				and Bit 14 = Size may be smaller if necessary.
+;			 else
+;				size is low 7 bits
+;				and Bit 7 = Size may be smaller if necessary.
+;		FQMODE =  Bit 7  -> Attach me to the region
+;			  Bit 15 -> Keep region around after detaches
+;
+;		FQFLAG =  Flags
+;		FQPROT =  Protection code
+;
+;									;030-
+; On return:
+;
+;	FQPPN = Library ID of dynamic region
+;	FQSIZ (low byte) = Dynamic region size				;022
+;
+; WCB slot assignment rules						;028
+;	The attach region for this function varies from the .PLAS in	;028
+;	which slot is the first used. Because Multi-user LIBs require	;028
+;	user slot #1, .PLAS skips the 1st slot (#0) when assigning.	;028
+;	This code then can assure languages the Dyn Region will be in	;028
+;	user slot #0, Which is assumed by F77 and others.		;028
+;
+; Privilege rules							;029
+;	Dynamic Regions have a seperate priv class defined by DYNPRV	;029
+;	which need not be the same as the other RTS functions. No priv	;029
+;	is required to create a dynamic region until memory used in 	;029
+;	regions exceeds the KW value in REGMAX (which is initially 0).	;029
+;
+;-
+
+CRERGN:	TST	FQNAM1(R4)	;Is this an unnamed region?		;012
+	BEQ	10$		;Yes, then name is certainly OK		;012
+	MOV	FQEXT(R4),R3	;Stash the region address for a while	;012
+	CLR	FQEXT(R4)	;And zero it for CHKNAM			;012
+	CALLX	CHKNAM		;Now check out this region name		;012
+	MOV	R3,FQEXT(R4)	;And restore the region address		;012
+10$:	MOV	R4,R0		;Save work block pointer		;012
+	BUFFER	GETSML,,20.	;Get a small buffer for the region block
+	BVC	20$		;There was one, that's good
+	ERROR	NOBUFS		;No buffers, can't create the region
+
+20$:	TST	(R4)+		;Skip past the link to next
+	ADD	#FQNAM1,R0	;R0 -> Work block @ region name
+	MOV	(R0)+,(R4)+	;Copy first part of region name
+	BNE	30$		;Named region, that's OK
+	CLR	(R4)+		;Be sure region doesn't have a name
+	TST	(R0)+		;And advance to FQEXT
+	CMPB	#32,FQERNO-FQEXT(R0)					;030
+				;Is this a virtual disk create?		;030
+	BEQ	40$		;Yup, so don't 'unmark' it.		;030
+	CLRB	<FQMODE+1>-FQEXT(R0) ;Dynamic regions are never /STAY
+	BISB	#200,FQMODE-FQEXT(R0) ;And are always "attach me"
+	BIC	#^C<140377>,FQSIZ-FQEXT(R0) ;Limit region size to byte	;033
+	BR	40$		;Now join up
+
+30$:	MOV	(R0)+,(R4)+	;Now copy region name
+40$:	MOV	@#FIUSER,(R4)+	;And PPN of region owner
+	MOV	R4,R2		;R2 -> LIB block @ M.CTRL (for CHKADD)
+.ASSUME	FQEXT	EQ FQNAM1+4						;030
+	MOV	(R0)+,M.PHYA(R2) ;Save the load address
+.ASSUME	FQSIZ	EQ FQEXT+2						;030
+	TST	(R0)		;New style?				;022
+	BPL	50$		;No, check old flag			;022
+	BIC	#100000,(R0)	;Clear new type flag, now noted		;033
+	BIT	#40000,(R0)	;Best-fit?				;022
+	BNE	60$		;Yes, set real flag and check address	;022
+	BR	70$		;No, check size				;022
+
+50$:	BIC	#177400,(R0)	;Assure size limitation			;033
+	TSTB	(R0)		;Best-fit?				;022
+	BPL	70$		;Not "best-fit", load address is OK	;015
+	BICB	#200,(R0)	;Clear entry best-fit flag, old style	;033
+60$:	COM	@#TYPCRE	;Set real best-fit flag			;022
+	BIC	#40000,(R0)	;Clear best fit firqb			;033
+	TST	FQEXT-FQSIZ(R0)	;Address specified and best-fit?	;030
+	BNE	80$		;Yes, can't do that			;022
+70$:	TST	(R0)		;Check for illegal byte size		;033
+	BNE	100$		;Branch if size is okay (non-zero)	;031
+80$:	BIC	#37,R4		;Get back to base address of buffer.	;030
+	BUFFER	RETSML		;And, return it!			;030
+90$:	ERROR	BADCNT		;Size can't be 0K			;022
+
+100$:	ADD	#L.STAT-R.MCTL,R4 ;Now R4 -> LIB block @ R.FLAG
+	MOV	(R0),M.SIZE(R2)	;Get size, stripped of flags		;033+
+
+;+									;030
+;	Note that the above is a MOV and not a MOVB.  It therefore
+;	wipes out the contents of M.CTRL, but we don't care about that
+;	now. CHKADR and others use 16 bit size in MCSB in this module
+;	therefore it must be validated above to the proper size.
+;	At this point size has been assured for all 3 cases.		;033
+;-									;033-
+
+	TSTB	<FQMODE+1>-FQSIZ(R0) ;Is this a /STAY region?		;030
+	BPL	110$		;No, not this time
+	MOV	#100000,R.CNT-L.STAT(R4) ;This dynamic region stays in memory
+110$:	MOVB	#LS.LIB!LS.DYN,(R4)+ ;Indicate this is a dynamic region
+	MOVB	FQPROT-FQSIZ(R0),(R4)+ ;Set up the protection code
+	TSTB	FQPFLG-FQSIZ(R0) ;Is protection code real?
+	BNE	120$		;Yes, it sure is
+	MOVB	#42.,L.PROT-R.FLAG(R4) ;No, so default it to <42>
+120$:	MOV	FQFLAG-FQSIZ(R0),(R4) ;Save user's flags
+	BIS	#PF.RW!PF.NER!PF.REM,(R4) ;Regions are always RW/No-error/REM
+	BIC	#^C<PF.1US!PF.RW!PF.NER!PF.REM!PF.EMT>,(R4)		;014
+				;Clear unused flags			;014
+	MOV	R0,-(SP)	;Save work block pointer @ FQSIZ
+	CALL	CHKADD		;Go and check out the address
+	MOV	(SP)+,R0	;Now restore work block pointer @ FQSIZ
+	BIC	#37,R2		;Point back to root of LIB block	
+	CMPB	#32,FQERNO-FQSIZ(R0) ;Are we creating a virtual disk?	;030
+	BNE	130$		;No, go on normally.			;030
+	FJMP	CVDSK		;Yes, jump off to do it.		;030
+
+
+130$:	MOVB	R.MCTL+M.SIZE(R2),(R0) ;Return the size of the region.	;030
+	TSTB	FQMODE-FQSIZ(R0) ;Desire attachment?
+	BPL	180$		;No, not this time.			;030
+
+; At this point, we'll attach the user to the library
+
+	CLR	R1		;Initialize region ID counter		;016
+	MAP	@#FIPJC6,APR=6,DATA,PIC,R=3 ;Map JCR entry for job	;019
+	MOV	@#FIPJCR,R3	;R3 -> JCR entry of this job		;019
+	ADD	#JCWPTR,R3	;R3 -> JCR @ pointer to window block
+	MOV	(R3),R5		;R5 -> WDB of caller
+	BNE	140$		;We've got one, good			;019
+	MAP	FIPPOL		;Failed, restore FIP pool mapping	;019
+	CALLX	GETFIP		;Get a FIP pool buffer for a WDB	;019
+	BCS	210$		;Failed, forget it.			;030
+	MAP	@#FIPJC6,APR=6,DATA,PIC,R=5 ;Re-map JCR entry		;019
+	MOV	R4,R5		;Match conventions			;019
+	ADD	#W.WIN1,R5	;And point to W.WIN1			;019
+	MOV	R5,(R3)		;Set up the WDB pointer			;019
+140$:	MAP	FIPPOL		;Restore FIP pool mapping		;019
+
+; R0 -> FIRQB @ FQSIZ
+; R1 = Region ID counter so far
+; R2 -> LIB block
+; R5 -> Window block @ W.WIN1
+
+150$:	INC	R1		;Update region ID counter		;016
+	TST	-(R5)		;Is this a free slot?
+	BEQ	170$		;Yes, let's use it
+	BIT	R5,#40-3	;Have we run out of room in the WDB?
+	BNE	150$		;No, try again
+	MOV	-(R5),R3	;Do we have another WDB?		;016
+	BEQ	160$		;No, not this time			;016
+	MOV	R3,R5		;Yes, so point to it			;016
+	BR	150$		;And loop
+
+160$:	MOV	R5,R3		;Copy pointer to old WDB @ link to next	;016
+	CALLX	GETFIP		;Go get a buffer for a WDB		;019
+	BCS	210$		;Failed, oh well!			;030
+	MOV	R4,R5		;Put WDB pointer in correct place
+	ADD	#W.WIN1,R5	;Now point to window 1
+	MOV	R5,(R3)		;And save the address of the new WDB
+	BR	150$		;And try again				;019
+
+170$:	MOV	R2,(R5)		;Attach the user to the library
+	BIS	#WA$WRT,(R5)	;And mark the attachment as read/write	;024
+	INCB	R.CNT(R2)	;And say one more attachment (the first one!)
+	DEC	R1		;0 region is legal outside		;028
+	MOV	R1,FQPPN-FQSIZ(R0) ;And return the region ID		;016
+180$:	MOV	#LIBLST,R3	;Point to root of library list		;034
+	BIT	#PF.EMT,R.FLAG(R2) ;Is this a special region?		;014
+	BEQ	190$		;No, not this time			;034
+	MOV	(R3),(R2)	;Yes, so set our link to next		;014
+	MOV	R2,(R3)		; and link us to the head of the list	;014
+	BR	200$		;  and we're done			;034
+
+190$:	MOV	R3,R4		;Save pointer to current block (or list head) ;034
+	MOV	(R3),R3		;Get link to next in list
+	BNE	190$		;More to do, so go for it
+	MOV	R2,(R4)		;Now link this into the list
+
+; Now we'll add this entry to MEMLST, and we're done!
+;
+; R2 -> LIB block
+
+200$:	ADD	#R.MCTL,R2	;R2 -> LIB block @ memory control area	;034
+	CALLRX	RESENT		;Now make this entry resident
+
+
+210$:	MOV	R2,R4		;Get ready to return LIB block		;030
+	BUFFER	RETSML		;Return it				;030
+	ERROR	NOBUFS		;And tell them we didn't have a buffer	;030
+
+GLOBAL	<FIUSER,FIPJCR,FIPJC6,LIBLST,TYPCRE>				;030
+
+
+;+
+; CHKADD - CHECK PARAMETERS ON RTS/LIB ADD.
+;
+;	R2 -> RTS/LIB BLOCK @ R.MCTL
+;		M.PHYA = K# OF LOAD ADDRESS (OR 0 OR -1 OR -2)
+;		R.CNT-R.MCTL BIT 15 => /STAY
+;	R4 -> RTS/LIB BLOCK @ R.FLAG
+;
+;	FCALL	CHKADD
+;
+;	R0 =  RANDOM
+;	R1 =  RANDOM
+;	R3 =  RANDOM
+;	R4 =  RANDOM
+;	R5 =  RANDOM
+;-
+
+CHKADD:	MOV	(R4),R1		;copy of flag word
+	BIC	#^C<PF.RW>,R1	;isolate RW flag
+	TST	R.CNT-R.MCTL(R2) ;test the /STAY flag
+	BPL	10$		;not set
+	BIS	#1,R1		;or in /STAY flag with RW flag
+10$:	MOV	M.PHYA(R2),R3	;copy of requested address code, EQ 0?
+	BNE	20$		;No-
+	TST	R1		;any over ride flags (/STAY or RW)?
+	BNE	30$		;yes- force address to be picked
+	BR	50$		;no- it's a restricted LIB/RTS (small floatg)
+
+20$:	INC	R3		;was address code=-1?
+	BEQ	30$		;yes- force an address picking now
+	INC	R3		;no- was address code=-2=pick ADDR @load?
+	BNE	40$		;No- set "save load address" bit & continue
+	TST	R1		;yes- but are any overide bits set? =-2
+	BNE	30$		;yes- UFL overriden =-1
+	TSTB	L.STAT-R.MCTL(R2) ;no- but is it a LIB?
+	BPL	30$		;no- its a RTS so override UFL request
+	BISB	#LS.UFL,L.STAT-R.FLAG(R4) ;Mark as a UFL (=-2)
+	CLR	M.PHYA(R2)	;reset address code to select
+	BR	50$		;begin processing
+
+
+30$:	CLR	M.PHYA(R2)	;Set request address to 0 & begin (=-1)
+40$:	BIS	#PF.SLA,(R4)	;Set "save load address" flag w/ clr addr(=n)
+50$:	FCALL	CHKADX		;NOW CHECK FOR PARAMETERS (=0)
+	BCC	70$		;ALL O.K.
+60$:	MOV	R2,R4		;ERROR, COPY THE RTS/LIB POINTER
+
+	SUB	#R.MCTL,R4	; AND RE-INDEX TO TOP OF THE BLOCK
+	BUFFER	RETSML		;NOW RETURN THE RTS/LIB BLOCK
+	FJMP	CHKERR		;Now go back for the error		;008
+
+70$:	RETURN			;Success, we're done
+
+FQFEND
+
+FQFSRT		;Begin RTS2						;034
+
+MORRTS:	MOV	(SP)+,@#FIPUNT	;Restore the Fip Unit Number		;007
+	CMP	(R0)+,(R4)+	;SKIP PPN AND LINK OF BLOCK
+	MOV	(R0)+,(R4)+	;SET THE RTS OR LIB NAME
+	MOV	(R0)+,(R4)+	; BOTH PARTS
+	MOV	26-FQEXT(R0),(R4) ;SET THE RUNNABLE EXTENSION
+	BITB	#20,FQERNO-FQEXT(R0) ;IS IT A RESIDENT LIBRARY ADD?
+	BEQ	10$		;NO
+	MOV	FQPPN-FQEXT(R0),(R4) ;SET THE LIBRARY [PPN]
+10$:	MOV	(SP)+,(R0)	;RESTORE LOAD ADDRESS @ +14
+	ADD	#R.CNT-R.DEXT,R4 ;INDEX TO ACCESS CONTROL COUNT
+	MOV	FQMODE-FQEXT(R0),(R4) ;LOAD THE "STAY" & POSITION PARAMETERS
+	BIC	#^C<100377>,(R4) ; AND CLEAR ALL BUT "STAY" BIT & POSITION
+	MOV	@#FIBFBN+F.FBNL,-(R4) ;SAVE LSB OF N.E. BLOCK AND
+	MOVB	@#FIBFBN,-(R4)	; THE MSB ALSO
+	MOV	UAR(R5),-(SP)	;SAVE LINK TO THE R.E.'S
+	MOV	UAA(R5),R3	;GET LINK TO A.E.
+	BITB	USTAT(R5),#US.DEL!US.UFD!US.UPD!US.OUT ;VALID FILE?
+	BNE	50$		;NO, ERROR
+	ASR	R5		;DIVIDE N.E. OFFSET BY TWO (FIBUF & 777 = 0)
+	MOVB	R5,-(R4)	;SAVE N.E. OFFSET /2
+	CALLX	RDE		;NOW READ THE A.E.
+	BIT	(R5),#UL.BAD	;BAD BLOCK IN THIS FILE?
+	BNE	50$		;YES, DON'T LET IT IN!
+
+GLOBAL	<FIBFBN>
+
+	MOVB	@#FIPUNT,R1	;GET THE UNIT NUMBER
+	ASL	R1		; TIMES 2 FOR WORD ADDRESSING
+	MOVB	DEVCLU(R1),R1	;NOW WE HAVE THE DEVICE CLUSTER SIZE
+	CLR	R2		;CLEAR A HIGH ORDER AND
+	MOV	UCLUS(R5),R3	; GET THE FILE'S CLUSTER SIZE
+	DIV	R1,R2		;DIVIDE FOR # DC'S PER RP
+	MOV	(SP)+,R3	;RESTORE LINK TO R.E.'S
+	MOV	USIZ(R5),-(SP)	;SAVE THE FILE'S SIZE
+	CALLX	RDECHK		;READ THE FIRST R.E.
+	BEQ	50$		;NULL LENGTH IS AN ERROR
+	MOV	UENT(R5),R1	;GET THE STARTING DCN
+	MOV	R1,-(SP)	; AND SAVE IT ALSO
+	BEQ	50$		;NO FIRST DCN IS AN ERROR
+20$:	MOV	(R5)+,R3	;SAVE LINK TO NEXT R.E. (IF ANY)
+30$:	TST	(R5)		;END OF ALL RP'S?
+	BEQ	40$		;YES, SO O.K.
+	CMP	R1,(R5)+	;IS THE FILE CONTIGUOUS?
+	BNE	50$		;NOPE
+	ADD	R2,R1		;SO FAR, BUMP FOR NEXT RP
+	BIT	R5,#20-1	;MORE IN THE R.E.?
+	BNE	30$		;YES, LOOP
+	CALLX	RDECHK		;NO, TRY FOR THE NEXT R.E.
+	BNE	20$		;ANOTHER EXISTS, CONTINUE
+40$:	MOV	(SP)+,R2	;RESTORE STARTING DCN
+	CALLX	CNVDCN		; AND CONVERT IT INTO A FBN
+	MOV	R2,-(R4)	;STORE LSB OF DATA FBN AND
+	ADD	#1,(R4)		; +1 IT FOR THE .SIL INDEX
+	MOVB	R3,-(R4)	;STORE MSB OF DATA FBN AND
+	ADCB	(R4)		; CARRY IF NEEDED
+	MOVB	@#FIPUNT,-(R4)	;NOW SET THE UNIT NUMBER
+	MOV	(R0)+,-(R4)	;SET THE LOAD K ADDRESS
+.ASSUME	<R.MCTL+M.PHYA> EQ	<R.DATA-2>
+	ADD	#R.SIZE-<R.MCTL+M.CTRL+1>,R4				;030
+				;Index to remaining parameters.		;030
+	BR	60$		;NOW CONTINUE
+
+50$:	BIC	#40-1,R4	;ERROR, TO TOP OF THE BLOCK
+	BUFFER	RETSML		; AND RETURN IT
+	ERROR	PRVIOL		;NOW GIVE THE ERROR
+
+GLOBAL	<FIPUNT,DEVCLU>
+
+60$:	CALLX	READ		;NOW READ THE .SIL INDEX BLOCK
+	MOV	#FIBUF+1000,R1	;GET A BUFFER END+2 POINTER
+	CLR	-(SP)		; AND CLEAR A CHECKSM LOCATION
+	CMP	-(R1),#^RSIL	;REALLY A .SIL INDEX?
+	BNE	50$		;NO, ERROR
+70$:	MOV	-(R1),R2	;GET A WORD AND
+	XOR	R2,(SP)		; .XOR. IT INTO CHECKSUM
+	CMP	R1,#FIBUF	;MORE?
+	BHI	70$		;YES, LOOP
+	TST	(SP)+		;VALID CHECKSUM??
+	BNE	50$		;NO, ERROR
+	CMP	(R1),#1		;ONLY 1 IMAGE?
+	BNE	50$		;NOPE, ERROR
+	CMP	(R1)+,10(R1)	;STARTING BLOCK = 1 ?
+	BNE	50$		;NOPE, ERROR
+	MOV	24(R1),R2	;GET SIZE IN 256-WORD DISK BLOCKS (MAYBE?)
+	BEQ	80$		;NOT PRESENT, MAY BE OLD STYLE
+	BIT	R2,#4-1		;IS SIZE A 1K MULTIPLE?
+	BNE	50$		;NO, ERROR
+	ASH	#-2.,R2		;GET SIZE IN 1K-WORDS
+	CMP	R2,#255.	;Anything on in high byte?		;023
+	BHI	50$		;Yes, then size is too large		;023
+	BITB	#20,FQERNO-FQSIZ(R0) ;IS IT A RESIDENT LIBRARY ADD?
+	BNE	100$		;YES, JUST STORE IT AWAY
+80$:	MOV	20(R1),R2	;GET SIZE IN BYTES
+	ADD	#2,R2		; PLUS 1 WORD FOR THE 177776 LOCATION
+	BIT	R2,#4000-1	;IS SIZE A 1K MULTIPLE?
+	BNE	50$		;NO, ERROR
+	BITB	#20,FQERNO-FQSIZ(R0) ;IS IT A RESIDENT LIBRARY ADD?
+	BNE	90$		;Yes (size OK since must be <= 31K in 5 bits) ;023
+	CMP	R2,#<28.*2048.>	;RTS size in bytes greater than 28Kw?	;023
+	BHI	50$		;Yes, illegal size			;023
+	MOV	R2,-(SP)	;NOW COPY THE SIZE +2
+	ADD	16(R1),(SP)+	; AND ADD IN THE LOAD ADDRESS
+	BNE	50$		;BAD FORMAT, ERROR
+90$:	ASH	#-11.,R2	;NOW FIND THE RTS/LIB SIZE IN K
+	BIC	#^C<37>,R2	; TRIMMING ANY SIGN EXTENSION
+100$:	MOVB	R2,R.KSIZ-R.SIZE(R4) ;SET RTS/LIB SIZE IN K
+	BEQ	50$		;Zero size is an error			;023
+	MOV	R2,R3		;SAVE RTS/LIB SIZE IN K
+	ASH	#2,R3		;FIND RTS/LIB SIZE IN BLOCKS (BLOCK=4*K)
+	CMP	R3,(SP)+	;DOES FILE HOLD RTS/LIB AND .SIL INDEX?
+	BHIS	50$		;NOPE, SO ERROR
+	BITB	#20,FQERNO-FQSIZ(R0) ;IS IT A RESIDENT LIBRARY ADD?
+	BNE	140$		;YES, SKIP DEFAULTING CHECKS
+	NEG	R2		;NOW FIND THE
+	ADD	#32.,R2		; LEGAL MAXIMUM FOR A JOB IMAGE
+	BIC	#4-1,R2		;  WITH THE MMU ROUND DOWN OF 4K
+	BEQ	50$		;NULL SIZE HERE IS AN ERROR ALSO
+
+GLOBAL	<FIBUF>
+
+	TSTB	FQERNO-FQSIZ(R0) ;DESIRE FULL DEFAULTING FROM .SIL
+	BPL	110$		;NOPE
+	MOV	R2,-(SP)	;SAVE COMPUTED MAX JOB IMAGE SIZE
+	MOV	@#FIBFBN+F.FBNL,R2 ;GET THE LSB OF .SIL INDEX BLOCK
+	ADD	R3,R2		; AND FIND LAST BLOCK OF RTS
+	MOV	@#FIBFBN,R3	;ALSO GET THE MSB AND
+	ADC	R3		; CARRY IF NEEDED
+	CALLX	READ		;READ IN LAST BLOCK OF THE RTS
+	MOV	@#FIBUF+<P.SIZE&777>,(R0) ;DEFAULT MAX SIZE (P.SIZE)
+	MOV	@#FIBUF+<P.MSIZ&777>,20-16(R0) ;DEFAULT MIN SIZE (P.MSIZ)
+	MOV	@#FIBUF+<P.FLAG&777>,24-16(R0) ;DEFAULT FLAGS (P.FLAG)
+	MOV	@#FIBUF+<P.DEXT&777>,R.DEXT-R.SIZE(R4) ;DEFAULT EXTENSION (P.DEXT)
+	MOV	(SP)+,R2	;RESTORE COMPUTED MAX JOB IMAGE SIZE
+110$:	CMP	R2,(R0)+	;IS LEGAL SIZE < PASSED MAX SIZE
+	BLOS	120$		;YES, USE IT
+	MOV	16-20(R0),R2	;NO, USE PASSED MAX SIZE
+120$:	CMP	R2,@#SWPMAX	;IS MAX SIZE < SWAP MAXIMUM
+	BLOS	130$		;YES, USE IT
+	MOV	@#SWPMAX,R2	;NO, USE SWAP MAXIMUM
+130$:	MOVB	R2,(R4)+	;SET THE MAXIMAL JOB IMAGE SIZE
+	CMP	R2,(R0)		;NO, IS MAXIMUM < MINIMUM ??
+	BLO	50$		;CAN'T DO THAT, SO ERROR
+	MOVB	(R0),(R4)+	;O.K., SET MINIMUM SIZE
+	BNE	150$		;FINISH UP WITH FLAG WORD
+	BR	50$		;MINIMUM = 0, ERROR
+
+140$:	TST	(R0)+		;GET IN SYNC WITH RTS CODE
+	MOVB	#LS.LIB,(R4)+	;SET L.STAT
+	MOVB	FQPROT-FQNAM2(R0),(R4)+ ;SET L.PROT
+	TST	FQPROT-1-FQNAM2(R0) ;HAS THE PROTECTION BEEN SPECIFIED?
+	BNE	150$		;YES, SKIP DEFAULT
+	MOVB	#42.,-1(R4)	;SET L.PROT TO DEFAULT <42>
+150$:	MOV	FQFLAG-FQNAM2(R0),(R4) ;NOW SET THE FLAGS WORD
+	BIC	#PF.SLA,(R4)	; CLEARING OUR BIT
+	MOV	R4,R2		;COPY RTS/LIB POINTER @ R.FLAG
+	ADD	#R.MCTL-R.FLAG,R2 ; AND INDEX TO MEMORY CONTROL
+	FCALL	CHKADD		;CHECK FOR LEGAL ADD PARAMETERS
+	MOVB	#OUT,M.CTRL(R2)	;Set non-residency.			;030
+	FJMP	LNKBLK		;LINK BLOCK INTO LIST AND EXIT
+
+GLOBAL	<FIBFBN,FIBUF,SWPMAX>
+
+FQFEND
+
+FQFSRT		;Begin RTS3						;034
+LNKBLK:	ADD	#R.FILE-R.MCTL,R2 ;INDEX TO DATA/N.E. FBB PAIR
+	CALLX	RNEFBB		;NOW (RE-)READ THE N.E.
+	MOVB	@#FIPUNT,R1	;GET THE UNIT NUMBER
+	ASL	R1		; TIMES 2 FOR WORD ADDRESSING
+	BIT	#UC.WLO,UNTCNT(R1) ;WRITE LOCKED UNIT?
+	BNE	10$		;YES
+	INC	UACNT(R5)	;NO, BUMP THE ACCESS COUNT
+	MARK	FIBUF		; AND MARK BUFFER FOR WRITE
+	BIT	#UC.DLW,UNTCNT(R1) ;DATE OF LAST WRITE TYPE UNIT?
+	BNE	10$		;YES, WE DON'T ALTER ANYTHING
+	CALLX	RAE		;READ ACCOUNTING ENTRY
+	CALLX	DATEIT		;GO SET DATE OF LAST ACCESS
+10$:	INC	UNTCNT(R1)	;COUNT AS ANOTHER OPEN FILE
+	SUB	#R.FILE,R2	;BACK TO THE TOP OF THE RTS/LIB BLOCK NOW
+	MOV	#NULRTS,R3	;Point to the NULRTS block		;018
+	TSTB	L.STAT(R2)	;IS IT A RESIDENT LIBRARY BLOCK?
+.ASSUME	LS.LIB	EQ	200
+	BPL	20$		;NO
+	MOV	#LIBLST,R3	;GET ROOT OF RESIDENT LIBRARY LIST
+20$:	MOV	R3,R1		;KEEP A PREVIOUS POINTER AND
+	MOV	(R1),R3		; GET NEXT IN THE LIST
+	BEQ	30$		;END OF LIST
+	DECB	R.CNT(R2)	;PLACE THIS RTS/LIB HERE?
+	BNE	20$		;NOT YET, LOOP 
+30$:	MOV	R3,(R2)		;LINK NEW TO REST OF LIST AND
+	MOV	R2,(R1)		; LINK PREVIOUS TO THIS RTS/LIB
+	BIC	#377,R.CNT(R2)	;ENSURE NO USER COUNT IN NEW RTS/LIB
+	BPL	40$		;/STAY (BIT 15) IS OFF, ALL DONE
+	ADD	#R.MCTL,R2	;/STAY (BIT 15) IS ON, SO START
+	CALLX	RESENT		; THE RESIDENCY RIGHT NOW
+40$:	RETURN			;ALL DONE...
+
+GLOBAL	<FIPUNT,UNTCNT,NULRTS,LIBLST>					;018
+
+.SBTTL	Unload a RTS/LIB						;011+
+
+;+
+; UNLOAD - Unload a RTS/LIB
+;
+;	R3 -> RTS/LIB block
+;
+;	FJMP	UNLOAD
+;-
+
+.ENABL	LSB
+
+UNLOAD:	BIC	#100000,R.CNT(R3) ;UNLOADING, ENSURE /STAY IS OFF NOW
+	CMPB	#OUT,R.MCTL+M.CTRL(R3) ;SIMPLY NON-RESIDENT NOW?	;018
+	BEQ	50$		;Yes, simple, just exit
+
+10$:	CMPB	#MC.LCK,R.MCTL+M.CTRL(R3) ;I/O PENDING OR OTHER STUFF?	;010
+	BNE	INUERR		;YES, "INUSE" ERROR			;010
+	CMP	R3,@#JOBRTS	;IS THIS MATCH CURRENT WITH "JOB"'S RTS?
+	BEQ	INUERR		;MUST GIVE AN ERROR IF SO
+	TST	@#JOBWDB	;DOES "JOB" HAVE A WINDOW DESCRIPTOR BLOCK?
+	BEQ	20$		;NO
+	MOVB	@#JOB,R0	;Yes, get "JOB"s job # * 2		;020
+	CALLX	LIBSUB,R5	;RETURNS WITH ALL MAPPED LIBRARIES
+	  BR	40$		;CHECK AGAINST "JOB"
+20$:	MOV	R3,R2		;COPY POINTER TO THE BLOCK,
+	BIT	#PF.RW,R.FLAG(R3) ;IS THIS A R/W RTS?
+	BEQ	30$		;NO SO JUST REMOVE IT
+	TST	R.CNT(R3)	;IS ANYONE USING IT?
+	BNE	INUERR		;YES, SO TELL THE USER IT'S IN USE.
+30$:	CALLRX	REMRTS		; REMOVE FROM MEMORY LIST AND EXIT
+
+40$:	CMP	R3,R2		;IS "JOB" MAPPED TO THIS LIBRARY?
+	BEQ	INUERR		;Yes, so go say an error		;008
+50$:	RETURN			;No, go back to co-routine		;008
+
+INUERR:	ERROR	INUSE		;RTS/LIB IS "IN USE" NOW ERROR
+
+.DSABL	LSB
+
+.SBTTL	Remove a RTS/LIB						;011+
+
+;+
+; REMOVE - Remove a RTS/LIB
+; REMDIE - Remove a RTS/LIB for UU.DIE
+;
+;	R3 -> RTS/LIB block
+;	R5 -> Previous RTS in list
+;
+;	FJMP	REMOVE
+;-
+
+REMOVE:	CMPB	L.STAT(R3),#LS.LIB!LS.DYN ;Is this a dynamic region?	;011
+	BHIS	UNLOAD		;Yes, so remove is an unload		;018
+.ASSUME	LS.DYN	EQ	100
+.ASSUME	LS.LIB	EQ	200
+	CMP	R3,@#DEFKBM	;System default KBM?			;017
+	BNE	REMDIE		;No, that's good			;017
+	ERROR	PRVIOL		;Yes, so protection violation		;018
+
+REMDIE::TSTB	R.CNT(R3)	;ANY USERS?				;017
+	BNE	INUERR		;Yes, so report an error		;011
+	CALL	UNLOAD		;NO, UNLOAD IT FROM MEMORY		;018
+	CMP	R3,@#DEFKBM	;IS RTS THE DEFAULT KBM?
+	BNE	10$		;NO
+	MOV	@#RTSLST,@#DEFKBM ;YES, RESET DEFAULT KBM TO SYS-DEF-RTS
+10$:	MOV	(R3),(R5)	;DE-LINK FROM LIST
+	CLR	R0		;Get initial job #			;019
+20$:	TST	(R0)+		;Get the next job number to try		;019
+	CMP	R0,#JOBMX2	;Are we out of jobs to try?		;019
+	BHI	30$		;Yes, so done				;019
+	CALLX	MAPJCR		;No, map the JCR entry for this job	;019
+	CMP	R3,JCDRTS(R1)	;Is job using this RTS as default?	;019
+	BNE	20$		;No, not this time			;019
+	MOV	@#DEFKBM,JCDRTS(R1) ;Yes, so switch to DEFKBM		;019
+	BR	20$		;And loop for the rest...		;019
+
+30$:	MAP	FIPPOL		;Restore FIP pool mapping		;019
+	MOV	R3,R4		;SAVE THE POINTER TO BLOCK RELEASE
+	MOV	R3,R2		;COPY THE BLOCK POINTER AND
+	ADD	#R.FILE,R2	; INDEX TO DATA FBB/N.E. FBB PAIR
+	MOVB	-FBBSIZ(R2),R1	;GET THE UNIT
+	ASL	R1		; TIMES 2 FOR WORD ADDRESSING
+	DEC	UNTCNT(R1)	;1 LESS OPEN FILE ON UNIT NOW
+	CALLX	RNEFBB		;READ IN THE N.E.
+	BIT	#UC.WLO,UNTCNT(R1) ;WRITE LOCKED UNIT?
+	BNE	40$		;YES
+	MARK	FIBUF		;NO, MARK BUFFER FOR WRITE
+	DEC	UACNT(R5)	;ONE LESS OPEN IN ACCESS COUNTER
+	BNE	40$		;MORE, JUST EXIT
+	TSTB	USTAT(R5)	;MARKED FOR DELETE?
+	BPL	40$		;NO
+.ASSUME	US.DEL	EQ	200
+	CALLX	XFL3		;YES, SO DELETE IT NOW
+40$:	BUFFER	RETSML		;RETURN THE BLOCK
+	RETURN			;And now we're done
+
+GLOBAL	<RTSLST,DEFKBM,JOBMX2,UNTCNT>					;019
+
+.SBTTL	POKE MEMORY
+
+;+
+; UU.POK - POKE MONITOR MEMORY.
+;
+;	R3 =  PPN
+;	R4 -> FIRQB
+;		+4     -> LOCATION TO POKE
+;		+6     =  DATA TO POKE
+;-
+
+.ENABL	LSB
+
+	UUOENT	POK,SYSMOD,SYNC,LOGABL	;POKE MEMORY			;013
+
+	CMP	(R4)+,(R4)+	;INDEX TO ADDRESS AND DATA WORDS
+	MOV	(R4)+,R1	;GET THE ADDRESS
+	CMP	R1,#120000	;IS ADDRESS IN PERM. MAPPED REGION?
+	BLO	10$		;YES
+	CMP	R1,#121000	;NO, IN I/O PAGE or in FIP pool		;027
+	BLO	40$		;NEITHER, SO AN ERROR
+10$:	MOV	#PR7&4340,@#PS	;;;NO INTERRUPTS AND PREV MODE=KERNEL
+	CALLX	DPEEKR		;;;TRY TO "PEEK" AT THAT ADDRESS (IN D-SPACE)
+	TST	R0		;;;ANY ERROR?
+	BNE	50$		;;;YES, DON'T DO THE POKE
+	MOV	@#DPDR5,R0	;;;GET ADDR OF DPDAR5 (OR IPDR5)
+	SUB	#5*2,R0		;;;NOW ADDR OF DESC. REG 0
+	MOV	#8.,R3		;;;THERE ARE 8. OF THEM
+	MOV	R3,R2		;;;KEEP THAT COUNT
+20$:	MOV	(R0),-(SP)	;;;SAVE A DESC. REG
+	BIS	#4,(R0)+	;;;THEN ADD WRITE PRIVS TO IT
+	SOB	R3,20$		;;;LOOP
+	MOV	(R4)+,-(R1)	;;;!! DO THE POKE !!
+30$:	MOV	(SP)+,R3	;;;RESTORE A DESC. REG
+	BIC	(PC)+,R3	;;; AND MAKE IT GOOD
+	 .BYTE	^C<16>,0
+	MOV	R3,-(R0)	;;;  AND RESET IT
+	SOB	R2,30$		;;;LOOP
+	SPLC	3		;;;BACK TO LEVEL 3 NOW
+	RETURN			;EXIT
+
+40$:	ERROR	PRVIOL		;;;Can't poke what isn't permanently mapped ;006
+
+50$:	JMPX	ERROR		;;;ANNOUNCE THE "PEEK" ERROR
+
+GLOBAL	<DPDR5>
+
+.DSABL	LSB
+FQFEND
+
+FQFSRT		;Begin RTS4						;034
+
+.SBTTL	Check parameters on add/load of a RTS or LIB
+
+;+
+; CHKADX - Check parameters on add for RTS or LIB
+;
+;	R2 -> RTS/LIB block @ R.MCTL
+;
+;	FCALL	CHKADX
+;
+;	R0 =  Random
+;	R1 =  Random
+;	R2 =  Same as passed
+;	R3 =  Random
+;	R4 =  Random
+;	R5 =  Physical return address for failure (if error)
+;
+;	C=0 for success
+;	C=1 for failure, return is made to caller, when caller is done,
+;		caller must FJMP to CHKERR (with R5 preserved).
+;-
+
+CHKADX:	CALL	CHKADR		;Check out the address			;008
+	BCC	10$		;Success, that's great!			;008
+	MOV	(SP)+,R5	;Failure, so R5 has return address	;008
+10$:	RETURN			;Now we're done				;008
+
+.SBTTL	Entry point for CHKADR failure
+
+;+
+; CHKERR - Handle errors from CHKADR
+;
+;	R5 = Address to return to in CHKADR
+;
+;	FJMP	CHKERR
+;
+; This routine is used to provide co-routine returns across overlays.
+;
+; If CHKADR gets an error (and is called via CHKADX), the caller
+; is passed the address to return to in R5. When the caller is done
+; with specific handling, he will FJMP here to allow CHKADR to do
+; completion.
+;-
+
+CHKERR:	JMP	(R5)		;Now wasn't that easy			;008
+
+.SBTTL	Address checking happens here
+
+;+
+; CHKADR - CHECK PARAMETERS ON ADD FOR RTS OR LIB.
+;
+;	R2 -> RTS/LIB BLOCK @ R.MCTL
+;
+;	CALL	CHKADR
+;
+;	R0 =  RANDOM
+;	R1 =  RANDOM
+;	R3 =  RANDOM
+;	R4 =  RANDOM
+;	R5 =  RANDOM
+;
+;	IF C=0 THEN ALL O.K.
+;	IF C=1 THEN ERROR AND CO-ROUTINE RETURN IS TAKEN
+;-
+
+CHKADR:	MOV	M.SIZE(R2),R4	;Get size of RTS/region/virtual disk	;030
+	ASH	#11.-6,R4	; CONVERTED INTO A MMU SIZE
+	MOV	M.PHYA(R2),R1	;GET K# TO LOAD RTS/LIB AT
+	CMP	#2048.-4,R1	;Is the K# completely illegal?		;021
+	BLO	90$		;YES, ERROR
+	ASH	#11.-6,R1	;NO, MAKE INTO A MMU ADDRESS
+	ADD	R1,R4		; AND FIND MMU ADDRESS JUST BEYOND THE RTS/LIB
+	BCS	90$		;OVERFLOW, AN ERROR
+	CMP	@#MEMSIZ,R1	;IS THE SPECIFIED ADDRESS TOO HIGH?
+	BLO	90$		;YES, ALSO AN ERROR
+	MOV	R1,M.PHYA(R2)	;O.K. SO FAR, SET MMU ADDRESS FOR LOAD
+	FCALL	BLDMAP		;Go and build the memory map		;015
+	BCS	90$		;Error... report it			;015
+	BIT	#PF.SLA,R.FLAG-R.MCTL(R2) ;Do we need to find an address? ;015
+	BEQ	NONSLA		;No, not this time			;015
+	TSTB	L.STAT-R.MCTL(R2) ;Is this a library block?		;015
+.ASSUME	LS.LIB	EQ	200
+	BMI	10$		;Yes, it sure is			;015
+	BIT	#PF.RW,R.FLAG-R.MCTL(R2) ;Is this a read/write RTS?	;015
+	BNE	10$		;Yes, it sure is			;015
+	TST	R.CNT-R.MCTL(R2) ;Is it /STAY?				;015
+	BPL	30$		;No, so don't copy table part 2		;015
+
+; If we are adding a library, or a RW or STAY RTS, we need to merge the
+; bit table in the second half of FIBUF with the table in the first half.
+; This will keep us from trying to allocate memory which is already used
+; by a fixed structure.
+
+10$:	MOV	#200,R1		;Pick up count of words to copy		;016
+	MOV	#FIBUF,R3	;R3 -> FIBUF				;015
+20$:	BIS	200*2(R3),(R3)+	;Merge a word of the table		;016
+	SOB	R1,20$		;For the whole table			;015
+
+30$:	TST	M.PHYA(R2)	;Do we have to pick an address?		;015
+	BNE	80$		;No, we were given one			;008
+
+; The first thing we will do is find a best-fit hole of the required
+; size to create this entry
+
+	CALL	SLASIZ		;Get the size required for this entry	;015
+	MOV	R3,R0		;And match conventions for FNDHOL	;015
+	MOV	#-1,R5		;Set an impossibly large hole		;015
+	MOV	@#MEMSIZ,R1	;R1 -> Top of memory in slivers		;015
+	ASH	#6-11.,R1	;Now we have top address in KW		;015
+	BIC	#^C<3777>,R1	;Clear out trash bits			;015
+40$:	CALL	FNDHOL		;Go and find the hole			;015
+	BEQ	50$		;None, so we're done			;015
+	CMP	R4,R5		;Is this hole a better size?		;015
+	BHI	40$		;No, this hole is larger		;015
+	MOV	R4,R5		;Set the smallest hole size		;015
+	MOV	R1,R3		;And stash the address			;015
+	BR	40$		;Now loop for all the holes		;015
+
+; Now we have the "best-fit" hole at required size in R3, and the
+; required size in R0.
+
+50$:	TST	R5		;Did we ever find a hole?		;016
+	BMI	90$		;No, not this time, MEMLST messed up	;016
+	MOV	R3,R1		;Get starting K-address			;015
+	MOV	R0,R5		;And get the required size		;015
+	CALL	SETBT1		;Now allocate it			;015
+	BCS	90$		;Hummm... shouldn't happen		;015
+
+; Now we have allocated the required part of memory, we can look for
+; a hole large enough for this entry.
+
+	MOV	@#MEMSIZ,R1	;R1 -> Top of memory in slivers		;008
+	ASH	#6-11.,R1	;R1 has address to try in KW		;008
+	BIC	#^C<3777>,R1	;Clear out trash bits			;008
+	MOV	M.SIZE(R2),R0	;R0 = Size of region			;030
+	CALL	FNDHOL		;Now try to find a hole for us		;015
+	BEQ	60$		;Can't find one, check on best fit	;015	
+	ADD	R4,R1		;R1 -> End of hole + 1			;015
+	SUB	R0,R1		;Now R1 -> Top part of hole		;015
+	ASH	#11.-6,R1	;And convert it to slivers		;008
+	MOV	R1,M.PHYA(R2)	;And stash it in the RTS/LIB block	;008
+	BR	110$		;And get out				;015
+
+60$:	TST	@#TYPCRE	;Hole not found, do they want the best?	;021
+	BEQ	70$		;No, not this time			;021
+	FCALL	MAXHOL		;Find the largest hole in memory	;015
+	ASH	#11.-6,R1	;And convert it to slivers		;015
+	MOV	R1,M.PHYA(R2)	;And stash it in the RTS/LIB block	;015
+	MOVB	R0,M.SIZE(R2)	;Return the size of the region		;015
+	BNE	110$		;We got something, good!		;015
+70$:	SEC			;Tell the user about failure		;008
+	CALL	@(SP)+		;Call our caller			;008
+	ERROR	NOROOM		;And tell them we can't find room	;008
+
+; This is the add at a specific address code
+
+80$:	CALL	SETBIT		;TRY TO ALLOCATE NEW RTS/LIB FOR US
+	BCC	100$		;NO PROBLEM WITH THE SPECIFIC ALLOCATION
+90$:	SEC			;C=1 FOR AN ERROR CONDITION		;016
+	CALL	@(SP)+		;CALL OUR CALLER
+	ERROR	BADCNT		; THEN REPORT THE PARAMETER ERROR
+
+100$:	FCALL	MAXHOL		;Find the largest hole in memory	;015
+	CALL	SLASIZ		;Get amount of memory which must be free now ;015
+	CMP	R0,R3		;Do we have enough free memory?		;015
+	BLO	90$		;No, not this time (BLO=BCS)		;015
+110$:	CLC			;Indicate success			;015
+	RETURN			;And we're done				;015
+
+GLOBAL	<MEMSIZ,SATBUF,SATUNT,FIBUF,SWPMAX,TYPCRE>			;021
+
+.SBTTL	Calculate how much free memory must remain for SLA entries
+
+;+
+; SLASIZ - Calculate how much free memory must remain for SLA entries
+;
+;	R2 -> MCSB for entry to add
+;
+;	CALL	SLASIZ
+;
+;	R3 = Required free memory size
+;	R5 = Undefined
+;
+; This routine is used to return the amount of memory which must be
+; available as a minimum size hole if a given entry (RTS/LIB) were
+; to be added.
+;-
+
+SLASIZ:	MOV	@#SWPMAX,R3	;Guess at checking against SWPMAX	;015
+	BIT	#PF.RW,R.FLAG-R.MCTL(R2) ;Is this a read/write RTS?	;015
+	BNE	10$		;Yes, so check against SWPMAX		;015
+	TST	R.CNT-R.MCTL(R2) ;Is it /STAY?				;015
+	BMI	10$		;Yes, so check against SWPMAX		;015
+	MOVB	L.STAT-R.MCTL(R2),R5 ;Is this a library block?		;015
+.ASSUME	LS.LIB	EQ	200
+	BMI	10$		;Yes, check against SWPMAX		;015
+	MOV	R5,R3		;Dynamic RTS, use R.SIZE		;015
+.ASSUME	R.SIZE	EQ	L.STAT
+10$:	RETURN			;Now we're done				;015
+
+.SBTTL	Check a non-SLA RTS/LIB
+
+;+
+; NONSLA - Check a non-SLA RTS/LIB
+;
+;	R2 -> RTS/LIB @ R.MCTL
+;
+;	JMP	NONSLA
+;
+;	R0, R1, R3, R4, R5 = Undefined
+;	R2 = Same as passed
+;
+;	C = 1 to indicate failure (and co-routine call)
+;	C = 0 to indicate success
+;
+;	This routine checks to see if there is room to add a RTS/LIB
+;	that doesn't have a specific load address. If this is a RTS,
+;	we check for a hole for the RTS size and a hole for the user
+;	size. If this is a LIB, we check for a hole for the LIB size
+;	and a hole for the largest possible user area possible under
+;	this LIB, assuming the LIB will be mapped entirely.
+;
+;	The RTS/LIB and maximum possible user area will be set up
+;	in the bit mask.
+;
+;
+;-
+;
+NONSLA:	CLR	R5		;Pick up RTS/LIB size			;021
+	BISB	M.SIZE(R2),R5	; ...					;021
+	MOVB	R.SIZE-R.MCTL(R2),R3 ;Get job image max or L.STAT	;015
+.ASSUME	R.SIZE	EQ	L.STAT
+.ASSUME	LS.LIB	EQ	200
+	BPL	10$		;RTS, go handle that
+
+	BITB	#LS.UFL,L.STAT-R.MCTL(R2) ;is this a UFL?
+	BNE	30$		;yes- make sure SWPMAX remains availible
+
+; This is restricted library, calculate the largest possible user image.
+
+	MOV	R5,R1		;Copy size of library			;015
+	ADD	#3,R1		;And round up				;015
+	BIC	#3,R1		; to a 4K boundry			;015
+	CMP	R1,#28.		;Library larger than 28K?		;015
+	BHI	20$		;Yes, forget it				;015
+	MOV	@#SWPMAX,R3	;Pick up the swap maximum		;015
+	BIC	#3,R3		;Round down to a 4K boundry		;015
+	SUB	R1,R3		;Now R3 has largest possible user image	;015
+
+; Now we have the shared segment size in R5 and the user segment size
+; in R3.
+
+10$:	ADD	R5,R3		;R3 has maximum size for this RTS/LIB	;015
+	CMP	@#SWPMAX,R3	;Do we have room for this?		;015
+	BHIS	40$		;Yes, we sure do (BHIS=BCC)		;015
+20$:	SEC			;Doesn't fit, set our error flag	;015
+	CALL	@(SP)+		;Call our caller			;015
+	ERROR	NOROOM		;And report the NOROOM error		;015
+
+30$:	MOV	@#MEMSIZ,R1	;Get machine size			;034
+	ASH	#6-11.,R1	;Make into KW
+	BIC	#^C<3777>,R1	;clear extra bits
+	MOV	@#SWPMAX,R0	;Size hole to search for
+	CALL	FNDHOL		;See if such a space exists?
+	 BEQ	20$		;No- not enough memory
+40$:	CLC			;Indicate success			;015
+	RETURN			;And we're done				;015
+
+GLOBAL	<SWPMAX>							;015
+
+.SBTTL	ALLOCATE A REGION IN THE MEMORY BIT MAP
+
+;+
+; SETBIT - Allocate a region given a MCSB
+; SETBT1 - Allocate a region given an address and size
+;
+; For SETBIT:
+;	R2 -> MEMORY CONTROL BLOCK
+;
+; For SETBT1:
+;	R1 = Starting K address
+;	R5 = Number of K-words to allocate
+;
+;	CALL	SETBIT
+;
+;	R0 =  RANDOM
+;	R1 =  RANDOM
+;	R5 =  RANDOM
+;
+;	C=0 IF ALL ALLOCATED MEMORY IS FREE
+;	C=1 IF THE MEMORY IS IN USE (ALLOCATION IS NOT FINISHED)
+;-
+
+SETBIT:	MOV	M.SIZE(R2),R5	;Get desired region size.		;030
+	MOV	M.PHYA(R2),R1	;GET STARTING MMU ADDRESS		;015
+	ASH	#6-11.,R1	;CONVERT ADDRESS TO A K NUMBER
+	BIC	#^C<3777>,R1	; AND REMOVE SIGN EXTENSION
+SETBT1:	MOV	R1,R0		;COPY THE K NUMBER
+	ASH	#-3,R0		;CONVERT TO A BYTE IN THE MAP
+	ADD	#FIBUF,R0	; AND RELOCATE IT TO BUFFER
+	BIC	#^C<7>,R1	;ISOLATE THE BIT WITHIN BYTE
+	MOVB	BITBYT(R1),R1	;GET THE STARTING BIT
+10$:	BITB	R1,(R0)		;IS THIS K IN USE?
+	BNE	30$		;YES, RETURN ERROR
+	BISB	R1,(R0)		;NO, ALLOCATE IT
+	ASLB	R1		;NOW FOR THE NEXT BIT
+	BCC	20$		;IN THE SAME BYTE
+	INC	R0		;GO TO THE NEXT BYTE
+	INC	R1		; AND START AT THE LOW BIT
+20$:	SOB	R5,10$		;DO MORE IF THERE IS MORE
+	TST	(PC)+		;DONE, CLEAR THE CARRY
+30$:	SEC			;ERROR, SET THE CARRY
+	RETURN			;RETURN ERROR OR NOT
+
+GLOBAL	<FIBUF,BITBYT>
+
+.SBTTL	Find a hole of a specified size
+
+;+
+; FNDHOL - Find a hole of a specified size
+; 
+;	R0 = Minimum hole size
+;	R1 = Address (in KW) to start search at + 1
+;
+;	CALL	FNDHOL
+;
+;	R1 = Address (in KW) hole was found at, or zero if no hole found
+;	R4 = Size of hole
+;
+;	Z = 1 if hole not found
+;
+; This routine searches the table at FIBUF for a free hole in memory.
+; Searching begins at the user's specified address, and works backwards
+; towards the beginning of memory.
+;
+; Note that this routine will not find holes below 8KW, RSTS monitors
+; are always that large.
+;-
+
+FNDHOL:	MOV	R2,-(SP)	;Save one register			;015
+	MOV	R3,-(SP)	;And another one			;015
+	MOV	R5,-(SP)	;And another one			;015
+	DEC	R1		;Get actual starting address		;025
+	MOV	R1,R3		;Copy start address for divide
+	CLR	R2		;Clear MSB for divide
+	DIV	#10,R2		;Now R2 has FIBUF offset, R3 has start bit
+	BEQ	40$		;Initial offset less than 8KW, forget it
+	CLR	R5		;R5 will hold first bit to test
+	BISB	BITBYT(R3),R5	;R5 = First bit to test (no sign extension)
+	CLR	R4		;Initially hole size is zero
+10$:	BITB	R5,FIBUF(R2)	;Is this K free?
+	BNE	20$		;No, not this time	
+	INC	R4		;Yes, so say 1K more is available
+	BR	30$		;And get ready for next bit		;015
+
+20$:	CMP	R4,R0		;End of hole, is it big enough?		;015
+	BHIS	50$		;Yes, so we're done			;015
+	CLR	R4		;No, so forget hole size		;015
+30$:	DEC	R1		;Indicate we've gone down by 1K
+	ASR	R5		;Off to next bit
+	BCC	10$		;Still in this byte, that's good
+	;SEC			;From ASR above
+	RORB	R5		;Ready for the next high bit
+	SOB	R2,10$		;And loop for all memory
+40$:	MOV	#-1,R1		;End of memory, say that we didn't find it ;015
+
+50$:	MOV	(SP)+,R5	;Restore R5				;015
+	MOV	(SP)+,R3	;And R3					;015
+	MOV	(SP)+,R2	;And R2					;015
+	INC	R1		;Correct address and set Z-bit		;015
+	RETURN			;And we're done
+
+GLOBAL	<BITBYT,FIBUF>
+
+FQFEND
+
+FQFSRT		;Begin RTS5						;034
+
+.SBTTL	Build a map of present memory usage
+
+;+
+; BLDMAP - Build a map of all memory in FIBUF and perform some tests
+;
+;	R2 -> MCSB of entry to check
+;
+;	FCALL	BLDMAP
+;
+;	R0, R1, R3, R4, R5 = Undefined
+;
+;	C = 1 if error
+;
+;	This routine:
+;		1. Sets a bit in FIBUF corresponding to each 1K of memory
+;		   that is permently allocated. Note that for the purpose
+;		   of this routine, a resident library at a specific
+;		   address is considered permanently allocated.
+;
+;		2. Sets a bit in FIBUF corresponding to each 1K of memory
+;		   that is allocated to a specific address, but not permenant.
+;		   This table starts at offset 400(8) in FIBUF.		;034
+;
+; Note: If the MCSB being passed is for a library or runtime system,
+; the MCSB will not be allocated in the table.
+;-
+
+.ENABL	LSB
+
+BLDMAP:	CALLX	WRITEC		;FLUSH OUT THE BUFFER IF NEEDED
+	MOVB	#-1,@#FIBUNT	;THE BUFFER IS NOW SCRATCH
+	MOV	#FIBUF,R0	;CLEAR OUT THE BIT MAP
+	MOV	#256.,R1	; OF MEMORY ALLOCATION			;015
+10$:	CLR	(R0)+		;  TO INDICATE EVERYTHING
+	SOB	R1,10$		;   FREE
+	MOV	#MEMLST,R4	;POINT TO MEMLST TO ALLOCATE LOCKED MEM
+20$:	BIT	R4,#20!10	;JOB OR RTS OR LIB?
+	BNE	30$		;YES: JOB TRANSIENT, RTS/LIB IS DONE LATER
+.ASSUME	JDMCTL	EQ	20
+.ASSUME	R.MCTL	EQ	10
+	CALL	ALOPRM		;NO, A LOCKED ITEM. ALLOCATE ITS REGION
+	BCS	150$		;MEMLST is screwed up!!			;034
+30$:	MOV	M.PNXT(R4),R4	;NEXT ITEM
+	BNE	20$		; IF ANY
+	MOV	@#NULRTS,R4	;Get first RTS after NULRTS		;017
+	BEQ	40$		;None, nothing to check			;017
+	CALL	ALLOC8		;LOOK FOR RUN-TIME SYSTEMS		;034
+40$:	MOV	@#LIBLST,R4	;POINT TO FIRST RESIDENT LIBRARY BLOCK
+	BEQ	130$		;None, so don't check libraries		;034
+	CLR	R0		;set MAX UFL size to none
+	CALL	ALLOC8		;LOOK FOR RESIDENT LIBRARIES
+	TSTB	L.STAT-R.MCTL(R2) ;are we installing a LIB?
+.ASSUME	LS.LIB	EQ 200
+	BPL	70$		;no- see if found a UFL in list
+	MOV	M.SIZE(R2),R5	;Yes- get size of requested UFL.	;033
+	BIT	#LS.DYN,L.STAT-R.MCTL(R2) ;Doing Dynamic region?	;029
+	BEQ	50$		;no- 					;029
+	TSTPRV	DYNPRV,@#FIPRVM	;yes-test for proper priv to exceed 	;029
+	BNE	50$		;proper priv- let him thru		;029
+	ADD	R5,@#REGMAX+2	;Regmax+2 is region in use(KW) before 	;029
+	BISB	#LS.NPC,L.STAT-R.MCTL(R2) ;not a privileged create,note	;029
+	CMP	@#REGMAX,@#REGMAX+2 ;will this Region exceed quota?	;029
+	BHIS	50$		;no- Privileges not needed to create	;029
+	TST	@#TYPCRE	;is the best fit flag set?		;033
+	BEQ	140$		;no- he's kaput				;034
+	SUB	R5,@#REGMAX+2	;back his out of current use mem sum	;032
+	MOV	@#REGMAX,R5	;get maximum non-priv size usable	;032
+	SUB	@#REGMAX+2,R5	;minus memory use other than him	;032
+	BLE	140$		;disallow for 0 or minus result		;034
+	MOV	R5,M.SIZE(R2)	;make the difference his requested size	;034
+50$:	BIT	#LS.UFL,L.STAT-R.MCTL(R2) ;are we installing a ufl?	;029
+	BEQ	70$		;no- but see if one in list
+	CMP	R0,R5		;is it bigger than max UFL in list?
+	BPL	130$		;no- which means were done bldmap
+				;yes- which means the existing UFL
+				;allocation is to small,therrefore
+				;fndhol .GE. this UFL size request
+				;NO UFL allocation yet done.
+	;+								;034
+	;after allocation here of the largest UFL, 'NONSLA' routine
+	;must assure that a hole of swapmax-4kw remains for the
+	;largest  task which can use the UFL Library.
+	;-								;034
+
+	MOV	R5,R0		;MAX UFL size now in R0
+	MOV	@#MEMSIZ,R1	;GET MACHINE SIZE IN MMU
+	ASH	#6.-11.,R1	;make it into Kwords			;027
+	BIC	#^C<3777>,R1	;no sign extend
+	FCALL	FNDHOL		;Look for hole R0 begin @ R1, descending
+60$:	BEQ	140$		;IF 0 then no room (this is a page hop)	;029
+				;success leaves R1 the start address
+				;& R5 the UFL size required, so..
+	BR	120$		;allocate that hole in perm. table	;034
+
+70$:	TST	R0		;is there a UFL in the list
+	BEQ	130$		;no- done bldmap
+	MOV	@#MEMSIZ,R1	;Get memory size in MMU
+	ASH	#6.-11.,R1	;make into K words for search start
+	BIC	#^C<3777>,R1	;no sign extend
+
+	;+								;034
+	;Note R0,R2,R3,R5 are preserved by the FNDHOL routine		;034
+	;The next group computes the beginning and ending address of	;034
+	;the current non-UFL request so that we do not arbitrarily go	;034
+	;and put the UFL space right where we will in a moment want to	;034
+	;put this request.
+	;-								;034
+
+	MOV	M.PHYA(R2),R5	;Get requested load address
+	ASH	#6-11.,R5	;convert to Kwords, 0 addr or not
+	BIC	#^C<3777>,R5	;no sign extend
+	MOV	R5,-(SP)	;Save on stack
+	CLR	-(SP)		;make a scratch cell
+	MOV	M.SIZE(R2),R4	;Get size of current request.		;030
+	ADD	R5,R4		;start+size=top address in Kwords
+	MOV	R4,-(SP)	;save the top address needed
+	CLR	R5		;smallest size so far
+	CLR	R3		;&where it begins
+80$:	FCALL	FNDHOL		;fnd next hole down or 0 if none
+	TST	R1		;was hole found?
+	BEQ	110$		;No hole if 0
+	TST	4(SP)		;Should we worry about overlap?
+	BEQ	90$		;NO 0 in load address
+	CMP	R1,(SP)		;is request hi addr<hole beginning?
+	BHI	90$		;yes -ok, hole above request
+	MOV	R0,2(SP)	;UFL to computation cell
+	ADD	R1,2(SP)	;add hole beginning=top UFL address
+	CMP	4(SP),2(SP)	;is top UFL addr<request load addr
+	BLOS	80$		;descard hole because of overlap
+90$:	TST	R5		;is this the 1st hole found?
+	BEQ	100$		;yes- now save and cont look
+	CMP	R5,R4		;is hole < current smallest?
+	BLOS	80$		;no leave as is
+100$:	MOV	R4,R5		;set new smallest hole so far
+	MOV	R1,R3		;and its address
+	BR	80$		;loop to look for next hole down
+
+110$:	ADD	#6,SP		;clean up stack from overlap tests
+	TST	R5		;Did we find at least one hole?
+	BEQ	140$		;no- sorry,tell user to buy bigger PDP
+	MOV	R3,R1		;set start address of hole for UFL
+	MOV	R0,R5		;set size to UFL needs
+120$:	FJMP	SETBT1		;and allocate it in perm table		;034
+
+	;general exit point
+
+130$:	TST	(PC)+		;Indicate success (C=0)			;034
+140$:	SEC			;Indicate failure			;015
+150$:	RETURN			;And we're done				;034
+
+GLOBAL	<MEMSIZ,FIBUNT,FIBUF,MEMLST,NULRTS,LIBLST>			;034
+
+.DSABL	LSB
+
+;+									;034
+; ALLOC8 - RTS/LIB allocation
+;
+; Inputs:
+;	R0 =  Max UFL size or zero if none
+;	R2 -> MCSB of entry to check
+;	R4 -> RTS or LIB list
+;
+;	CALL ALLOC8
+;
+; Output:
+;	R0 =  Max UFL size or zero if none
+;	R2 -> MCSB of entry to check
+;	R1,R3,R4,R5 = Undefined
+;-									;034
+
+.ENABL	LSB
+
+ALLOC8:	CLR	@#REGMAX+2	;initialize dyn region use tally word	;034
+	ADD	#R.MCTL,R4	;INDEX TO ITS MEMORY LIST POINTER
+	CMP	R4,R2		;IS THIS BLOCK THE ONE WE'RE CHECKING?
+	BEQ	50$		;YES. SKIP IT FOR NOW
+	BIT	#PF.SLA,R.FLAG-R.MCTL(R4) ;Is this SLA?			;015
+	BNE	10$		;yes- check for direct allocation
+	BIT	#LS.UFL,L.STAT-R.MCTL(R4) ;is it an unrestricted LIB	;034
+	BEQ	50$		;no- off no concern here
+	CLR	R5		;get the LIB size
+	BISB	M.SIZE(R4),R5	;...
+	CMP	R0,R5		;gtr than current MAX size UFL so far
+	BPL	50$		;no - leave max alone, skip here on
+	MOV	R5,R0		;set MAX to current value
+	BR	50$		;skip- only allocate the largest UFL
+
+10$:	TSTB	L.STAT-R.MCTL(R4) ;IS IT A LIBRARY BLOCK?
+.ASSUME	LS.LIB	EQ	200
+	BMI	20$		;Yes, so allocate it			;015
+	BIT	#PF.RW,R.FLAG-R.MCTL(R4) ;Is this a read/write RTS?	;029
+	BNE	30$		;Yes, so allocate it			;029
+	TST	R.CNT-R.MCTL(R4) ;Is it /STAY?				;015
+	BMI	30$		;Yes, so allocate it as permenant	;029
+	CALL	ALOTMP		;No, allocate it as temporary		;015
+	BR	40$		;And check for errors			;015
+
+20$:	BIT	#LS.NPC,L.STAT-R.MCTL(R4) ;Is it non-priv Dyn region?	;029
+	BEQ	30$		;no- don't tally memory use		;029
+	CLR	R5		;get KW used by this region		;029
+	BISB	M.SIZE(R4),R5	;...					;029
+	ADD	R5,@#REGMAX+2	;tally use				;029
+30$:	CALL	ALOPRM		;ALLOCATE A PERMANENT RTS/LIB		;029
+40$:	BCS	60$		;Two entries in the same place!
+50$:	MOV	R.LINK-R.MCTL(R4),R4 ;NEXT BLOCK
+	BNE	ALLOC8		; IF ANY				;034
+60$:	RETURN								;034
+
+GLOBAL	<REGMAX>							;034
+
+.DSABL	LSB
+
+;+									;034
+; ALOTMP - Allocate memory in temporary list of FIBUF
+; ALOPRM - Allocate memory in permanent list of FIBUF
+;
+; Inputs:
+;	R4 -> MCSB to allocate
+;
+;	CALL ALOTMP
+;         - or -
+;	CALL ALOPRM
+;
+; Output:
+;	R0 =  Preserved
+;	R1,R3,R5 = Undefined
+;
+;	C = 0	Memory allocated
+;	C = 1	Memory in use
+;-									;034
+
+.ENABL	LSB
+
+ALOTMP:	MOV	#400,R3		;Set up for second table		;016
+	BR	10$		;And join up				;015
+
+ALOPRM:	CLR	R3		;Use the first table			;015
+10$:	MOV	R0,-(SP)	;save  R0 = max UFL size to date
+	CLR	R5		;Get number of bits to allocate		;021
+	BISB	M.SIZE(R4),R5	; ...					;021
+	MOV	M.PHYA(R4),R1	;GET STARTING MMU ADDRESS
+	ASH	#6-11.,R1	;CONVERT ADDRESS TO A K NUMBER
+	BIC	#^C<3777>,R1	; AND REMOVE SIGN EXTENSION
+	MOV	R1,R0		;COPY THE K NUMBER
+	ASH	#-3,R0		;CONVERT TO A BYTE IN THD0MAP
+	ADD	#FIBUF,R0	; AND RELOCATE IT TO BUFFER
+	BIC	#^C<7>,R1	;ISOLATE THE BIT WITHIN BYTE
+	MOVB	BITBYT(R1),R1	;GET THE STARTING BIT
+	ADD	R0,R3		;Now R3 -> Table to set bits in		;015
+20$:	BITB	R1,(R0)		;IS THIS K IN USE?
+	BNE	40$		;YES, RETURN ERROR
+	BISB	R1,(R3)		;NO, ALLOCATE IT
+	ASLB	R1		;NOW FOR THE NEXT BIT
+	BCC	30$		;IN THE SAME BYTE
+	INC	R0		;GO TO THE NEXT BYTE
+	INC	R3		;In both places				;015
+	INC	R1		; AND START AT THE LOW BIT
+30$:	SOB	R5,20$		;DO MORE IF THERE IS MORE
+	TST	(PC)+		;DONE, CLEAR THE CARRY
+40$:	SEC			;ERROR, SET THE CARRY
+	MOV	(SP)+,R0	;pop R0 leaving carry untouched
+	RETURN			;RETURN ERROR OR NOT
+
+GLOBAL	<FIBUF,BITBYT>							;034
+
+.DSABL	LSB
+FQFEND
+
+
+FQFSRT		;Begin RTS6						;034
+
+;+									;030+
+;	CVDSK - Create virtual disk
+;
+; At entry:
+;	R0 -> FIRQB @ FQSIZ
+;	R2 -> LIB block
+;-									;030-
+	
+CVDSK:	MOV	(R0),R1			;Get cleaned up size from FIRQB	;033
+	MOV	R.MCTL+M.PHYA(R2),R3	; and base physical address.	;030
+	MOV	R1,-(SP)		;Save them on the stack, too -	;030
+	MOV	R3,-(SP)		; they're used to set up the	;030
+					; virtual disk CSR and size.	;030
+	MOV	#255.,R0		;Get a handy constant.		;030
+	CLR	-(SP)			;Make a "hole" to mark our place;030
+
+10$:	CMP	R1,R0			;Do we want more than 255K?	;030
+	BHI	20$			;Yes, so get a 255K chunk.	;030
+	MOV	R1,R0			;Otherwise, get only as much as	;030
+					; we need!			;030
+20$:	MOV	R2,-(SP)		;Stack current buffer's address.;030
+	MOV	R0,R.MCTL+M.SIZE(R2)	;Put size of this chunk away.	;030
+					; ...and clear mem control bits	;033
+	MOV	R3,R.MCTL+M.PHYA(R2)	;Also, it's base address.	;030
+	SUB	R0,R1			;Subtract this chunk from total.;030
+	BEQ	50$			;No more to do!			;030
+	MOV	R0,R5			;Get base address in K.		;030
+	ASH	#11.-6.,R5		;Convert to MMU slivers.	;030
+	ADD	R5,R3			;Bump base addr for next chunk.	;030
+	BUFFER	GETSML,,20.		;Get another buffer.		;030
+	BVS	30$			;Ain't no moah - oops!		;030
+	MOV	R4,R2			;Make new buffer our current one;030
+	BR	10$			;And, go again.			;030
+
+30$:	MOV	(SP)+,R4		;Get a buffer address.		;030
+	BEQ	40$			;We're at our "hole" - no more	;030
+					; to give back.			;030
+	BUFFER	RETSML			;Give it back.			;030
+	BR	30$			;Loop 'til all done.		;030
+	
+40$:	ERROR	NOBUFS			;Sorry, out of buffers!		;030
+
+;+									;030+
+;	OFFSET is a symbol we define locally (mostly to avoid a lot of
+;	typing!).  It represents the difference in position between
+;	the MCSB within a LIB/RTS block and the position of the MCSB
+;	within a Locked Memory block.  Basically, in order to convert
+;	the LIB/RTS blocks into Locked Memory blocks, we shift the MCSB
+;	up to the position it occupies in a Locked Memory block.  Also,
+;	in order to mark this block as a virtual disk block and not some
+;	other Locked Memory block, we set the word immediately after
+;	the MCSB to -1.
+;
+;	In addition, we also need to make sure that the L.STAT flag
+;	byte remains at the same offset from the MCSB as it was in the
+;	RTS/LIB block.  This is because routine ALLSET (in the memory
+;	manager) needs to be fooled into thinking that these are RTS/LIB
+;	blocks.  Rather than moving the flag word, we'll simply create a
+;	new one.
+;-									;030-
+OFFSET	= R.MCTL-ML.LCK
+
+
+50$:	MOV	(SP)+,R4		;Get a saved LIB block address.	;030
+	BEQ	70$			;All done!			;030
+	MOV	#<R.DATA-R.MCTL>/2,R0	;R0 = length of MCSB, in words.	;030
+	MOV	R4,R1			;Get another copy of pointer.	;030
+	ADD	#ML.LCK,R1		;R1 -> where to move MCSB.	;030
+	MOV	R1,R2			;Save new MCSB pointer for RESENT.
+									;030
+60$:	MOV	OFFSET(R1),(R1)+
+	SOB	R0,60$
+	MOV	#-1,(R1)		;Set flag saying this is a	;030
+					; virtual disk memory block.	;030
+	MOV	#<LS.LIB!LS.DYN>,L.STAT-OFFSET(R4)			;030
+					;Set flags to keep ALLSET happy.;030
+	CALLX	RESENT			;Add this block to the list!	;030
+	BR	50$
+
+
+70$:	CALL	DVFUN			;Get FUN*2 of virtual disk.	;030
+	MOV	(SP)+,R1		;Get base MMU address.		;030
+	ASH	#-5,R1			;Convert so DVDSK will like it.	;030
+	MOV	R1,@#CSR.DV		;Load CSRTBL.			;030
+	ASL	(SP)			;Change K words to blocks	;030
+	ASL	(SP)			; (blocks = K words * 4)	;030
+	MOV	(SP)+,UNTSIZ(R4)	;Put unit size, in blocks, away.;030
+	MOV	#100000,UNTCNT(R4)	;Say this device is available.	;030
+	RETURN				;All done!!			;030
+	
+GLOBAL	<UNTSIZ,CSR.DV>							;030
+
+
+;+									;030+
+;	RVDSK - Remove virtual disk
+;
+; At entry:
+;	R0 -> FIRQB @ FQSIZ
+;	R2 -> LIB block
+;-									;030-
+	
+RVDSK:	TST	@#CSR.DV		;Is it there?			;030
+	BEQ	40$			;No!  So give NODEVC.		;030
+	CALL	DVFUN			;Get FUN*2 of virtual disk.	;030
+	CMP	UNTCNT(R4),#100000	;Is it in use?  (100000 means	;030
+					; not mounted, not open NFS,	;030
+					; no open files)		;030
+	BNE	50$			;Yup!  Give INUSE error.	;030
+	MOV	#MEMLST,R2		;Get memory list root pointer.	;030
+10$:	MOV	M.PNXT(R2),R2		;Get pointer to MCSB.		;030
+20$:	BEQ	30$			;No more to do!			;030
+	MOV	R2,R1			;Get a copy of pointer.		;030
+	BIC	#^C<37>,R1		;Get rid of irrelevant bits.	;030
+	CMP	R1,#ML.LCK		;Is this a Locked Memory block?	;030
+	BNE	10$			;No, go go try the next one.	;030
+	CMP	R.DATA-<ML.LCK+OFFSET>(R2),#-1				;030
+					;Is this one of ours?		;030
+	BNE	10$			;Nope, so skip it.		;030
+	CALLX	BYERTS			;Remove it from the memory list!;030
+	TST	-(R0)			;Bump R0 so it points to start	;030
+					; of MCSB in previous entry	;030
+					; (BYERTS returns R0 -> previous;030
+					;  entry @ M.PNXT).
+	MOV	R0,R2			;Set up R2 for next link.	;030
+	BR	20$			;And, go get more.		;030
+
+30$:	CLR	UNTSIZ(R4)		;Clear UNTSIZ table entry...	;030
+	CLR	@#CSR.DV		; and CSR pointer.		;030
+	MOV	#120000,UNTCNT(R4)	;Say this device is unavailable.;030
+	RETURN				;Go back!			;030
+
+40$:	ERROR	NODEVC			;'?Not a valid device'		;030
+50$:	ERROR	INUSE			;'?Account or device in use'	;030
+
+GLOBAL	<CSR.DV,UNTSIZ>							;030
+
+
+.ENABL	LSB								;030
+
+.SBTTL	Return FUN*2 of Virtual Disk					;030
+
+;+									;030+
+;	DVFUN - Returns FUN*2 of Virtual Disk
+;
+; No setup is necessary.
+;
+;	CALL	DVFUN
+;
+; On return, R4 contains FUN*2 of virtual disk.
+;-									;030-
+
+DVFUN:	;CLR	R0			;We assume that DV: is unit 0.	;030
+	MOV	#DEVNAM,R4		;Start searching through DEVNAM.;030
+10$:	CMP	(R4)+,#"DV		;Did we get to "DV yet?		;030
+	BNE	10$			;No, so keep trying.		;030
+	SUB	#DEVNAM+2,R4		;Get just the offset in DEVNAM.	;030
+	MOV     DEVPTR(R4),R4		;Make it a UNTCNT table address.;030
+	SUB     #UNTCNT,R4		;Now, a FUN * 2!		;030
+	;ADD	R0,R4			;Add unit number*2 if necessary.;030
+	RETURN				;And, go back.			;030
+
+GLOBAL	<DEVNAM,DEVPTR,UNTCNT>						;030
+
+.SBTTL	FIND THE LARGEST HOLE IN THE BIT MAP
+
+;+
+; MAXHOL - FIND THE LARGEST HOLE IN THE BIT MAP.
+;
+;	FCALL	MAXHOL
+;
+;	R0 = SIZE OF HOLE (MAY BE 0!)
+;	R1 = K NUMBER OF START OF HOLE
+;-
+
+.ENABL	LSB								;034
+
+MAXHOL:	REGSCR			;SAVE THE REGISTERS
+	CLR	R0		;MAXIMUM HOLE SO FAR IS 0
+	CLR	R1		;START OF THIS HOLE REGION IS 0
+	CLR	R2		;K NUMBER WE ARE CHECKING STARTS AT 0
+	MOV	#FIBUF,R3	;START AT THE BEGINNING OF THE MAP
+	MOV	#1,R4		; WITH THE FIRST BIT
+	MOV	@#MEMSIZ,R5	;GET MACHINE SIZE AS MMU SIZE
+	ASH	#6-11.,R5	;MAKE IT INTO A K COUNT
+	BIC	#^C<3777>,R5	; WITH NO SIGN EXTENSION
+10$:	BITB	R4,(R3)		;IS THIS K FREE?
+	BNE	20$		;NO, GO END A HOLE
+	TST	R1		;YES, ARE WE IN A HOLE NOW?
+	BNE	40$		;IN HOLE, CONTINUE EXPANDING THE HOLE
+	MOV	R2,R1		;ELSE START A HOLE HERE
+	BR	40$		; AND GO EXTEND IT
+
+20$:	TST	R1		;A BUSY K. ARE WE IN A HOLE?
+	BEQ	40$		;NO, WE STILL AREN'T
+	MOV	R2,-(SP)	;YES, COMPUTE THE SIZE
+	SUB	R1,(SP)		; AS CURRENT K - STARTING K
+	CMP	R0,(SP)		;IS THIS THE BIGGEST SO FAR?
+	BHIS	30$		;NO, PUNT IT
+	MOV	(SP),R0		;YES, REMEMBER IT
+	MOV	R1,TOS.R1+2(SP)	;GIVE CALLER THE STARTING K NUMBER
+30$:	TST	(SP)+		;PURGE THE STACK
+	CLR	R1		;NOT IN A HOLE NOW
+40$:	ASLB	R4		;NEXT BIT
+	BCC	50$		;SAME BYTE
+	CMPB	(R3)+,(R4)+	;NEXT BYTE, FIRST BIT
+50$:	INC	R2		;NEXT K
+	CMP	R2,R5		;UP TO THE TOP?
+	BLOS	10$		;NOT YET
+	MOV	R0,TOS.R0(SP)	;YES, RETURN LARGEST HOLE
+	RETURN			; AND DONE
+
+GLOBAL	<FIBUF,MEMSIZ>
+
+.DSABL	LSB								;034
+
+FQFEND									;030
+.END
+
+

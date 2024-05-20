@@ -1,0 +1,194 @@
+1	SUB SETOMS
+	!
+	!	s u b p r o g r a m   t i t l e
+	!
+	!	subprogram : SETOMS.B2S
+	!	   version : V10.1
+	!	      edit : A
+	!	 edit date : 10-MAY-91
+	!	 author(s) : DBM
+	!
+	!********************************************************************
+	!
+	!		  C O P Y R I G H T
+	!
+	!
+	!		      Copyright (C) 1989, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.
+	!
+	!
+	! This software is furnished under a license and may be used and
+	! copied  only  in accordance with the terms of such license and
+	! with the  inclusion  of  the  above  copyright  notice.   This
+	! software  or  any  other copies thereof may not be provided or
+	! otherwise made available to any other person.  No title to and
+	! ownership of the software is hereby transferred.
+	!
+	! The information in this software is subject to change  without
+	! notice  and should not be construed as a commitment by Digital
+	! Equipment Corporation.
+	!
+	! DIGITAL assumes no responsibility for the use  or  reliability
+	! of its software on equipment that is not supplied by DIGITAL.
+	!
+	!********************************************************************
+	!
+	!	m o d i f i c a t i o n   h i s t o r y   l o g
+	!
+	!
+	! VER/ED	EDIT DATE	REASON
+	!
+	! T10.0-01	28-Mar-89	(DBM) Creation
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	p r o g r a m   d e s c r i p t i o n
+	!
+	!	SETOMS.B2S handles the SET OPERATOR_SERVICES command.
+	!
+	!********************************************************************
+	!
+	!	c h a n n e l   a s s i g n m e n t s
+	!
+	!	channel #	file-spec	description
+	!	=========	=========	===========
+	!	  0		_KB:		User keyboard (BP2 default)
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	C o m p i l e   O P T I O N s
+	!
+	!********************************************************************
+
+	OPTION	TYPE = EXPLICIT
+
+	!********************************************************************
+	!
+	!	I N C L U D E   r e q u i r e d   M A P s , C O M M O N s
+	!
+	!********************************************************************
+
+	%INCLUDE "CUI:CUICMN.E2S"		! Include CUI data section
+	%INCLUDE "SYSTEM:CMNDEF.B2S"		! Include OMS common defs
+	%INCLUDE "SYSTEM:OMSKEY.B2S"		! Include CUI key defs
+
+	!********************************************************************
+	!
+	!	D E C L A R E   V A R I A B L E S
+	!
+	!********************************************************************
+	
+	DECLARE	STRING	TEMP			! Temporary string storage
+
+	EXTERNAL WORD				! Patch points for OMSSUB     &
+				OMS$LO,		!   OMS Local Object Type     &
+				OMS$MM,		!   Message Max for declare   &
+				OMS$PD,		!   Raise privs for declare   &
+				OMS$PS		!   Raise privs for send
+
+	MAP (OMSREQ)	STRING	FILL = 14%,	! Layout parameter buffer     &
+			WORD	OMSCMD,		!   Command sent to OMS	      &
+				FILL(6),	!   Skip to error status word &
+				ERRSTS,		!   Error returned from call  &
+				ERRFLD		!   ORP field in error
+
+	MAP (CMDBUF)	STRING	CMDBUF = 4%	! Layout of command buffer:
+	MAP (CMDBUF)	BYTE	FLD.ML,		! Byte for OC$ML	      &
+				FILL,		! Reserved		      &
+				FLD.KEEP,	! Byte for keep level	      &
+				FLD.NOKP	! Byte for 'no' keep level
+
+	DECLARE WORD FUNCTION SET.CLR(WORD,WORD)! Function to handle /KEEP args
+
+	EXTERNAL WORD FUNCTION						      &
+			PRIVED (STRING),	! Function to check for priv  &
+			MGRSND (WORD, WORD),	! Function to send to OMS     &
+			MGRRCV (STRING, WORD, WORD, STRING) ! FN to rcv OMS ack
+
+	!	P E R F O R M   C O M M A N D   P R O C E S S I N G
+
+ SET_OMS:	! Set Operator Services Command
+
+	FLD.ML = OC$ML				! Set keep level field value
+	FLD.KEEP, FLD.NOKP = 0%			! Clear inital keep settings
+
+	CALL FET$CQ (KEEP.Q)			! Make sure /KEEP is there
+	IF (U.PRES = 0%)			! Was it?
+	THEN
+	  PRINT "?Additional qualifier required"
+	  GOTO SET_OMS_END			! No, get out.
+	END IF
+
+	IF U.NO					! Yes, was it /NOKEEP?
+	THEN
+	  FLD.NOKP = ML.ALL			! Yes, turn off everything
+	ELSE
+	  CALL FET$K				! No, find out what to keep
+	  WHILE U.PRES				!   Loop while keywords present
+	    SELECT U.KEY
+	      CASE MESS.K			!     /KEEP=MESSAGES?
+		JUNK = SET.CLR(ML.MSG, U.NO)	!     Yes, set keep level field
+	      CASE RQST.K			!     /KEEP=REQUESTS?
+		JUNK = SET.CLR(ML.REQ, U.NO)	!     Yes, set keep level field
+	      CASE ALL.K			!     /KEEP=ALL?
+		JUNK = SET.CLR(ML.ALL, FALSE)	!     Yes, set keep level field
+	      CASE NONE.K			!     /KEEP=NONE?
+		JUNK = SET.CLR(ML.ALL, TRUE)	!     Yes, clr keep level field
+	      CASE ELSE				!     Otherwise
+		GOTO SEND_CMD			!	End of argument list
+	    END SELECT
+	    CALL FET$K				!   Fetch next argument
+	  NEXT					! Loop if another one present
+	END IF
+
+ SEND_CMD:
+
+	FLD.KEEP = ML.ALL			! Default to /KEEP=ALL if,    &
+	  UNLESS FLD.KEEP OR FLD.NOKP		!   nothing was specified
+
+	GOTO SET_OMS_END						      &
+	  UNLESS PRIVED(PRIV.SWCFG)		! Get out unless priv'd user
+
+						! Set up for OMSSUB calls:
+	OMS$PD = TRUE				! Raise privs for declare
+	OMS$PS = FALSE				! Drop privs for send
+
+	ON ERROR GO BACK			! Start checking for ^C
+	JUNK = CTRLC				! Right now
+
+	GOTO SET_OMS_END			! Quit if...		      &
+	  UNLESS MGRSND(OC.SET, 4%)		!   unable to send cmd packet
+
+	GOTO SET_OMS_END			! Quit if can't get ack	      &
+	  UNLESS MGRRCV("", 90%, 15%, "acknowledgement")
+
+	JUNK = RCTRLC				! Done with ^C trap
+	IF ERRSTS
+	THEN
+	  TEMP = "?Program failure in " + P.NAM	! This may be a bug	      &
+	    +CR.LF +ERT$(ERRSTS) +" in OMSRCV"	!   Display error/module
+	ELSE
+	  TEMP = "Operator/Message Services modified"
+	END IF
+
+	PRINT TEMP
+
+32767	!
+ SET_OMS_END:
+
+	DEF* WORD SET.CLR(WORD BIT.VAL,NO.FLAG)	! Handle /KEEP arguments
+	  IF NO.FLAG				! Was it NOarg?
+	  THEN
+	    FLD.NOKP = FLD.NOKP OR BIT.VAL	! Yes, set nokeep level field
+	    FLD.KEEP = FLD.KEEP AND NOT BIT.VAL	!   and clear keep level field
+	  ELSE
+	    FLD.KEEP = FLD.KEEP OR BIT.VAL	! No, set keep level field
+	    FLD.NOKP = FLD.NOKP AND NOT BIT.VAL	!   and clear nokeep level field
+	  END IF
+	END DEF					! All done
+
+	END SUB

@@ -1,0 +1,375 @@
+.INCLUDE /SYSTEM:BCKPFX/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:FLDEF/
+TITLE	RSTDIR,<Directory Restoring>,0A,10-MAY-91,KPH/BGN
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for RSTDIR
+
+;+
+;
+;			[RSTS V9.0]
+;  000	KPH  16-Nov-83	Creation for Version 9.0
+;  001	KPH  28-Nov-84	Don't create accounts that aren't selected
+;			Skip account [0,1]
+;			Don't supercede accounting data when restoring
+;				to other than the original account.
+;  002	KPH  06-Mar-85	Add /OPTIMIZE=DIRECTORY
+;			Restore RDS0 passwords
+;			Don't verify quota blockette
+;
+;			[RSTS V9.1]
+;  003  KPH  23-Aug-85	Verify privilege mask is written correctly
+;
+;			[RSTS V9.5]
+;  004	BGN  14-Jul-87	Backup/Directory Support
+;
+;			[RSTS V10.0]
+;  005  REG  27-AUG-90	Give a better error message if no ?ACNT privs
+;-
+
+.SBTTL	Call and define any required MACROs
+
+.MCALL	CALBX,.ASCIC,$CUI
+
+$CUI	MSG
+
+;+
+; ATRNVR - Declare attribute fields which can't be verified
+;
+;	ATRNVR	num,<bits>
+;-
+
+.MACRO	ATRNVR	NUM,BITS
+.IF	IDN	<BITS>,<ALL>
+$$$$$$	=	177777
+.IFF	;IDN	<BITS>,<ALL>
+$$$$$$	=	0
+.IRP	SYM,<BITS>
+$$$$$0	=	1
+.REPT	<SYM-UADAT>
+$$$$$0	=	$$$$$0*2
+.ENDR
+$$$$$$	=	$$$$$$ ! $$$$$0
+.ENDM
+.ENDC	;IDN	<BITS>,<ALL>
+.SAVE
+	.PSECT	RODATA
+.=ATRNVT+<<NUM-1>*2>
+	.WORD	$$$$$$
+.RESTORE
+.ENDM	ATRNVR
+
+.SBTTL	Define our local data
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+ATRNVT:	.BLKW	127.		;Define unverifyable attribute table
+
+	.PSECT	RWDATA,RW,D,LCL,REL,CON
+
+ACTFLG:	.BLKW			;Flag word				;001
+R50PAS:	.BLKW	2		;Rad-50 password stashed here		;002
+
+.SBTTL	Define unverifyable attributes
+
+	ATRNVR	AA.DAT,<AT.KB,AT.LDA,AT.LDA+1,AT.LTI,AT.LTI+1>
+				;Unverifyable fields within date attribute
+	ATRNVR	AA.QUO,<AQ.CRM,AQ.CRL,AQ.CRL+1>				;002
+	ATRNVR	AA.PRV,ALL						;002
+
+.SBTTL	Flag bits in ACTFLG
+
+.BSECT	,NOCREF
+
+ACALOG:	.BLKB	.		;Attributes have been logged		;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+ACTPRN:	.BLKB	.		;If set, this is not the original account ;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+	.BLKB	.		;Reserved				;001
+ACTSKP:	.BLKB	.		;Skip restoring accounting data		;001
+
+.SBTTL	Process a directory attribute record
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+	RECENT	BRT$DA		;Directory attribute record
+
+	BIT	#DO.ACC,C$FLAG	;Do we want accounting data restored?
+	BEQ	30$		;No, so ignore this type of record
+	CLR	ACTFLG		;Clear out our flags			;001
+	MOV	BRH$VB(R3),$CURFI+C$PPN ;Go pick up the PPN
+	BEQ	20$		;None, this record is invalid
+	CALLX	CHKPLS		;Should we do this PPN?			;001
+	BCS	30$		;No, not this time			;001
+	CALLX	RENPPN		;Go and handle the PPN renaming
+	CMP	BRH$VB(R3),$CURFI+C$PPN ;Is this going to original account? ;001
+	BEQ	10$		;Yes, sure is				;001
+	BIS	#ACTPRN,ACTFLG	;No, so set the flag			;001
+10$:	CALLRX	ATRDSP		;Now process the attributes in this record ;001
+
+20$:	CMESSAGE #INVDAR	;Tell them we've got a strange record here
+30$:	RETURN			;And ignore it
+
+GLOBAL	<C$FLAG,$CURFI,INVDAR>
+
+.SBTTL	Process directory creation attributes
+
+	ATRENT	BRT$DA,BDA$CR,FIRQB+FQDEV,BCR$PW,BCRSIZ			;002
+				;Directory creation attribute
+
+;+
+;
+;	R2 = Length of attribute
+;
+; Old save sets do not contain RAD-50 passwords, so the attribute
+; record length will be shorter. If the length is equal to BCR$PW,
+; then this is an old saveset without a RAD-50 password. If
+; this is a new saveset, the length should be equal to BCRSIZ.
+; The range checker has verified the correct range, we will have
+; to make sure it is the two legal values and reject all others.
+;-
+
+	CMP	R2,#BCR$PW	;Is this an old save set?		;002
+	BEQ	10$		;Yes, sure is				;002
+	CMP	R2,#BCRSIZ	;How about a new one?			;002
+	BEQ	10$		;Yes, sure is				;002
+	CMESSAGE #INVALN	;No, report the invalid length		;002
+	JMP	130$		;And get out				;002
+
+10$:	CALLX	CHKINI		;Check for initializing output disk
+	;MOV	#FIRQB+FQDEV,R4	;Set up pointer to FIRQB
+	CALLX	CLRFQB		;Set up the FIRQB
+	MOV	$CURFI+C$PPN,@#FIRQB+10 ;Now use the current PPN
+	MOV	$DSKDEV,(R4)+	;On the RSTS device
+	MOV	$DSKUNT,(R4)+	;And unit
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;004
+	BEQ	50$		;No, not this time
+
+; Code below is VERIFY specific
+
+	CMP	$CURFI+C$PPN,#1	;Is this [0,1]?				;002
+	BEQ	45$		;Yes, don't try to verify it		;002
+	MOVB	#UU.RAD,@#FIRQB+FQFUN ;Function is accounting data lookup
+	MOVB	#1!10,@#FIRQB+12 ;Don't look up quota usage, return PRVIOL
+	.UUO			;Now do the lookup
+	MOVB	@#FIRQB,R1	;Pick up error code
+	BEQ	20$		;None, that's good
+	MOV	#ERRVAD,R2	;Error, set up the code			;002
+	BR	65$		;And report it				;002
+
+20$:	ADD	#2,R3		;Don't bother verifying clustersize/extend size
+	CMPB	(R3)+,@#FIRQB+34 ;Check quota LSB
+	BNE	40$		;Doesn't match, error
+	CMPB	(R3)+,@#FIRQB+35 ;How about quota MSB
+	BNE	40$		;No match, error			;002
+	CMP	R2,#BCR$PW	;Is this an old attribute?		;002
+	BEQ	45$		;Yes, don't check password		;002
+	MOV	#FIRQB+FQNAM1+2,R4 ;Point to password			;002
+	MOV	#4,R5		;Set up count to verify			;002
+30$:	CMPB	(R3)+,(R4)+	;Compare a byte of password		;002
+	BNE	40$		;Mismatch, error			;002
+	SOB	R5,30$		;Loop for the whole thing		;002
+	BR	45$		;Matches, get out			;002
+
+40$:	CMESSAGE #VEREAT,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>		;002
+				;Report this mismatch			;002
+45$:	JMP	130$		;And we're done				;002
+
+; Code below is RESTORE specific
+
+50$:	CMP	$CURFI+C$PPN,#1	;Is this account [0,1]?			;002
+	BEQ	120$		;Yes, so skip it			;002
+	;MOVB	#UU.PAS,@#FIQRB+FQFUN ;Function is create account	;002
+.ASSUME	UU.PAS	EQ	0
+	MOVB	(R3)+,@#FIRQB+FQFIL ;Using the passed UFD extend size
+.ASSUME	BCR$SI	EQ	0
+	BIT	#C2$DIR,C$FLG2	;Should we really pre-extend directories? ;002
+	BNE	60$		;Yes, well done...			;002
+	CLRB	@#FIRQB+FQFIL	;No, so use the default extension	;002
+
+60$:	MOVB	(R3)+,(R4)	;And pass the clustersize		;002
+.ASSUME	BCR$CS	EQ	BCR$SI+1
+	NEG	(R4)		;But indicate that it is OK to use PCS
+	MOV	#FIRQB+FQSIZ,R4	;Set up to pass quota and expiration date ;002
+	MOVB	(R3)+,(R4)+	;Set up the passed quota LSB		;002
+	MOVB	(R3)+,(R4)+	;And the passed quota MSB		;002
+.ASSUME	BCR$QU	EQ	BCR$CS+1
+.ASSUME	BCR$PW	EQ	BCR$QU+2
+	MOV	#R50PAS+4,R0	;Point to end of rad-50 password	;002
+	CLR	-(R0)		;Clear one word of it			;002
+	CLR	-(R0)		;And clear other word of it		;002
+	CMP	R2,#BCR$PW	;Is this an old attribute?		;002
+	BEQ	62$		;Yes, no password to look at		;002
+.REPT	4
+	MOVB	(R3)+,(R0)+	;Copy the password			;002
+.ENDR
+62$:	MOV	#-1,(R4)	;Guess at a no expire account		;002
+	CMP	R50PAS,#134745	;Is the password all question marks?	;002
+	BNE	64$		;No, not this time			;002
+	CMP	R50PAS+2,#134745 ;Maybe, is it ?????? ?			;002
+	BNE	64$		;No, not this time			;002
+	MOV	#1000.,(R4)	;Yes, so set expiration as Jan 0, 1970	;002
+
+64$:	.UUO			;Now create the account			;002
+	MOVB	@#FIRQB,R1	;Pick up any error code
+	BEQ	70$		;Very easy, it worked			;001
+	CMPB	R1,#FIEXST	;Error, but is it because the account exists?
+	BEQ	120$		;Yes, so that isn't really an error
+	MOV	#ERRCAT,R2	;Set up the error code			;002
+65$:	CMESSAGE R2,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>		;002
+				;Report an error creating an account
+	CMPB	#BADFUO,R1	;Is this ?Illegal SYS () usage?		;005
+	BNE	67$		;No, leave it				;005
+	MOVB	#PRVIOL,R1	;Yes, give 'em a better error		;005
+67$:	CMESSAGE R1		;Now tell them about it			;005
+	JMP	125$		;And get out				;005
+
+70$:	MOV	#R50PAS,R0	;Point to rad-50 password again		;002
+	TST	(R0)		;Is there really a password?		;002
+	BEQ	110$		;No, not this time			;002
+	CALLX	CLRFQB		;Clear out the FIRQB			;002
+	MOV	#FIRQB+FQFUN,R5	;Point to FIRQB @ FQFUN			;002
+	MOVB	#UU.ATR,(R5)+	;Function is write attributes		;002
+	MOV	#<<-2&377>!<AA.PAS*400>>,(R5)+ ;Set to write password	;002
+	MOV	$CURFI+C$PPN,(R5)+ ;Set up the account to use		;002
+	CLRB	(R5)+		;Skip unused word			;002
+	CALLX	RAD$W2		;Now convert the password		;002
+80$:	CMP	R5,#FIRQB+FQNAM1+1 ;Are we done yet?			;002
+	BEQ	90$		;Yes, sure are				;002
+	CMPB	-(R5),#40	;Trailing space?			;002
+	BNE	90$		;No, so all done			;002
+	CLRB	(R5)		;Convert spaces to nulls		;002
+	BR	80$		;And loop				;002
+
+90$:	MOV	$DSKDEV,@#FIRQB+FQDEV ;Set up device name		;002
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;And unit			;002
+	.UUO			;Now go for it				;002
+	MOVB	@#FIRQB,R1	;Pick up the error code			;002
+	BEQ	110$		;None, good				;002
+	CMESSAGE #ERWRAT,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>		;002
+				;Tell them error writing attributes	;002
+	CMESSAGE R1		;And the RSTS error code		;002
+
+110$:	CALLX	ACRLIS		;Go and log the account creation	;002
+	BR	130$		;And get out				;001
+
+120$:	TSTB	ACTFLG		;Have we changed the PPN?		;001
+.ASSUME	ACTPRN	EQ	200						;001
+	BPL	130$		;No, not this time			;001
+125$:	BIS	#ACTSKP,ACTFLG	;Yes, so skip the accounting data	;005
+130$:	RETURN			;Now we're done
+
+GLOBAL	<$DSKDEV,$DSKUNT,$CURFI,FIEXST,ERRCAT,ERRVAD,GENFLG,C$FLG2>	;002
+GLOBAL	<ERWRAT,INVALN,VEREAT,RESSUB>				;002	;004
+GLOBAL	<BADFUO,PRVIOL>							;005
+
+.SBTTL	Process directory attributes attributes
+
+	ATRENT	BRT$DA,BDA$AT,FIRQB+FQFUN,14.,14.
+				;Directory attributes attribute
+
+	TST	ACTFLG		;Should we skip this?			;001
+.ASSUME	ACTSKP	EQ	100000						;001
+	BMI	90$		;Yes, so forget it			;001
+	CALLX	CHKINI		;Check for initializing output disk
+	;MOV	#14.,R2		;Pick up count of bytes in attribute
+	;MOV	#FIRQB+FQFUN,R4	;Point to the FIRQB @ FQFUN
+	CALLX	CLRFQB		;Clear out the FIRQB
+	MOVB	#UU.ATR,(R4)+	;Function is read/write attributes
+	MOV	$DSKDEV,@#FIRQB+FQDEV ;Set up device name
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;And unit number
+	DECB	(R4)		;Guess at reading attributes (verify)
+	BIT	#RS$VFY,RESSUB	;Good guess?				;004
+	BNE	10$		;Yes, we were correct	
+	DECB	(R4)		;Writing attributes, set the type code
+10$:	INC	R4		;Advance to type code in FIRQB
+	MOVB	(R3)+,(R4)+	;Using the passed type code
+	MOV	$CURFI+C$PPN,(R4)+ ;Into the PPN we are working with
+	DEC	R2		;Correct attribute count
+	INC	R4		;And skip the unused byte
+	MOV	#ERVAAT,R1	;Guess at verify's error code
+	BIT	#RS$VFY,RESSUB	;Is this a verify?			;004
+	BNE	30$		;Yes, so guess was correct
+	MOV	#ERWRAT,R1	;Get error code for restore
+20$:	MOVB	(R3)+,(R4)+	;Copy a byte of attributes
+	SOB	R2,20$		;For all the attributes
+30$:	.UUO			;Now go for it
+	MOVB	@#FIRQB,R5	;Pick up returned error code
+	BEQ	40$		;None, that's good and easy
+	CMESSAGE R1,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>
+				;Tell them error writing attributes
+	CMESSAGE R5		;And the RSTS error code
+	BR	90$		;Now get out
+
+40$:	BIT	#RS$VFY,RESSUB	;Is this a verify?			;004
+	BNE	50$		;Yes, so go do the verify		;001
+	SUB	#14.,R3		;Point back to start of attribute	;003
+	CMPB	(R3)+,#AA.PRV	;Writing privilege mask?		;003
+	BNE	45$		;No, not this time			;003
+	MOV	#FIRQB+FQNAM1+1,R4 ;Yes, point to FIRQB			;003
+	MOV	#13.,R2		;And set up byte count			;003
+41$:	CMPB	(R3)+,(R4)+	;Privileges get written OK?		;003
+	BNE	42$		;No, not this time			;003
+	SOB	R2,41$		;Yes, loop for all of them though	;003
+	BR	45$		;Privileges OK, good			;003
+
+42$:	CMESSAGE #BADPRV,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>		;003
+				;Tell the user privileges not restored	;003
+45$:	BIT	#ACALOG,ACTFLG	;Have we logged this attribute yet?	;001
+	BNE	90$		;Yes, don't do it twice			;001
+	INC	ACTFLG		;Indicate we did the logging		;001
+.ASSUME	ACALOG	EQ	1
+	CALLX	ACALIS		;Go log the attibute restore		;001
+	BR	90$		;And get out				;001
+
+50$:	CLR	R5		;Guess at no mask
+	MOVB	-1(R3),R1	;Pick up the attribute code
+	BMI	60$		;User attribute, no mask given
+	ASL	R1		;System attribute, get attribute code * 2
+	MOV	ATRNVT-2(R1),R5	;R5 = Verification mask for this attribute
+
+60$:	CMPB	(R3)+,(R4)+	;Compare a byte of attributes
+	BEQ	70$		;They match, that's good
+	ASR	R5		;They don't match, so get a bit from the mask
+	BCS	80$		;Bit was on, so mismatch doesn't matter	
+	CMESSAGE #VEREAT,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>
+				;Tell them attribute verify error
+	BR	90$		;And get out
+70$:	ASR	R5		;Shift a bit of the attribute mask
+80$:	SOB	R2,60$		;Now loop for all the attributes
+
+90$:	RETURN			;Now we're done with this attribute
+
+GLOBAL	<$CURFI,$DSKDEV,$DSKUNT,ERWRAT,ERVAAT,VEREAT,GENFLG,BADPRV>	;003
+GLOBAL	<RESSUB>							;004
+
+.END

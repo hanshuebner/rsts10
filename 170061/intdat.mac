@@ -1,0 +1,410 @@
+	.NLIST
+	.NLIST	BEX
+	TTL$	INTDAT,INTDAS,R$$SUP
+	.LIST
+	.IDENT	/01/
+;
+;	International Date Formatting
+;
+;
+; COPYRIGHT 1985, 1986 DIGITAL EQUIPMENT CORP., MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED TO PURCHASER UNDER A LICENSE FOR USE
+; ON A  SINGLE COMPUTER SYSTEM AND CAN BE COPIED (WITH INCLUSION 
+; OF DEC'S COPYRIGHT NOTICE) ONLY FOR USE IN SUCH SYSTEM, EXCEPT 
+; AS MAY OTHERWISE BE PROVIDED IN WRITING BY DEC. 
+;
+; THE  INFORMATION IN THIS DOCUMENT IS SUBJECT TO CHANGE WITHOUT 
+; NOTICE AND  SHOULD NOT BE CONSTRUED AS A COMMITMENT BY DIGITAL 
+; EQUIPMENT CORPORATION. 
+;
+; DEC  ASSUMES NO  RESPONSIBILITY  FOR  THE  USE  OR RELIABILITY 
+; OF ITS  SOFTWARE ON  EQUIPMENT WHICH  IS NOT SUPPLIED BY DEC.  
+;
+; VERSION 01
+;
+; J. Covert	18-Apr-85
+;
+; Based on EDDAT written by
+;
+; G.W. BERRY/C. MONIA 06-APR-74
+;
+; DATE AND TIME FORMAT CONVERSION ROUTINES
+;
+; Last modified on 28-Mar-86
+;
+; Modified for RSX-11M-PLUS V3.0 Update C by:
+;
+;	Todd Schoeller		28-Mar-86	07.02
+;		TMS031 -- Correctly update R1 when a when the logical
+;			  sys$date_format is present.
+;
+
+	.MCALL	.PDATA,.PCODE,TLOG$S
+
+;+
+; **-$DAT-CONVERT DATE STRING
+;
+; THIS ROUTINE IS CALLED TO CONVERT THE THREE WORD INTERNAL DATE
+; TO THE STANDARD 9-CHARACTER OUTPUT FORMAT, AS FOLLOWS:
+;
+;			Z9-AAA-99
+;
+; OR TO A MORE GENERAL FORMAT DEFINED IN THE LOGICAL SYS$DATE_FORMAT.
+;
+; INPUTS:
+;
+;	R0 = OUTPUT STRING
+;	R1 = ADDRESS OF PARAMETER BLOCK
+;	WHERE THE FORMAT FOR THE PARAMETER BLOCK IS:
+;		.WORD 	YEAR	;YEAR-1900
+;		.WORD	MONTH	;MONTH OF YEAR
+;		.WORD	DAY	;DAY OF MONTH
+;	SYS$DATE_FORMAT, IF DEFINED, IS THE TEMPLATE FOR THE OUTPUT
+;	IF NOT DEFINED, STANDARD FORMAT IS PRODUCED
+;
+; OUTPUTS:
+;
+;	R0 = OUTPUT STRING (ADVANCED)
+;	R1 = (INPUT R1) + 6
+;-
+
+	.IF	NDF,R$$SUP	; NO DATA IN SUPERVISOR MODE LIBRARY
+
+	.PDATA			; PURE DATA PSECT
+
+;MONTH TABLE
+MONTH:	.ASCII /JANFEBMARAPRMAYJUNJULAUGSEPOCTNOVDEC/
+
+	.ENDC
+
+	.PCODE			; PURE CODE PSECT
+
+$DAT::				;
+	SAVRG			; SAVE NON-VOLATILE REGISTERS
+	MOV	R2,-(SP)	;
+	MOV	SP,R4		; SAVE SP
+	MOV	#"T ,-(SP)	; PUT "SYS$DATE_FORMAT"
+	MOV	#"MA,-(SP)	;
+	MOV	#"OR,-(SP)	; ONTO THE STACK FOR THE TLOG
+	MOV	#"_F,-(SP)	;
+	MOV	#"TE,-(SP)	; DIRECTIVE
+	MOV	#"DA,-(SP)	;
+	MOV	#"S$,-(SP)	;
+	MOV	#"SY,-(SP)	;
+	MOV	SP,R5		; START OF "SYS$DATE_FORMAT"
+	CLR	-(SP)		; MAKE A PLACE FOR THE LENGTH
+	MOV	SP,R3		; ADDRESS
+	TLOG$S	#0,#0,#0,R5,#15.,R5,#16.,R3
+	BCS	20$		; IF NO TRANSLATION, GO TO 20$
+	MOV	(SP),R3		; PUT THE LENGH OF SYS$DATE_FORMAT INTO R3
+	MOV	R1,(SP)		; STOW R1 HERE FOR SAFETY
+4$:	MOV	PC,R2		; ASSUME NO ZERO SUPPRESS
+5$:	DEC	R3		; COUNT DOWN THE LENGTH
+	BMI	17$		; IF MI, DONE!
+	CMPB	#'D,(R5)	; LOOK FOR "D"
+	BEQ	6$		; HANDLE "D"
+	CMPB	#'M,(R5)	; LOOK FOR "M"
+	BEQ	7$		; HANDLE "M"
+	CMPB	#'Y,(R5)	; LOOK FOR "Y"
+	BEQ	8$		; HANDLE "Y"
+	CMPB	#'Z,(R5)	; LOOK FOR "Z"
+	BEQ	12$		; HANDLE "Z"
+	MOVB	(R5)+,(R0)+	; COPY ANYTHING ELSE FROM INPUT TO OUTPUT
+	BR	4$		; AND CONTINUE LOOPING
+6$:	MOV	4(R1),R1	; GET DAY
+	BR	9$
+7$:	MOV	2(R1),R1	; GET MONTH
+	CMPB	#'M,2(R5)	; ARE THERE THREE M'S?
+	BEQ	14$		; IF EQ, YES
+	BR	9$		; NO, NORMAL NUMERIC MONTH
+8$:	MOV	(R1),R1		; GET YEAR
+9$:	TST	R2		; WAS A "Z" ENCOUNTERED
+	BEQ	10$		; IF EQ, YES, WE'RE PAST THAT ALREADY
+	INC	R5		; NO, BUMP OVER IT
+	DEC	R3		; AND DECREMENT THE COUNT
+10$:	INC	R5		; BUMP THE POINTER
+	CALL	$CBDAT		; CALL DATE CONVERSION
+11$:	MOV	(SP),R1		; AND RESTORE R1
+	BR	4$		; AROUND AGAIN
+12$:	CLR	R2		; SET ZERO SUPPRESS
+	INC	R5		; SKIP OVER THE "Z"
+	BR	5$		; AND BACK TO THE TOP
+14$:	MOV	R3,-(SP)	; SAVE SOME REGISTERS
+	MOV	R4,-(SP)	;
+	MOV	R5,-(SP)	;
+	MOV	SP,R4		; SAVE SP
+	MOV	R0,R5		; SAVE R0 WHILE WE USE $CBDAT
+	CLR	-(SP)		; MONTH NUMBER WILL GO HERE
+	MOV	SP,R0		; R0 MUST POINT FOR $CBDAT
+	MOV	R1,R3		; SAVE R1
+	CALL	$CBDAT		; PUT "NN" OF MONTH ON THE STACK
+	MOV	R3,R1		; RESTORE R1
+	MOV	R5,R0		; MIGHT AS WELL GET REAL R0 BACK NOW
+	MOV	#"H_,-(SP)	; WE'RE PUSHING "SYS$MONTH_NN"
+	MOV	#"NT,-(SP)	; ONTO THE STACK FOR THE TLOG
+	MOV	#"MO,-(SP)	; DIRECTIVE
+	MOV	#"S$,-(SP)	;
+	MOV	#"SY,-(SP)	;
+	MOV	SP,R5		; START OF "SYS$MONTH_NN
+	CLR	-(SP)		; MAKE A PLACE FOR THE LENGTH
+	MOV	SP,R3		; ADDRESS
+	TLOG$S	#0,#0,#0,R5,#12.,R5,#12.,R3
+	BCS	16$		; IF NO TRANSLATION, USE BUILTINS
+	MOV	(SP),R3		; PUT THE LENGH OF SYS$DATE_FORMAT INTO R3
+15$:	MOVB	(R5)+,(R0)+	; MOVE THE MONTH IN
+	DEC	R3		; DECREMENT LENGTH
+	BGT	15$		; IF GT, MORE, CONTINUE
+	BR	161$		; JOIN COMMON CODE
+16$:	CALL	30$		; CALL MONTH ROUTINE
+161$:	MOV	R4,SP		; RESET STACK
+	MOV	(SP)+,R5	; RESTORE R5-R3
+	MOV	(SP)+,R4	;
+	MOV	(SP)+,R3	;
+	ADD	#3,R5		; SKIP THE THREE LETTERS
+	SUB	#2,R3		; AND GET THE TWO EXTRA OFF THE COUNT
+	BR	11$		; AROUND AGAIN
+17$:	MOV	R4,SP		; RESTORE THE STACK
+	ADD	#6,R1		; update R1 by 3 words
+	MOV	(SP)+,R2	; RESTORE R2
+	RETURN
+20$:	MOV	R4,SP		; RESTORE THE STACK
+	MOV	(SP)+,R5	; R2 HIDES IN R5 THROUGH THIS CODE SECTION
+	MOV	R1,R4		; FREE UP R1, R2
+	MOV	(R4)+,-(SP)	; SAVE YEAR
+	MOV	(R4)+,-(SP)	; SAVE MONTH 
+	MOV	(R4)+,R1	; GET DAY
+	CALL	DIGS		; OUTPUT TWO DIGITS ZERO SURPRESSED
+	MOVB	#'-,(R0)+	; OUTPUT SEPARATOR
+	MOV	(SP)+,R1	; GET MONTH
+	CALL	30$		; MONTH
+	MOVB	#'-,(R0)+	; OUTPUT SEPARATOR
+	MOV	(SP)+,R1	; GET YEAR
+	BR	DIG		; OUTPUT TWO DIGITS, EXIT
+
+30$:				; REF LABEL
+
+	.IF	NDF,R$$SUP	; PIC VERSION
+
+	MOV	R1,-(SP)	; MONTH
+	ASL	(SP)		; MULTIPLY BY THREE
+	ADD	(SP)+,R1	;
+	ADD	PC,R1		; COMPUTE TABLE POINTER, PC RELATIVE
+	ADD	#<MONTH-3-.>,R1	; ADDRESS OF MONTH NAME
+	MOVB	(R1)+,(R0)+	; OUTPUT MONTH
+	MOVB	(R1)+,(R0)+	;
+	MOVB	(R1)+,(R0)+	;
+
+	.IFF			; SUPER MODE
+
+	CALL	MOVMON		; MOVE IN THE PROPER ASCII
+
+	.ENDC
+	RETURN
+;
+;+
+; **-$TIM-CONVERT TIME
+;
+; THIS ROUTINE IS CALLED TO CONVERT THE TIME IN A STANDARD FORMAT
+; TO AN ASCII OUTPUT STRING OF THE FORM:
+;
+;		HH:MM:SS.S
+;
+; THE STANDARD FORMAT FOR THE INPUT VALUES IS IDENTICAL WITH THE
+; ARGUMENTS RETURNED BY THE "GET TIME" SYSTEM CALL.
+;
+; INPUTS:
+;
+;	R0 = OUTPUT STRING
+;	R1 = ADDRESS OF FIRST PARAMETER
+;	R2 = PARAMETER COUNT, WHERE:
+;		R2=0 OR 1	OUTPUT: HH
+;		R2=2		OUTPUT: HH:MM
+;		R2=3		OUTPUT: HH:MM:SS
+;		R2>3		OUTPUT: HH:MM:SS.S
+;
+;	WHERE THE FORMAT FOR THE PARAMETER BLOCK IS:
+;		.WORD	HOUR-OF-DAY
+;		.WORD	MINUTE-OF-HOUR
+;		.WORD	SECOND-OF-MINUTE
+;		.WORD	TICK-OF-SECOND
+;		.WORD	TICKS-PER-SECOND
+;
+; OUTPUTS:
+;
+;	R0 = OUTPUT STRING
+;	R1 = NEXT PARAMETER (ADVANCED PAST LAST PARAMETER USED)
+;	R2 IS DISTROYED
+;-
+
+$TIM::				;                                               ;**NEW**
+	SAVRG			; SAVE NON-VOLATILE REGISTERS                   ;**NEW**
+	MOV	R1,R4		; FREE UP R1                                    ;**NEW**
+	MOV	#3,R5		; ASSUME TENTHS WANTED                          ;**NEW**
+	CMP	R2,R5		; WANT TENTHS OF SECOND?                        ;**NEW**
+	BLOS	10$		; IF LOS NO                                     ;**NEW**
+	CALL	30$		; OUTPUT HH:MM:SS                               ;**NEW**
+	MOVB	#'.,(R0)+	; OUTPUT SEPARATOR                              ;**NEW**
+	MOV	R0,R3		; SAVE STRING POINTER                           ;**NEW**
+                                                                                ;**NEW**
+	.IF	DF	V1145                                                   ;**NEW**
+                                                                                ;**NEW**
+	MOV	(R4)+,R0	; GET TICKS                                     ;**NEW**
+	MUL	#10.,R0		; COMPUTE TICKS X 10.                           ;**NEW**
+	DIV	(R4)+,R0	; COMPUTE TENTHS OF SECOND                      ;**NEW**
+                                                                                ;**NEW**
+	.IFF                                                                    ;**NEW**
+                                                                                ;**NEW**
+	MOV	(R4),R0		; GET TICKS                                     ;**NEW**
+	ASL	R0		; MULTIPLY TICKS BY 10.                         ;**NEW**
+	ASL	R0		;                                               ;**NEW**
+	ASL	R0		; NOW HAVE TICKS*8                              ;**NEW**
+	ADD	(R4),R0		; ADD TICKS*2                                   ;**NEW**
+	ADD	(R4)+,R0	;                                               ;**NEW**
+	MOV	(R4)+,R1	; GET TICKS PER SECOND                          ;**NEW**
+	CALL	$DIV		; COMPUTE TENTHS                                ;**NEW**
+                                                                                ;**NEW**
+	.ENDC                                                                   ;**NEW**
+                                                                                ;**NEW**
+	MOV	R0,R1		; SET VALUE TO BE CONVERTED                     ;**NEW**
+	MOV	R3,R0		; RESTORE STRING POINTER                        ;**NEW**
+	BR	DIGS		; RESTORE UPDATED R1, EXIT                      ;**NEW**
+10$:				;                                               ;**NEW**
+	MOV	R2,R5		; SET LOOP COUNT                                ;**NEW**
+	BR	30$		;                                               ;**NEW**
+20$:				;                                               ;**NEW**
+	MOVB	#':,(R0)+	; OUTPUT SEPARATOR                              ;**NEW**
+30$:				;                                               ;**NEW**
+	MOV	(R4)+,R1	; GET VALUE                                     ;**NEW**
+	CALL	DIG		; OUTPUT TWO DIGITS                             ;**NEW**
+	DEC	R5		; DECREMENT COUNT                               ;**NEW**
+	BGT	20$		; IF GT GO AGAIN                                ;**NEW**
+	BR	DIGX		;                                               ;**NEW**
+                                                                                ;**-22
+;+
+; OUTPUT TWO DIGIT SUBROUTINE.
+;
+; INPUTS:
+;
+;	R0 = OUTPUT STRING
+;	R1=VALUE (MUST BE IN RANGE 0-99)                                        ;**NEW**
+;                                                                               ;**-1
+; OUTPUTS:
+;
+;	R0 = OUTPUT STRING
+;                                                                               ;**NEW**
+;-                                                                              ;**-1
+;                                                                               ;**NEW**
+; ZERO SUPRESS FIRST DIGIT                                                     ;**NEW**
+;                                                                               ;**NEW**
+                                                                                ;**NEW**
+DIGS:				;                                               ;**NEW**
+	CLR	R2		; SET SUPRESS INDICATOR                        ;**NEW**
+	BR	DIG1		;                                               ;**NEW**
+                                                                                ;**NEW**
+;                                                                               ;**NEW**
+; NO ZERO SUPRESS ON FIRST DIGIT                                               ;**NEW**
+;                                                                               ;**NEW**
+                                                                                ;**NEW**
+DIG:				;                                               ;**NEW**
+	MOV	PC,R2		;                                               ;**NEW**
+DIG1:				;                                               ;**NEW**
+	CALL	$CBDAT		; CONVERT DIGITS                                ;**NEW**
+DIGX:				;                                               ;**NEW**
+	MOV	R4,R1		; SET UPDATED PARAMETER VECTOR                  ;**NEW**
+	MOV	R5,R2		; RESTORE R2 (POSSIBLY DESTROYED)               ;**NEW**
+	RETURN			;                                               ;**NEW**
+                                                                                ;**-16
+	.PAGE
+;
+;+
+; MOVMON - MOVE ASCII MONTH NAME INTO OUTPUT STRING - SUPER MODE ROUTINE
+;
+; INPUTS:
+;
+;	R0 = POINTER TO OUTPUT STRING
+;	R1 = MONTH NUMBER
+;
+; OUTPUTS:
+;
+;	R0 INCREASED BY 3 FOR VALID INPUT P1
+;	R1 DESTROYED
+;-
+;
+	.IF	DF,R$$SUP	; SUPER MODE
+
+MOVMON:	CMP	#12.,R1		; MONTH NUMBER IN BOUNDS?
+	BLT	20$		; NO - TOO BIG - LEAVE THE FIELD UNTOUCHED
+	DEC	R1		; R1 SHOULD BE ZERO RELATIVE
+	BLT	20$		; TOO SMALL - RETURN
+	MOV	R0,-(SP)	; SAVE OUTPUT STRING POINTER
+	MOV	#MOVLEN,R0	; LENGTH OF MONTH MOVE ROUTINE
+	CALL	$MUL		; R1 WILL BE OFFSET
+	MOV	(SP)+,R0	; RESTORE STRING POINTER
+	ADD	R1,PC		; JUMP TO THE APPROPRIATE ROUTINE
+
+10$:	MOVB	#'J,(R0)+	; MOVE IN JAN
+	MOVB	#'A,(R0)+	;
+	MOVB	#'N,(R0)+	;
+20$:	RETURN			;
+
+MOVLEN=.-10$			; LENGTH OF EACH MONTH CONVERSION
+
+	MOVB	#'F,(R0)+	; MOVE IN FEB
+	MOVB	#'E,(R0)+	;
+	MOVB	#'B,(R0)+	;
+	RETURN			;
+
+	MOVB	#'M,(R0)+	; MOVE IN MAR
+	MOVB	#'A,(R0)+	;
+	MOVB	#'R,(R0)+	;
+	RETURN			;
+
+	MOVB	#'A,(R0)+	; MOVE IN APR
+	MOVB	#'P,(R0)+	;
+	MOVB	#'R,(R0)+	;
+	RETURN			;
+
+	MOVB	#'M,(R0)+	; MOVE IN MAY
+	MOVB	#'A,(R0)+	;
+	MOVB	#'Y,(R0)+	;
+	RETURN			;
+
+	MOVB	#'J,(R0)+	; MOVE IN JUN
+	MOVB	#'U,(R0)+	;
+	MOVB	#'N,(R0)+	;
+	RETURN			;
+
+	MOVB	#'J,(R0)+	; MOVE IN JUL
+	MOVB	#'U,(R0)+	;
+	MOVB	#'L,(R0)+	;
+	RETURN			;
+
+	MOVB	#'A,(R0)+	; MOVE IN AUG
+	MOVB	#'U,(R0)+	;
+	MOVB	#'G,(R0)+	;
+	RETURN			;
+
+	MOVB	#'S,(R0)+	; MOVE IN SEP
+	MOVB	#'E,(R0)+	;
+	MOVB	#'P,(R0)+	;
+	RETURN			;
+
+	MOVB	#'O,(R0)+	; MOVE IN OCT
+	MOVB	#'C,(R0)+	;
+	MOVB	#'T,(R0)+	;
+	RETURN			;
+
+	MOVB	#'N,(R0)+	; MOVE IN NOV
+	MOVB	#'O,(R0)+	;
+	MOVB	#'V,(R0)+	;
+	RETURN			;
+
+	MOVB	#'D,(R0)+	; MOVE IN DEC
+	MOVB	#'E,(R0)+	;
+	MOVB	#'C,(R0)+	;
+	RETURN			;
+
+	.ENDC
+
+	.END

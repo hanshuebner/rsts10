@@ -1,0 +1,4472 @@
+	.INCLUDE /CMN:COMMON/
+;+
+;  INIDFN requires one symbol to be defined by KERNEL - FBBSIZ.
+;  But KERNEL and the QNAROM code multiply define other values
+;  such as KISAR5 and a cast of others, so instead of including
+;  KERNEL, we define the one structure needed to make INIDFN
+;  assemble without error.
+;-
+
+; Fip Block Description Sub-Block
+
+	.DSECT	,NOCREF
+F.UNT:	.BLKB		; FIP unit number
+F.FBNM:	.BLKB		; FIP block number (msb)
+F.FBNL:	.BLKW		; FIP block number (lsb)
+FBBSIZ:			; Size of the FIP block sub-block in bytes
+
+	.INCLUDE /INIT:INIDFN/
+TITLE	INIQNA,<INIT QNAROM overlay header>,01,09-Sep-86,DBM
+
+;
+;		COPYRIGHT (c) 1974, 1985 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for INIQNA
+;+
+;
+;  000	DBM  09-Sep-86	Creation.  "And Cecil said, 'Let there be INIQNA'"
+;
+;-
+	RNDAPR	5,QNA
+
+	DEFORG	QNA
+
+;+
+;  This code is the actual diagnostic code on the QNA boards.  Since
+;  Rev E boards did not have the new ROM's, and we want to perform
+;  integrity checks on the QNA, we have included it as a phase of INIT.
+;
+;  The phase is loaded during the boot process and overlays SAVRES's
+;  I/O buffer.  INIONE will read the on board diagnostics off of the
+;  QNA into SATBF2, and calls the ROOT to verify the checksum as a
+;  further integrity check.  The ROOT then saves SATBUF (Which is
+;  ROOT's own oneshot code) into SATBF2, and calls our copy of the
+;  diagnostic ROM.  Upon return, it restores SATBUF and null mapping
+;  and returns to INIONE.
+;
+;  The only thing different from the ROM and this code is that the
+;  DECNET boot code has been removed.  This caused some multiply
+;  defined globals and other weird problems, and was useless to us
+;  anyways.  If new diagnostic code is issued, we can get a copy of
+;  it, delete everything from the line after DECnet::, and replace
+;  this module after this comment page with the new code.
+;-
+
+.NLIST
+.NLIST	CND,SEQ,LD,BIN
+.ENABL	lc
+
+ONEFILE=1	; CONTROL USE OF SOURCE FILES
+		; ONEFILE IS NOT DEFINED   ASSEMBLE EACH SOURCE FILE SEPARATELY
+		; ONEFILE=ANYTHING   ASSEMBLE ALL SOURCE FILES TOGETHER
+
+.IIF DF ONEFILE,.NLIST	TOC
+
+
+.TITLE	USER DOCUMENTATION
+
+
+.LIST
+
+						.REM &
+
+		IDENTIFICATION
+		--------------
+
+PRODUCT CODE:  AC-T612A-MC
+
+PRODUCT NAME:  CIQNDC0 DEQNA ROM RESIDENT CODE
+
+PRODUCT DATE:  29 June 1984
+
+MAINTAINER:    DIAGNOSTIC ENGINEERING
+
+
+
+
+
+	THE INFORMATION IN THIS DOCUMENT IS  SUBJECT  TO  CHANGE WITHOUT
+	NOTICE  AND  SHOULD  NOT BE CONSTRUED AS A COMMITMENT BY DIGITAL
+	EQUIPMENT CORPORATION.  DIGITAL EQUIPMENT CORPORATION ASSUMES NO
+	RESPONSIBILITY FOR ANY ERRORS THAT MAY APPEAR IN THIS DOCUMENT.
+
+	NO RESPONSIBILITY IS ASSUMED  FOR  THE  USE  OR  RELIABILITY  OF
+	SOFTWARE ON EQUIPMENT THAT IS NOT  SUPPLIED  BY  DIGITAL  OR ITS
+	AFFILIATED COMPANIES.
+
+	COPYRIGHT (C) 1983,1984 BY DIGITAL EQUIPMENT CORPORATION
+
+THE FOLLOWING ARE TRADEMARKS OF DIGITAL EQUIPMENT CORPORATION:
+
+	DIGITAL		PDP		UNIBUS		MASSBUS
+	DEC		DECUS		DECTAPE
+
+
+
+                        DIAGNOSTIC ENGINEERING
+
+                       FUNCTIONAL SPECIFICATION
+
+                               FOR THE
+
+		   DEQNA EXTENDED PRIMARY BOOTSTRAP
+
+
+*******************************************************************************
+
+
+1	OVERVIEW OF DIAGNOSTIC PRODUCT
+
+Relevant Product Numbers:
+
+	DEQNA/M7504	Ethernet network adaptor for Q-Bus
+
+	CIQNDxx		DEQNA ROM resident code
+
+	AC-T612A-MC	Documentation and listings
+	AH-T613A-MC	Micro-fiche documentation and listings
+	AF-T612A-M0	Diagnostic Engineering Change Order
+
+Revision History:
+
+	A0	21-Dec-83	- Initial release
+
+	B0	16-Feb-84	- J11/F11 compatible, sanity timer use 
+				  change, bulkhead fuse bit change
+
+	C0	29-Jun-84	- change error recovery for CQ test #8
+				  on heavily loaded Ethernet
+				- don't check for DIGITAL Station Address
+                                  range.
+                                - 4 Mbyte system Non-Existant Memory exception
+                                  handling.
+                                - intermediete Descriptor status and flag words
+                                  checked for 14xxxx octal.
+	D0	8-oct-84	- q.ochk mask for rec status 1 not sufficent
+				- .sbttl STRART BNE to INI rather that SNDIT.
+
+1.1	PRODUCT DESCRIPTION
+
+The DEQNA Extended Primary Boot (EPB) is PDP-11 code that is to be loaded 
+into the host by a primary boot. The process of loading or "booting" the 
+DEQNA is similar to that of a disk or other mass storage device.
+
+The EPB is loaded and when control is passed to it, continues the booting
+process by loading the complete QNA Boot/diagnostic ROM into the host. When
+the load is complete and error free a DEQNA diagnostic is executed in order
+to assure that the DEQNA can safely use the Ethernet. 
+
+In the normal case the diagnostic passes and the booting process continues
+by either transferring control to the DECnet boot which is also resident on
+the QNA Boot/diagnostic ROM or transferring control to an address in the
+host. 
+
+In case of errors from the QNA diagnostic, the EPB code will return to a 
+caller supplied address or will perform a CPU halt. Errors of this nature
+are hard errors and no attempt to boot DECnet or transfer to the user's
+boot code is made. If the diagnostic fails the EPB halts or returns and the
+contents of R0 and/or the diagnostic LED's on the DEQNA indicate further
+diagnostic action. 
+
+1.2	PRODUCT USERS AND USES
+
+o Customer usage...
+
+	Power up auto boot for DECnet using Ethernet
+	QNA Citizenship test prior to non-standard Ethernet boot 
+
+o Field Service usage...
+
+	Execute DEQNA citizenship test at customer site
+
+1.3	CONTENTS OF THE QNA BOOT DIAGNOSTIC ROM.
+
+The ROM on-board the DEQNA module is contained in the i8051 micro-processor
+on the module. This ROM is 4K bytes in length of which a relatively small
+portion is dedicated to i8051 code. The rest of the ROM is used to contain
+host code to support module testing and network booting. 
+
+	Usage			start	end	bytes
+
+    i8051 code			 000	 777	 512.
+    QNA Extended primary boot	1000	1311	 202.
+    Citizenship test		1312	5603	2234.
+    DECnet boot and MOP code	5604	7535	 986.
+    Free space			7536	7775	 160.
+    Checksum			7776	7777	   2.
+				-----------------------
+	Total					4096.
+
+2	PRODUCT GOALS
+
+2.1	PERFORMANCE GOALS
+
+"Hooks" for unattended system operation or "auto-booting" are provided.
+
+It provides support for the QNA DECnet case as well as for OEM use of the
+QNA Boot/Diagnostic ROM features.
+
+2.2	COMPATIBILITY GOALS
+
+The Boot scheme is compatible with existing primary boot schemes (LCP-5,
+LCP-8, ORION).
+
+The QNA bootstrap software operates on any LSI-11 system with an 18 or 22-bit
+Q-Bus.
+
+The boot code is written in MACRO-11 assembly language and uses standard
+tools for maintenance, assembly, linking, loading and execution.
+
+2.3	FAILSOFT GOALS
+
+Reasonable safeguards are designed into the QNA boot process and utilized
+in the code to prevent the host system from hanging or otherwise failing
+during a boot sequence. 
+
+2.4	RESTRICTIONS
+
+	None noted.
+
+3	REQUIREMENTS
+
+3.1	HARDWARE DESIGN REQUIREMENTS
+
+The QNA Extended Primary Boot code is resident on the QNA module and is 
+downloaded by the module on command into the host's memory. Refer to the 
+DEQNA programming specification for details.
+
+3.2	RUN TIME ENVIRONMENT REQUIREMENTS
+
+The run-time environment required for the EPB is minimal. The EPB code is 
+loaded starting at location zero. Memory management is normally disabled 
+and if it is enabled the mapping for the first 16K words must be 1 to 1 
+logical to physical and the I/O page must be mapped into the upper 4K of 
+the address space. The processor is to be in kernel mode.
+
+3.2.1	UNATTENDED SYSTEM OPERATION CONSIDERATIONS
+
+The DEQNA module is a key component in PDP-11 systems that are to operate 
+in what is known as "unattended" mode. In these cases the systems is 
+expected behave in a precise manner in the error free (i.e. all "self 
+testing" passes) case of operation as well as in the case of a detected 
+fault. 
+
+3.2.2	USE AS A DEQNA DIAGNOSTIC
+
+The QNA citizenship test is a diagnostic that reports test results using
+the three LED's on the DEQNA/M7504 module. If a host system, such as the
+PDP 11/23 Plus, is configured to boot DECnet via the DEQNA module and there
+is a failure in the DEQNA module the LED's will indicate the failure (see
+references for details). In other cases the DIP switches on the CPU board
+can be temporarily set to cause the DEQNA EPB to be attempted and then the
+LED's can be interpreted. The transceiver cable can be disconnected for
+this test if no traffic is to go on the Ethernet or if the DEQNA fails any
+part of the Citizenship test no attempt to place test traffic on the
+Ethernet is made. 
+
+If all the tests pass the DECnet boot will be entered and depending upon 
+the Ethernet protocol in effect there may or may not be impact on the 
+entire network.
+
+3.3	DEVELOPMENT ENVIRONMENT REQUIREMENTS
+
+Source code development and maintenance use only standard tools that are 
+supported by RSX-11M, RT-11, RSTS, and VAX/VMS.
+
+Testing of the QNA boot code program requires a PDP-11/23 with a Q18 or 
+Q22-bus.
+
+
+4	FUNCTIONAL DESCRIPTION
+
+The code to select the QNA and to load the first 512. bytes of the QNA's
+Boot/Diagnostic ROM is assumed to be resident in the host. The booting of
+the QNA is similar to booting a disk so that the QNA Primary Boot code
+and/or techniques are compatible with existing systems. The existing PDP-11
+Primary Boot ROM's are extended to support the DEQNA/M7504 Ethernet
+interface module. 
+
+The booting via the QNA starts by "uploading" the first 512. bytes of the
+QNA's Boot/Diagnostic ROM into host memory locations 0000-0777. Once the
+transfer is complete and proper, location 12 is set for a possible error, 
+registers R0 and R1 are set to specification and a transfer to location
+zero is performed. 
+
+The Code that is "uploaded" from the QNA is called the QNA Extended Primary
+Boot (EPB) and will initialize and test the DEQNA module before continuing
+the boot process. 
+
+The EPB code when entered expects the I/O Page address of the QNA to be set 
+in R1 (either 174440 or 174460) and R0 along with location 12 contains a
+coded value that specifies the action the EPB is to take after the DEQNA
+module is tested and initialized. Currently these values are as follows: 
+
+	R0 - Set to zero, causes the QNA to perform a DECnet boot
+
+	   - Set to a value greater than or equal to 1000 octal will cause 
+	     the EPB code to transfer control to that location, via a "JMP"
+	     instruction after the module is tested and initialized.
+
+	     Settings in R0 from 1 to 777 are currently undefined and will
+	     cause the EPB to take the error return.
+
+	Location 12 - Set to zero causes the EPB to halt in case of an 
+	     error detected by the boot process or the Citizenship test.
+
+	   - If set to a value other than 0 then if an error is detected 
+	     the value (in location 12) is used as an transfer address.
+
+	     R0 is set to an error code as described in section 4.4.
+
+The QNA's boot diagnostic ROM contents when "uploaded" into the PDP-11's 
+memory starts with the locations set to the following values:
+
+Address	0	000240		NOP
+	2	0004xx		PDP-11 branch to Extended Primary Boot
+	4	0004yy		PDP-11 branch/vector to Citizenship tests
+	6	000zzz		Offset from address "zero" for the checksum
+	10-end			The actual code etc.
+
+The primary or extended boot process does not set the DEQNA floating
+address vectors. These must be set the "booted" code such as the
+citizenship test, the DECnet boot, or a custom boot if needed. 
+
+4.1	PRIMARY BOOT PROCESS
+
+The primary boot, resident in the host, normally checks for the existence 
+of the device it is going to boot from, boots 512. bytes from the device, 
+verifies the operation, sets parameters and transfers to the "booted" code.
+
+A suggested method for "checking" for a QNA is as follows: 
+
+	Write a "2" (a module reset) into the QNA's CSR at location 
+	17774456 or 17774476.
+
+	Read back the CSR and compare against an octal 000062.
+
+	If equal then there is most likely a QNA there.
+
+	If not equal (Bus time-out?) then "sniff" elsewhere.
+
+	Write a "0" back into the CSR to "reset" the reset bit.
+
+If a QNA is present and it is to be used for the boot the first thing 
+then:
+
+	A descriptor for a 256. word "receive" is validated in the QNA.
+
+		Data is read into the host starting at location 0
+		The descriptor is 8 words long, words 0, 4, 5 and 6 will
+		contain operation status. Words 1, 2, 3, and 7 are constant.
+
+	Write a "1010" into the CSR to move the boot code into the QNA's
+	internal receive buffer and delay for approximately one second.
+
+	Write a "1000" into the CSR to move the data in the internal
+	receive buffer into host memory and delay for approximately one
+	second. 
+
+	Reset the QNA and check the CSR for proper status.
+
+	Checked the receive descriptor for nominal states.
+
+	The Data transfer is verified.
+				
+	If the QNA primary boot code detects a failure at this point the
+	host boot is re-entered.
+
+	Transfer is made to the first location of the freshly loaded 
+	portion of the QNA BD ROM.
+
+		R1 contains the I/O Page address of the QNA (174440)
+
+		R0 contains a "000000" if the DECnet boot resident on the 
+		QNA is to be used. 
+				- or -
+		If R0 is greater than "000777" an effective JMP (R0) is 
+		executed in lieu of the DECnet boot.
+
+
+		Location 12 contains a "000000" if the EPB is to halt when 
+		an error is detected.
+				- or -
+		If loaction 12 is greater than "000000" an effective JMP @12
+		is executed in lieu of a "HALT".		
+
+
+4.1.1	EXPECTED VALUES FOR VERIFICATION
+
+CSR is checked for a nominal state as are the status words in the receive
+descriptor.
+
+		Status	Nominal
+		---------------
+		CSR	000060 or 010060
+		FLAG	14xxxx
+		BSW1	14xxxx
+		BSW2	14xxxx
+		CSW0	177777
+
+      x - don't care bits
+
+Next the actual data transfer is verified by checking the first three bytes 
+of the data transferred for standard values. These first locations and their
+expected contents are:
+
+		Location	Contents
+		--------------------------
+		0000-1		000240	(NOP)
+		0002		   001	(a BR instruction)
+		0003		   xxx
+
+		0004
+		 ..		The QNA Extended Primary Boot (EPB) code
+		0777
+
+4.1.2	SAMPLE PRIMARY BOOT CODE
+
+Below is an example of how a primary boot could be implemented on a typical
+PDP-11 based host.
+
+Upon entry R0 is coded to indicate which QNA is to be used for the boot. 
+The first 32K bytes of the host memory is assumed to be mapped 1 to 1 
+physical to logical. The I/O page is mapped to the last 4K.
+
+Assume settings for R0 as follows:	
+
+	R0 - Contains a "4" for QNA#1 @ 174440
+	     Contains a "5" for QNA#2 @ 174460
+
+PDP-11 code for booting the DEQNA EPB might be as follows:
+
+	mov	#174440,r1	; assume device is DEQNA #1
+	cmp	#4,r0
+	beq	10$		; good assumption
+	mov	#174460,r1	; select device at DEQNA #2
+
+10$:	mov	#2,16(r1)	; assert QNA software reset
+	cmp	#000062,16(r1)	; "nominal" status during reset
+	bne	90$		;? not a proper response, halt
+	clr	16(r1)		; clear reset state and all others
+
+	mov	#2000,r3	; pick an address for descriptor
+	mov	r3,r4
+	mov	#100000,(r4)+	; Flag word, changed to -1
+	mov	(r3),(r4)+	; Valid buffer descriptor, receive
+	clr	(r4)+		; location zero
+	mov	 #-400,(r4)+	; 256. words or 512. bytes
+	clr	(r4)+		; Descriptor status 1, changed to -1
+	clr 	(r4)+		; Descriptor status 2, changed to -1
+	mov	(r3),(r4)+	; Chain flag word, changed to -1
+	mov	#020000,(r4)	; end descriptor code
+	mov	r3,04(r1)
+	clr	06(r1)		; validate a receive descriptor
+
+	mov	#1010,16(r1)	; Instruct QNA to unload the EPB code
+	clr	r0		; delay about 60 ms for transfer of
+	sob	r0,.		; i8051 contents to receive FIFO
+	clr	#1000,16(r1)	; Complete the EPB unload
+	clr	r0		; delay about 60 ms for transfer of
+	sob	r0,.		; receive FIFO to host memory
+	mov	#2,16(r1)
+	clr	16(r1)		; Final reset to complete operation
+
+	mov	#2014,r4
+	bic	#037777,(r4)	; check if last status word was updated 
+	cmp 	#140000,(r4) 	;
+	bne	90$		;
+
+	cmp	#240,@#0	; check for QNA boot block
+	bne	90$		;? operation data check
+	cmpb	#001,@#3	; check for "BR" opcode
+	bne	90$		;? operation data check
+
+	mov	#DECnet,r0	; Load DECnet code (or other code into R0)
+	jmp	@#0		; go to extended primary boot
+
+	; R0 - set to zero for DECnet boot
+	; R1 - has address of QNA #1 or #2
+
+90$:	halt		;? QNA error, get back to host boot control?
+	br	90$
+
+4.2	EXTENDED PRIMARY BOOT PROCESS
+
+Once the host properly executes the QNA primary boot sequence, the QNA
+Extended Primary Boot (EPB) code is executed that completes the loading of
+the entire QNA's private Boot/Diagnostic ROM contents. The Extended Primary
+Boot (EPB) operates as follows: 
+
+	All 4096. bytes of the QNA BD ROM are read into the host beginning at 
+	location 1024. (2000 octal).
+
+	CSR and descriptor status are verified.
+
+	The data transfer is verified using the checksum on the ROM
+
+	If the EPB code detects a failure at this point it halts or returns 
+	to the caller.
+
+	Next the Host is used to execute the QNA citizenship test. A 4096. 
+	byte buffer is used by the Citizenship test. Location 5120. (12000
+	octal) is used.
+
+	If the Citizenship test detects a failure at this point return is
+	made to the EPB code which returns to the caller or halts.
+
+Passage of the GO/NOGO citizenship test leaves the QNA in the following
+state:
+
+	The diagnostic LED's on the QNA are all turned off signifying that 
+	the citizenship test has passed.
+
+	The target address memory has all fourteen (14) station addresses set
+	to the Ethernet station address assigned to the board (via the 
+	on-board station address ROM).
+
+	The sanity timer interrupt interval is set to the default value of 
+	4 minutes. The sanity timer is NOT enabled and WILL NOT interrupt 
+	unless the board is jumpered otherwise.
+
+	The device is "freshly" reset and all CSR bits that are writable 
+	are set to zero. The QNA is in the following state:
+
+		1 - Receive is disabled
+		2 - Transmit is disabled
+		3 - The sanity timer is set according to the jumper
+		4 - Normal address filtering is enabled
+			(NOT promiscuous or multicast)
+
+At this point the QNA's private boot code must transfer control to the next 
+level of boot code. The value in R0 at entry is consulted to determine what
+is next.
+
+If the QNA's private boot code is to pass control to the QNA DECnet Boot
+code it will do so without further ado. This code will continuously attempt
+the DECnet boot until successful or stopped at the host. 
+
+If the "OEM" boot is to be used a "JMP" to the specified location is
+executed and that code is expected to keep the ball rolling. This case
+allows the QNA to be tested and if the testing passes, control is passed to
+code that assumedly contains a boot for some other system. 
+
+4.3	Checksum
+
+The checksum on the Boot/Diagnostic ROM is computed for the entire ROM 
+contents by setting the last two bytes to zero and then using the Data I/O 
+PROM blaster to compute a "sum-check". The two bytes of the "sum-check" are 
+then stored in the last two bytes to be blasted and the ROM blasted.
+
+The Data I/O "sum-check" is defined as follows:
+
+	A summation of bits calculated according to the rules of simple 
+	addition and usually expressed as a 4-digit hex number; any carry
+	from the most significant bit or digit is discarded. A sum-check
+	is used to verify the integrity of data transfers.
+
+(see references for details):
+
+4.4	ERRORS
+
+Location 12 is used to determine the action to take in the case the EPB of 
+the citizenship test detects an error. In all cases of error R0 is set as 
+described below.
+
+If the contents of location 12 are zeros, which is the case unless the
+caller sets it otherwise, the EPB will attempt to halt the CPU at location
+2306 or 306 (octal) when an error is detected by the boot code or the
+citizenship test. If the contents of location 12 are non-zero then the
+contents are used as a transfer address to be taken in case of error. 
+
+A halt at location 306 is an error detected by the EPB when it is 
+attempting to load the entire contents of the Boot/Diagnostic ROM into the 
+host while a halt at location 2306 is an error detected after a succesful 
+load of the ROM.
+
+The contents of R0 and the three DEQNA status LED's give the cause of the
+error. The below table describes these errors: 
+
+LED's		R0 Contents		Error
+---------------------------------------------------------------------------
+all on or	0			boot load operation status check
+all off
+
+all on		6776			Boot/Diagnostic ROM checksum error
+
+all off		1-777			R0 entry value error
+
+one or more	any other value		CQ failure code, see references
+on 
+
+5	INTERFACES
+
+The DEQNA extended primary boot code appears to be a typical PDP-11 boot 
+block of 512. bytes.
+
+The DEQNA extended primary boot calls the standard DECnet boot for Ethernet
+based nodes.
+
+There are no interfaces to operating systems in the DEQNA extended primary 
+boot code.
+
+
+6	BIBLIOGRAPHY
+
+Diagnostic Engineering Functional Specification for Diagnostic/Boot ROM
+(LCP-5 and 8 version)	Document: GBH-002-82, Revision 1.1
+
+QNA (Q-Bus to NI adaptor) Functional and Programming Specification, Rev 1
+
+Functional Specification for the QNA Ethernet Citizenship Test (CQ),
+Rev 2.1, 21 November 1983
+
+Data I/O Corporation
+29A Universal Programmer 990-0029
+10-990-0029-001 Rev E. May 82
+
+7	GLOSSARY
+
+Primary	Boot		PDP-11 code "resident" in memory when the system is 
+			"powered up". Usually contained in a ROM that is 
+			peculiar to a particular system (LCP-8, MXV-11, etc.).
+
+QNA Primary Boot	That portion of Primary Boot code (see definition 
+			above) that is QNA specific.
+
+
+Extended Primary Boot	PDP-11 code, resident on the QNA module that will 
+			"upload" the entire QNA Boot/Diagnostic ROM into
+			PDP-11 memory, perform the Citizenship test, and
+			either Halt if there is an error, dispatch to a
+			caller supplied vector, or dispatch to the DECnet
+			boot.
+
+QNA DECnet Boot		PDP-11 code resident on the QNA module that when 
+			invoked will start DECnet.
+
+QNA Citizenship Test	PDP-11 test code resident on the QNA module that 
+			is a GO/NOGO diagnostic. If test passes the module 
+			is declared to be a "good citizen".
+
+Good QNA Citizen	A DEQNA module that operates well enough to be 
+			attached to a network without causing the network 
+			to fail or significantly degrade and well enough to
+			download test programs for further fault detection
+			and isolation.
+
+Station Address		A unique address of 48 bits assigned to each 
+			Ethernet network adaptor.
+
+QNA Loopback modes	Special modes designed into the DEQNA module for 
+			diagnostic purposes.
+
+Internal loopback	A mode for testing station address filtering 
+			without causing network activity.
+
+Internal Extended loopback	A mode for testing transmit and receive 
+			operation without causing network activity.
+
+External loopback	A mode for testing transmit and receive operation
+			when module is attached to a network, a transceiver
+			or a special loopback connector that causes traffic
+			to be "sent on the wire".
+
+Timeout			The QNA failed to respond to an operation, transmit 
+			or receive, in a designated time (as opposed to a 
+			Bus time-out).
+
+
+
+                        DIAGNOSTIC ENGINEERING
+
+                       FUNCTIONAL SPECIFICATION
+
+                               FOR THE
+
+		       QNA CITIZENSHIP TEST (CQ)
+
+
+*******************************************************************************
+
+1.	OVERVIEW OF DIAGNOSTIC PRODUCT
+
+Relevant Product Numbers:
+
+	DEQNA/M7504	Ethernet network adaptor for Q-Bus
+
+	CIQNDA0		DEQNA ROM resident code
+	AC-T612A-MC	Documentation and listings
+	AF-T612A-M0	Diagnostic Engineering Change Order
+
+1.1	PRODUCT DESCRIPTION
+
+The DEQNA or M7504 module (QNA) is an Ethernet network adaptor module designed 
+for PDP-11 systems based on the 18-bit or 22-bit Q-Bus.
+
+The QNA citizenship test (CQ or CITIZEN_QNA) is a PDP-11 based diagnostic
+that is contained on the QNA module. When "uploaded" into a PDP-11 and
+executed, the CQ program returns GO/NOGO indicators as to the "citizenship"
+of the QNA as it regards Ethernet. 
+
+The QNA citizenship test is used by "higher" level network layer processing 
+as a "init" or "self-test" function to aid in determining whether the node
+can attempt to come onto the network or whether further board level
+diagnostics are required. 
+
+1.2	PRODUCT USERS AND USES
+
+o Customer usage...
+
+	installation verificaton
+	confidence testing
+
+o Field Service usage...
+
+	same as customer
+
+o Engineering usage...
+
+	reliablity test component
+	DEQNA sanity test
+
+o Manufacturing usage...
+
+	Burn-in test component
+
+2.	PRODUCT GOALS
+
+2.1	PERFORMANCE GOALS
+
+This test detects faults on the QNA board and provides a simple check on 
+the board's ability to operate within a "live" Ethernet.
+
+Test result indicators are program detectable for software reporting and visual
+for human operator action.
+
+Testing is done with internal loopback and internal extended loopback with
+90% coverage in under 10 seconds. 
+
+Testing "on the wire" using external loopback provides 95% coverage in 
+under 10 seconds.
+
+2.2	COMPATIBILITY GOALS
+
+The CQ program is a free-standing body of code that may be loaded into any
+3000. byte block of PDP-11 memory and executed as a subroutine. The stack
+and a 4K word work space for CQ is caller supplied. The QNA module to be
+tested, QNA#1 or QNA#2, is indicated by passing the I/O Page base address
+(either 174440 or 174460) to the CQ program. No interrupts, other than
+those caused by the CQ code itself, may occur when the CQ code is
+operating. 
+
+2.3	FAILSOFT GOALS
+
+All known traps are plugged and events are timed to prevent a broken QNA
+from hanging or running away.
+
+2.4	RESTRICTIONS
+
+	None noted.
+
+2.5	NON-GOALS
+
+	None noted.
+
+3.	REQUIREMENTS
+
+3.1	HARDWARE DESIGN REQUIREMENTS
+
+The CQ program uses only the hardware associated with the QNA module and 
+the H4000 transceiver or it's equivalent. A properly functioning Ethernet
+is not required for proper CQ test execution. The code operates on any
+LSI-11 CPU family member with an 18 bit or 22 bit Q-Bus. 
+
+The actual CQ code resides in the read only memory of the i8051 or i8751
+microprocessor that the QNA uses for Ethernet protocol processing. The QNA
+is capable of transfering the contents of the ROM into the host in a
+manner similar to receiving an Ethernet packet. 
+
+3.2	RUN TIME ENVIRONMENT REQUIREMENTS
+
+The CQ test program must first be loaded into the PDP-11's memory by some 
+boot code or other program. The CQ test assumes that it is called as a
+subroutine and access to the I/O Page as well as the first 1000 words of
+memory is required. The PDP-11 code is PIC and the work area address is
+passed to the routine as well as the I/O Page address for the module to
+test. The work area must not overlap the CQ code or any memory that is to
+be saved for later use. CQ assumes that the stack is set by the caller and
+as long as the stack does not overlap the work area or extends below 1000,
+it will be maintained by CQ. 
+
+3.3	DEVELOPMENT ENVIRONMENT REQUIREMENTS
+
+Development of the CQ code uses standard tools and techniques. MACRO-11 
+is the source for the actual CQ code and it may be assembled, loaded and 
+tested on most PDP-11's with a QNA.
+
+For development the CQ code is "nested" in the XXDP+/DRS environment. This 
+allows testing to take place in a controlled state and does not depend upon
+the CQ code being resident in the i8051 or i8751. See section 4.5 for 
+details.
+
+3.4	SPECIAL REQUIREMENTS FOR ROM PRODUCTION
+
+The CQ code must be merged with the other code to be placed on the i8051
+ROM and assembled in absolute format in preparation for volume QNA
+production. 
+
+The EPROM version of the i8051 is the i8751 and is used for the development 
+process.
+
+4.	FUNCTIONAL DESCRIPTION
+
+The CQ code must first be loaded into the host and then it may be executed.
+The 4096. byte Boot/Diagnostic ROM includes code for these four functions: 
+
+	QNA support code (i8051 machine language)
+
+	Extended Primary Boot code (PDP-11 machine language)
+
+	Citizenship Test code (PDP-11 machine language)
+
+	DECnet Boot code (PDP-11 machine language)
+
+The i8051 QNA support code is the first 512. bytes of the ROM. When the 
+contents of the i8051 ROM are "uploaded" into the host memory the first 
+locations loaded is a standard PDP-11 boot block header. These first 
+locations are as follows:
+
+  word	0	240		A PDP-11 "nop"
+	2	br q.boot	A branch vector to the Extended Primary Boot
+	4	br citqna	A branch vector to the QNA citizenship code
+	6	integer		Offset, relative to word 0, to checksum
+
+The Boot/Diagnostic ROM is checksumed using a simple 16-bit arithmetic sum,
+ignoring carries, of the first 4094. bytes, one byte at a time, and storing
+the computed checksum value in the last two bytes of the ROM, bytes 4095.
+and 4096.. 
+
+The checksum is verified each time the Boot/Diagnostic ROM is read into the 
+host.
+
+4.1	CQ EXECUTION ENVIRONMENT
+
+
+4.1.1	LOADING QNA RESIDENT BOOT/DIAGNOSTIC CODE
+
+The Boot/Diagnostic code may be loaded by code, ROM resident or "soft", in
+the host PDP-11. 
+
+A general scheme for loading the Boot/Diagnostic code is:
+
+BOOT:	toggle RESET
+	verify device status
+	if fail
+		1 - assume QNA citizenship test failed
+		2 - take action specific to boot
+	set-up QNA to transfer BOOT/DIAGNOSTIC ROM
+		1 - descriptors for 4096. byte 
+		    Boot/Diagnostic "upload"
+		2 - controller status
+	activate and wait
+	verify
+		1 - controller status for GOOD/BAD load
+		2 - descriptor status for GOOD/BAD load
+		3 - checksum the loaded data
+	if fail
+		1 - assume QNA citizenship test failed
+		2 - take action specific to boot
+
+	set I/O Page base address
+	set working buffer address
+	call CITIZEN_QNA
+	if fail
+		device malfunction does not preclude:
+
+			- wait for operator intervention
+			- over-ride of test results
+			- remote notification of problem
+			- use of Ethernet
+			- etc.
+
+	else (pass)
+		appropriate action may include:
+
+			- proceed with normal DECnet boot sequence
+			- downline load/boot network request
+			- repeat execution of test
+			- use of Ethernet
+			- etc.
+
+4.1.2	CQ CALLING SEQUENCE
+
+;++
+;	Memory Mapping:
+;
+;	If memory management is enabled when CQ is executed the environment 
+;	described below is assumed. If memory managment is not enabled then
+;	no special setup is required.
+;
+;	Postition Independent Code (PIC) assumed to be in kernel mode
+;	Locations 000000-000777 are used as follows:
+;		0004/0006 - Bus Time-out or non-existant memory vector
+;		0024/0026 - Power-fail or QNA sanity timer interrupt vector
+;		0766-0772 - Storage for sanity timer interrupt error recovery
+;		0774/0776 - Floating vector used for QNA testing by CQ
+;	Locations 160000-177777 mapped to I/O Page locations 160000-177777
+;	4096. Word work space in low 48K with logical addresses same as 
+;		physical
+;	Stack requires less than 20 words
+;
+;	Calling Sequence:
+;
+;	R1 - Base address of I/O Page registers (174440 or 174460)
+;	R2 - Address of 4096. word workspace
+;	SP - Requires approx. 20 words
+;
+;	JSR	PC,CITIZEN_QNA	; Call CITIZEN_QNA functional test routine
+;
+;	R1 - Base address of the DEQNA/M7504 in the I/O Page.
+;
+;	R0 - Contains test results as follows:
+;
+;		All zero bits, Citizenship test passed.
+;
+;		Non-zero setting indicates test failure. Specific test
+;		failure is bit encoded as follows:
+;
+; Symbol	Bit Set--	Reason--
+  cq.e00=	bit00	; Invalid Ethernet station address
+  cq.e01=	bit01	; Station address/Receive FIFO processing check
+  cq.e02=	bit02	; Station address compare test check
+  cq.e03=	bit03	; Extended loopback transmit buffer data check
+  cq.e04=	bit04	; DMA interface processing check
+  cq.e05=	bit05	; Ethernet external loopback test check
+  cq.e06=	bit06	; Final operation to clear device failure
+  cq.e07=	bit07	;	unused
+  cq.e08=	bit08	;	unused
+  cq.e09=	bit09	; Device operation timeout
+  cq.e10=	bit10	; Bus timeout or non-existant memory interrupt
+  cq.e11=	bit11	; Spurious or missing device interrupt
+  cq.e12=	bit12	; Setup packet or Target address echo data check
+  cq.e13=	bit13	; Sanity timer interrupt
+  cq.e14=	bit14	; Operation completion status check
+  cq.e15=	bit15	; External loopback not operational
+;--
+
+4.1.3	QNA STATES ON TEST COMPLETION
+
+In the case of successful CQ test execution, R0 was zero on return, the QNA
+is set up as follows:
+
+	All three LED's are off
+	Target address memory contains the assigned Ethernet Station address
+		in all fourteen (14) postions
+	Sanity timer set to power-up default interval (4 minutes) and disabled
+		or if jumper on module is installed it is enabled
+	Normal address filtering mode set (promiscuous and multicast address
+		modes are off)
+	Device "freshly" reset
+
+The stack pointer (SP or R6) as well as the I/O Page base address in R1 are 
+preserved through successful or un-successful CQ execution. Registers R2-R5
+are not saved.
+
+If any errors are detected by the CQ test an attempt to reset the device is 
+made before returning to the test caller. No assumptions should be made 
+about the state of the UUT in the event of test failure.
+
+4.1.4	TEST COVERAGE ASSUMPTIONS
+
+The "upload" process for the entire QNA Boot/Diagnostic ROM requires a 
+chained receive descriptor to transfer the entire 4K in one operation. The 
+CQ code proper does not check chained receives but assumes that this was 
+done as part of the "upload" sequence.
+
+The H4000 transceiver, as per the Ethernet V2.0 spec, has the heartbeat 
+indicator set as bit8 (TFAIL) in transmit status word 1. In order to 
+allow usage with transceivers other than the H4000 this bit is not checked 
+for it's proper state by the external loopback test (See section 4.2.8).
+
+The TDR value returned from a transmit operation is only checked to be
+greater than zero. 
+
+Promiscuous and multi-cast station address filtering is not explicitly 
+tested by CQ.
+
+The QNA's ability to process collisions is not tested directly by CQ in the
+normal case. The Boot/Diagnostic ROM containing the i8051 code used to do
+collision and back-off processing is verified as part of the "upload"
+sequence. A proper checksum and passing the CQ tests is an indirect test of
+the collision processing. There are cases, when the CQ test is executed
+with a very busy Ethernet, that the complete collision and back-off
+processing will be tested but this cannot be relied upon. 
+
+The CQ tests are executed with the sanity timer disabled thus it is not 
+expected to go off during the testing. The sanity timer not enabled before 
+returning to the CQ test caller unless the DEQNA is jumpered otherwise.
+
+The carrier sense bit of the CSR (bit12 CA) is checked only to be sure it 
+is off or will go off in a reasonable amount of time.
+
+The status words returned by the receive and transmit are checked for 
+expected values that depend upon the actual test. If the actual status is 
+not identical to the actual status the test fails.
+
+Status conditions not explicitly checked are:
+
+Receive descriptor--
+
+	word 1	bit 0	message overflow
+		bit 1,2	CRC and framing alignment
+		bit 3	short packet
+		bit 12	discard
+		
+Transmit descriptor--
+
+	word 1	bit 9	transmission abort
+		bit 7:4	transmission attempt count
+		bit 10	sanity timer default on a power-up
+		bit 11	no carrier during a transmission
+		bit 12	loss of carrier during a transmission
+
+4.2	CITIZENSHIP TEST
+
+PRE-TESTS - To be done as part of ROM boot or "upload".
+
+The PDP-11 resident boot code, when directed to "boot" from the QNA, will
+in the normal case assure that the "uploaded" code is "safe" to be used. If
+the QNA does not respond as specified or the "uploaded" code was not
+properly transferred into the PDP-11 then the QNA fails the citizenship
+test. 
+
+	1 - Reset device and enable boot/diagnostic ROM read
+	2 - Assure device status is nominal
+	3 - Execute receive of 4096. byte boot/diagnostic ROM
+	4 - Assure device status is nominal in acceptable time frame
+	5 - Verify checksum of data read
+	6 - Transfer to the designated address of the boot/diagnostic
+
+At this point the 3 LED's are in the ON state from the process that
+"uploaded" the Boot/Diagnostic code. These LED's are turned on by the QNA
+module's power-up sequence and/or by the action of "uploading" the
+Boot/Diagnostic code. 
+
+
+TEST CONTROL -
+
+The test control calls the test set-up code as a subroutine and expects the 
+tests to return either passing or failing. Upon return to test control the 
+UUT is reset then the sanity timer is turned off. If the attempt to turn 
+off the sanity timer fails then UUT is reset again and return is made with 
+error codes set. Next LED3 is turned off and the sanity timer is set to four 
+(4) minutes and enabled or disabled depending on the DEQNA board's sanity
+timer jumper. Finally the UUT is reset and the reset status checked before 
+returning to the caller.
+
+Errors:
+
+	e06 - Final device reset status check
+	e06,e12 - Target address echoed data check
+	e06,e12,e09 - Setup packet operation timeout
+	e06,e12,e14 - Setup packet operation status check
+
+
+TEST SETUP -
+
+The interrupt vectors for Bus Time-out (Non-existant memory) and Power 
+failure (QNA Sanity Timer) are "plugged" to return with errors thus FAILING 
+the UUT. The floating vector is set to a default address and set to return 
+with an error.
+
+QNA state,	on entry:	Boot/Diagnostic ROM loaded and verified
+				All LED's are on
+				Status is ready (FIFO empty)
+				Receive and transmit disabled
+
+		on exit:	LED1 is turned off
+				CSR Boot/Diagnostic bit3 BD, is off
+				CSR interrupt enable bit6 IE, is off
+				Target address memory all zeros
+				Status is ready (FIFO empty)
+				Receive and transmit disabled
+
+Test sequence...
+
+	1 - Set non-existant memory trap vector
+	2 - Set sanity timer trap vector
+	3 - Set floating device interrupt vector
+	4 - Turn off LED1 and enable sanity timer for 1 second
+
+Errors:
+
+	e10 - Bus time-out or non-exsitant memory error
+	e13 - Sanity timer interrupt or power failure
+	e11 - Spurious device interrupt
+	e12 - Target address echoed data check
+	e12,e09 - Setup packet operation timeout
+	e12,e14 - Setup packet operation status check
+
+4.2.1	TEST 1 - Station Address Verification.
+
+Station address is verified and copied into a test packet for later use. If
+this test fails, testing continues until the final external loopback test 
+or another test failure occcurs.. 
+
+Legal DEC QNA physical addresses are in the range AA-00-00-00-00-00 and 
+AA-00-04-FF-FF-FF.
+
+QNA state,	on entry:	As per set-up
+
+		on exit:	Status is ready (FIFO empty)
+				Receive and transmit disabled
+				Station address saved in work area
+				If test failed error status is set
+Test sequence...
+
+	1 - Read station address into work space
+	2 - Check for address of all zero bits
+	3 - Check for address of all one bits
+	4 - Check for legal DEC QNA address
+
+Errors:
+
+	e00 - Station address is all zero bits
+	e00 - Station address is all one bits
+	e00 - Station address not a valid DEC QNA address
+	e10 - Bus timeout or non-existant memory error
+
+4.2.2	TEST 2 - Device interrupt and non-existant memory test
+
+A transmit descriptor that is chained to an non-existant memory location is 
+sent to the UUT after interrupts are enabled. The UUT should generate an 
+transmit interrupt with the non-existant memory state in the CSR.
+
+QNA state,	on entry:	As per prior test
+				Internal loopback mode
+
+		on exit:	Status is ready (FIFO empty)
+				Receive and transmit disabled
+				Interrupts disabled
+
+Test Sequence...
+
+	1 - Build transmit descriptor in valid memory that is chained to a 
+		non-existant memory location.
+	2 - Set floating/default vector address to "step 5" below
+	3 - Intitate "transmit" operation and time-out
+	4 - If time-out then test failure
+	5 - If interrupt detected then continue
+	6 - Verify UUT status and descriptor status
+
+Errors:
+
+	e11 - No interrupt occoured
+	e11 - Interrupt occoured prematurely
+	e11 - Wrong interrupt occoured
+
+4.2.3	TEST 3 - Set-up mode and receive FIFO processing test.
+
+A series of set-up packets with a repeating test pattern for checking
+"stuck at" faults is transmitted to the UUT. The patterns are varied so
+that each byte in the station address memory is tested with all patterns.
+The set-up packet is echoed into the receive FIFO and verified. The set-up 
+packet length is set so that the recieve FIFO memory will get different 
+patterns. The operation is repeated so that all bytes of the FIFO receive
+each of the four basic patterns.
+
+QNA state,	on entry: 	Internal loopback mode set
+
+		on exit:	Status is ready (FIFO empty)
+				Receive and transmit disabled
+				Target address memory "garbaged"
+
+Test Sequence...
+
+	1 - initialize test pattern table
+     Repeat until test counter reaches nominal value...
+	2 - generate station address set-up packet based on pattern
+	3 - transmit set-up packet to UUT
+	5 - receive set-up packets stored in FIFO
+	6 - check for nominal completion status
+	7 - verify received data against expected pattern
+     End repeat.
+
+Errors:
+
+	e01,e12 - Target address echoed data check
+	e01,e12,e09 - Setup packet operation timeout
+	e01,e12,e14 - Setup packet operation status check
+
+4.2.4	TEST 4 - Internal loopback and station address filter test
+
+A station address set-up packet with a walking bit pattern is generated 
+and set-up in the UUT. Then for each address in the set, two internal
+loopback packets are generated and transmitted. The first is a complemented
+version of the station address and is not in the set and the second is an
+address in the set. The first must be properly transmitted but received
+as a RUNT and the second is to be properly transmitted and received. 
+
+The test is repeated for a a walking one bit and a walking zero bit.
+
+QNA state,	on entry: 	Internal loopback mode set
+
+		on exit:	Status is ready (FIFO empty)
+				Receive and transmit disabled
+				Target address memory "garbaged"
+
+Test Sequence...
+
+	1 - Generate set-up station address packets:
+		. 48 station addresses with 1 bit set (walking bit)
+		. 4 set-up packets needed, 8 patterns duplicated
+     For pattern of walking one bit and then for walking zero bit...
+     For each of the four sets of station addresses set-up packets...
+	2 - Transmit and verify station address set-up packet
+     For each address in the set of station addresses...
+	3 - Generate loopback packet from complemented station address
+	4 - Enable UUT receive side
+	5 - Transmit "false" loopback/station address packet
+	6 - Verify transmission and assure RUNT packet receipt
+	7 - Complement the loopback packet for valid station address
+	8 - Transmit valid station address/loopback packet
+	9 - Verify receipt and transmission
+	10 - Compare transmitted and received data
+     End For.
+
+Errors:
+	e02 - Transmitted and receive data compare check
+	e02,e09 - RUNT packet transmit and receive operation timeout
+	e02,e09 - Valid packet transmit and receive operation timeout
+	e02,e14 - RUNT packet transmit and receive operation status check
+	e02,e14 - Valid packet transmit and receive operation status check
+	e02,e12 - Target address echoed data check
+	e02,e12,e09 - Setup packet operation timeout
+	e02,e12,e14 - Setup packet operation status check
+
+4.2.5	TEST 5 - Internal extended loopback and protocol testing
+
+The UUT is set into Internal Extended Loopback mode and packets of varying
+(increasing) byte length are circlulated thru the transmit buffer and the
+receive FIFO. The packets are made up of bit patterns designed to show
+"stuck at" conditions in the buffers and faults in buffer and FIFO
+processing. The received packets are verified to be sure that data was
+properly transferred. The packet length starts at the minimum Ethernet
+packet size and continues, in increments of 11 bytes, until beyond the
+maximum size. The test completes when the UUT detects the expected long
+packet. 
+
+QNA state,	on entry: 	Internal loopback mode set
+				Status is ready (FIFO empty)
+
+		on exit:	Status is ready (FIFO empty)
+				Extended internal loopback mode set
+				Receive and transmit disabled
+
+Test Sequence...
+
+	1 - Set UUT into internal extended loopback mode
+	2 - Initialize packet test pattern table
+	3 - Set minimum initial packet length
+    Repeat...
+	4 - Generate test packet with cyclic pattern
+	5 - Transmit and receive packet
+	6 - Verify operation status
+	7 - If operation status error goto step 10
+	8 - Compare received data against expected data
+	9 - Increment packet byte count by 11
+    End repeat...
+	10 - If operation status is LONG packet error and packet length
+		equal to expected size, then test passes
+
+Errors:
+
+	e03 - Long packet not detected via device transmit status
+	e03 - Internal extended loopback transmit/receive data compare check
+	e03,e09 - Test packet transmit or receive operation timed out
+	e03,e14 - General operation status check, long packet not detected
+
+4.2.6	TEST 6 - DMA Q-Bus interface processing test
+
+An internal/extended loopback packet based on the station address is
+transmitted using a chained descriptor, with buffers, elements and with
+high/low bytes. This packet is received and verified. 
+
+QNA state,	on entry: 	Status is ready (FIFO empty)
+
+		on exit:	Status is ready (FIFO empty)
+				Receive and transmit disabled
+				Station address memory has physical address
+
+Test Sequence...
+
+	1 - generate transmit descriptor list
+		. high/low byte transfer combinations
+		. multiple packet buffers
+		. chained descriptor
+	2 - transmit set-up packet and receive echoed packet
+	3 - check all UUT status and compare transmitted and received data
+
+Errors:
+
+	e04 - DMA Q-Bus interface transmit (scatter/gather) data check
+	e04,e14 - Receive or transmit operation status check
+	e04,e09 - Transmit (special) and receive operation timeout
+
+4.2.7	TEST 7 - Transceiver operational and status test
+
+A setup packet with the UUT's station address is generated and sent to the
+UUT's target address memory. LED2 is also turned off and the sanity timer
+value reset to 1 second 
+
+The Carrier sense bit in the CSR is monitored to be sure that it is off or 
+if it is on that it goes off within approximately 100 micro-seconds.
+
+QNA state,	on entry: 	Internal Extended loopback mode set
+				Status is ready (FIFO empty)
+
+		on exit:	Status is ready (FIFO empty)
+				Receive and transmit disabled
+				Station address memory has physical address
+				LED2 is turned off
+				Sanity timer interval set for 1/4 second
+
+Test Sequence...
+
+	1 - Generate station address packet with:
+		. UUT's station address from prior test
+		. Any other addresses wanted? (broadcast? etc??)
+	2 - transmit set-up packet and receive echoed packet
+		. Turn off LED2
+		. Set sanity timer for short interval
+	3 - check all UUT status and compare transmitted and received data
+	4 - examine CSR carrier sense bit
+	5 - examine transmit status word
+Errors:
+
+	e15 - CSR carrier sense on too long
+	e12 - Target address packet with LED command echoed data check
+	e12,e09 - Setup packet operation timeout
+	e12,e14 - Setup packet operation status check
+
+
+4.2.8	TEST 8 - External loopback and Ethernet Protocol test
+
+This test is executed only if no other errors have been detected.
+
+The UUT's station address is assumed to in the target address memory of the
+UUT. Next a minimum sized Ethernet packet addressed to the UUT with a data
+pattern of descending integers is transmitted and received using external
+loopback. Finally the maximum sized Ethernet packet is generated and sent
+to the UUT. The maximum packet is addressed to the UUT and has a data
+pattern of descending integers. Both packets will test Ethernet protocol
+processing and the maximum packet will test the transmit FIFO memory. 
+
+The packets used to "go on the wire" are compatible with loopback test
+packets and have the protocol type set to "loopback" and other fields set
+to cause testers to ignore these packets. The destination address (and
+source) of the loopback packet is the UUT's assigned Ethernet station
+address. 
+
+QNA state,	on entry:	Target address memory has physical address
+				Other addresses set to zero
+				H4000 or equivalent is connected
+				Live Ethernet or terminated cable
+				Status is ready (FIFO empty)
+				Receive and transmit disabled
+
+		on exit:	External loopback enabled
+				Status is ready (FIFO empty)
+				Receive and transmit disabled
+
+Test Sequence...
+
+	1 - Generate minimum sized Ethernet Packet
+		. source and destination address is UUT's assigned address
+		. packet data are descending bytes, [56..1]
+		. type field is set to "loopback", 90-00 hex.
+		. skip count set to zero, 00-00 hex.
+		. reply function code set to 1, 01-00 hex.
+	2 - transmit and receive the minumum packet in external loopback
+	3 - check all UUT status
+	4 - compare received data against nominal
+	5 - Generate maximum sized Ethernet Packet
+		. source and destination address is UUT's assigned address
+		. packet data are descending bytes, [(1500mod256)..1]
+		. type field is set to "loopback", 90-00 hex.
+		. skip count set to zero, 00-00 hex.
+		. reply function code set to 1, 01-00 hex.
+	6 - transmit and receive the maximum packet in external loopback
+	7 - check all UUT status
+	8 - Alter transmitted packet to be nominal receive packet
+	9 - compare received data against nominal
+
+Errors:
+
+	e15 - External loopback using "wire" not operational
+	e05 - minimum packet data compare check
+	e05 - maximum packet data compare check
+	e05,e14 - minimum/maximum packet operation status check
+	e05,e09 - minimum/maximum packet operation timeout
+
+4.4	ERROR DESCRIPTIONS
+
+4.4.1	HARDWARE (LED'S) INDICATOR CODING
+
+The three numbered LED's located between the handle and transceiver cable
+connector provide visual indication of the CQ test results. The LED closest
+to the transceiver cable connector is LED1, the middle LED2 and the
+farthest is LED3. Valid LED readings are: 
+
+	All three on - Boot/Diagnostic ROM cannot be "uploaded"
+	LED1 is off, LED's 2 and 3 are on - Internal error detected
+	LED1 and LED2 are off, LED3 is on - H4000 or Ethernet error
+	All three off - QNA has passed all Citizenship tests
+
+4.4.2	SOFTWARE ERROR (R0) INDICATOR CODING
+
+The errors detected by the citizenship test are indicated by bit settings 
+in a register that is returned to the caller. By convention no bits set 
+signifies that the UUT has passed the QNA citizenship test and if only bit 15
+is set the device has passed all tests excepting those that require an H4000
+to be connected. The remaining bits (00-14) are coded with a single bit
+representing an error condition and the CITIZEN_QNA routine may return with
+multiple error bits set. 
+
+The errors and their causes are:
+
+Error # 00 - Invalid Ethernet station address (Test 1)
+
+	Read I/O Page register failure (see also Error # 10)
+	UUT is not a DEQNA/M7504 module
+	Station address ROM malfunction
+	Station address ROM improperly manufactured
+	Address is not valid DEC QNA address
+
+Error # 01 - Station address/Receive FIFO processing check (Test 3)
+
+	Target address memory malfunction
+	Packets not properly stored in receive FIFO
+	Receive FIFO memory malfunction
+
+Error # 02 - Station address compare test check (Test 4)
+
+	Address filter logic passing all addresses
+	Address filter logic not passing expected addresses
+
+Error # 03 - Extended loopback transmit buffer data check (Test 5)
+
+	Ethernet protocol processing check
+	Transmit buffer memory malfunction
+	Packet size processing error (protocol error)
+
+Error # 04 - DMA interface processing check (Test 6)
+
+	DMA odd/even length and address processing check
+	Multi-element transmit descriptor processing check
+	Chained transmit descriptor processing check
+
+Error # 05 - Ethernet extended loopback test check (Test 8)
+
+	Ethernet protocol processing check
+	Minimum valid length Ethernet processing check
+	Maximum valid length Ethernet processing check
+
+Error # 06 - Final operation to clear device failure (test control)
+
+	UUT error caused device not to reset properly
+	Set-up to turn off sanity timer failed
+	Set-up to turn off LED3 failed
+	
+Error # 07 - 
+Error # 08 -
+
+Error # 09 - Device operation timeout (all tests)
+
+	UUT failed to complete a transmit and/or receive in time
+
+Error # 10 - Bus timeout or non-existant memory interrupt (general error)
+
+	I/O Page is not accessable for read or write
+	Cannot read station address ROM
+	Test code has attempted to access non-existant memory
+
+Error # 11 - Spurious or missing device interrupt (general error)
+
+	No device interrupt was detected when expected
+	Device did not detect non-existant memory state on bus
+	18 or 22-Bit addressing failure
+	QNA caused unexpected device interrupt during any test
+
+Error # 12 - Setup packet or Target address echo data check (all tests)
+
+	Transmit of set-up packet timed out
+	Transmit operation status not nominal
+	Receipt of echoed set-up packet timed out
+	Receive operation status not nominal
+	Echoed data not identical to transmitted data
+	Extra word at end of set-up packet not nominal
+
+Error # 13 - Sanity timer interrupt (general error)
+
+	Power failed during test
+	QNA Sanity timer caused unexpected interrupt during test sequence
+
+Error # 14 - Operation completion status check (all tests)
+
+	CSR status after final reset not nominal
+	CSR status after transmit and/or receive not nominal
+	Receive descriptor flag and status word 1 not nominal
+	Received byte length check
+	Transmit descriptor flag and status word 1 not nominal
+	TDR value not greater than zero
+
+Error # 15 - External loopback not operational (Test 7 and 8)
+
+	Ethernet not operational
+	H4000 fuse blown
+	H4000 not connected
+
+Excerpts from:
+
+                                     DECnet
+
+                          DIGITAL Network Architecture
+
+                             Maintenance Operations
+
+                            Functional Specification
+
+                                 Version 3.0.0
+                                 September 1983
+
+
+
+                                    ABSTRACT
+
+                    This document describes  the  structure,
+                    functions,   interfaces,  and  protocols
+                    needed for the low level maintenance  of
+                    a DECnet network.
+
+                         DIGITAL EQUIPMENT CORPORATION
+
+                          MAYNARD, MASSACHUSETTS 01754
+
+
+
+           Copyright (c) 1980, 1983 by Digital Equipment Corporation
+
+                                   APPENDIX B
+
+                         DATA LINK SPECIFIC INFORMATION
+
+
+
+     This appendix contains information necessary to relate  specific  data
+     link types to the maintenance operations.
+
+
+     B.1  DDCMP
+
+     The Digital Data Communication Message Protocol (DDCMP) Data Link is a
+     point-to-point  channel  and allows exclusive maintenance operation in
+     its maintenance mode.  It does not require message padding.
+
+
+     B.2  LAPB
+
+     The LAPB Data Link is the frame level of X.25.  It is a point-to-point
+     channel  and allows exclusive maintenance operation for loopback only.
+     It does not require message padding.
+
+
+     B.3  Ethernet
+
+     The  Ethernet  Data  Link  is  the   Digital   Equipment   Corporation
+     implementation  of  the  inter-company  Ethernet Data Link.  It allows
+     concurrent maintenance operation and is  a  multiaccess  channel.   As
+     such  it  has  specific protocol types and multicast addresses that go
+     with it.  It requires message padding.
+
+     Refer to the the Ethernet Product Architecture Specification  and  the
+     DNA  Ethernet  Data  Link  Architectural  Specification  for  specific
+     functions and requirements.  For  example,  the  Product  Architecture
+     Specification  requires  that  the  Loop Server and the Console Server
+     cannot be off while the data link is on.
+
+     Data Link Specific Information                                Page B-2
+
+
+     The protocol types are:
+
+         Value      Protocol
+          
+         90-00      Loopback
+         60-01      Dump/Load
+         60-02      Remote Console
+
+     The multicast addresses are:
+
+         Address            Group
+          
+         CF-00-00-00-00-00  Loopback assistance
+         AB-00-00-01-00-00  Dump/Load assistance
+         AB-00-00-02-00-00  Remote Console
+
+     Ethernet counters  can  be  read  through  the  Remote  Console.   The
+     counters are defined in the DNA Ethernet Data Link specification.  The
+     counters are a fixed format block with each value as indicated below.
+
+          Byte
+         Length  Counter Value
+          
+            2    Seconds since last zeroed
+            4    Bytes received
+            4    Bytes sent
+            4    Frames received
+            4    Frames sent
+            4    Multicast bytes received
+            4    Multicast frames received
+            4    Frames sent, initially deferred
+            4    Frames sent, single collision
+            4    Frames sent, multiple collisions
+            2    Send failure
+            2    Send failure reason bitmap
+            2    Receive failure
+            2    Receive failure reason bitmap
+            2    Unrecognized frame destination
+            2    Data overrun
+            2    System buffer unavailable
+            2    User buffer unavailable
+
+     The bit meanings for the Send failure reason bitmap are:
+
+         Bit   Reason
+          
+          0    Excessive collisions
+          1    Carrier check failed
+          2    Short circuit
+          3    Open circuit
+          4    Frame too long
+          5    Remote failure to defer
+
+     Data Link Specific Information                                Page B-3
+
+
+     The bit meanings for the data errors inbound reason bitmap are:
+
+         Bit   Reason
+          
+          0    Block check error
+          1    Framing error
+          2    Frame too long
+
+
+                                   APPENDIX C
+
+               IMPLEMENTATION SPECIFIC DUMP/LOAD CHARACTERISTICS
+
+
+
+     This appendix documents characteristics of PDP-11  dump/load  programs
+     existing as of the date of this specification.
+
+
+     C.1  Secondary Loader
+
+     The secondary loader is sent as a single  Memory  Load  with  Transfer
+     Address   message   as   normally   required.   In  addition  to  this
+     requirement, it must be loaded and started  at  location  6.   Current
+     secondary  loaders  are between 400 and 600 bytes in length, depending
+     upon the device type used.  They use the stack address set up  by  the
+     primary loader.  For current loaders this will be between 17400(octal)
+     and 17776(octal).  The secondary loader assigns its buffer space below
+     the  stack.  The secondary loader accepts Memory Load with and without
+     Transfer  Address  messages.   It  is,  therefore,  capable  of  doing
+     multi-block  loads  into absolute addresses without memory management.
+     It requests a tertiary loader to be loaded.
+
+     The DMP-11 and DMV-11 do not  set  up  the  stack  pointer  or  R1  as
+     described.  For those devices, R1 contains the device unit number.
+
+
+     C.2  Tertiary Loader
+
+     The tertiary loader is loaded by the secondary in a  multi-block  load
+     starting at location 10000(octal).  It will run with memory management
+     on if it exists on the system.  The tertiary loader  moves  itself  to
+     the top of physical memory and assigns its stack and buffer space just
+     below itself.  It is, therefore, capable  of  multi-block  loads  from
+     location  0  up  to its buffer address, usually the last 1-2K words of
+     physical memory.  It requests the operating system to be loaded.   The
+     current tertiary loaders do not specify any specific operating system.
+     The choice of system to send is established by prior agreement  or  by
+     command at the host system.
+
+
+						&
+
+.NLIST
+.LIST SEQ,BIN
+.LIST
+
+	.TITLE	QNAROM - DEQNA/M7504 Diagnostic/Boot ROM
+	.IDENT	/V01.13/
+; 
+	.enabl	lc	; Listing in UPPER and lower case
+;
+	.dsabl	ama	; Allow assembly in PIC
+	.dsabl	gbl	; No undefined symbols allowed
+;
+;
+; Copyright (C) 1983, 1984
+; Digital Equipment Corporation, Maynard, MASS.
+;
+;
+; This software is furnished under a license for use only on a
+; single computer system and  may  be  copied  only  with  the
+; inclusion of the above copyright notice.  This software,  or
+; any other copies thereof, may not be provided  or  otherwise
+; made available to any other person  except for use  on  such
+; system and to one who agrees to these license terms.  Title
+; to and ownership of the software shall at all  times  remain
+; in DEC.
+;
+; The information in this document is subject to change without
+; notice and should not be construed as a commitment by Digital
+; Equipment Corporation.
+;
+; DEC assumes no responsibility for the use or  reliability of
+; its software on equipment which is not supplied by DEC.
+
+; Revision History:
+;
+; 1.00	6-Oct-83	Initial version, concatenated QNA extended primary
+;			boot, citizenship test and DECnet boot code for
+;			testing.
+;
+; 1.01	12-Oct-83	Fix bugs in Extended primary boot, timers and addresses.
+;
+; 1.02	13-Oct-83	Fix addressing bugs in Citizenship test, stack etc. save
+;			Add "HALT" as first instruction of DECnet boot for
+;			Debugging
+;
+; 1.03	13-Oct-83	Add FIFO overflow case to long packet test (T05)
+;
+; 1.04	20-Oct-83	Change SOB's to DEC/BNE's for LSI-11 compatability
+;			in Extended Primary Boot and Citizenship test only.
+;
+; 1.05	04-Nov-83	Replace DECnet boot code with version 1.09
+;			Define "BUFSIZ" symbol for DECnet boot code!
+;
+; 1.06	08-Nov-83	Fix Citizenship test code for cases of activity on
+;			the wire during test 8 and the final clean-up
+;
+; 1.07	15-Nov-83	Decrease Citizenship test time from ~30 seconds to
+;			about 10 seconds for the quiche eaters.
+;
+; 1.08	16-Nov-83	Set minimum packet length in "SNDDRV" routine to
+;			60. as DEQNA takes care of the 4 byte CRC.
+;
+; 1.09	07-Dec-83	Remove sanity timer testing from the Citizenship test
+;
+; 1.10	26-Jan-84	Change Boot timing for Micro J11 based systems, fix bug
+;			in test 5, add error return vector for boot.
+;
+; 1.11	1-Feb-84	Change for reversed CSR bit setting for bulkhead 
+;			fuse state indicator
+;
+; 1.12	30-May-84	Test 7 - extend carrier sense time-out
+;			Test 8 - check error summary bit or receive and
+;			transmit for retry.
+;			Q.DESC - extend time out check time
+;			Q.OCHK - remove xl bit from qo.csn
+;				 added xl bit to qo.csr
+;			q.test- change BGE to BHIS
+;
+; 1.13	15-Jun-84	Compare Receive Descriptor Flag Word of a received
+;                       packet to octal 140000 rather than 177777.
+;
+; 1.14	2-Apr-86	Removed NXM check from test 2, increased retry count in
+;			test 8, increased wait for tx done time (cq.sto) in 
+;			q.sets, changed mask for rcv stat1 in q.ochk (the EDLC
+;			will sometimes set error bits without discard)
+;
+; 1.15	20-May-86	preserve upper byte of PSW when generating interrupt
+;			vector table - i.e. do not switch register sets 
+;			method should be compatible with 1103 through 1183
+;			mask out error and loss of carrier in tx status word 1
+;			per driver recommendations for DECOM
+;
+; 1.16	24-Jul-86	Change DECNET BOOT CODE
+;			look for loss of carrier in tx status word 1 during
+;			secondary boot - per driver recommendations for DECOM
+;			restore PSW to initial IPL after test 2 in CIT code
+;			this is for compatibility with MXV11 boot code
+;			NOTE, the MXV11 code is responsible for setting up
+;			the line clock vector, this QNA code must not change it
+; 			changes marked with 'rev 1.16' as comment
+
+
+;
+
+.sbttl	Memory usage of the DEQNA boots and resident diagnostic...
+;
+;++
+;
+; This table shows memory usage by the DEQNA host resident primary boot 
+; code, the Extended Primary Boot (EPB) code and the Citizenship test. Not 
+; shown is usage of memory by the DECnet boot also resident on the DEQNA 
+; Boot/Diagnostic ROM.
+; 
+; Memory usage of the DEQNA boots and resident diagnostic...
+;
+;	After Primary	After Extended Primary	After DEQNA Citizenship
+;	Boot (Host	Boot (DEQNA Resident	Test execution (DEQNA
+;	Resident)	Code)			Resident Code)
+;----------------------------------------------------------------------------
+; 00000	| EPB code	|			| See notes below for	|    0
+;  ...	| 512. bytes	|			| locations used by 	|
+; 01000	|		|			| Citizenship test.	|  512
+;----------------------------------------------------------------------------
+; 01776	|		| EPB stack start	| Citizenship stack	| 1023
+;----------------------------------------------------------------------------
+; 02000	|		| Contents of DEQNA	| 			| 1024
+;  ...	|		| Boot/diagnostic ROM	|			|
+; 11777	|		| 4096. bytes		|			| 5119
+;----------------------------------------------------------------------------
+; 12000	|		|			| Citizenship test	| 5120
+;  ...	|		|			| work space of		|
+; 21777	|		|			| 4096. bytes		| 9215
+;----------------------------------------------------------------------------
+; 22000		Memory above this location not used			  9216 
+;
+;******************************************************************************
+;
+; Locations in Interrupt and Trap vector space used by Citizenship test...
+;
+; These locations are modified by the DEQNA/M7504 Citizenship test during
+; execution. They are to be saved by the calling routine if need be.
+;
+;	004/006		Bus time-out and illegal instruction
+;
+;	012		Boot process error vector 
+;
+;	024/026		Powerfail or DEQNA sanity timer interrupt
+;
+;	766		Storage for entry value of stack pointer (SP/R6)
+;	770		Storage for entry value of workspace pointer (R2)
+;	772		Storage for entry value of I/O Page base pointer (R1)
+;
+;	774/776		Interrupt vector used for DEQNA interrupt
+;
+;--
+
+.sbttl	CITQNA	QNA Extended Boot and Citizenship test
+;
+.sbttl	EQUATED SYSTEM STANDARD SYMBOLS...
+
+; BIT DEFINITIONS
+
+BIT15 =	100000
+BIT14 =	40000
+BIT13 =	20000
+BIT12 =	10000
+BIT11 =	4000
+BIT10 =	2000
+BIT09 =	1000
+BIT08 =	400
+BIT07 =	200
+BIT06 =	100
+BIT05 =	40
+BIT04 =	20
+BIT03 =	10
+BIT02 =	4
+BIT01 =	2
+BIT00 = 1
+
+BIT9 =	BIT09
+BIT8 =	BIT08
+BIT7 =	BIT07
+BIT6 =	BIT06
+BIT5 =	BIT05
+BIT4 =	BIT04
+BIT3 =	BIT03
+BIT2 =	BIT02
+BIT1 =	BIT01
+BIT0 =	BIT00
+
+NOBITS = 000000
+
+; CPU PRIORITY LEVEL DEFINITIONS
+
+PRI07 =	340
+PRI06 =	300
+PRI05 =	240
+PRI04 =	200
+PRI03 =	140
+PRI02 =	100
+PRI01 =	40
+PRI00 =	0
+
+.sbttl	QNA programming model
+;
+;	QNA device symbols and standard symbols ... [SMITH.QNA]QNAMOD.MAC
+;
+; REFERENCE:
+;
+; 1 -	QNA (Q-Bus to NI Adapter)
+;	FUNCTIONAL & PROGRAMMING SPECIFICATION
+;	Revision 1.0, 28 February 1983
+;
+; 2 -	DIAGNOSTIC ENGINEERING FUNCTIONAL SPECIFICATION FOR
+;	THE QNA CITIZENSHIP TEST (CQ)
+;	Revision 2.0, 18 March 1983
+;
+; 3 -	DESIGN REVIEW PACKAGE
+;	1 April 1983
+;
+; 4 -	Rev-B experience
+;	20 September 1983
+;
+;************************************************************************
+;
+; QNA DEVICE ADDRESS AND VECTOR ASSIGMENTS...
+;
+	QNA1IO	=	174440		; I/O page register set base address
+	QNA1VC	=	300		; default interrupt vector address
+;
+	QNA2IO	=	174460		; I/O page register set base address
+	QNA2VC	=	304		; default interrupt vector address
+;
+	QNANPR	=	4		; Bus priority assigment
+;
+	QNAIOP	=	QNA1IO		; Default I/O page base address
+	QNAVEC	=	QNA1VC		; Default interrupt vector address
+;
+	QNAROM	=	4096.		; Bytes in QNA's Boot/Diagnostic ROM
+	QNASUM	=	4094.		; Offset to checksum word in ROM
+;
+;************************************************************************
+.page
+.sbttl	QNA I/O Page control, status, registers and bits defined
+;
+;************************************************************************
+;
+; I/O Page Configuration Definitions...
+;
+; IOP00 - Station address, first 8 bits			<07:00>	read only
+; IOP02 - Station address, second 8 bits		<07:00> read only
+; IOP04	- Receive buffer descriptor low address		<15:00> write only
+;	  Station address, third 8 bits			<07:00> read only
+; IOP06	- Receive buffer descriptor high address	<05:00> write only
+;	  Station address, fourth 8 bits		<07:00> read only
+; IOP10	- Transmit buffer descriptor low address	<15:00> write only
+;	  Station address, fifth 8 bits			<07:00> read only
+; IOP12	- Transmit buffer descriptor high address	<05:00> write only
+;	  Station address, sixth 8 bits			<07:00> read only
+; IOP14 - Interrupt vector address			<09:02> read/write
+; IOP16	- Control and Status Register			 (see below)
+;
+	IOPRS	=	10	; Contigious I/O Page registers
+;
+;**************************************************************************
+;
+; IOP14 / Interrupt Vector address..
+;
+		;	bits 15-10	Reserved, read as zeros
+		;	bits 9-2	Interrupt vector address, read/write
+		;			Bits 9-2 of full 16-bit address
+		;	bits 0-1	Reserved, read as zeros
+;
+;	Notes:
+;
+;	QNA floating interrupt vector addresses normally assigned above 
+;	location 300 and below 1000.
+;
+;**************************************************************************
+.page
+;**************************************************************************
+;
+; IOP16 / CSR bit definitions...
+;
+	ri	=	bit15	; Receive interrupt request	read/write 1
+		;	bit14	; reserved			unusable
+	ca	=	bit13	; Ethernet carrier sense	read only
+	xc	=	bit12	; Transceiver powered		read only
+		;	bit11	; reserved			unusable
+	se	=	bit10	; Sanity Timer enable		read/write
+	el	=	bit9	; External loopback enable	read/write
+	il	=	bit8	; Internal loopback disable	read/write
+;
+	xi	=	bit7	; Transmit interrupt request	read/write 1
+	ie	=	bit6	; Device interrupt enable	read/write
+	rl	=	bit5	; Receive list invalid		read only
+	xl	=	bit4	; Transmit list invalid		read only
+	bd	=	bit3	; Boot/Diagnostic read enable	read/write
+	ni	=	bit2	; Non-existant memory access	read only
+	sr	=	bit1	; Software reset		read/write
+	re	=	bit0	; Receiver enable		read/write
+;
+	csrm	=	044000	; mask for unused CSR bits
+;
+; Notes:
+;
+;	<bd> and <el> bits must be set and cleared to transfer contents
+;		of the Boot/Diagnostic ROM
+;
+;	<re> bit set to zero to disable receive from wire
+;	<il> bit set to zero to disable transmit onto wire	
+;
+;	<xi,ri> bits cleared by writing one's
+;
+;	CSR state after reset is <rl!xl>
+;
+;*************************************************************************
+.page
+;*************************************************************************
+;
+; Buffer Descriptor Block Format...
+;
+; WORD0	- ! Status word	0, use flag word			  !
+; WORD1	- ! Buffer state ! Transmit odd/even ! High order address !
+; WORD2 - ! Low order address					  !
+; WORD3 - ! One's complement buffer size (byte count)		  !
+; WORD4 - ! Status word 1, transmit and receive			  !
+; WORD5 - ! Status word 2, transmit and receive			  !
+; WORD6 - ! Descriptor link pre-fill status word		  !
+; WORD7 - ! Buffer state ! transmit odd/even ! High order address !
+; WORD8 - ! Low order address					  !
+;
+; Prototypical QNA Buffer descriptor offsets...
+;
+	bsw0	=	 0	; Buffer status word 0, flag word
+	bdes	=	 3	; Buffer descriptor
+	bpah	=	 2	; High address bits and odd/even bits
+	bpad	=	 4	; Buffer pointer address, low 16 bits
+	bsiz	=	 6	; Two's complement buffer word count
+	bsw1	=	10	; Buffer status word 1
+	bsw2	=	12	; Buffer status word 2
+;
+	csw0	=	14	; Descriptor link status word 0, flag word
+	cdes	=	17	; Chain pointer descriptor
+	cpah	=	16	; Chain pointer high order address
+	cpad	=	20	; Chain pointer low order address
+;
+;*************************************************************************
+;
+; BDES/CDES - Buffer descriptor / Chain descriptor:
+;
+	v	=	bit15	; Valid address bit if 1
+	c	=	bit14	; Chain address if 1
+	e	=	bit13	; End of message (transmission)
+	s	=	bit12	; Setup mode packet if 1
+		;     	bits 11:8	; reserved
+;
+; BPAH - Transmit odd/even:
+;
+	l	=	bit7	; Transmit buffer ends on byte boundary
+	h	=	bit6	; Transmit buffer begins on byte boundary
+;
+; BPAH/CPAH - Buffer high order address / chain high order address:
+;
+		;     bits 5-0	; High order address	<05:00>
+;
+;*************************************************************************
+.page
+;*************************************************************************
+;
+; Transmit operation buffer status:
+;
+; BSW0/CSW0 - Status word 0, flag word...
+;
+	newb	=	bit15		; - buffer not used
+	used	=	bit14!bit15	; - used and not last segment
+;
+	tsm0	=	037777		; Bits 13-0, reserved
+;
+; BSW1 - Status word 1...
+;
+	lastd	=	bit15	; last descriptor in chain
+	errsu	=	bit14	; error summary
+		;	bit13		reserved
+	closs	=	bit12	; cable shorted
+	nocar	=	bit11	; no carrier
+	ste16	=	bit10	; sanity timer on at power-up
+	abort	=	bit9	; 16 collisions, abort
+	tfail	=	bit8	; transmission failed, heartbeat
+	count	=	000360	; bits 7-4, collision attempt count
+		;	bits 3-0	reserved
+;
+	tsm1	=	020017	; transmit status word 1 mask
+;
+; BSW2 - Status word 2...	
+;
+		;  	bits 15-14 	reserved
+	tdrct	=	037777	; bits 13-0, TDR (time domain reflectometry)
+				;	100 nano-sec resolution count.
+;
+	tsm2	=	140000	; transmit status word 2 mask
+;
+;	TDR value of greater than 51.2 micro-seconds implies late 
+;	collision.
+;
+;*************************************************************************
+;
+;	<tfail> is on during internal loopback and setup operations.
+;
+;	<tfail> may be on during normal or external loopback with
+;	transceivers other than the DEC H4000.
+;
+;*************************************************************************
+.page
+;*************************************************************************
+;
+; Receive command buffer status:
+;
+; BSW0/CSW0 - Status word 0, Flag word...
+;
+	newb	=	newb	; - buffer not used
+	used	=	used	; - used and not last segment
+;
+	rsm0	=	037777	; Bits 13-0, reserved
+;
+; BSW1 - Status word 1...
+;
+	lastd	=	lastd	; last descriptor in chain
+	errsu	=	errsu	; Long packet or error summary
+	esetu	=	bit13	; Loopback packet or control-setup
+	discr	=	bit12	; discard packet
+	runtp	=	bit11	; Runt packet in FIFO
+	rblh	=	003400	; bits 10-8, Received byte length, bits 10:8
+		;	bits 7-4	reserved
+	short	=	bit3	; packet with less than 10 bytes
+	frame	=	bit2	; alignment error
+	crcer	=	bit1	; CRC error
+	ffovf	=	bit0	; FIFO buffer overflow
+;
+	rsm1	=	000360	; Receive status word 1 mask value
+;
+; BSW2 - Status word 2...
+;
+		;	bits 15-8	reserved
+	rbll	=	000377	; bits 7-0, Received byte length, bits 7:0
+				; Received Byte Length field of 11 bits is 
+				; made up of the bits in status word 1.
+;
+	rsm2	=	177400	; Receive status word 2 mask value
+;
+;**********************************************************************
+;
+;	<short> and <discr> on implies that a short packet was received and 
+;	is to be discarded. <short> alone is to be ignored.
+;
+;*************************************************************************
+.page
+;**********************************************************************
+;
+; Ethernet Data Packet fields, offsets and sizes...
+;
+	; 0-5			; Destination address, 6 octets
+	; 6-11			; Source address, 6 octets
+	; 12,13			; Type, 2 octets
+	; 14-59			; Packet, minimum 46 octets
+	; 14-1513		;  "  "   maximum 1500 octets
+	; 60-63/1514-1517	; Frame check (CRC) 4 octets
+	; 64.			; Smallest legal packet size
+	; 1518.			; Largest legal packet size
+	;		; Long packets truncated at 1740. bytes
+;
+;**********************************************************************
+;
+; Target address setup packet can contain up to 14. Ethernet addresses
+;
+; Group "A", addresses 1-7...
+;
+	; 1		Offset to first byte of first address
+	; 10		Offset to subsequent bytes of an address
+	; 57		Offset to last byte of seventh address
+	; 1		Offset to first bytes of addresses 2-7
+;
+; Group "B", addresses 8-14...
+;
+	; 101		Offset to first byte of eighth address
+	; 10		Offset to subsequent bytes of an address
+	; 157		Offset to last byte of fourteenth address
+	; 1		Offset to first byte of addresses 9-14
+; 
+;**********************************************************************
+.page
+;**********************************************************************
+;
+; Setup Mode value bits and settings...
+;
+; Setup packet length of greater than 128. (200 octal) bytes (note: BYTES!)
+; uses low 7 bits of byte count to set addressing modes, set sanity timer 
+; value and to control diagnostic LED's.
+;
+	modl	=	100	; "length" for mode settings
+;
+; The left six bits are encoded in the transmit word count, <BSIZ>,  and the
+; right-most bit is encoded via the <l> bit of BPAH.
+;
+	mcst	=	l	; Multicast address recognize ( <l> bit of BPAH)
+	pmsc	=	bit0	; Promiscuous mode enable
+;
+; Diagnostic LED control commands:
+;
+	dls1	=	bit1		; LED1 off
+	dls2	=	bit2		; LED2 off
+	dls3	=	bit1!bit2	; LED3 off
+;
+; Sanity timer setting field:
+;
+	stv0	=	nobits		; Setting 0, 1/4 second
+	stv1	=	bit3		; Setting 1, 1 second
+	stv2	=	bit4		; Setting 2, 4 seconds
+	stv3	=	bit3!bit4	; Setting 3, 16 seconds
+	stv4	=	bit5		; Setting 4, 64 seconds, 1.07 minutes
+	stv5	=	bit5!bit3	; Setting 5, 256 seconds, 4.27 minutes
+	stv6	=	bit5!bit4	; Setting 6, 1024 seconds, 17.07 minutes
+	stv7	=	bit5!bit4!bit3	; Setting 7, 4096 seconds, 68.27 minutes
+;
+;**********************************************************************
+
+.sbttl 	QNAEPB - DEQNA/M7504 Boot
+;
+;++
+;
+; The Extended Primary Boot is that portion of code resident on the QNA in 
+; the Boot/Diagnostic ROM that uploads the entire 4K x 8 ROM, calls the QNA 
+; Citizenship test and either halts if there is an error, dispatches to the 
+; DECnet boot, or dispatches to a caller supplied address.
+;
+; The QNA Extended Primary Boot (QNAEPB) is in the first 512. bytes of the 
+; QNA Boot/Diagnostic ROM that is read from the QNA into the host memory.
+; It must be loaded (booted) into locations 0-777 as QNAEPB will not execute
+; elsewhere.
+;
+; Note that the contents of the QNA BD ROM are not loaded into host memory 
+; in the same order as in the actual ROM itself. This is because the ROM 
+; contains i8051 code used by the QNA and this code must be located starting
+; in location zero of the ROM. When the ROM is loaded into host memory the 
+; it is done by the i8051 code and the entire 4K bytes of the ROM is 
+; transferred.
+;
+; The first location transferred is first location PAST the i8051 code which
+; by convention is the QNAEPB code. The ROM's checksum, while in the last two 
+; bytes of the QNA BD ROM, appears after the last of the PDP-11 code and 
+; before the i8051 code. 
+;
+; QNA Boot/Diagnostic ROM layout:
+;
+;	Actual ROM contents-		"uploaded" contents-
+;
+;	i8051 code			QNA Extended Primary Boot
+;	QNA Extended Primary Boot	Citizenship test code
+;	Citizenship test code		DECnet boot code
+;	DECnet boot code		MOP code
+;	MOP code			Checksum (1 word)
+;	Checksum (1 word)		i8051 code
+;
+; Sequence of operations:
+;
+;	1 - Set stack to location 1776	
+;	2 - Push R0 onto stack (entry argument)
+;	3 - Using I/O Page address in R1:
+;		a - validate receive descriptor for:
+;			4096. bytes
+;			location 2000
+;		b - write a "1010" to the CSR
+;		c - wait for i8051 ROM to be moved to receive FIFO
+;		d - clear the CSR
+;		e - wait for receive FIFO to transfered to host memory
+;		f - reset the QNA
+;	4 - Check for nominal receive status
+;	5 - Validate checksum		
+;	6 - Execute QNA Citizenship test
+;	7 - Halt if failure
+;	8 - Pop entry argument from stack
+;	9 - If entry argument greater than 777 dispatch there
+;	10 - If entry argument not equal to zero HALT
+;	11 - Dispatch to DECnet boot
+;
+; QNA Boot failure halts, reasons:
+;
+;	Boot/Diagnostic "upload" operation status check
+;	Boot/Diagnostic "upload" checksum
+;	Invalid entry parameter in R0
+;	QNA Citizenship test failed
+;
+;--
+
+.sbttl	Extended Primary Boot for QNA
+;
+; This code and data is to be loaded into location 0 of the host's memory. 
+; It will not work elsewhere.
+;
+;******************************************************************************
+;
+; QNA Extended Primary Boot header, words 0, 2, 4 and 6
+;
+; Contains:
+;
+;	word 0 - QNA primary boot entry
+;
+;		R0 - Boot DECnet if 0, else transfer address
+;		R1 - I/O Page base address of QNA 	
+;
+;	word 4 - QNA Citizenship test entry
+;
+;		R1 - I/O Page base address of QNA 	
+;		R2 - Address of workspace
+;
+; Symbols for the QNA Extended Primary Boot:
+;
+qp.stk	=	1776		; Stack location [1000-1776]
+qp.rom	=	2000		; Location for the "upload"
+qp.wrk	=	qp.rom+QNAROM	; Base address of 4K byte workspace for CITQNA
+;
+q.8051	=	512.	; Number of bytes, rounded up to be even, used for
+			; i8051 code.
+;
+qb.csr	=	16	; Offset to DEQNA CSR register
+qb.rbl	=	04	; Activate receive descriptor low address
+qb.rba	=	06	; Activate receive descriptor high address
+;
+qnaepb	= 0
+;****************************************************************************
+;
+;	T H I S   I S  T H E   A C T U A L   S T A R T   O F   C O D E
+
+	nop			; Word 0 - Standard "boot" first location
+	br	q.boot		; Word 2 - branch to actual boot code
+	br	citqna		; Word 4 - branch to QNA Citizenship test
+qb.sum	= 6
+	.word	4094.-q.8051	; Word 6 - Offset to the ROM checksum
+qb.tst	= 10
+	br	q.test		; Word 10 - branch to call test and boot
+qb.erv	= 12
+	.word	0		; Word 12 - if non-zero then error vector
+;
+;******************************************************************************
+;
+; Receive descriptor for the Boot/Diagnostic "upload" operation
+;
+qb.rds	= 14			; Word 14 - Descriptor start
+	.word	newb		; Flag word is new, changed to octal 140000
+	.word	v		; Descriptor is valid
+	.word	qp.rom		; First half gets loaded here
+	.word	-<QNAROM/4>	; Size is one half needed words
+qb.rs1:	.word	0		; Intermediate status word 1, changed to octal 140000
+	.word	0		; Intermediate status word 2, changed to octal 140000
+;
+qb.rs2:	.word	newb		; Second flag word is new, changed to octal 140000
+	.word	v		; Last descriptor is valid
+	.word	qp.rom+<QNAROM/2>	; Second half gets loaded here
+	.word	-<QNAROM/4>	; Size is one quarter needed bytes
+	.word	0		; Final status word 1, not changed
+	.word	0		; Final status word 2 (RBL), not changed
+;
+qb.rs3:	.word	newb		; Final flag word, not changed
+	.word	e		; End of Receive descriptor
+;
+; Test constants...
+;
+qb.ns1:
+qb.ns2:	.word	used		; Nominal second descriptor flag word
+qb.ns3:	.word	newb		; Nominal final flag word, no change
+;
+;******************************************************************************
+;
+; Begin the actual QNA Extended Primary Boot
+;
+q.boot:	mov	#qp.stk,sp	; Get us a valid stack
+	mov	r0,-(sp)	; and save the entry argument
+	mov	#qb.rds,qb.rbl(r1)	; make a valid receive descriptor...
+	clr	qb.rba(r1)	; and use it to "upload" all the QNA BD ROM
+;
+	mov	#bd!el,qb.csr(r1)	; set Boot/Diagnostic bits in the CSR
+	clr	r0
+3$:	dec	r0		; long delay needed for all LSI-11 processors
+	bne	3$		; Wait for i8051 ROM to FIFO transfer
+;
+	clr	qb.csr(r1)	; clear the Boot/Diagnostic bits
+	clr	r0
+5$:	dec	r0		; long timer for all LSI-11 processors
+	bne	5$		; Wait for FIFO to memory via DMA transfer
+;
+	mov	#sr,qb.csr(r1)	; reset the QNA
+	clr	qb.csr(r1)	; and Boot/Diagnostic sequence is done
+;
+; Continue the boot process
+;
+        bic     #037777,qb.rs1  ; Mask out bits 0-13
+	cmp	qb.rs1,qb.ns1	; Check first descriptor receive status
+	bne	q.halt		;? Status check
+        bic     #037777,qb.rs2  ; Mask out bits 0-13
+	cmp	qb.rs2,qb.ns2	; Check second descriptor flag word
+	bne	q.halt		;? Status check
+        bic     #037777,qb.rs3  ; Mask out bits 0-13
+	cmp	qb.rs3,qb.ns3	; Check last descriptor flag word
+	bne	q.halt		;? Status check
+;
+; Data transfer complete, now check the check sum...
+;
+	mov	#QNASUM,r4	; Bytes to sum, 2 less than total
+	clr	r3		; Clear bucket for checksum
+	clr	r2		; Clear index for buffer scan
+;
+10$:	movb	qp.rom(r2),r0	; fetch a byte
+	inc	r2		; account for it
+	bic	#^C377,r0	; clean it up
+	add	r0,r3		; and sum it
+	cmp	r2,@#qb.sum	; Check for the byte/word with the checksum
+	bne	20$		; and since it is ignored
+	tst	(r2)+		; skip over the checksum word (2 bytes).
+20$:	dec	r4
+	bne	10$		; counting bytes to sum
+;
+	mov	@#qb.sum,r0	; Offset from base of the Boot/Diagnostic Code
+	cmp	qp.rom(r0),r3	; and compare actual checksum to expected
+	bne	q.halt		;? Boot/Diagnostic Checksum failure
+	jmp	@#qp.rom+qb.tst	; Test and boot (DECnet) from fresh copy
+;
+; Contents of QNA's Boot Diagnostic ROM are in host memory
+;
+;******************************************************************************
+;
+; Execute the QNA Citizenship test...
+;
+; This code is executed in the copy loaded by the boot process above. The
+; stack is set and the top entry contaions the R0 entry value for action upon
+; successful completion of the citizenship test.
+;
+;	R1 - Points to base of I/O Page registers for QNA
+;
+q.test:	mov	#qp.wrk,r2	; 4K work area pointer in R2
+	jsr	pc,citqna	; Perform the test (30 seconds or less)
+	tst	r0		; Test results in R0, if not zero then
+	bne	q.halt		;? QNA has failed the citizenship test
+;
+; Transfer control to the next level of boot...
+;
+;	R1 - Points to base of I/O Page registers for QNA
+;
+	mov	(sp),r2		; get the entry parameter
+	bne	30$
+	jmp	DECnet		; Go directly to the DECnet boot code
+30$:	cmp	#777,r2		; check range of parameter
+	bhis	q.halt		;? Invalid entry parameter
+	jmp	(r2)		; Go to the caller specified next place please
+;
+; Halt for QNA boot failure:
+;
+q.halt:	mov	@#qb.erv,r3	; examine error vector location
+	beq	10$		; if zero then just halt
+	jmp	(r3)		; otherwise go there
+10$:	halt			; the standard halt for DEQNA problems
+	br	10$
+;
+; End of QNA Extended Primary Boot code...
+
+.sbttl	Reference copy of CITIZEN_QNA Functional Test Routine.
+;
+;++
+;	Calling Sequence:
+;
+;	R1 - Base address of I/O Page register set
+;	R2 - Address of 4096. word workspace
+;
+;	JSR	PC,CITQNA	; Call CITIZEN_QNA functional test routine
+;
+;	R0 - Contains test results as follows:
+;
+;		All zero bits, Citizenship test passed.
+;
+;		Non-zero setting indicates test failure. Specific test
+;		failure is bit encoded as follows:
+;
+.sbttl	QNA Citizenship Test error codes defined...
+;
+; Symbol	Bit Set--	Reason--
+;
+  cq.e00=	bit00	; Invalid Ethernet station address
+  cq.e01=	bit01	; Station address/Receive FIFO processing check
+  cq.e02=	bit02	; Station address compare test check
+  cq.e03=	bit03	; Internal Extended loopback transmit buffer data check
+  cq.e04=	bit04	; DMA interface processing check
+  cq.e05=	bit05	; Ethernet external loopback test check
+  cq.e06=	bit06	; Final operation to clear device failure
+  cq.e07=	bit07	;
+;
+  cq.e08=	bit08	;
+  cq.e09=	bit09	; Device operation time-out check
+  cq.e10=	bit10	; Bus timeout or non-existant memory interrupt
+  cq.e11=	bit11	; Spurious or missing device interrupt
+  cq.e12=	bit12	; Target address memory echo data check
+  cq.e13=	bit13	; Sanity timer interrupt
+  cq.e14=	bit14	; Operation completion status check
+  cq.e15=	bit15	; External loopback not operational
+;
+; The sanity timer is enabled for the testing but is not expected to go off. 
+; If the timer does go off it is an error. The sanity timer is initially set 
+; to 1 second when LED1 is turned off. The testing will defer the interrupts. 
+; The timer then is changed to 1/4 second when LED2 is turned off. When all 
+; testing is complete, pass or fail, the sanity timer is turned off. If all
+; tests have passed the sanity timer interval is set to 4 minutes the default
+; setting at "power-on" when LED3 is turned off. If the DEQNA is configured
+; for the sanity timer to be enabled at power-up, it is enabled when LED3 is 
+; turned off. If the sanity timer cannot be turned off or is interrupting
+; very fast the test will lose control.
+;
+;--
+
+.sbttl	Define Symbolic Constants and Offsets for CITIZEN_QNA code...
+;
+; Symbolic constants for general usage:
+;
+cq.sto	=	777		; "short" time-out counter
+cq.lto	=	7777		; "long" time-out counter
+;
+; Offsets to QNA registers in I/O page:
+;
+q.csr	=	16		; Offset to device CSR in I/O Page
+;
+q.rbl	=	04-q.csr	; Receive descriptor low address
+q.rba	=	06-q.csr	; Activate receive and high address
+q.tbl	=	10-q.csr	; Transmit descriptor low address
+q.tba	=	12-q.csr	; Activate transmit and high address
+q.fiv	=	14-q.csr	; Floating interrupt vector address
+;
+; Symbols for QNA Citizenship test code:
+;
+q.nxm	=	004	; Bus time-out or non-existant memory error
+q.prf	=	024	; Power-fail or QNA sanity timer fired
+q.trap	=	034	; vector location for TRAP rev 1.15
+q.spsw	=	764	; Location to save PSW rev 1.15
+q.svr6	=	766	; Save bucket for entry stack pointer
+q.svr2	=	770	; Save bucket for workspace pointer
+q.svr1	=	772	; Save bucket for I/O Page register base pointer
+q.vec	=	774	; Address used for (floating) device interrupt vector 
+;
+q.pri	=	PRI07	; CPU Priority set for interrupt catchers
+q.cpu	=	PRI00	; CPU Priority set for test operation
+;
+; Offsets into work area base address passed in R2:
+;
+cq.err	=	0		; Test error indicator word	1 word
+cq.wsp	=	cq.err+2	; Words for work space		4 words
+cq.sad	=	cq.wsp+10	; Station address storage	6 bytes
+cq.rda	=	cq.sad+6	; Receive descriptor		20 bytes
+cq.tda	=	cq.rda+20	; Transmit descriptor		122 bytes
+cq.sbf	=	cq.tda+122	; Setup packet buffer		1200 bytes
+cq.rbf	=	cq.sbf+1200	; Receive packet buffer		3000 bytes
+cq.tbf	=	cq.rbf+3000	; Transmit packet buffer	3000 bytes
+;
+cq.siz	=	cq.tbf+3000	; size of work area, see "CQBUFF".
+
+.sbttl	Begin testing and test exit for PASS or FAIL
+;
+;*****************     start of PIC CITIZEN_QNA	  *****************************
+;
+;++
+; The first test, the set-up sequence, is called and testing continues 
+; until a test fails. Each test "falls thru" to the next test and the last 
+; test returns to the control. All testing returns to location following the
+; call regardless of PASS or FAIL. 
+;
+; Note that R1 is set to point to the DEQNA's CSR and that R2 points to the 
+; error code word. This is done to conserve space.
+;
+; QNA state on successful exit:
+;
+;	Target (Station) address memory contains Ethernet physical address 
+;		in all fourteen (14.) addresses.
+;	Device is properly reset as per the DEQNA specification which 
+;		enables normal address filtering.
+;	All three diagnostic LED's are turned off.
+;	Sanity timer set to value on power-up (4 Minutes).
+;	Sanity timer is disabled if board not configured (jumpered) to be
+;		enabled on power-up or it is enabled if the board is jumpered
+;		to be enabled at power-up.
+;
+; Operation Sequence:
+;
+; The first test is called which will call the next test and each test 
+; either returns here when an error is detected or "falls thru" to the next 
+; test if it passes. The sanity timer, assumed to be enabled is disabled in 
+; all cases. The error indicator, cleared to zero by Test #00, is checked
+; upon return. If there were no errors LED3 is turned off and the UUT is
+; given a RESET before returning to the CITIZEN_QNA caller. If there were
+; errors an attempt to reset is made before returning with the test failure
+; code as set up in "CQ.ERR". 
+;
+; Errors:
+;
+;	e06,e12 - Setup packet errors (timeout, status and data checks)
+;	e06 - Final device reset status check
+;
+;--
+;
+; Symbolic constants...
+;
+qx.sof	=	modl		; Turn off the sanity timer
+qx.l3	=	modl+dls3+stv5	; LED3 off and set default sanity timer
+qx.csr	=	xc!xl!rl	; Nominal status for success exit RESET
+;
+; Test begin...
+;
+CITQNA::		; first location and entry point reference symbol
+;
+	add	#q.csr,r1	; Bias I/O Page address to point to CSR
+	jsr	pc,cq.t00	; do the in-line CITIZEN_QNA tests
+;
+; After all tests (pass or fail), turn off the sanity timer... 
+;
+	bis	#sr,(r1)	; Reset UUT in all cases, error or nominal
+	clr	(r1)		; Zero all CSR bits for safety
+	jsr	r5,q.sets	; turn-off the sanity timer
+	 +	-qx.sof		; No LED bits set
+	bne	20$		;? It failed right here, reset it and hope
+	tst	(r2)		; see how the UUT did today...
+	bne	50$		;? It failed (some other test)! Reset it and go
+;
+; Only if all tests have passed, turn off LED3...
+;
+	bit	#ste16,cq.tda+bsw1(r2)	; look at transmit status from last
+	beq	10$		; operation to see if UUT jumpered for
+	bis	#se,(r1)	; sanity timer enabled on power-up
+10$:	jsr	r5,q.sets	; send standard set-up and verify
+	 +	-qx.l3		; Start LED3 turn off sequence
+	beq	50$		; and it went well...
+20$:	bis	#cq.e06,(r2)	;? Final operation  to clear device failed
+;
+; And now pass or fail, do the final RESET...
+;
+50$:	mov	#sr,(r1)	; tell QNA to "go RESET yourself"!
+	clr	(r1)		; stop "RESETing yourself"!
+	mov	(r1),r0		; see how it did
+	bic	#csrm!ca,r0	; get rid of CSR noise bits
+	cmp	#qx.csr,r0
+	beq	70$		; all as expected
+	bis	#cq.e06,(r2)	;? final swan song went to hell!
+70$:	mov	(r2),r0		; get the status word
+;
+; Exit CITIZEN_QNA with device in known state if all tests pass...
+;
+99$:	sub	#q.csr,r1	; Restore entry value of I/O Page address
+	rts	pc		; CITIZEN_QNA test exit
+;
+;******************************************************************************
+;
+; Table of patterns for test packet generation...
+;
+; These bytes are used to generate packets with bit patterns designed to show
+; memory errors. The basic set has four bytes that will show most errors. If 
+; more than four bytes are needed the contents of the bytes following the 
+; table may be used. They may be considered to be "random" patterns.
+;
+qx.pat:	.byte	000	; 1 - stuck at one
+	.byte	125	; 2 - stuck at one or zero
+	.byte	252	; 3 - stuck at zero or one
+	.byte	377	; 4 - stuck at zero
+			; 5 - "random byte, contents of next location.
+
+.sbttl	Subtest t00: Setup test environment.
+;
+;++
+; The interrupt vectors for Bus Time-out (Non-existant memory) and Power 
+; failure (QNA Sanity Timer) are "plugged" to return with errors thus FAILING 
+; the UUT. The floating vector is set to a default address and set to return 
+; with an error.
+;
+; QNA state,	on entry:	Boot/Diagnostic ROM loaded and verified
+;				All LED's are on
+;				Status is ready (FIFO empty) after a reset
+;				Receive and transmit disabled
+;
+;		on exit:	LED1 is turned off
+;				Sanity timer enabled and "set" to 1 second
+;				Target address memory all zeros
+;				Status is ready (FIFO empty)
+;				Receive and transmit disabled
+;				CPU priority set to "q.cpu", i.e. 0
+;
+; Test sequence...
+;
+;	1 - Set non-existant memory trap vector
+;	2 - Set sanity timer trap vector
+;	3 - Set floating device interrupt vector
+;	4 - Turn off LED1
+;
+; Note the order and location of the interrupt error processing code.
+;
+; Errors:
+;
+;	e10 - Bus time-out or non-exsitant memory error
+;	e13 - Sanity timer interrupt or power failure
+;	e11 - Spurious device interrupt
+;	e12,e09,e14 - setup packet errors
+;
+;--
+;
+; Local test variables, offsets to workspace pointer in R2...
+;
+q0.rpt	=	cq.wsp+0	; repeat counter
+;
+; Symbolic test constants...
+;
+q0.sln	=	modl+dls1+stv1	; turn off LED1 and set timer to 1 second
+q0.rpm	=	2		; re-try counter for first operation
+;
+; Begin setup code...
+;
+cq.t00:		; Section 00, Setup test enviroment...
+;
+	mov	@#q.trap,-(sp)	;save trap vector rev 1.15
+	mov	@#q.trap+2,-(sp) ;save psw for trap vector rev 1.15
+
+	mov	pc,r3		; Find out where I am at now
+10$:	add	#40$-10$,r3	;address of trap service routine rev 1.15
+	mov	r3,@#q.trap	;set address in vector table
+	mov	#q.pri,@#q.trap+2 ;new psw is 340
+	trap	0		;trap to get current PSW high byte rev 1.15
+	mov	(sp)+,@#q.trap+2 ;restore psw for trap vector rev 1.15
+	mov	(sp)+,@#q.trap	;restore trap vector rev 1.15
+ 	mov	@#q.spsw,r0	;r0 now has original PSW (upper byte ) rev 1.15
+;
+; Compute interrupt service addresses, order counts!
+;
+
+	BIS	#q.pri,r0	;Plug interrupts, use highest priority rev 1.15
+	add	#50$-40$,r3	; Non-existant Memory  trap addres
+	mov	r3,@#q.nxm	;?	Interrupt Service -- cq.e10
+	mov	r0,@#q.nxm+2	;	Priority
+;
+	mov	sp,@#q.svr6	; copy of current stack pointer
+	mov	r1,@#q.svr1	; copy of the I/O Page base address
+	mov	r2,@#q.svr2	; copy of the workspace pointer
+	add	#60$-50$,r3	; Powerfail/Sanity timer trap address
+	mov	r3,@#q.prf	;?	Interrupt Service -- cq.e13
+	mov	r0,@#q.prf+2	;	Priority
+;
+	add	#70$-60$,r3	; Device Interrupt Service address
+	mov	#q.vec,q.fiv(r1)	; Set floating vector address
+	mov	r3,@#q.vec	;?	Interrupt service -- cq.e11
+	mov	r0,@#q.vec+2	;	Priority
+;
+; Turn off LED1 using zeroed target address set-up data
+;
+	clr	q0.rpt(r2)	; clear retry counter
+20$:	clr	(r2)		;? cq.err -- clear error flags
+	mov	#cq.sbf,r0	; use the setup packet buffer
+	add	r2,r0
+	mov	#q0.sln,r4	; word count
+30$:	clr	(r0)+		; clear buffer word by word
+	dec	r4
+	bne	30$
+	jsr	r5,q.sets	; transmit, receive and check set-up
+	 +	-q0.sln		; Turn off LED1 (set sanity timer running?)
+	beq	90$		; operation passed, UUT now clear regardless
+	inc	q0.rpt(r2)	; operation failed, see about a retry
+	cmp	#q0.rpm,q0.rpt(r2)	; is case of latched status bits
+	bgt	20$		; possible after power-up
+	rts	pc		;? Let error stand, UUT will not clear	
+;
+; Exits for interrupt and trap catchers (order counts!)...
+;
+
+40$:	mov	2(sp),@#q.spsw	;get upper byte of psw REV 1.15
+	rtt			;done
+
+
+50$:	bis	#cq.e10,(r2)	;? Bus time-out error or non-existant memory
+	add	#4,sp		; clean up stack for return to driver
+	rts	pc
+;
+60$:	mov	@#q.svr6,sp	; restore copy of stack pointer
+	mov	@#q.svr1,r1	; restore the I/O Page base address
+	mov	@#q.svr2,r2	; restore the workspace pointer
+	bis	#cq.e13,(r2)	;? Sanity timer error or power-fail interrupt
+	rts	pc		; Return with an error bit set
+;
+70$:	bis	#cq.e11,(r2)	;? Spurious device interrupt
+	rti			; Return with an error bit set
+
+
+;
+90$:	mtps	#q.cpu		; set lowest practical CPU operating priority
+	;br	cq.t01		; fall through to start the testing please...
+
+
+;
+; End of test setup...
+
+.sbttl	Subtest t01: Station Address Verification.
+;
+;++
+; Station address is verified and copied into a test packet for later use.
+; If the address is not proper the error will be recorded and testing will 
+; continue.
+;
+; QNA state,	on entry:	As per set-up, TEST0
+;				UUT is in "internal loopback mood"
+;
+;		on exit:	Status is ready (FIFO empty)
+;				Receive and transmit disabled
+;				Station address saved in work area
+;				Error status may be set
+;
+; Test sequence...
+;
+;	1 - Read station address into work space
+;	2 - Check for address of all zero bits
+;	3 - Check for address of all one bits
+;	4 - Check for legal DEC QNA address
+;
+; Errors:
+;
+;	e00 - Station address is all zero bits
+;	e00 - Station address is all one bits
+;	e00 - Station address not a valid DEC QNA address
+;
+;--
+;
+; Symbolic constants for station address verification test:
+;
+q1.sa	=	6	; Bytes in Ethernet Station Address
+;
+; Masks for "legal" Station Addresses assigned to the QNA modules...
+;
+; Legal range of DEC addresses:	AA-00-00-00-00-00 to AA-00-04-FF-FF-FF
+; Legal range of QNA addresses:	AA-00-00-00-00-00 to AA-00-04-FF-FF-FF
+;
+q1.de1	=	000252	; hex AA-00, first two bytes must be equal
+q1.de2	=	   004	; hex 04, third byte high limit. Low limit is zero
+;
+; Begin test code...
+;
+cq.t01:		; Section 01, Station address verification ...
+;
+	mov	r1,r3		; Copy I/O Page CSR address
+	sub	#q.csr,r3	; Fix to point to base
+	mov	r2,r4		; and copy base of work space
+	add	#cq.sad,r4	; make pointer to space
+;
+	mov	#q1.sa,r5	; Station address has 48 bits
+10$:	mov	(r3)+,r0	; Copy station address byte as word
+	movb	r0,(r4)+	; and store as byte in table
+	dec	r5
+	bne	10$		; Do for all bytes in station address
+;
+	mov	r2,r4		; test for address of all zero bits
+	add	#cq.sad,r4	; make pointer to space
+	mov	r4,r5		; and save a copy...
+	tst	(r4)+		; Work space has 6 bytes of station
+	bne	20$		; okay if non-zero
+	tst	(r4)+
+	bne	20$
+	tst	(r4)
+	beq	100$		;? Station address is all zeroes!
+;
+20$:	mov	r5,r4		; test for address of all one bits
+	mov	#-1,r0
+	cmp	r0,(r4)+	
+	bne	cq.t02		; okay if not all-bits
+	cmp	r0,(r4)+
+	bne	cq.t02
+	cmp	r0,(r4)
+	beq	102$		;? Station address is all ones!
+	bne	cq.t02
+;
+	mov	r5,r4		; Test for legal DEC QNA address
+	cmp	#q1.de1,(r4)+	; bytes 1 and 2
+	bne	105$		;? Station address not in DEC's address space
+	cmpb	#q1.de2,(r4)	; byte 3 range [0..4], bytes 4, 5 & 6 any value
+	bhis	cq.t02		; Test passed, goto next test
+;
+; Error exits from subtest #1...
+;
+100$:				;? Station address all zero bits
+102$:				;? Station address all one bits
+105$:	bis	#cq.e00,(r2)	;? Station address is not valid DEC QNA address
+	;br	cq.t02		; Fall through to next test even on failure
+;
+; If Sub-test #1 passed. VALID Station address is in reserved slot of work
+; space and later is to be copied into set-up packet for QNA station address 
+; filtering.
+;
+; End of test #1...
+
+.sbttl	Subtest t02: Interrupt test
+;
+;++
+; A transmit descriptor is given to the UUT after interrupts are enabled. 
+; The UUT should generate a transmit interrupt . 
+; This test was modified, it used to try to generate an NXM interrupt by using
+; what is a non-existant address for a UNIBUS system. Because of the QBUS
+; architecture, this technique does not work, hence the NXM code was removed.
+;
+; QNA state,	on entry:	As per prior test, TEST1	
+;				Internal loopback mode
+;
+;		on exit:	Status is ready (FIFO empty)
+;				Receive and transmit disabled
+;
+; Test Sequence...
+;
+;	1 - Build transmit descriptor in valid memory 
+;	2 - Set floating/default vector address to "step 5" below
+;	3 - Intitate "transmit" operation and time-out
+;	4 - If time-out then test failure
+;	5 - If interrupt detected then continue
+;	6 - Verify UUT status and descriptor status
+;
+; Errors:
+;
+;	e11 - No interrupt occoured
+;	e11 - Interrupt occoured prematurely
+;	e11 - Wrong interrupt occoured
+;
+;--
+;
+; Symbolic constants for interrupt test:
+;
+;q2.ilh	=	77	; 22-bit address of a non-existant memory location
+;q2.ila	=	160000	; all PDP and LSI-11's is "17760000".
+; (WRONG, read the QBUS spec, BBS7 has to be asserted at the same time)
+;
+q2.mcs	=	xc!CSRM!ca!se	; CSR mask after interrupt
+q2.ics	=	ni!xi!ie!xl!rl	; CSR state after interrupt
+;q2.4mb	=	xi!ie!xl!rl	; CSR state, 4 Mbyte system after "interrupt"
+q2.is0	=	used		; BSW0 - transmit descriptor status
+;
+; Begin test code...
+;
+cq.t02:		; Section 02, interrupt 
+;
+; Generate a transmit descriptor that will force an interrupt
+;
+	mov	#-1,r0		; small buffer size, set R0 to -1
+	jsr	pc,q.dest	; initialize the transmit descriptor
+;	mov	#v!c!q2.ilh,bpah(r4)	; chained address, 22-bits
+;	mov	#q2.ila,bpad(r4)	; but the address is illegal!
+;
+; Prepare for interrupt and activate UUT
+;
+	mov	@#q.vec,r5	; save current interrupt vector address
+	mov	pc,r3		; find out where we are and make up a new
+10$:	add	#50$-10$,r3	; vector address
+	mov	r3,@#q.vec	; vector now armed for the test
+	bis	#ie,(r1)	; enable interrupts in UUT
+	mov	r4,q.tbl(r1)	; transmit descriptor low (legal) address
+	clr	r0		; close window but for the next instruction
+	mov	r0,q.tba(r1)	; set high address bits and activate UUT
+	mov	#7777,r3	; set a timer for transmit to finish & intr
+20$:	dec	r3		; to occur
+	bne	20$		;wait for intr to 50$ or fall through on timeout
+;;
+;; Check if this is 4 Mbyte system 
+;;
+;	mov	(r1),r0		; get CSR contents
+;	bic	#q2.mcs,r0	; dump noise bits and do a
+;	cmp	#q2.4mb,r0	; CSR status check
+;	bne	40$		;? Status word 2 bad
+;        jmp     55$             ; Continue testing
+; this does not work !!!
+
+;
+; Interrupt failure, it didn't go as planned 
+;
+
+40$:	bis	#cq.e11,(r2)	;? Device interrupt test check
+	rts	pc
+;
+; Interrupt service routine, see if interrupt happened properly
+;
+50$:	add	#4,sp		; flush the stack
+	mov	r5,@#q.vec	; restore the olde device vector address
+	inc	r0		; r0 s.b. not set to -1 if interrupt okay?
+	beq	40$		;? interrupt happened before operation
+			;I.E. intr occurred before high address was written
+			;R0 is -1 when low tx desc address is written and set
+			;to 0 before it is written to qna as high address
+	mov	(r1),r0		; get CSR contents
+	bit	#xi,r0		;did the transmit finish ?
+	beq	40$		;if xi not set, then error
+55$:	mov	(r4),r0		; descriptor status words, flag word
+	bic	#TSM0,r0
+	cmp	#q2.is0,r0
+	bne	40$		;? Status word 0 bad
+	tst	BSW1(r4)	; Status word not to changed
+	beq	40$		;? Status word 1 bad
+	tst	BSW2(r4)	; Status word not to changed
+	beq	40$		;? Status word 2 bad
+;
+; Test passed, clean-up UUT CSR and go to next test...
+;
+	mov	#xi!ri!se,(r1)	; dismiss interrupt requests
+				; and disable interrupts
+	mtps	@#q.spsw	; and restore original CPU priority  rev 1.16
+	;br	cq.t03		; Falling through to next test now.
+;
+; End of test #2...
+
+.sbttl	Subtest t03: Set-up mode and receive FIFO processing test.
+;
+;++
+; A series of set-up packets with a repeating test pattern for checking
+; "stuck at" faults is transmitted to the UUT. The patterns are varied so
+; that each byte in the station address memory is tested with all patterns.
+; The set-up packet is echoed into the receive FIFO and verified. The set-up 
+; packet length is set so that the receive FIFO memory will get different 
+; patterns. The operation is repeated so that all bytes of the FIFO receive
+; each of the four basic patterns.
+;
+; QNA state,	on entry: 	Internal loopback mode set
+;
+;		on exit:	Status is ready (FIFO empty)
+;				Receive and transmit disabled
+;				Target address memory "garbaged"
+;
+; Test Sequence...
+;
+;	1 - initialize test pattern table
+;     Repeat until test counter reaches nominal value...
+;	2 - generate station address set-up packet based on pattern
+;	3 - transmit set-up packet to UUT
+;	5 - receive set-up packets stored in FIFO
+;	6 - check for nominal completion status
+;	7 - verify received data against expected pattern
+;     End repeat.
+;
+; Errors:
+;
+;	e01,e12 - Setup packet echoed data check, FIFO processing test
+;	e01,e12,e09 - Setup packet operation time-out
+;	e01,e12,e14 - Setup packet operation status check
+;
+;--
+;
+; Local test variables, offsets to R2 the workspace pointer...
+;
+q3.ptp	=	cq.wsp+0	; Pointer to pattern, initial value
+q3.pts	=	cq.wsp+2	; Pattern pointer, final value
+q3.wpp	=	cq.wsp+4	; Working pattern pointer
+q3.cnt	=	cq.wsp+6	; Pass counter for test
+;
+; Symbolic test constants for Set-up and receive FIFO processing test
+;
+q3.cnx	=	500.	; number of times to repeat test
+q3.blt	=	59.	; set-up packet word count
+			; first prime number between 56. & 64.
+q3.pab	=	5	; Bytes in one repetition of test pattren
+;
+; Begin test code...
+;
+cq.t03:		; Section 03, Receive FIFO and memory test
+;
+	mov	pc,r3		; compute address of pattern table
+10$:	add	#qx.pat-10$,r3	; as absolute address
+	mov	r3,q3.ptp(r2)	; set up as initial value
+	mov	r3,q3.wpp(r2)	; and as inital working pointer
+	add	#q3.pab,r3	; adjust by table length
+	mov	r3,q3.pts(r2)	; and set test stop value
+	clr	q3.cnt(r2)	; zero pass counter and...
+;
+; Generate series of set-up packets with pattern...
+;
+20$:	mov	r2,r3		; make pointer to data pattern area
+	add	#cq.sbf,r3
+	mov	#2,r0		; two groups of addresses
+30$:	mov	#6,r5		; six rows in a group
+40$:	clrb	(r3)+		; first column is zero
+	mov	#7,r4		; seven columns of pattern bytes
+50$:	cmp	q3.pts(r2),q3.wpp(r2)	; see if at end of pattern sequence
+	bgt	60$		; no, not yet
+	mov	q3.ptp(r2),q3.wpp(r2)	; restart pattern sequence
+60$:	movb	@q3.wpp(r2),(r3)+	; set pattern in address field
+	inc	q3.wpp(r2)	; advance to next pattern
+	dec	r4
+	bne	50$		; seven columns of pattern bytes
+	dec	r5
+	bne	40$		; six rows in a group
+;
+	mov	#20,r4		; twenty bytes between groups
+70$:	clrb	(r3)+		; all set to zero
+	dec	r4
+	bne	70$
+	dec	r0
+	bne	30$		; two groups of addresses, 112. bytes set.
+;
+; Send the set-up packet through the UUT and check all...
+;
+	jsr	r5,q.sets	; perform set-up transmit, receive and verify
+	 +	-q3.blt		; buffer length for cycling
+	beq	80$		; all went well so...
+	bis	#cq.e01,(r2)	;? Set code for this test into failure code
+	rts	pc		; exit CITIZEN_QNA
+;
+; Test for test completion...
+;
+80$:	inc	q3.cnt(r2)	; increment pass count
+	cmp	#q3.cnx,q3.cnt(r2)	; see if done it enough
+	bgt	20$		; not enough yet, carrion!
+	;br	cq.t04		; Fall through to next test please
+;
+; End of test #3...
+
+.sbttl	Subtest t04: Internal loopback and station address filter test
+;
+;++
+; A station address set-up packet with a walking bit pattern is generated 
+; and set-up in the UUT. Then for each address in the set, two internal
+; loopback packets are generated and transmitted. The first is a complemented
+; version of the station address and is not in the set and the second is an
+; address in the set. The first must be properly transmitted but not 
+; properly received and the second is to be transmitted and received. 
+;
+; The test is repeated for a a walking one bit and a walking zero bit.
+;
+; QNA state,	on entry: 	Internal loopback mode set
+;
+;		on exit:	Status is ready (FIFO empty)
+;				Receive enabled
+;				Transmit disabled
+;				Target address memory "garbaged"
+;
+; Test Sequence...
+;
+;	1 - Generate set-up station address packets:
+;		. 48 station addresses with 1 bit set (walking bit)
+;		. 4 set-up packets needed, 8 patterns duplicated
+;     For pattern of walking one bit and then for walking zero bit...
+;     For each of the four sets of station addresses set-up packets...
+;	2 - Transmit and verify station address set-up packet
+;     For each address in the set of station addresses...
+;	3 - Generate loopback packet from complemented station address
+;	4 - Enable UUT receive side
+;	5 - Transmit "false" loopback/station address packet
+;	6 - Verify transmission and assure runt receipt
+;	7 - Complement the loopback packet for valid station address
+;	8 - Transmit valid station address/loopback packet
+;	9 - Verify receipt and transmission
+;	10 - Compare transmitted and received data
+;     End For.
+;
+; Errors:
+;
+;	e02,e12 - Setup packet echoed data check
+;	e02,e12,e09 - Setup packet operation time-out
+;	e02,e12,e14 - Setup packet operation status check
+;	e02,e09 - false packet transmission error
+;	e02,e14 - false packet receive error
+;	e02,e09 - true packet transmission or receive error
+;	e02,e14 - true packet not received
+;	e02 - transmitted/received packet data compare check
+;
+;--
+;
+; Local Test Variables, offsets to R2, the work space pointer...
+;
+q4.tsp	=	cq.wsp+0	; Test set-up packet of station addresses
+q4.sad	=	cq.wsp+2	; Pointer to station address in use
+q4.sac	=	cq.wsp+4	; Counter for station addresses and groups
+q4.pas	=	cq.wsp+6	; Pass control switch
+;
+; Symbolic Test Constants...
+;
+q4.sa	=	6		; bytes in a station address
+q4.wbs	=	<4*200>+1	; bytes in walking bit set-up buffers
+q4.gip	=	8.		; groups in walking bit set-up packet area
+q4.end	=	253		; end of test pattern set test pattern
+;
+q4.spz	=	modl		; set-up packet for normal address filtering
+q4.lcp	=	6.		; loop-back packet byte size
+q4.lpz	=	-3.		; loop-back packet word count
+q4.dbb	=	10		; "distance" between bytes in a station address
+;
+q4.lto	=	cq.sto		; time-out for loopback transmit and no receive
+q4.ls1	=	0		; Normal transmit status, TFAIL ignored
+q4.bs1	=	runtp!errsu	; BSW1 - for a RUNT packet
+;
+q4.nto	=	cq.sto		; time-out for loopback transmit and receive
+q4.ns1	=	0 		; normal transmit status 1, TFAIL ignored
+q4.ds1	=	0		; internal loopback
+;
+; Begin test code...
+;
+cq.t04:		; section 04, walking bit station address test
+;
+	clr	q4.pas(r2)	; flag the first of two passes
+;
+; create walking one set-up packets for address filter test...
+;
+	mov	r2,r3		; compute pointer to pattern buffer
+	add	#cq.sbf,r3
+	mov	r3,r4		; and keep a copy close by
+	mov	r3,q4.tsp(r2)	; and a copy for transmitting
+	mov	#q4.wbs,r0	; bytes to intialize in pattern area
+10$:	clrb	(r3)+		; zero all bytes in pattern area
+	dec	r0
+	bne	10$		; one extra byte than needed for end mark
+	movb	#q4.end,-(r3)	; end mark is unique pattern here
+;
+; We now generate a set of station addresses with a walking one bit. Each
+; address has one bit set and all the others set to zero. There are 48 bits
+; in a station address so (INT(48/14)+1) (i.e. four) sets of station
+; addresses are needed. All 48 bits will set once and eight addresses will be
+; duplicates. The duplicates are run thru twice because it's easier and won't
+; hurt anything. 
+; 
+	mov	r4,r3		; Develop pointer to pattern buffer
+	inc	r3		; and point to first byte of first address
+	clr	r0		; value for the walking bit
+	clr	r4		; initialize group counter, 7 addresses per
+	clr	r5		; declare counter, 48 bits per address, 56 total
+12$:	aslb	r0		;	Walk the bit in r0...
+	bne	14$		; Carry on, or if it runs away...
+	inc	r0		; unless we get a new one
+14$:	movb	r0,(r3)+	; then store the bit in the station address
+	inc	r4		; let us count the addresses
+	cmp	#7,r4		; either seven addresses in a group or if
+	bgt	16$		; results are a group then branch
+	clr	r4		;	reset group counter and...
+	add	#71,r3		; eat space up to next packet in pattern set
+16$:	inc	r5		; and count this bit
+	bit	#7,r5		; then if counter is modulo 8 (8 bits per byte)
+	bne	18$		; see if all done, not modulo 8
+	add	#10,r3		;	"walk" the bit to next station address
+	cmp	#60,r5		; special case at 48./60 bits
+	bne	18$		; happens only once
+	sub	#<47+11>,r3	; init or go back to first byte of 15.th address
+18$:	cmp	#70,r5		; then do for 4.*14.=56./70 addresses
+	bgt	12$		; .
+	br	70$		; go do for walking one's
+;
+; Turn set of station addresses into walking zero bits by complementing the 
+; existing set of walking one bit patterns...
+;
+30$:	mov	r2,r3		; get address of pattern buffer
+	add	#cq.sbf,r3
+	mov	r3,q4.tsp(r2)	; reset pointer back to beginning of patterns
+	mov	#q4.gip,r5	; total groups in pattern
+40$:	mov	#6,r4		; six rows of address bytes
+50$:	tstb	(r3)+		; skip over column 1 of all zeroes
+	mov	#7,r0		; columns 2-8 are the patterns
+60$:	comb	(r3)+		; complement the walking bits
+	dec	r0
+	bne	60$		; seven bytes of address in a row
+	dec	r4
+	bne	50$		; six rows per group
+	add	#20,r3		; two rows of eight bytes between groups
+	dec	r5
+	bne	40$		; do for all bytes in all patterns
+;
+; Place target address packet into the UUT and verify...
+;	q4.tsp - points to set-up packet to use
+;
+70$:	clr	q4.sac(r2)	; Reset station address working counter
+	mov	q4.tsp(r2),r0	; pointer to set-up packet
+	jsr	r5,q.setu	; send to UUT and verify
+	 +	-q4.spz		; common packet size, normal filtering
+	bne	120$		;? Packet didn't make it into memory
+;
+; Station addresses now set-up in UUT, test by sending known good and known 
+; bad addresses and monitor the responses.
+;
+; For both group A and B addresses in the set-up packet, do...
+;
+	mov	q4.tsp(r2),r3	; get the base of the set-up packet
+	add	#1,r3		; point to first station address
+	mov	r3,q4.sad(r2)	; and set it up for this series of tests
+;
+; Generate internal loopback packet from set-up packet address in "q4.sad"
+;
+90$:	mov	q4.sad(r2),r3	; Get address of next station address
+	mov	r2,r4		; make pointer to transmission buffer
+	add	#cq.tbf,r4
+	mov	#q4.sa,r0	; bytes in the station address
+100$:	movb	(r3),(r4)	; copy from set-up to transmit buffers
+	comb	(r4)+		; and complement to make different!!!!
+	add	#q4.dbb,r3	; adjust to next byte in address
+	dec	r0
+	bne	100$		; repeat for all bytes in address
+	clr	(r4)+		; zero last four bytes (assume 6 bytes)
+	clr	(r4)+		; for a total of 10 bytes in loop-back packet
+;
+; Transmit the loopback packet but DO NOT PROPERLY receive it...
+;
+	mov	#re,(r1)	; enable receive for internal loopback
+	mov	#q4.lpz,r0	; set-up echo packet size
+	jsr	pc,q.desr	; initialize receive descriptor
+	mov	r4,q.rbl(r1)	; arm receive side with descriptor
+	clr	q.rba(r1)	; and activate the UUT
+;
+	jsr	pc,q.dest	; initialize transmit descriptor, r0 set
+	mov	r4,q.tbl(r1)	; arm transmit side with descriptor
+	clr	q.tba(r1)	; and initiate the transmit
+;
+; Transmit of loopback packet started and receive enabled, see how things went.
+;
+	mov	#q4.lto,r0	; time-out counter
+110$:	bit	#ri,(r1)	; wait for receive (RUNT) induced state change
+	bne	130$
+	dec	r0
+	bne	110$		; timed loop
+115$:	bis	#cq.e09,(r2)	;? Operation timed out
+;
+; Loopback packet receipt or transmit failure, station address processing check
+;
+120$:	bis	#cq.e02,(r2)	;? Loopback Packet transmission check
+	rts	pc
+;
+; Operation complete, check all status values...
+;
+130$:	clr	r0		; should not receive valid packet anything
+	jsr	r5,q.ochk	; verify operation status
+	 +	q4.ls1		; Transmit
+	 +	q4.bs1		; Receive
+	bne	120$		;? Operation failed, received a legit packet?
+	bic	#re,(r1)	; disable module receive.
+;
+; Complement the loopback packet and re-transmit it...
+;
+	mov	r2,r4		; make pointer to loop-back packet
+	add	#cq.tbf,r4
+	com	(r4)+		; make packet into address in set-up
+	com	(r4)+		; so that it had better be received!!!
+	com	(r4)+
+	mov	#q4.lpz,r0	; redo receive descriptor, set size
+	jsr	pc,q.desr
+	mov	r4,q.rbl(r1)	; arm receive side of UUT
+	clr	q.rba(r1)	; and make valid in CSR
+	jsr	pc,q.dest	; redo the transmit descriptor, size in R0
+;
+; Start transmit and receive of loopback packet and then see how things went.
+;
+	mov	r4,q.tbl(r1)	; arm transmit side with descriptor
+	clr	q.tba(r1)	; and initiate the transmit, receive is armed!
+	mov	#re,(r1)	; enable receive for internal loopback
+	mov	#q4.nto,r0	; time-out counter
+150$:	bit	#ri,(r1)	; wait for receive state change
+	bne	170$
+	dec	r0
+	bne	150$		; timed loop
+	br	115$		;? Operation timed out
+;
+; Operation complete, check all status values...
+;
+170$:	clr	r0		; should transmit and receive
+	jsr	r5,q.ochk	; verify operation status
+	 +	q4.ns1		; Check transmit loopback status
+	 +	q4.ds1		; Check receive status for use
+	bne	120$		;? Operation failed, didn't receive?
+	bic	#re,(r1)	; disable module receive
+;
+; Compare the transmitted loopback packet against the received packet...
+;
+	mov	#q4.lcp,r0	; bytes to compare in packets
+	mov	r2,r4
+	add	#cq.rbf,r4	; received packet, set-up memory echo
+	mov	r2,r5
+	add	#cq.tbf,r5	; transmitted packet, set-up addresses
+180$:	cmpb	(r4)+,(r5)+	; see if the same, or not
+	bne	120$		;? must be the same in all regards
+	dec	r0
+	bne	180$		; fall thru for proper operation
+;
+; Station address with the bit set has passed all tests. Next we pick-up 
+; the next station address in the current group and use it. If end of group A 
+; then we go to group B and do those 7 addresses. If the end of group B we 
+; must then get next set of addresses and set them up in the UUT.
+;
+; See if at end of group A or at end of group B...
+;
+	inc	q4.sad(r2)	; to the next address in current group
+	inc	q4.sac(r2)	; count this address
+	cmp	#7.,q4.sac(r2)	; see if address still in group A
+	bgt	90$		; Go test this address in Group A
+	cmp	#7.,q4.sac(r2)	; see if at transition between Group A & B
+	bne	190$		; No, test for Group B limits
+	add	#71,q4.sad(r2)	; Set pointer to Group B station addresses
+	add	#1.,q4.sac(r2)	; account for transition
+190$:	cmp	#14.,q4.sac(r2)	; see if through with Group B
+	bge	90$		; Go test this address in Group B
+; 
+; See if at end of all of the test patterns...
+;
+	add	#200,q4.tsp(r2)	; address of next pattern set or maybe...
+	cmpb	#q4.end,@q4.tsp(r2)	; at the end of all patterns
+	beq	200$		; if so see if complement and re-do
+	jmp	70$		; go do new set of target addresses
+200$:	tst	q4.pas(r2)	; first pass (=0) is walking one's
+	bne	cq.t05		; all done
+	inc	q4.pas(r2)	; second pass (=1) is walking zero's
+	jmp	30$		; complement the patterns
+;
+; End of test #4...
+
+.sbttl	Subtest t05: Internal extended loopback and protocol testing
+;
+;++
+; The UUT is set into Internal Extended Loopback mode and packets of 
+; varying (increasing) length are circlulated thru the transmit buffer and 
+; the receive FIFO. The packets are made up of bit patterns designed to show 
+; "stuck at" conditions and faults in the buffer and FIFO processing. The 
+; received packets are verified to be sure that the data was properly
+; transferred. The packet length starts at the minimum Ethernet packet size
+; and continues until beyond the maximum size.
+;
+; The test completes when the UUT detects the proper long packet.
+;
+; QNA state,	on entry: 	Internal loopback mode set
+;				Status is ready (FIFO empty)
+;
+;		on exit:	Status is ready (FIFO empty)
+;				Extended internal loopback mode set
+;				Receive and transmit disabled
+;
+; Test Sequence...
+;
+;	1 - Set UUT into internal extended loopback mode
+;	2 - Initialize packet test pattern table
+;	3 - Set initial packet length to 64.
+;    Repeat...
+;	4 - Generate test packet with cyclic pattern
+;	5 - Transmit and receive packet
+;	6 - Verify operation status
+;	7 - If operation status error goto step 10
+;	8 - Compare received data against expected data
+;	9 - Increment packet length
+;    End repeat...
+;	10 - If operation status LONG packet error and packet length
+;		greater that 1518. then test pass
+;
+; Errors:
+;
+;	e03,e09 - Test packet transmission or receive operation time-out
+;	e03,e14 - Long packet not detected via operation status
+;	e03,e14 - General operation status error
+;	e03 - General packet transmit/receive data check
+;	e03 - Long packet not detected
+;
+;--
+;
+; Local test storage...
+;
+q5.ptp	=	cq.wsp+0	; initial pattern pointer value
+q5.pts	=	cq.wsp+2	; stopping pattern pointer value
+q5.wpp	=	cq.wsp+4	; working pattern pointer
+q5.cnt	=	cq.wsp+6	; byte count of test packet, [64...1518]
+;
+; Symbolic Test Constants...
+;
+q5.pab	=	4		; bytes in one repetition of test pattren
+q5.inc	=	11		; increment for byte count, 10 second test time
+	;	3		; increment for byte count, 30 second test time
+q5.mcp	=	60.		; bytes in the shortest packet, less CRC
+q5.lcp	=	1524.+13.	; byte count to stop at if status fails
+q5.stp	=	1524.+12.	; minimum bytes in packet when status is "long"
+q5.rsm	=	rsm1!rblh!short	; receive status mask for "long" status
+q5.rls	=	errsu!esetu		; Nominal "long" packet status
+q5.rlf	=	errsu!esetu!discr!ffovf	; Special "long" packet status
+;
+q5.ms1	=	0		; transmit, TFAIL ignored
+q5.bs1	=	esetu		; Receive
+;
+; Begin test code...
+;
+cq.t05:		; Section 05, 
+;
+	bis	#el,(r1)	; establish internal/extended loopback
+;
+	mov	pc,r3
+10$:	add	#qx.pat-10$,r3	; generate actual address of byte table
+	mov	r3,q5.ptp(r2)	; initial pointer to pattern table
+	mov	r3,q5.wpp(r2)	; working copy of the table
+	add	#q5.pab,r3	; and end value for working pointer
+	mov	r3,q5.pts(r2)	; set into working variables
+	mov	#q5.mcp,q5.cnt(r2)	; start with minimum Ethernet packet
+;
+; Build Ethernet packet for internal extended loopback...
+;
+20$:	mov	r2,r3		; make transmit buffer into Ethernet packet
+	add	#cq.tbf,r3	; pointer to copy of transmitted packet
+	mov	q5.cnt(r2),r5	; bytes in the packet to generate
+30$:	cmp	q5.pts(r2),q5.wpp(r2)	; see of pattern to be rolled
+	bgt	40$		; not yet, byte pattern cycles in test packet
+	mov	q5.ptp(r2),q5.wpp(r2)	; cycle the pattern pointer
+40$:	movb	@q5.wpp(r2),(r3)+	; byte of pattern to packet
+	inc	q5.wpp(r2)	; and count it
+	dec	r5
+	bne	30$		; do for all bytes in the packet
+	clrb	(r3)+
+	clrb	(r3)+		; some insurance?
+;
+; Transmit 64. to 1518. byte Ethernet packet and receive it...
+;
+	mov	q5.cnt(r2),r0	; get byte count for packet
+	jsr	r5,q.desc	; transmit and receive it
+	bcs	70$		;? operation never passed
+;
+; Operation complete, check all status values...
+;
+	mov	q5.cnt(r2),r0	; set received byte length and...
+	jsr	r5,q.ochk	; verify operation status
+	 +	q5.ms1		; Ethernet packet transmit status
+	 +	q5.bs1		; and receive status word 1
+	bne	200$		; check for expected error to end test
+;
+; Compare the transmitted packet against the received packet...
+;
+	mov	q5.cnt(r2),r0	; bytes to compare in packets
+	mov	r2,r4
+	add	#cq.rbf,r4	; received packet, set-up memory echo
+	mov	r2,r5
+	add	#cq.tbf,r5	; transmitted packet, set-up addresses
+60$:	cmpb	(r4)+,(r5)+	; see if the same, or not
+	bne	70$		;? must be the same in all regards
+	dec	r0
+	bne	60$		; fall thru for proper operation
+	add	#q5.inc,q5.cnt(r2)	; packet size increases by words
+	cmp	#q5.lcp,q5.cnt(r2)	; see if over maximum
+	bge	20$		; LONG packet stops test
+70$:	bis	#cq.e03,(r2)	;? Ethernet protocol error, packet too long
+	rts	pc
+;
+; Operation status failure, look for expected long packet...
+;
+200$:	cmp	#q5.stp,q5.cnt(r2)	; check the transmitted packet length
+	bne	70$		;? error occured at unexpected place
+	mov	cq.rda+BSW1(r2),r3	; get receive status word one
+	bic	#q5.rsm,r3	; mask receive status
+	cmp	#q5.rls,r3	; see if packet too long
+	beq	210$		; long packet status seen
+	cmp	#q5.rlf,r3	; see if FIFO overflow case (loopback artifact)
+	bne	70$		;? expected error was not seen
+210$:	bic	#cq.e14,(r2)	; Cancel error from operation check
+	;br	cq.t06		; Fall through to the very next test.
+;
+; End of test #5...
+
+.sbttl	Subtest t06: DMA Q-Bus interface processing test
+;
+;++
+; An internal extended loopback packet with the station address is
+; transmitted using a chained descriptor, with buffers, elements and with
+; high/low bytes. This packet is received and verified. 
+;
+; QNA state,	on entry: 	Internal Extended loopback mode set
+;				Status is ready (FIFO empty)
+;
+;		on exit:	Status is ready (FIFO empty)
+;				Internal Extended loopback mode set
+;
+; Test Sequence...
+;
+;	1 - Generate set-up packet:
+;		. one address is UUT's assigned station address
+;		. all other addresses set to zero
+;	2 - generate transmit descriptor list
+;		. high/low byte transfer combinations
+;		. multiple packet buffers
+;		. chained descriptor
+;	3 - transmit set-up packet and receive echoed packet
+;	4 - check all UUT status and compare transmitted and received data
+;
+; Errors:
+;
+;	e04,e09 - Transmit (special) and receive operation timeout
+;	e04,e14 - Receive or transmit operation status check
+;	e04 - Transmit (scatter/gather) data check
+;
+;--
+;
+; Symbolic Test Constants...
+;
+q6.tsz	=	-8.	; word count for internal extended loopback packet
+q6.rbc	=	16.	; received byte count for test packet
+q6.dtc	=	8.	; descriptor element count
+;
+q6.d1	=	0	; offset to 1st element in transmit descriptor
+q6.d2	=	q6.d1+CSW0	; 2nd element
+q6.d3	=	q6.d2+CSW0	; 3rd element
+q6.d4	=	q6.d3+CSW0	; 4th element
+q6.d5	=	q6.d4+CSW0	; 5th element
+q6.d6	=	q6.d5+CSW0	; 6th element
+q6.d7	=	q6.d6+CSW0	; 7th element
+q6.d8	=	q6.d7+CSW0	; 8th element
+;
+q6.ts1	=	lastd		; BSW1 - first element status not changed
+q6.ts3	=	tfail		; BSW1 - from transmit element with status
+q6.rs1	=	esetu		; BSW1 - internal/extended nominal status
+;
+; Begin test code...
+;
+cq.t06:		; Section 06, Setup station address and test QDTC
+;
+; Use internal/extended  loopback and station address to check QDTC
+; scatter/gather and descriptor chaining. Transmit side only
+;
+	mov	#q6.tsz,r0	; setup receive internal loopback packet
+	jsr	pc,q.desr	; initialize to standard values
+	mov	r4,q.rbl(r1)	; and arm the UUT with a receive
+	clr	q.rba(r1)	; valid receive descriptor...
+;
+; Setup a multiple buffer chained transmit descriptor...
+;
+	mov	r2,r3
+	add	#cq.tda,r3	; pointer to transmit descriptor area
+	mov	r3,r4		; and a working copy
+	mov	#q6.dtc,r0	; count of elements to initialize
+10$:	mov	#newb,(r3)+	; BSW0 - all set to new buffer state
+	mov	#v,(r3)+	; BDES/BPAH - set to valid for a start
+	mov	r2,(r3)		; BPAD - is set to station address bytes
+	add	#cq.sad,(r3)+	;	 for a start
+	mov	#-1,(r3)+	; BSIZ - one word transfers for a start
+	clr	(r3)+		; BSW1 - set to zero
+	clr	(r3)+		; BSW2 - set to zero
+	dec	r0
+	bne	10$		; do for all buffers in the "chain"
+;
+; Now, go back into chain and set special values...
+;
+	mov	r4,r3		; base of the descriptor
+;
+	bis	#l,q6.d1+BPAH(r3)	; D1, one byte transfer, left-most byte
+;
+	bis	#l!h,q6.d2+BPAH(r3)	; D2, left-most and right-most bytes
+	mov	#-2,q6.d2+BSIZ(r3)	;     2 bytes transfered
+;
+	bis	#h,q6.d3+BPAH(r3)	; D3, one byte transfer, right-most byte
+	add	#2,q6.d3+BPAD(r3)	;     second word of address
+;
+	add	#4,q6.d4+BPAD(r3)	; D4, third word of station address
+;
+	mov	#c,q6.d5+BPAH(r3)	; D5, chain to 6'th element
+	mov	r3,q6.d5+BPAD(r3)	;     point to next transmit
+	add	#q6.d6,q6.d5+BPAD(r3)	;     descriptor element
+;
+	mov	r3,q6.d6+BPAD(r3)	; D6, buffer is two words of zeroes
+	add	#q6.d5+BSW1,q6.d6+BPAD(r3);   in the status of the 5'th element
+	mov	#-2,q6.d6+BSIZ(r3)	;     two words in buffer
+;
+	mov	#v!e,q6.d7+BPAH(r3)	; D7, end of this transmit
+	mov	#-3,q6.d7+bsiz(r3)	;     three words, repeat the pattern
+;
+	mov	#e,q6.d8+BPAH(r3)	; D8, end of the transmit descriptor
+;
+; Perform transmit of station address and verify the operation...
+;
+	mov	r4,q.tbl(r1)	; set low order address and
+	clr	q.tba(r1)	; and then high order to start operation
+	mov	#cq.sto,r0	; set a short time out-counter
+20$:	bit	#ri,(r1)	; wait for a receive signal
+	bne	50$		; then go verify all status'es
+	dec	r0
+	bne	20$		; timed loop...
+	bis	#cq.e09,(r2)	;? Set time-out error bit and...
+	br	90$		;? internal/extended loopback packet timed out
+;
+50$:	mov	#q6.rbc,r0	; set expected received byte count
+	jsr	r5,q.ochk	; partial verify of operation status
+	 +	q6.ts1		; status words not touched?
+	 +	q6.rs1
+	beq	100$		; part was okay, go check all!
+80$:	bis	#cq.e14,(r2)	;? operation status check
+90$:	bis	#cq.e04,(r2)	;? DMA interface processing test
+	rts	pc
+;
+; Verify rest of the transmit status in the descriptor chain...
+;
+100$:	mov	r2,r3
+	add	#cq.tda,r3	; point to start of the chain
+	mov	#q6.dtc,r0	; counter for descriptors
+110$:	mov	BSW0(r3),r5	; get flag word from descriptor element
+	bic	#tsm0,r5	; mask off don't care bits
+	cmp	#used,r5	; and see if correct state
+	bne	80$		; see if error or at end of elements
+	cmp	#4,r0		; Looking at D5, the chained entry?
+	beq	120$		; yes, must be zeros in BSW1 and BSW2
+	cmp	#1,r0		; Looking at D8, the terminal entry?
+	bne	130$		; no, check other entries
+120$:	tst	bsw1(r3)	; Entries 5 and 8, check for zero status
+	bne	80$		;? BSW1 was altered from zeros to?
+	tst	bsw2(r3)	; indicating not updated
+	bne	80$		;? BSW2 was altered from zeros to?
+	br	160$		; next descriptor
+130$:	cmp	#2,r0		; Looking at D7, the entry with status?
+	beq	140$		; yes, so checkit!
+	bit	#lastd,bsw1(r3)	; intermediate status flag bit set to one?
+	beq	80$		;? BSW1 not in expected intermediate state
+	br	160$		; skip BSW2 check and on to next element
+;
+140$:				; Entry #7, the operation status entry!
+	mov	bsw1(r3),r5	; get BSW1 from transmit element
+	bic	#tsm1!ste16,r5	; mask off don't care bits
+	cmp	#q6.ts3,r5	; allow only this state
+	bne	80$		;? Final BSW1 status word check
+	mov	bsw2(r3),r5	; get BSW2 from last transmit element
+	bic	#tsm2,r5	; mask off don't care bits, non-zero TDR
+	beq	80$		;? Final BSW2 status word check, zero TDR
+;
+160$:	add	#CSW0,r3	; and bump to next descriptor element
+	dec	r0
+	bne	110$		; Step thru all the descriptor elements
+;
+; Operation status verified and correct, check the data transfer next...
+;
+	mov	r2,r3
+	add	#cq.sad,r3	; pointer to transmitted data
+	mov	r2,r4
+	add	#cq.rbf,r4	; pointer to received data
+	mov	r4,r5
+;
+	cmp	(r3)+,(r4)+	; check 6 bytes of the station address
+	bne	90$		;? Data transfer check, bytes 1 & 2
+	cmp	(r3)+,(r4)+
+	bne	90$		;? Data transfer check, bytes 3 & 4
+	cmp	(r3)+,(r4)+
+	bne	90$		;? Data transfer check, bytes 5 & 6
+;
+	tst	(r4)+		; next 4 bytes should be zero
+	bne	90$		;? Data transfer check, bytes 7 & 8
+	tst	(r4)+
+	bne	90$		;? Data transfer check, bytes 9 & 10
+;
+	cmp	(r5)+,(r4)+	; next three words same as first three
+	bne	90$		;? Data transfer check, bytes 11 & 12
+	cmp	(r5)+,(r4)+
+	bne	90$		;? Data transfer check, bytes 13 & 14
+	cmp	(r5)+,(r4)+
+	bne	90$		;? Data transfer check, bytes 15 & 16
+;
+	;br	cq.t07		; Fall through to next test
+;
+; End of Test #6...
+
+.sbttl	Subtest t07: Transceiver operational and status test
+;
+;++
+;
+; LED2 is also turned off and the sanity timer value reset to ???
+; The QNA status is used to determine if a H4000 transceiver or another 
+; loopback device is attached to the UUT.
+;
+; QNA state,	on entry: 	Internal Extended loopback mode set
+;				Status is ready (FIFO empty)
+;
+;		on exit:	Status is ready (FIFO empty)
+;				Receive and transmit disabled
+;				Station address memory has physical address
+;				LED2 is turned off
+;				Sanity timer set for 1/4 second
+;
+; Test Sequence...
+;
+;	1 - Use station address packet from prior test
+;	2 - transmit set-up packet and receive echoed packet
+;		. Turn off LED2
+;		. Change sanity timer to 1/4 second
+;	3 - check all UUT status and compare transmitted and received data
+;	4 - examine CSR carrier sense bit
+;	5 - examine transmit status word
+;
+; Errors:
+;
+;	e12,e09 - Operation time-out on set-up
+;	e12,e14 - Set-up operation status check
+;	e12 - Set-up operation, echoed data check
+;	e15 - CSR carrier sense on to long
+;
+;--
+;
+; Symbolic test constants...
+;
+q7.spx	=	75.		; words to clear in target address packet area
+q7.sa	=	6		; bytes in a station address
+q7.cc	=	7		; Column count, one for each address in group
+q7.gb	=	100-60		; Offset to buffer for B Group addresses
+;
+q7.spz	=	modl+dls2+stv0	; setup packet word count, coded for...
+				; turn off LED2
+				; sanity timer interrupt in 1/4 second
+;
+q7.cat	=	7000.		; Timer for Carrier Sense Signal test
+				; 10**3 over, 70 us is nominal?
+;
+;
+; Begin test code...
+;
+cq.t07:		; Section 07, Read status, then off LED2 and test Ethernet
+;
+; Build set-up packet with only the UUT's station address...
+;
+	mov	r2,r3
+	add	#cq.sbf,r3	; set-up packet's buffer address
+	mov	r3,r5		; save a copy for working
+	mov	#q7.spx,r0	; words in the total set-up packet
+10$:	clr	(r3)+		; zero all the words
+	dec	r0
+	bne	10$
+;
+	mov	r2,r4
+	add	#cq.sad,r4	; pointer to station address byte string
+	jsr	pc,100$		; Copy station address into Group A
+	add	#q7.gb,r5	; point to group B in buffer
+	jsr	pc,100$		; Copy station address into Group B
+;
+; use the Default station address packet to turn off LED2
+;
+	jsr	r5,q.sets	; transmit, receive and verify set-up
+	 +	-q7.spz		; turn off LED2 and set sanity timer
+	beq	30$
+	rts	pc		;? final setup packet didn't work?
+;
+; Ethernet Station Address now set-up in UUT. Examine status to determine 
+; if there are signs that the H4000 connection or Ethernet is bad.
+;
+; 1 - Check carrier sense bit in the CSR for activity "on the wire"
+;
+30$:	mov	#q7.cat,r0	; See if carrier sense in CSR is okay
+40$:	bit	#ca,(r1)	; should be off or not on for long
+	beq	cq.t08		; it is off, no activity now
+	dec	r0
+	bne	40$
+;
+; Set Special error code for something wrong out-board of UUT
+;
+50$:	bis	#cq.e15,(r2)	;? External Loopback not Operational
+	rts	pc
+;
+; Copy station address bytes into one entire group, A or B...
+;
+;	R4 - Pointer to copy of station address bytes.
+;	     Restored to entry value on exit
+;	R5 - Address of set-up packet, Group A or B
+;	     Points to byte at end of group on exit
+;
+100$:	mov	r4,-(sp)	; Save base of station address
+	mov	#q7.sa,r0	; Bytes in a station address
+110$:	inc	r5		; Space over first column
+	mov	#q7.cc,r3	; Count of remaining columns
+120$:	movb	(r4),(r5)+	; Replicate address byte through columns
+	dec	r3
+	bne	120$		; Repeat
+	inc	r4		; go to next byte in address
+	dec	r0
+	bne	110$		; Repeat for each byte in station address
+	mov	(sp)+,r4	; Restore base of station address pointer
+	rts	pc
+;
+; End of test #7...
+
+.sbttl	Subtest t08: External loopback and Ethernet Protocol test
+;
+;++
+; The UUT's station address from sub-test #7 is assumed to in the target 
+; address memory of the UUT. Next a minimum sized Ethernet packet addressed
+; to the UUT with a data pattern of descending integers is transmitted and
+; received using external loopback. Finally the maximum sized Ethernet packet
+; is generated and sent to the UUT. The maximum packet is addressed to the
+; UUT and has a data pattern of descending integers. Both packets will test
+; Ethernet protocol processing and the maximum packet will test the transmit
+; FIFO memory.
+;
+; QNA state,	on entry:	Target address memory has physical address
+;				Other addresses set to zero
+;				H4000 or equivalent is connected
+;				Live Ethernet or terminated cable
+;				Status is ready (FIFO empty)
+;				Receive and transmit disabled
+;
+;		on exit:	External loopback enabled
+;				Status is ready (FIFO empty)
+;				Receive and transmit disabled
+;
+; Test Sequence...
+;
+;	1 - Generate minimum sized Ethernet Packet
+;		. destination address is UUT's assigned address
+;		. packet data are descending bytes, [56..1]
+;		. source field is set to zero
+;		. type field is set to "loopback", 60-00 hex.
+;	2 - transmit and receive the minumum packet in external loopback
+;	3 - check all UUT status
+;	4 - Alter transmitted packet to be nominal receive packet
+;	5 - compare received data against nominal
+;	6 - Generate maximum sized Ethernet Packet
+;		. destination address is UUT's assigned address
+;		. packet data are descending bytes, [(1500mod256)..1]
+;		. source field is set to zero
+;		. type field is set to "loopback"
+;		. packet formatted to be ignored by DEC test systems
+;	7 - transmit and receive the maximum packet in external loopback
+;	8 - check all UUT status
+;	9 - Alter transmitted packet to be nominal receive packet
+;	10 - compare received data against nominal
+;
+; Errors:
+;
+;	e05,e09 - External loopback packet operation time-out
+;	e05,e14 - External loopback operation status check
+;	e05 - External loopback transmitted/received packet data compare check
+;	e15 - External loopback not operational
+;
+;--
+;
+; Local test variables...
+;
+q8.rpt	=	cq.wsp+0	; transmit repeat counter
+;
+; Symbolic Test Constants...
+;
+q8.sof	=	10		; offset to source station address field
+q8.typ	=	000220		; packet type, loopback hex 90-00
+q8.skc	=	000000		; skip count, hex 00-00
+q8.rfc	=	000001		; reply format code, hex 00-01
+;
+q8.rpm	=	100.		; re-try transmit maximum attempts
+q8.lms	=	^C<errsu>	; status of "soft" receive/transmit error
+;
+q8.mbc	=	46.		; bytes in minimum packet data field
+q8.mcp	=	64.-4.		; bytes in the shortest packet, less CRC
+;
+q8.ms1	=	0		; transmit status word 1, TFAIL ignored
+q8.bs1	=	esetu		; receive state, both mimimum and maximum
+;
+q8.lbc	=	1500.		; bytes of data in longest packet
+q8.lcp	=	1518.-4.	; bytes in the longest packet, less CRC
+;
+; Begin test code...
+;
+cq.t08:		; Section 08, Ethernet Processing test
+;
+	tst	(r2)		; double check the error status
+	bne	29$		; if any errors then skip external loopback
+10$:	bis	#il!el,(r1)	; establish external loopback
+;
+; Build minimum sized Ethernet packet and transmit in external loopback...
+;
+	mov	#q8.mbc,r0	; bytes in the data portion of the packet
+	jsr	pc,300$		; initialize packet buffer and repeat counter
+20$:	mov	#q8.mcp,r0	; set-up minimum packet size
+	jsr	r5,q.desc	; setup descriptors and activate
+	bcc	40$		; Fall through if device timed out
+;
+; On time-out assume no transceiver connected or "hard" cable problem
+;
+	bic	#cq.e09,(r2)	; remove (just) the assumed time-out error
+25$:	bis	#cq.e15,(r2)	;? External loopback not operational
+29$:	rts	pc
+;
+; Operation complete, check all status values...
+;
+40$:	mov	#q8.mcp,r0	; set expected byte count
+	jsr	pc,310$		; check repeat count and verify operation status
+	beq	20$		; Operation failed, repeat till done
+	beq	60$		; Minimum transmission (finally?) worked
+;
+; Mimimum sized Ethernet External loopback packet receipt or transmit failure
+;
+50$:	bis	#cq.e05,(r2)	;? Minimum Ethernet Packet transmission check
+	rts	pc
+;
+; Compare the transmitted packet against the minimum received packet...
+;
+60$:	mov	#q8.mcp,r0	; bytes to compare in packets
+	jsr	pc,320$		; common compare
+	bne	50$		;? Minimum packet data transmission
+;
+; Make up the longest Ethernet packet and transmit in external loop-back...
+;
+	mov	#q8.lbc,r0	; bytes in the data portion of the packet
+	jsr	pc,300$		; and init it along with repeat counter
+70$:	mov	#q8.lcp,r0	; set-up longest packet size
+	jsr	r5,q.desc	; initialize both descriptors and run
+	bcs	50$		;? Maximum packet initialize failed
+;
+; Operation complete, check all status values and compare the packets...
+;
+80$:	mov	#q8.lcp,r0	; expected received byte count
+	jsr	pc,310$		; check for soft errors and repeats
+	beq	70$		; Soft error, re-try it
+	bne	50$		;? maximum packet operation didn't fly
+	mov	#q8.lcp,r0	; bytes to compare in packets
+	jsr	pc,320$		; common packet data check
+	bne	50$		;? maximum packet data compare check
+	rts	pc		; all done
+;
+; Initialize Transmit Packet Buffer area, length in R0 (bytes)
+;
+300$:	mov	r2,r3		; make transmit buffer into Ethernet packet
+	add	#cq.tbf,r3	; pointer to copy of transmitted packet
+	mov	r2,r4
+	add	#cq.sad,r4	; pointer to station address (source)
+	mov	r4,r5		; and another copy
+	mov	(r4)+,(r3)+	; destination is myself
+	mov	(r4)+,(r3)+
+	mov	(r4)+,(r3)+
+	mov	(r5)+,(r3)+	; source is set to myself also
+	mov	(r5)+,(r3)+
+	mov	(r5)+,(r3)+
+	mov	#q8.typ,(r3)+	; packet type is set to "loopback"
+	clr	(r3)+		; skip count set to "none"
+	mov	#q8.rfc,(r3)+	; reply function code set to "none"
+;
+309$:	movb	r0,(r3)+	; descending pattern of bytes...
+	dec	r0
+	bne	309$		; are the data
+	clr	q8.rpt(r2)	; reset the repeat counter
+	rts	pc
+;
+; Check repeat count and operation status, R0 has byte count
+;
+310$:	jsr	r5,q.ochk	; verify operation status
+	 +	q8.ms1		; Transmit
+	 +	q8.bs1		; Receive
+	bne	315$		; Operation failed nominal status check
+;
+318$:	add	#2,(sp)		; set return for operation done, good or bad
+319$:	tst	(r2)		; set the condition codes for BEQ/BNE
+	rts	pc		; Return at call+2 for re-try or call+4 for done
+;
+315$:	mov	cq.tda+BSW1(r2),r0	; get transmit status word 1 value
+	bic	#q8.lms,r0	; look only at error summary bit
+	bne	316$		; if on then re-try, else XMIT okay
+	mov	cq.rda+BSW1(r2),r0	; get receive status word 1
+	bit	#q8.lms,r0	; look only at the ERRSU bit
+	bne	316$		; if on then re-try, else RECEIVE
+	bic	#cq.e14,(r2)	; collisions or receive noise assumed
+	br	318$		; operation was really okay!?!
+316$:	inc	q8.rpt(r2)	; bump repeat counter
+	cmp	#q8.rpm,q8.rpt(r2)	; repeat count exceeded?
+	ble	318$		;? Bad minimum or maximum packet transmission
+	bic	#cq.e14,(r2)	;! Clear the operation status error
+	br	319$		; and return signalling a re-try
+;
+; Compare transmitted and received data packets. Byte length in R0 
+;
+320$:	mov	r2,r4
+	add	#cq.rbf,r4	; received packet, set-up memory echo
+	mov	r2,r5
+	add	#cq.tbf,r5	; transmitted packet, set-up addresses
+326$:	cmpb	(r4)+,(r5)+	; see if the same, or not
+	bne	329$		;? must be the same in all regards
+	dec	r0
+	bne	326$		; fall thru for proper operation
+329$:	rts	pc
+;
+; End of test #8...
+
+.sbttl	jsr r5,q.setu	; Transmit and verify target address set-up
+.sbttl	jsr r5,q.sets	; Transmit set-up area and verify target address set-up
+;
+;++
+; A set-up packet is transmitted to the UUT and it's echo received and 
+; verified. Used to load target station address memory, to turn off LED's, 
+; to set the sanity timer and to set address filtering modes.
+;
+; Two calls are supported. The first assumes the target address packet is in
+; the "standard" area and the other requires a pointer to be in R0. 
+;
+; Calling sequence:
+;
+;	jsr	r5,q.sets	; for packet in "cq.sbf" call using R5
+;	   -or-
+;	mov	target_packet_address,r0
+;	jsr	r5,q.setu	; call using R5
+;	 +	word count and encoding, two's complement
+;	beq	success		; device state and data nominal
+;	bne	failure		; R0 set to error code
+;
+; Errors:
+;
+;	e12, e09 - Setup packet operation time-out
+;	e12, e14 - Setup packet operation status check
+;	e12	 - Setup packet echoed data check
+;
+;--
+; Local test symbolic constants...
+;
+qs.sto	=	-1		; time-out for set-up transmit and receive
+qs.exm	=	037777		; Extra word check mask value
+qs.exv	=	140000		; Extra word check value
+;
+qs.ss1	=	0		; nominal BSW1 status, no problems please!
+qs.es1	=	esetu		; set-up packet
+;
+; Begin target address set-up routine(s)...
+;
+q.sets:
+	mov	r2,r0		; get base of the workspace
+	add	#cq.sbf,r0	; add the offset to the buffer
+;
+q.setu:
+;
+; Arm receive side for set-up packet echo...
+;
+25$:	mov	r0,-(sp)	; save target address packet pointer
+	mov	(r5),r0		; set packet size
+	dec	r0		; and make receive longer than transmit
+	jsr	pc,q.desr	; initialize receive descriptor area
+	mov	r4,q.rbl(r1)	; set low address for receive descriptor
+	clr	q.rba(r1)	; and activate the UUT for receive
+;
+; Generate transmit descriptor and start transmit of set-up packet...
+;
+	mov	(r5)+,r0	; set transmit packet size
+	jsr	pc,q.dest	; cleanup transmit area
+	mov	#v!s!e,bpah(r4)	; valid set-up packet address
+	mov	(sp),bpad(r4)	; of 22-bits
+;
+; Start transmit and receive of set-up packet and see how things went.
+;
+	mov	r4,q.tbl(r1)	; set low 16-bits of address
+	clr	q.tba(r1)	; and initiate the transmit
+	mov	#qs.sto,r4	; time-out counter
+30$:	bit	#ri,(r1)	; wait for receive state change
+	bne	50$
+	dec	r4
+	bne	30$		; timed loop
+	bis	#cq.e09,(r2)	;? Setup packet operation time-out
+;
+; Set-up packet receipt or transmit failure
+;
+35$:	tst	(sp)+		;? error and stack (buffer address) flush
+40$:	bis	#cq.e12,(r2)	;? Station address set-up problem
+	br	99$
+;
+; Operation complete, check all status values...
+;
+50$:	mov	-2(r5),r0	; get transmitted word count
+	asl	r0		; and make into bytes
+	neg	r0		; that are positively the one's
+	jsr	r5,q.ochk	; verify CSR and descriptor status
+	 +	qs.ss1
+	 +	qs.es1		; receive set-up status
+	bne	35$		;? Operation status check, set-up packet
+;
+; Compare the transmitted set-up packet against the received echo...
+;
+	mov	-2(r5),r0	; transmitted packet word count
+	asl	r0		; convert to byte count
+	neg	r0		; to an integer that is...
+	mov	r2,r4		; address of the
+	add	#cq.rbf,r4	; received packet, set-up memory echo
+	mov	(sp)+,r3	; get address of the transmitted setup packet
+60$:	cmpb	(r4)+,(r3)+	; see if the same, or not
+	bne	40$		;? must be the same in all regards
+	dec	r0
+	bne	60$		; fall thru for proper operation
+	mov	(r4),r0		; get the "extra word" from the QDTC chip
+	bic	#qs.exm,r0	; and make sure it is nominal
+	cmp	#qs.exv,r0	; word put there if receive length greater 
+	bne	40$		;? than transmit length
+;
+; Station addresses now set-up in UUT
+;
+99$:	rts	r5
+
+.sbttl	jsr r5,q.desc	; Set-up receive and transmit descriptors and activate
+;
+;++
+; Initialize receive and transmit descriptors using the byte count passed 
+; in R0. Receive and transmit operations are initiated and the UUT CSR state 
+; is monitored for a receive interrupt. If the device times out, return is 
+; made with an indicator set.
+;
+; Calling sequence:
+;
+;	mov	byte_count_for_operations,R0
+;	jsr	r5,q.desc	; Call using R5
+;	bcc	operation_caused_state_change
+;	bcs	operation_timed_out
+;
+; Errors:
+;
+;	e09 - Operation time-out
+;
+;--
+;
+q.desc:	clr	-(sp)		; set a flag on the stack and set carry to 0
+	ror	r0		; convert (odd number) bytes to words
+	adc	(sp)		; and set a "carry" flag
+	add	(sp),r0		; adjust for "extra" byte
+	neg	r0		; two's complement word count
+	jsr	pc,q.desr	; initialize receive descriptor
+	mov	r4,q.rbl(r1)	; arm receive side with descriptor
+	clr	q.rba(r1)	; and activate the UUT 
+;
+	jsr	pc,q.dest	; initialize transmit descriptor
+	tst	(sp)+		; see if odd number of bytes to be transmitted
+	beq	100$		; even number
+	bis	#l,BPAH(r4)	; set descriptor bit
+;
+; Start transmit of packet and then see how things went.
+;
+100$:	mov	r4,q.tbl(r1)	; arm transmit side with descriptor
+	clr	q.tba(r1)	; and initiate the transmit, receive is armed!
+	clr	r0		; set really long time-out counter
+150$:	bit	#ri,(r1)	; wait for receive state change
+	bne	170$
+	dec	r0
+	bne	150$		; timed loop
+	bis	#cq.e09,(r2)	;? Device timed out on transmit/receive
+	sec			; set C=1 for fail in CPU status
+	br	199$
+170$:	clc			; set C=0 success CPU status
+199$:	rts	r5
+
+.sbttl	jsr pc,q.desr	; Initialize receive descriptor
+.sbttl	jsr pc,q.dest	; Initialize transmit descriptor
+;
+;++
+; Using the two's complement word count passed in r0, the descriptors are
+; initialized for packet transmission or receipt. Base address of descriptor
+; is returned to caller.
+;
+; Calling sequence:
+;
+;	mov	-<word_count_for_operation>,r0
+;	jsr	pc,q.desr/t	; call using pc
+;	mov	r4,descriptor_base	; no errors
+;
+; Errors:
+;
+;	None.
+;
+; R4 - points to base of descriptor area, set as follows...
+;
+;  OFFSET:	RECEIVE:	TRANSMIT:
+;
+; BSW0		newb		newb		unused descriptor
+; BDES/BPAH	v!e / 0000	v!e / 0000	valid, and last entry in lo mem
+; BPAD		cq.rbf		cq.tbf		absolute addresses'
+; BSIZ		R0		R0		parameter, 2's complement
+; BSW1		000000		000000		initialized
+; BSW2		000000		000000		  to zeroes
+; CSW0		newb		newb		unused descriptor
+; CDES		e		e		end of chain
+;
+;--
+;
+	.enabl	lsb
+;
+; Initialize receive descriptor...
+;
+q.desr:	mov	r2,r3
+	add	#cq.rbf,r3	; pointer to receive buffer
+	mov	#200,r4		; max words+ in setup buffer
+10$:	mov	#051343,(r3)+	; pre-fill buffer
+	dec	r4
+	bne	10$		; with special pattern
+	jsr	r5,100$		; initialize area with these parameters...
+	 +	cq.rda		; Receive Descriptor area
+	 +	cq.rbf		; For pointer to receive buffer
+	rts	pc
+;
+; Initialize transmit descriptor...
+;
+q.dest:	jsr	r5,100$		; initialize transmit area
+	 +	cq.tda		; offset to transmit descriptor
+	 +	cq.tbf		; base for pointer to transmit buffer
+	rts	pc
+;
+100$:	mov	(r5)+,r3	; make pointer to the descriptor
+	add	r2,r3		; add base of work area
+	mov	r3,r4		; save copy for status checking
+	mov	#newb,(r3)+	; BSW0 - valid entry
+	mov	#v!e,(r3)+	; BDES/BPAH - valid set-up packet address
+	mov	(r5)+,(r3)	; base of pointer to the buffer
+	add	r2,(r3)+	; BPAD - make pointer to either buffer
+	mov	r0,(r3)+	; BSIZ - packet size
+	clr	(r3)+		; BSW1 -
+	clr	(r3)+		; BSW2 -
+	mov	#newb,(r3)+	; CSW0 - valid entry
+	mov	#e,(r3)+	; DLST - one element in descriptor
+	rts	r5
+;
+	.dsabl	lsb
+
+.sbttl	jsr r5,q.ochk	; Operation completion verification
+;
+;++
+; Verifies transmit and receive status from just completed operation. CSR is 
+; checked for nominal status as is both transmit and receive descriptor 
+; flag words and status words using the passed parameters.
+;
+; All status words that are checked are masked to remove "don't care" bits 
+; before testing against the five passed parameters.
+;
+; CSR should have XI and RI set, RL set to one.
+;
+; Transmit flag word to be USED
+; Transmit status word 1 checked via parameter
+;   TFAIL bit ignored for non-DEC transceiver compatibility
+;   STE16 bit ignored for both cases of sanity timer jumper
+; TDR value is checked to be greater than zero.
+;
+; Receive flag word to be used
+; Receive status word 1 checked via parameter
+; Received byte length checking is done with all ten bits (BSW1, bits 8-10 
+;   and BSW2, bits 7-0) for internal/extended and external loopback, low eight
+;   bits (BSW2 bits 7-0)for setup packets, and is ignored for internal
+;   loopback. 
+;
+; Resets both transmit and receive interrupt flags in all cases.
+;
+; Calling sequence:
+;
+;	mov	expected_receive_byte_count,r0
+;	jsr	r5,q.ochk	; call using R5
+;	 +	transmit status word 1
+;	 +	receive status word 1
+;	beq	success		; CSR and device state nominal
+;	bne	failure		; cq.err(r2) set to error code
+;
+; Errors:
+;
+;	e14 - Operation status check
+;
+;--
+;
+; Symbolic constants...
+;
+qo.int	=	-3		; word count for an internal loopback packet
+;
+qo.csr	=	ca!xc!csrm!re!el!il!se!xl	; bits to ignore in CSR
+qo.csn	=	xi!ri		; nominal CSR for checking
+qo.tfl	=	tsm0		; transmit flag word mask
+qo.tfn	=	used		; transmit flag nominal value
+qo.tsm	=	77777		; mask for "LASTD" case of status word 1
+qo.ts1	=	tsm1!tfail!ste16!closs!errsu	; transmit status word 1 mask
+						;error & loss for DECOM 1.15
+qo.ts2	=	tsm2		; transmit status word 2 mask (TDR)
+qo.rfl	=	rsm0		; receive flag word mask
+qo.rfn	=	used		; receive flag nominal value
+qo.rs1	=	3777		; receive status word 1 mask
+qo.rs2	=	rsm2		; receive status word 2 mask (RBL)
+;
+; Check operation status, CSR and status from transmit and receive...
+;
+q.ochk:	mov	r0,-(sp)	; save transmitted byte count
+	clr	r0		; set R0 for no errors so far
+;
+	mov	(r1),r4		;CSR - get current CSR contents
+	bis	#ri!xi,(r1)	; and dismiss interrupts
+	bic	#qo.csr,r4	; and mask off unused and don't care bits
+	cmp	#qo.csn,r4	; compared to nominal
+	beq	10$
+	mov	pc,r0		;? R0 set to non-zero for an error
+;
+10$:	mov	cq.tda+bsw0(r2),r4	;BSW0 - status word 0, the flag word
+	bic	#qo.tfl,r4	; mask off don't care bits
+	cmp	#qo.tfn,r4	; test against nominal flag word
+	beq	20$
+	mov	pc,r0		;? R0 set to non-zero for flag word bad
+20$:	mov	cq.tda+bsw1(r2),r4	;BSW1 - status word 1, transmit status
+	bpl	25$		; see if intermediate operation status
+	bic	#qo.tsm,r4	; bits 14-0 are not specified in this case
+25$:	bic	#qo.ts1,r4	; mask off don't care bits
+	cmp	(r5)+,r4	;p1 - test against nominal status
+	beq	30$
+	mov	pc,r0		;? R0 set to non-zero for status bad
+30$:	mov	cq.tda+bsw2(r2),r4	;BSW2 - status word 2, TDR value
+	bic	#qo.ts2,r4	; mask off don't care bits
+	bne	40$
+	mov	pc,r0		;? R0 set to non-zero for TDR check
+;
+40$:	mov	cq.rda+bsw0(r2),r4	;BSW0 - receive word 0, the flag word
+	bic	#qo.rfl,r4	; mask off don't care bits
+	cmp	#qo.rfn,r4	; test against nominal flag word
+	beq	50$
+	mov	pc,r0		;? R0 set to non-zero for flag word bad
+50$:	mov	cq.rda+bsw1(r2),r4	;BSW1 - status word 1, receive status
+	mov	r4,-(sp)	; save for byte length computation
+	bic	#qo.rs1,r4	; mask off don't care bits and RBL high bits
+	cmp	(r5)+,r4	;p2 - test against nominal status
+	beq	60$
+	mov	pc,r0		;? R0 set to non-zero for status bad
+60$:	mov	(sp)+,r4	;BSW1/BSW2 - Received byte count
+	bic	#^Crblh,r4	; get bits 8,9,10 of RBL, and clean it all up
+;
+	cmp	#qo.int,cq.tda+bsiz(r2)	; check for internal loopback size
+	bne	70$		; set-up, internal/extended or external packets?
+	tst	(sp)+		; clear stack top (expected RBL)
+	br	90$		; and ignore RBL check in internal loopback
+;
+70$:	bit	#s,cq.tda+bpah(r2)	; check for set-up packet
+	beq	80$		; assume internal/extended or external loopback
+	clr	r4		; ignore RBL bits 8-10 in setup operation
+;
+80$:	mov	cq.rda+bsw2(r2),r3	;BSW2 - word 2, received byte length
+	bic	#qo.rs2,r3	; mask off high bits (don't cares)
+	add	r3,r4		; then adjust by Keith's "FF"
+	cmp	(sp)+,r4
+	beq	90$
+85$:	mov	pc,r0		;? received byte length check
+;
+90$:	mov	r0,r3		; set processor status
+	beq	99$		; R3 has address of LAST failure, R4 data
+	bis	#cq.e14,(r2)	;? set device status check error code
+99$:	rts	r5
+
+.sbttl
+;
+;*****************	end of PIC CITIZEN_QNA	  *****************************
+;
+; Some limits and other numbers in octal and decimal...
+;
+r8 = 4096.	; Useable bytes in Boot/Diagnostic ROM
+;
+r8 = citqna		; what the EPB needs
+r8 = 2000.		; CITIZEN_QNA's half
+r8 = CQLAST-CITQNA	; What CITIZEN_QNA currently needs
+;
+r8 = CQLAST-2000.	; space (bytes) needed if plus
+;
+r8 = 4096.	; bytes for CITIZEN_QNA workspace
+r8 = CQ.SIZ	; What CITIZEN_QNA currently needs
+;
+r8 = 14.	; bytes in Ethernet packet header
+r8 = 46.	; bytes in Ethernet packet, minimum
+r8 = 60.	; header and packet
+r8 = 64.	; header and packet and CRC, smallest legal packet
+;
+r8 = 1500.	; bytes in Ethernet packet maximum
+r8 = 1514.	; header and packet
+r8 = 1518.	; header and packet and CRC. largest legal packet
+r8 = 1528.	; largest packet in interna/extended loopback
+;
+;*****************************************************************************
+;
+;=============================================================================
+;
+CQLAST::		; last location reference symbol
+;
+;==============================================================================
+DECnet::		; Fall through to DECnet boot
+
+	HALT		; Code removed for INIT, halt if we get here
+
+	.END	

@@ -1,0 +1,984 @@
+2!		PROGRAM		: CPATCH.BAS
+5!		VERSION		: V10.1
+6!		EDIT		: A
+7!		EDIT DATE	: 10-MAY-91
+10		EXTEND
+11	! &
+	&
+	&
+	!		  C O P Y R I G H T &
+	&
+	&
+  !		      Copyright (C) 1977, 1991 by &
+  !	        Digital Equipment Corporation, Maynard, Mass. &
+  !	&
+  !	&
+  !	This software is furnished under a license and may be used and &
+  !	copied  only  in accordance with the terms of such license and &
+  !	with the  inclusion  of  the  above  copyright  notice.   This &
+  !	software  or  any  other copies thereof may not be provided or &
+  !	otherwise made available to any other person.  No title to and &
+  !	ownership of the software is hereby transferred. &
+  !	&
+  !	The information in this software is subject to change  without &
+  !	notice  and should not be construed as a commitment by Digital &
+  !	Equipment Corporation. &
+  !	&
+  !	DIGITAL assumes no responsibility for the use  or  reliability &
+  !	of its software on equipment that is not supplied by DIGITAL. &
+  !	&
+  !******************************************************************* &
+
+20	! &
+	&
+	&
+	!	M O D I F I C A T I O N    H I S T O R Y &
+	&
+	&
+
+21	! VER/ED	EDIT DATE	REASON &
+	! &
+
+100	! &
+	&
+	&
+	!	G E N E R A L    D E S C R I P T I O N &
+	&
+	&
+	&
+	&
+   ! CPATCH IS A COMPONENT OF THE BASIC-PLUS CUSP'S AUTO-PATCHING &
+   ! FACILITY.  IT ACCEPTS THE NAME OF THE FILE TO BE PATCHED, AND &
+   ! THE COMMAND AND LOG FILE NAMES, CHECKS THE NAMES FOR VALIDITY, &
+   ! SETS UP THE WORK FILE TO REFLECT THIS INFORMATION AND THEN &
+   ! CHAINS TO AUTOED WHICH PERFORMS THE PATCH.  CPATCH MAY BE &
+   ! RUN AT THE USERS KEYBOARD, BUT NORMALLY CPATCH IS RUN BY &
+   ! THE PROGRAM PBUILD, AND ALL THE INPUT TO CPATCH IS FORCED &
+   ! TO THE KEYBOARD BY PBUILD. &
+
+300	! &
+	&
+	&
+	!	I / O    C H A N N E L S &
+	&
+	&
+	&
+   !	CHANNEL #		USED FOR &
+   !	   1%		INPUT CHANNEL FOR FILE COPY OPERATIONS &
+   !	   2%		OUTPUT CHANNEL FOR FILE COPY OPERATIONS &
+   !	  10%		KEYBOARD INPUT CHANNEL &
+   !	  12%		WORK FILE FOR PASSING INFORMATION BETWEEN PROGRAMS &
+
+400	! &
+	&
+	&
+	!	V A R I A B L E    D E F I N I T I O N S &
+	&
+	&
+	&
+   !	VARIABLE NAME		USED FOR &
+   !	&
+   !	ARG%		NUMERIC ARGUMENT TO EDIT COMMANDS &
+   !	AUTO$		STRING CONTAINING NAME OF AUTOED AND ACCT$ &
+   !	BAK$		STRING CONTAINING ".BAK" &
+   !	BAS$		STRING CONTAINING ".BAS" &
+   !	C0		COUNT OF LINES READ FROM KB &
+   !	C0$		STRING CONTAINING NAME OF COMMAND FILE FOR AUTOED &
+   !	C0%		CHANNEL NO. OF INPUT FOR FILE COPIES &
+   !	C1%		COMMAND FILE STATUS FLAG (-1% MEANDS ITS A KB:) &
+   !	CS.FLAG%	CHECKSUM SWITCH FLAG = -1 IF /CS SPECIFIED, &
+   !			=32767 IF /CS:nn SPECIFIED. &
+   !	CS.VALUE%	VALUE nn IN /CS:nn SWTICH IF SPECIFIED. &
+   !	CMD$		STRING CONTAINING ".CMD" &
+   !	CR$		CARRAIGE RETURN LINE FEED &
+   !	CRC$		CHR$(13%) &
+   !	D0%		FLAGS INDICATING A DISK DEVICE IN STATUS FLAG &
+   !	DEVBITS%	AS ABOVE BUT INCLUDES UNDEFINED LOGICAL NAME FLAG &
+   !	DEVST%		WORK VARIABLE CONTAINING DEVICE STATUS AS RETURNED &
+   !			BY FILE NAME STRING SCAN &
+   !	DEVSTAT%	AS ABOVE BUT SET ONLY BY FNFLNMCK% FUNCTION &
+   !	DOT$		STRING CONTAINING "." &
+   !	DS%		WORK VARIABLE (USED AS DEVST%) &
+   !	E%		VARIABLE SET TO ERROR TYPE CODE &
+   !	E0%		CHAIN ENTRY FLAG &
+   !	EDIN$		NAME OF TEMP FILE FOR EDIT INPUT &
+   !	EDOUT$		NAME OF TEMP FILE FOR EDIT OUTPUT &
+   !	EXTBITS%	BITS IN STRING SCAN STATUS WORD CONCERNING THE &
+   !			FILENAME EXTENSION &
+   !	F0%		UTILITY VARIABLE &
+   !	FILN$(11)	FILE NAME ARRAY IN WORK FILE TO PASS INFORMATION &
+   !			BETWEEN CPATCH AND AUTOED (VIRTUAL ARRAY FILE) &
+   !	FILN%(11,63)	VIRTUAL ARRAY TO ACCESS WORK FILE BY WORDS &
+   !			(SUCH AS TO PASS CHECKSUM INFORMATION) &
+   !	FLNBITS%	BITS IN STRING SCAN STATUS WORD CONCERNING THE &
+   !			FILENAME &
+   !	I$		VERSION/EDIT NUMBER &
+   !	I%		UTILITY VARIABLE &
+   !	JN$,JN%		CURRENT JOB NUMBER AS ASCII STRING AND INTEGER &
+   !	L0$		NAME OF LOG FILE &
+   !	L0%		CHANNEL NUMBER OF LOG FILE &
+   !	L1%		LOG FILE DEVICE TYPE FLAGE &
+   !	LFC$		CHR$(10%) &
+   !	LOGEXT$		STRING CONTAINING ".LOG" &
+   !	LOGFIL$		TEMPORARY LOG FILE NAME &
+   !	M0%(30),M1%(30) UTILITY ARRAY USED IN STRING SCANS &
+   !	MD%		UTILITY VARIABLE FOR MODE IN FILE OPEN &
+   !	MRG1%		UTILITY VARIABLE &
+   !	N0%		UTILITY VARIABLE &
+   !	NL$		A NULL STRING CONSTANT &
+   !	NPG%		PROJECT NUMBER OF CURRENT USER &
+   !	NPJ%		PROGRAMMER NUMBER OF CURRENT USER &
+   !	P0%		UTILITY VARIABLE &
+   !	PATCH$		NAME OF CPATCH PROGRAM FOR CHAIN COMMAND &
+   !	PKG.LOC$	NAME OF DEVICE:ACCOUNT WHICH CONTAINS ALL PROGRAMS &
+   !	PPNBITS%	FLAG BITS IN FILE NAME SCAN STATUS WORD &
+   !			PERTAINING TO PROJECT PROGRAMMER NUMBER &
+   !	PRTBITS%	FLAG BITS IN FILE NAME SCAN STATUS WORD &
+   !			PERTAINING TO PROTECTION CODE &
+   !	PTC$		FILE TO PATCH PROMPT &
+   !	S0$		FILE NAME STRING SCAN FIP CALL &
+   !	S0%,S1%		UTILITY VARIABLES &
+   !	T0-Tn(% OR $)	TEMPORARY (SCRATCH) VARIABLES &
+   !	TMP$		STING ".TMP" &
+   !	TST0%		UTILTY VARIABLE &
+   !	TZERO$		CONSTANT "0" &
+   !	W%		UTILITY VARIABLE &
+   !	WRKFIL$		NAME OF WORK FILE &
+
+800	! &
+	&
+	&
+	!	F U N C T I O N / S U B R O U T I N E    D E S C . &
+	&
+	&
+	&
+	! &
+	&
+	&
+	&
+	!	S U B R O U T I N E S &
+	&
+	&
+	! SUBROUTINE	LINES		USED FOR &
+	! &
+	! INIT		10000-10020	INITIALIZE PROGRAM VARIABLES &
+	! &
+	&
+	&
+	&
+	!	F U N C T I O N S &
+	&
+	&
+	&
+	! FNFLNMCK$(P$,F%,DFLT$) &
+	!		15000-15090	RETURN FILE NAME P$ WITH ALL MISSING &
+	!				PARTS OF NAME (EXTENSION ETC.) &
+	!				FROM STRING DFLT$.  CHECK STRING &
+	!				FOR VALIDITY ACCORDING TO FLAG F% &
+	! &
+	! FNINPUT$(A$,B$) &
+	!		15500-15510	INPUT STRING "LOGFIL=CMDFIL" WITH &
+	!				A$ AS DEFAULT FOR LOGFIL AND B$ &
+	!				AS DEFAULT FOR CMDFIL &
+	! &
+	! FNGET.SWITCHES$(A$)		STRIPS OFF /CS[:nn] SWITCH AND &
+	!		15600-15630	SETS FLAGS ACCORDINGLY. &
+	! &
+	! FNFLMRG$(A0$,A1$,FLG%) &
+	!		17300-17395	MERGE FILE NAME STRING A0$ INTO A1$ &
+	!				BY INSERTING INTO A1$ ALL PARTS OF A0$ &
+	!				WHICH ARE BOTH MISSING FROM A1$ AND &
+	!				SELECTED BY BITS IN FLG% &
+	! &
+	! FNFILCOP%(A0$,A1$,MD%) &
+	!		17500-17560	COPY FILE A0$ INTO FILE A1$. IF MD%=2% &
+	!				THEN OPEN FILE A1$ IN APPEND MODE &
+	! &
+	! FNILN$	17600-17620	INPUT LINE FROM KB: ON CHANNEL 10% &
+	!				TRAPPING EOF ERRORS &
+	! &
+
+900	! &
+	&
+	&
+	!	D I M E N S I O N    S T A T E M E N T S &
+	&
+	&
+
+920	DIM #12%, FILN$(11%)=128% &
+	\ DIM #12%, FILN%(11%,63%) &
+	\ DIM M0%(30%),M1%(30%) &
+
+1000	! &
+	&
+	&
+	!	M A I N    C O D I N G    A R E A &
+	&
+	&
+
+1010	ON ERROR GOTO 19000 &
+	\ PRINT IF CCPOS(0%)<>0% &
+	\ I$="V10.1-A" &
+		! SET UP STANDARD ERROR TRAP &
+		! RETURN KB TO LEFT MARGIN &
+		! SET UP VERSION/EDIT NUMBER &
+
+1020	PRINT "CPATCH	";I$;CHR$(9%); &
+	CVT$$(RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(0%)),3%),4%) &
+	IF E0%=0% &
+	\ PRIV.OFF$=SYS(CHR$(6%)+CHR$(-21%)) &
+		! PRINT THE SYSTEM HEADER FOR A RUN ENTRY &
+
+1030	CHANGE SYS(CHR$(12%)) TO M0% &
+	\ PKG.LOC$="["+NUM1$(M0%(6%))+","+NUM1$(M0%(5%))+"]" &
+	\ PKG.LOC$="_"+CHR$(M0%(23%))+CHR$(M0%(24%)) &
+	    +NUM1$(M0%(25%))+":"+PKG.LOC$ &
+		IF M0%(26%) AND 1% &
+	\ IF M0%(3%)+SWAP%(M0%(4%))<>15%*2% THEN &
+		PRINT "?Please 'RUN CPATCH'" &
+	\	GOTO 32760 &
+		! BUILD NAME OF DEVICE AND ACCOUNT OF LAST OPENED FILE. &
+		! WE MUST HAVE COME FROM A COMPILED FILE SO WE CAN BE &
+		! SURE THAT THIS NAME IS REALLY OUR PACKAGE LOCATION. &
+
+1040	GO SUB 10000 &
+	\ OPEN K0$ AS FILE 10% &
+	\ OPEN WRKFIL$ AS FILE 12% &
+	\ IF E0% <> 0% &
+		THEN GO TO 1100 &
+		ELSE FILN$(3%)=EDIN$ &
+		\    FILN$(4%)=EDOUT$ &
+		! OPEN WORK FILE AND INIT TEMP EDIT FILE NAMES. &
+	&
+
+1069	! &
+	&
+	&
+	&
+	!	F I L E   T O   P A T C H   I N P U T &
+	&
+	&
+
+1070	PRINT PTC$; &
+	\ T0%=FNINPUT%(NL$,NL$) &
+	\ GO TO 1070 IF (T0%=0%) AND (C0$=NL$) &
+	\ L0$=C0$ IF L0$=NL$ &
+	\ IF T0% <> 0% &
+		THEN CLOSE 10% &
+		\    GO TO 32700 &
+		! INPUT FILE NAME.  IF AN EOF, OR IF &
+		! INDIRECT COMMAND ERROR, THEN RETURN &
+		! TO MAIN LEVEL. &
+
+1080	C0$=FNFLNMCK$(C0$,29%,BAS$) &
+	\ GO TO 1070 IF C0$=NL$ &
+	\ L0$=FNFLNMCK$(L0$,28%,BAS$) &
+	\ IF L0$=NL$ &
+		THEN GO TO 1070 &
+		ELSE FILN$(6%)=C0$ &
+		\    FILN$(9%)=L0$ &
+		\    T0%=FNFILCOP%(C0$,EDIN$,-1%) &
+		\    GO TO 1120 IF T0%=0% &
+		\    GO TO 1070 &
+		! LOOK UP FILE TO PATCH.  IF FOUND, THEN COPY &
+		! TO TEMPORARY EDIT FILE. &
+	&
+
+1099	! &
+	&
+	&
+	&
+	!	C H A I N   E N T R Y   C O D E &
+	&
+	&
+
+1100	CS.FLAG%=FILN%(7%,61%) &
+	\ IF CS.FLAG% AND LEN(FILN$(0%))=0% THEN &
+		T0%=FILN%(7%,62%) &
+	\	IF CS.FLAG%<0% THEN &
+			PRINT "Checksum =";32768.+T0% &
+		ELSE	CS.VALUE%=FILN%(7%,63%) &
+	\		IF CS.VALUE%<>T0% THEN &
+				PRINT IF CCPOS(0%) &
+	\			FILN$(0%)="?Actual checksum of" &
+					+NUM$(32768.+T0%) &
+					+"does not match" &
+					+NUM$(32768.+CS.VALUE%) &
+		! IF WE WERE DOING CHECKSUMMING, EITHER PRINT &
+		! WHAT THE CHECKSUM WAS, OR MATCH IT AGAINST THE &
+		! USER-SPECIFIED CHECKSUM. &
+
+1105	IF FILN$(0%) <> NL$ &
+		THEN PRINT FILN$(0%) &
+		ELSE KILL FILN$(3%) &
+		\    NAME FILN$(4%) AS FILN$(3%) &
+		! APPEND A FORM FEED TO LOG FILE IF NOT KB:. &
+		! IF NO ERROR ON EDIT, THEN MAKE TEMPORARY &
+		! OUTPUT FILE THE NEW TEMPORARY INPUT FILE. &
+
+1110	PRINT "%"; IF LEN(FILN$(0%)) &
+	\ PRINT "Patch from ";FILN$(1%); &
+	\ IF LEN(FILN$(0%)) THEN &
+		PRINT " skipped." &
+	ELSE	PRINT " complete." &
+
+1115	IF FILN$(5%) <> NL$ &
+		THEN T0%=FNFILCOP%(FILN$(2%),FILN$(5%),2%) &
+		\    KILL FILN$(2%) &
+		! APPEND TEMP LOG FILE TO PERMANENT LOG. &
+	&
+
+1119	! &
+	&
+	&
+	&
+	!	C O M M O N   T O   R U N   A N D   C H A I N &
+	&
+	&
+
+1120	L1%,C1%,CS.FLAG%=0% &
+	\ PRINT "#"; &
+	\ T0%=FNINPUT%(K0$,K0$) &
+	\ GO TO 2000 IF T0% <> 0% &
+	\ L0$=FNGET.SWITCHES$(L0$) &
+	\ GOTO 1120 UNLESS LEN(L0$) &
+	\ L0$=FNFLNMCK$(L0$,28%,LOGEXT$) &
+	\ GO TO 1120 IF L0$=NL$ &
+	\ L1%=-1% IF (DEVSTAT% AND 255%)=2% &
+	\ C0$=FNGET.SWITCHES$(C0$) &
+	\ GOTO 1120 UNLESS LEN(C0$) &
+	\ C0$=FNFLNMCK$(C0$,29%,CMD$) &
+	\ GO TO 1120 IF C0$=NL$ &
+	\ C1%=-1% IF (DEVSTAT% AND 255%)=2% &
+	\ IF (C0$=L0$) AND (C1%=0%) &
+		THEN PRINT CR$+"?Can't be the same"+ &
+			CR$+L0$+"="+C0$+CR$ &
+		\    GO TO 1080 &
+		! GET COMMAND AND LOG FILES FROM CURRENT &
+		! COMMAND INPUT FILE. &
+
+1130	FILN$(7%)=CVTF$(0.0) &
+	\ FILN$(0%)=NL$ &
+	\ FILN$(1%)=C0$ &
+	\ FILN$(2%)=L0$ &
+	\ FILN$(5%)=NL$ &
+	\ FILN%(7%,61%)=CS.FLAG% &
+	\ FILN%(7%,63%)=CS.VALUE% &
+	\ IF L1%=0% &
+		THEN FILN$(5%)=L0$ &
+		\    FILN$(2%)=LOGFIL$ &
+		! DETERMINE IF LOG IS A KB. &
+
+1140	CLOSE 10%,12% &
+	\ CHAIN AUTO$ LINE 31000 &
+	&
+
+1999	! &
+	&
+	&
+	&
+	!	P A T C H I N G   C O M P L E T E &
+	&
+	&
+
+2000	T3$=FILN$(6%) &
+	\ T2$=FILN$(9%) &
+	\ IF T2$=T3$ &
+		THEN T1%=INSTR(1%,T3$,DOT$) &
+		\    T1%=LEN(T3$)+1% IF T1%=0% &
+		\    T1$=LEFT(T3$,T1%-1%)+BAK$ &
+		\    ON ERROR GO TO 2020 &
+		\    NAME T2$ AS T1$ &
+
+2010	T0%=FNFILCOP%(FILN$(3%),T2$,-1%) &
+	\ KILL FILN$(3%) &
+	\ ON ERROR GO TO 19000 &
+	\ E0%=-1% &
+	\ GO TO 1070 &
+		! COPY TEMPORARY EDIT OUTPUT FILE TO PERMANENT &
+		! OUTPUT FILE. &
+
+2020	KILL T1$ &
+	\ RESUME &
+	&
+
+10000	! &
+	&
+	&
+	!	S U B R O U T I N E S &
+	&
+	&
+	&
+	! &
+	&
+	&
+	&
+	!	I N I T I A L I Z E   V A R I A B L E S &
+	&
+	&
+
+10020	K0$="_KB:CPATCH.CMD" &
+	\ TZERO$="0" &
+	\ LFC$=CHR$(10%) &
+	\ CRC$=CHR$(13%) &
+	\ DOT$="." &
+	\ BAK$=".BAK" &
+	\ BAS$=".BAS" &
+	\ CMD$=".CMD" &
+	\ LOGEXT$=".LOG" &
+	\ NL$="" &
+	\ TMP$=".TMP" &
+	\ T0$=SYS(CHR$(6%)+CHR$(14%)+STRING$(6%,0%)+CHR$(1%)) &
+	\ CHANGE T0$ TO M0% &
+	\ NPJ%=M0%(7%) &
+	\ NPG%=M0%(8%) &
+	\ JN%=M0%(1%)/2 &
+	\ JN$=RIGHT(NUM1$(100%+JN%),2%) &
+	\ WRKFIL$="WORK"+JN$+TMP$ &
+	\ EDIN$="EDIN"+JN$+TMP$ &
+	\ EDOUT$="EDOT"+JN$+TMP$ &
+	\ LOGFIL$="TLOG"+JN$+TMP$ &
+	\ AUTO$=PKG.LOC$+"AUTOED" &
+	\ PATCH$=PKG.LOC$+"CPATCH" &
+	\ PTC$="File to patch - " &
+	\ CR$=CRC$+LFC$ &
+	\ C0%=1% &
+	\ L0%=2% &
+	\ S0$=CHR$(6%)+CHR$(-10%) &
+	\ CS.FLAG%,CS.VALUE%=0% &
+	\ RETURN &
+	&
+
+14999	! &
+	&
+	&
+	!	F U N C T I O N S &
+	&
+	&
+	&
+	! &
+	&
+	&
+	&
+	!	F U N C T I O N   F N F L N M C K $ &
+	&
+	&
+	&
+	! FUNCTION: FNFLNMCK$(P$,F%,DFLT$) &
+	! &
+	! THE STRING P$ IS USED AS A FILE NAME. IF NO &
+	! EXTENSION IS PROVIDED ON P$ THEN DFLT$ IS USED &
+	! FOR THE EXTENSION.  THE RESULTING STRING IS &
+	! CHECKED ACCORDING TO THE SPECIFICATION IN F%. &
+	! F% IS INTERPRETTED AS FOLLOWS: &
+	! &
+	!	BIT		MEANING &
+	! &
+	!	0		IF SET, THEN LOOKUP FILE AS &
+	!			CHECK FOR CORRECTNESS. &
+	! &
+	!	1		SET MEANS THAT WILD CARD &
+	!			CHARACTERS ARE PERMITTED &
+	! &
+	!	2		SET INDICATES THAT A DEVICE MAY &
+	!			BE SPECIFIED.  IF CLEAR, NONE IS &
+	!			PERMITTED AND SY: IS ASSUMED. &
+	! &
+	!	3		IF SET, THEN A PPN IS PERMITTED IN &
+	!			THE FILE SPECIFICATION. &
+	! &
+	!	4		IF SET, DEV AND/OR PPN SHOULD &
+	!			BE EXPANDED TO SY: AND CURRENT ACCOUNT &
+	!			IF THEY ARE MISSING FROM THE &
+	!			RESULTING FILE NAME &
+	! &
+	!	5		IF SET, A FILENAME IS NOT PERMITTED. &
+	!			I.E. A DEVICE SPECIFIER IS EXPECTED &
+	! &
+	! IF THE FILE NAME IS VALID, THEN THE STRING IS RETURNED &
+	! AS THE FUNCTION VALUE. IF INVALID FOR ANY REASON, &
+	! THE NULL STRING IS RETURNED. &
+	&
+
+15000	DEF* FNFLNMCK$(P$,F%,DFLT$) &
+	\ W%=2%+4%+32%+64%+256%+512% &
+	\ D0%=4096%+8192%+16384% &
+	\ N0%=1%+8%+16% &
+	\ P0%=128% &
+	\ MRG1%=31% &
+	\ MRG1%=63% IF (F% AND 16%) <> 0% &
+	\ F0%=0% &
+	\ F0%=W% IF (F% AND 2%)=0% &
+	\ F0%=F0%+D0% IF (F% AND 4%)=0% &
+	\ F0%=F0%+P0% IF (F% AND 8%)=0% &
+	\ F0%=F0%+N0% IF (F% AND 32%) <> 0% &
+		! INIT FLAGS FOR STRING CHECK. &
+
+15010	T0$=CVT$$(P$,6%) &
+	\ IF T0$=NL$ &
+		THEN FNFLNMCK$=NL$ &
+		\    GO TO 15060 &
+
+15020	T0$=FNFLMRG$(DFLT$,T0$,MRG1%) &
+	\ ON ERROR GO TO 15090 &
+	\ IF S1%=0% &
+		THEN PRINT "?Bad file name: "+T0$ &
+		\    FNFLNMCK$=NL$ &
+		\    GO TO 15060 &
+		! SCAN STRING AND INSERT DEFAULT EXTENSION. &
+		! IF A BAD NAME IS GIVEN, THEN RETURN NULL LINE. &
+
+15030	GO TO 15040 IF ((S1% AND F0%)=0%) &
+		AND (S1% >= 0%) &
+	\ PRINT T0$+" not permitted" &
+	\ FNFLNMCK$=NL$ &
+	\ GO TO 15060 &
+		! IF FILENAME CONTAINS ITEMS WHICH ARE &
+		! NOT PERMITTED BY THE VALUE OF F%, THEN &
+		! RETURN NULL STRING. &
+
+15040	GO TO 15050 IF ((F% AND 1%) <> 0%) &
+		   AND (((DEVSTAT% AND 256%)=0%) &
+			OR ((DEVSTAT% AND 512%) <> 0%) &
+			OR (DEVSTAT% < 0%)) &
+		   AND ((DEVSTAT% AND 255%) <> 14%) &
+	\ FNFLNMCK$=T0$ &
+	\ GO TO 15060 &
+		! IF FILENAME DOES NOT HAVE TO BE &
+		! LOOKED UP, THEN RETURN IT. &
+
+15050	M1%(1%)=6% &
+	\ M1%(2%)=17% &
+	\ M1%(3%),M1%(4%)=255% &
+	\ CHANGE M1% TO T1$ &
+	\ T1$=SYS(T1$) &
+	\ FNFLNMCK$=T0$ &
+		! LOOKUP FILE NAME.  IF FOUND (I.E. IF NO &
+		! ERROR TRAP OCCURS) THEN RETURN IT. &
+
+15060	ON ERROR GO TO 19000 &
+		! RESET ERROR HANDLER &
+
+15070	FNEND &
+	&
+
+15080	! &
+	&
+	&
+	&
+	!	E R R O R   H A N D L E R :   F N F L N M C K $ &
+	&
+	&
+
+15090	E%=ERR &
+	\ T2$="?"+T0$+" err="+NUM1$(E%) &
+	\ T2$="?File not found: "+T0$ IF E%=5% &
+	\ PRINT T2$ &
+	\ FNFLNMCK$=NL$ &
+	\ RESUME 15060 &
+		! PRINT ERROR MESSAGE AND PROMPT &
+		! AND GET INPUT AGAIN. &
+	&
+
+15499	! &
+	&
+	&
+	&
+	!	F U N C T I O N   F N I N P U T % &
+	&
+	&
+	&
+	! FUNCTION: FNINPUT%(A$,B$) &
+	! &
+	! FUNCTION TO INPUT COMMAND LINES OF THE FORM &
+	!	LOGFIL=CMDFIL &
+	! VALUES INPUT ARE PUT IN C0$ FOR CMDFIL AND L0$ &
+	! FOR LOGFIL.  DEFAULTS FOR L0$ AND C0$ ARE A$ AND B$ &
+	! RESPECTIVELY. &
+	! &
+	! THE FUNCTION RETURNS THE FOLLOWING POSSIBLE VALUES. &
+	! &
+	!	VALUE	MEANING &
+	! &
+	!	 0	CORRECT COMMAND WAS READ. &
+	! &
+	! &
+	!	 2	EOF WAS READ.  THIS IS ONLY RETURNED &
+	!		IF A CONTROL Z IS TYPED ON THE KEYBOARD &
+
+15500	DEF* FNINPUT%(A$,B$) &
+	\ FNINPUT%=2% &
+	\ T0$=FNILN$ &
+	\ GO TO 15510 UNLESS LEN(T0$) &
+	\ T0$=CVT$$(T0$,38%) &
+	\ T0%=INSTR(1%,T0$,"=") &
+	\ C0$=RIGHT(T0$,T0%+1%) &
+	\ L0$=LEFT(T0$,T0%-1%) &
+	\ L0$=A$+L0$ IF LEN(L0$)=0% OR ASCII(L0$)=ASCII("/") &
+	\ C0$=B$+C0$ IF LEN(C0$)=0% OR ASCII(C0$)=ASCII("/") &
+	\ FNINPUT%=0% &
+		! INPUT A LINE OF TEXT. IF EOF THEN &
+		! EXIT, ELSE CUT AT THE "=". &
+
+15510	FNEND &
+	&
+
+15599	! &
+	&
+	&
+	&
+	!	F U N C T I O N    F N G E T . S W I T C H E S $ &
+	&
+	&
+	&
+	! FUNCTION: FNGET.SWITCHES$(A$) &
+	! &
+	! FUNCTION TO STRIP OF CPATCH SWITCHES FROM A$ &
+	! (CURRENTLY /CS[:nn] IS THE ONLY VALID SWITCH.) &
+	! RETURNS A$ WITHOUT THE SWITCHES, OR NULL STRING IF ERROR. &
+
+15600	DEF* FNGET.SWITCHES$(A$) &
+	\ ON ERROR GOTO 15620 &
+	\ T0%=INSTR(1%,A$,"/CS") &
+	\ IF T0% THEN &
+		T0$=NL$ &
+	\	T0$="?Duplicate switch" IF CS.FLAG% &
+	\	CS.FLAG%=-1% &
+	\	T1%=(ASCII(MID(A$,T0%+3%,1%))=ASCII(":")) &
+	\	T0$="?Invalid switch" IF LEN(A$)>T0%+2% AND NOT T1% &
+					OR LEN(A$)=T0%+3% &
+	\	GOTO 15630 IF LEN(T0$) &
+	\	IF T1% THEN &
+			CS.FLAG%=32767% &
+	\		CS.VALUE%=VAL(RIGHT(A$,T0%+4%))-32768. &
+		! SET CS.FLAG% TO -1% IF JUST /CS SWITCH PRESENT. &
+		! SET CS.FLAG% TO 32767% IF /CS:nn SPECIFIED. &
+		! SET CS.VALUE TO nn IF ARGUEMENT GIVEN. &
+		! nn CAN BE IN THE RANGE 0-65535. &
+
+15610	ON ERROR GOTO 19000 &
+	\ FNGET.SWITCHES$=A$ &
+	\ FNGET.SWITCHES$=LEFT(A$,T0%-1%) IF T0% &
+	\ FNEND &
+		! RESET STANDARD ERROR TRAP. &
+		! STRIP THE SWITCH OFF A$ AND RETURN THE REST. &
+
+15620	T0$="Illegal argument for switch" &
+	\ RESUME 15630 &
+		! TRAP "ILLEGAL NUMBER" ERROR IN VAL() FUNCTION ABOVE. &
+
+15630	PRINT IF CCPOS(0%) &
+	\ PRINT T0$;" - ";RIGHT(A$,T0%) &
+	\ A$=NL$ &
+	\ GOTO 15610 &
+		! PRINT BAD SWITCH ERROR, GO RETURN FROM FUNCTION. &
+	&
+
+17299	! &
+	&
+	&
+	&
+	!	F U N C T I O N   F N F L M R G $ &
+	&
+	&
+	&
+	! FUNCTION: FNFLMRG$(A0$,A1$,FLG%) &
+	! &
+	! FUNCTION TO MERGE FILE NAME A0$ INTO A1$. &
+	! STRING A1$ IS THE TARGET STRING.  A0$ IS &
+	! MERGED INTO A1$ FILLING IN ALL COMPONENTS &
+	! MISSING FROM A1$ AS SELECTED BY THE FLAG &
+	! WORD FLG%.  THE MEANING OF THE BITS ARE: &
+	! &
+	!	BIT AND VALUE		MEANING &
+	! &
+	!	0 ((FLG% AND 1%) <> 0%) &
+	! &
+	!		COPY DEVICE FROM A0$ IF IT &
+	!		IS MISSING FROM A1$ &
+	! &
+	!	1 ((FLG% AND 2%) <> 0%) &
+	! &
+	!		COPY PPN SPECIFICATION FROM A0$ &
+	!		IF MISSING FROM A1$ &
+	! &
+	!	2 ((FLG% AND 4%) <> 0%) &
+	! &
+	!		COPY FILE NAME IF MISSING &
+	! &
+	!	3 ((FLG% AND 8%) <> 0%) &
+	! &
+	!		COPY EXTENSION IF MISSING &
+	! &
+	!	4 ((FLG% AND 16%) <> 0%) &
+	! &
+	!		COPY PROTECTION CODE IF MISSING &
+	! &
+	!	5 ((FLG% AND 32%) <> 0%) &
+	! &
+	!		FILL IN "_SY:" FOR DEVICE IF NO &
+	!		DEVICE IN EITHER STRING, AND &
+	!		CURRENT ACCOUNT FOR PPN IF NO &
+	!		PPN IN EITHER STRING. &
+	! &
+	! IN ALL CASES, M1% CONTAINS STRING SCAN OF RESULTING &
+	! STRING "CHANGE"D TO INTEGER ARRAY.  S1% CONTAINS &
+	! THE FLAG WORD AND DEVSTAT% CONTAINS STATUS.  IF &
+	! EITHER A0$ OR A1$ IS A BAD STRING, THAT STRING &
+	! IS RETURNED AS THE FUNCTIONS VALUE AND S1%=0% &
+	&
+
+17300	DEF* FNFLMRG$(A0$,A1$,FLG%) &
+	\ ON ERROR GO TO 17395 &
+	\ DEVBITS%=4096%+8192%+16384%+32767%+1% &
+	\ PRTBITS%=1024%+2048% &
+	\ PPNBITS%=128%+256%+512% &
+	\ EXTBITS%=8%+16%+32%+64% &
+	\ FLNBITS%=1%+2%+4% &
+	\ T0%=0% &
+	\ A0$=SYS(S0$+A0$) &
+	\ CHANGE A0$ TO M0% &
+	\ S0%=M0%(29%)+SWAP%(M0%(30%)) &
+	\ TST0%=STATUS &
+	\ TST0%=0% IF (S0% < 0%) OR (S0% AND 4096%)=0% &
+	\ T0%=1% &
+	\ A1$=SYS(S0$+A1$) &
+	\ CHANGE A1$ TO M1% &
+	\ S1%=M1%(29%)+SWAP%(M1%(30%)) &
+	\ DEVSTAT%=STATUS &
+	\ DEVSTAT%=0% IF (S1% < 0%) OR (S1% AND 4096%)=0% &
+		! SCAN THE 2 FILE NAMES &
+
+17310	IF (FLG% AND 1%) <> 0% AND (S1% AND 4096%)=0% &
+		THEN M1%(I%)=M0%(I%) FOR I%=23% TO 26% &
+		\    S1%=S1% OR (S0% AND DEVBITS%) &
+		\    DEVSTAT%=TST0% &
+		\    IF (S1% AND 4096%)=0% AND (FLG% AND 32%) <> 0% &
+			THEN M1%(23%)=ASCII("S") &
+			\    M1%(24%)=ASCII("Y") &
+			\    M1%(25%),M1%(26%)=0% &
+			\    S1%=S1% OR (4096%+8192%) &
+		! FILL IN DEVICE FIELD IF LEFT OUT OF TARGET &
+		! STRING.  FORCE DEFAULT "SY:" IF NO DEVICE &
+		! IN EITHER STRING AND FORCE DEFAULT BIT IS SET. &
+
+17320	IF (FLG% AND 2%) <> 0% AND (S1% AND 128%)=0% &
+		THEN M1%(I%)=M0%(I%) FOR I%=5% TO 6% &
+		\    S1%=S1% OR (S0% AND PPNBITS%) &
+		\    IF (S1% AND 128%)=0% AND (FLG% AND 32%) <> 0% &
+			THEN M1%(5%)=NPJ% &
+			\    M1%(6%)=NPG% &
+			\    S1%=S1% OR 128% &
+		! FILL IN PPN.  SET TO CURRENT ACCOUNT IF NONE &
+		! IN TARGET STRING. &
+
+17330	IF (FLG% AND 4%) <> 0% AND (S1% AND 1%)=0% &
+		THEN M1%(I%)=M0%(I%) FOR I%=7% TO 10% &
+		\    S1%=S1% OR (S0% AND FLNBITS%) &
+		! COPY FILE NAME IF SELECTED. &
+
+17340	IF (FLG% AND 8%) <> 0% AND (S1% AND 8%)=0% &
+		THEN M1%(I%)=M0%(I%) FOR I%=11% TO 12% &
+		\    S1%=S1% OR (S0% AND EXTBITS%) &
+		! FILL IN EXTENSION BITS. &
+
+17350	IF (FLG% AND 16%) <> 0% AND (S1% AND 1024%)=0% &
+		THEN M1%(I%)=M0%(I%) FOR I%=21% TO 22% &
+		\    S1%=S1% OR (S0% AND PRTBITS%) &
+		! PROTECTION CODE &
+
+17360	A0$=NL$ &
+	\ IF (S1% AND 4096%) <> 0% &
+		THEN A0$="_"+CHR$(M1%(23%))+CHR$(M1%(24%)) &
+		\    A0$=A0$+NUM1$(M1%(25%)) IF M1%(26%)=255% &
+		\    A0$=A0$+":" &
+		\    IF S1% < 0% &
+			THEN A0$=NL$ &
+			\    A0$=A0$+RAD$(M1%(I%)+SWAP%(M1%(I%+1%))) &
+				FOR I%=23% TO 25% STEP 2% &
+			\    A0$=A0$+":" &
+		! IF COMPOSITE NAME CONTAINS A DEVICE SPEC, &
+		! THEN BUILD DEVICE SPEC INTO FILE NAME. &
+
+17370	IF (M1%(5%)+M1%(6%)) <> 0% &
+		THEN A0$=A0$+"["+NUM1$(M1%(6%))+","+ &
+		     NUM1$(M1%(5%))+"]" &
+		! BUILD ON PPN &
+
+17380	T0%=11% &
+	\ T0%=13% IF (S1% AND 8%) <> 0% &
+	\ FOR I%=7% STEP 2% UNTIL I%=T0% &
+	\	A0$=A0$+"." IF I%=11% &
+	\	A0$=A0$+RAD$(M1%(I%)+SWAP%(M1%(I%+1%))) &
+	\ NEXT I% &
+		! CONVERT RAD 50 FILE NAME TO ACTUAL FILE NAME &
+
+17385	A0$=CVT$$(A0$,6%) &
+	\ IF (S1% AND 1024%)=0% &
+		THEN FNFLMRG$=A0$ &
+		ELSE FNFLMRG$=A0$+"<"+NUM1$(M1%(22%))+">" &
+		! FILL IN PROTECTION CODE IF ONE WAS &
+		! INCLUDED. &
+
+17390	ON ERROR GO TO 19000 &
+	\ M1%(29%)=S1% AND 255% &
+	\ M1%(30%)=SWAP%(S1%) AND 255% &
+	\ FNEND &
+
+17395	FNFLMRG$=A0$ IF T0%=0% &
+	\ FNFLMRG$=A1$ IF T0% <> 0% &
+	\ S1%=0% &
+	\ RESUME 17390 &
+	&
+
+17499	! &
+	&
+	&
+	&
+	!	F U N C T I O N   F N F I L C O P % &
+	&
+	&
+	&
+	! FUNCTION: FNFILCOP%(A0$,A1$,MD%) &
+	! &
+	! COPY FILE A0$ INTO FILE A1$. IF MD% >=0% &
+	! THEN USE MD% AS AN ARG TO THE MODE OPTION &
+	! WHEN OPENING A1$ &
+
+17500	DEF* FNFILCOP%(A0$,A1$,MD%) &
+	\ ON ERROR GO TO 17540 &
+	\ CLOSE C0%,L0% &
+	\ MD%=0% IF MD% <> 2% &
+	\ T0$=SYS(S0$+A0$) &
+	\ DEVST%=(STATUS AND 255%) &
+	\ T1$=SYS(S0$+A1$) &
+	\ DS%=STATUS AND 255% &
+	\ CHANGE T0$ TO M0% &
+	\ CHANGE T1$ TO M1% &
+	\ S1%=M1%(29%)+SWAP%(M1%(30%)) &
+	\ DS%=0% IF (S1% AND D0%)=0% &
+	\ MD%=((DS%=0%) AND 2%) OR &
+		((DS%=14%) AND 128%) IF MD% <> 0% &
+		! SCAN STRINGS AND DETERMINE IF OUTPUT FILE IS &
+		! MAGTAPE OR DISK.  IF EITHER, THEN APPEND MODE &
+		! IS PERMITTED, THEREFORE DETERMINE MODE VALUE &
+		! FOR OPEN.  IF NOT REQUESTED OR IF DEVICE IS &
+		! NOT DISK OR MAGTAPE, THEN SET MODE TO 0% &
+
+17510	IF MD%=0% &
+		THEN M0%(1%)=6% &
+		\    M0%(2%)=17% &
+		\    M0%(3%),M0%(4%)=255% &
+		\    CHANGE M0% TO T0$ &
+		\    T0$=SYS(T0$) UNLESS DEVST%=14% &
+		\    CHANGE T0$ TO M0% &
+		\    T0%=M0%(13%)+SWAP%(M0%(14%)) &
+		\    T0%=0% IF DEVST%=14% &
+		\    OPEN A1$ FOR OUTPUT AS FILE L0%, FILESIZE T0% &
+		\    OPEN A0$ FOR INPUT AS FILE C0%, RECORDSIZE 2% &
+		\    WHILE -1% &
+		\	GET #C0%+SWAP%(L0%) &
+		\	PUT #L0% &
+		\    NEXT &
+		! IF MODE=0% THEN LOOKUP INPUT FILE TO GET SIZE, &
+		! OPEN OUTPUT FILE PREEXTENDED AND THEN COPY THE FILE. &
+
+17530	OPEN A1$ AS FILE L0%, MODE MD% &
+	\ OPEN A0$ FOR INPUT AS FILE C0%, RECORDSIZE 2% &
+	\ WHILE -1% &
+	\	GET #C0%+SWAP%(L0%) &
+	\	PUT #L0% &
+	\ NEXT &
+		! OPEN FILE AND APPEND TO IT &
+
+17540	IF ERR=11% &
+		THEN FNFILCOP%=0% &
+		ELSE PRINT "?Can't copy "+A0$+" to "+A1$+CR$+ &
+			RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(ERR)),3%) &
+		\    FNFILCOP%=-1% &
+
+17550	RESUME 17560 &
+
+17560	CLOSE L0%,C0% &
+	\ ON ERROR GO TO 19000 &
+	\ FNEND &
+	&
+
+17599	! &
+	&
+	&
+	&
+	!	F U N C T I O N   F N I L N $ &
+	&
+	&
+	&
+	! FUNCTION: FNILN$ &
+	! &
+	! INPUT A LINE FROM KB: TRAPPING EOF'S. &
+	! INPUT IS EXPLICITLY FROM CHANNEL 10. &
+
+17600	DEF* FNILN$ &
+	\ C0=C0+1 &
+	\ ON ERROR GO TO 17610 &
+	\ INPUT LINE #10%, T0$ &
+	\ FNILN$=T0$ &
+	\ GO TO 17620 &
+
+17610	FNILN$=NL$ &
+	\ RESUME 17620 &
+
+17620	ON ERROR GO TO 19000 &
+	\ FNEND &
+	&
+
+19000	! &
+	&
+	&
+	!	E R R O R    H A N D L I N G &
+	&
+	&
+
+19010	RESUME 32700 IF ERR=11% &
+	\ PRINT IF CCPOS(0%) &
+	\ PRINT CVT$$(RIGHT(SYS(CHR$(6%)+CHR$(9%)+CHR$(ERR)),3%),4%); &
+		" at line";ERL;"in CPATCH ";I$ &
+	\ PRINT &
+	\ RESUME 32710 &
+		! TEMPORARY DUMMY ERROR HANDLER &
+	&
+
+31000	! &
+	&
+	&
+	!	C H A I N    E N T R Y &
+	&
+	&
+
+31010	E0%=-1% &
+	\ GO TO 1000 &
+		! SET CHAIN FLAG AND GO TO MAIN CODE. &
+
+32699	! &
+	&
+	&
+	&
+	!	E X I T &
+	&
+	&
+
+32700	FILN$(0%)=NL$ &
+		! NORMAL EXIT, CLEAR ERROR MESSAGE &
+
+32710	CLOSE C0%,L0%,12% &
+	\ GO TO 32760 &
+		! NORMAL EXIT ON CONTROL Z FOR &
+		! LOG OR COMMAND FILE NAME. &
+
+32720	FILN$(7%)=CVTF$(0.) &
+	\ CLOSE C0%,L0%,12% &
+	\ CHAIN PATCH$ LINE 31000 &
+
+32760	T0$=SYS(CHR$(9%)) &
+		! CLEAR PROGRAM AND EXIT TO USER'S DEFAULT RTS. &
+
+32767	END

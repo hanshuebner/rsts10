@@ -1,0 +1,2631 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /INIT:INIPFX/
+TITLE	CLEAN,<RSTS/E INIT - CLEAN A DISK>,0A,10-MAY-91,ABC/WBN/GPK/FEK/FRL
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR INICLN
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;
+;				[RSTS V8.0]
+;  000	GPK  30-Aug-82	Changes for new disk structure
+;  001	GPK  23-Sep-82	Debug feature
+;  002	GPK  01-Oct-81	Allow non-16 MFD/GFD clustersizes
+;			Check clusters for alignment on FCS not just PCS
+;  003	GPK  05-Oct-82	Change terminology to "rebuild"
+;  004	FEK  13-Jan-83	Correct RP04/5/6 sizes
+;  005	GPK  16-Feb-83	Better performance off-line
+;
+;				[RSTS V9.0]
+;  006  FRL  21-Dec-83  Allowed [0,*] to be legal for V9.0 disks
+;  007	GPK  14-Mar-84	Add usage setup in quota blocks for rev 1.2 disks
+;  008	GPK  20-Jul-84	Fix 007 when files are deleted
+;
+;				[RSTS V9.5]
+;  009	PJH  29-Jun-87	Add large disk support/block mode i/o
+;
+;				[RSTS V9.7]
+;  010	JRM  20-Mar-89	Modified 001, CLNDBG now passed using /D on input
+;
+;				[RSTS V10.0]
+;  011	FEK  02-Nov-89	Verify that clustersize of SATT and BADB = PCS
+;-
+
+.SBTTL	EXPLAINING THINGS
+
+; CLEAN IS AN INIT OVERLAY WHICH IS CALLED FROM OTHER OVERLAYS IN THE
+;	SAME OVERLAY REGION.  TO DO THIS, THE CALLER MUST TAKE THE
+;	FOLLOWING STEPS:
+;
+;	1)	ENSURE THAT NO DATA IS STORED IN THE OVERLAY REGION
+;		CALLING CLEAN.  DATA MAY BE PRESERVED IN THE ROOT
+;
+;	2)	SET UP A ROUTINE IN THE ROOT OF THE FORM:
+;		XXX$CL::CALLX	CLEAN
+;			JMPX	XXX$CR
+;
+;	3)	CALL CLEAN BY DOING:
+;			JMPX	XXX$CL
+;		XXX$CR:: ...
+;
+; THE CLEAN OPERATION IS AS FOLLOWS:
+; 1. THE DISK IS MARKED AS MOUNTED (DIRTY)
+; 2. A CLEAN (UNALLOCATED) SAT IS BUILT IN MEMORY
+; 3. Bad blocks marked in BADB.SYS are flagged as allocated.  Next, the	;000
+;    pack label is checked for validity.
+; 4. On old disks, the MFD is scanned, and each account in it is cleaned. ;000
+;    On new disks, the MFD is checked, allocated, and scanned for GFDs.	;000
+;    Each GFD is checked, allocated, and scanned for accounts.  Each	;000
+;    account's directory entries (name block, accounting block, and	;000
+;    attributes in the GFD) is marked as in use.  Then the account is	;000
+;    cleaned in the same way as old disks (see below).			;000
+; 5. THE SAT IS REWRITTEN TO [0,1]SATT.SYS AND THE DISK IS
+;    MARKED AS CLEAN.
+;
+; TO CLEAN AN ACCOUNT:
+; EVERY DIRECTORY ENTRY WHICH IS IN USE (OTHER THAN THE CLUSTER MAPS
+;	AT THE END OF EACH BLOCK) STARTS WITH A LINK WORD.
+;	THE BOTTOM FOUR BITS OF THAT WORD ARE RESERVED FOR FLAGS.
+;	CLEAN USES BIT 3 (VALUE 10) TO FLAG A DIRECTORY ENTRY AS
+;	BEING IN USE.
+; 1. THE DIRECTORY IS SCANNED, AND EVERY ENTRY HAS ITS FLAG BIT (10)
+;    TURNED OFF.  AT THE SAME TIME, THE CLUSTER MAPS AT THE END OF
+;    EACH BLOCK ARE VERIFIED.  IF NOT ALL THE SAME, THE DIRECTORY IS
+;    CORRUPT AND THE ACCOUNT WILL NEED TO BE DELETED.  On new disks,	;000
+;    the second and third block of the MFD and GFD are skipped in this	;000
+;    process, since they contain table blocks rather than normal	;000
+;    blocks and therefore don't end with a cluster map.			;000
+; 2. THE DISK CLUSTERS CONTAINING THE DIRECTORY ITSELF ARE ALLOCATED.
+; 3. EVERY NAME ENTRY IN THE UFD IS SCANNED, AND EACH FILE IS
+;    EITHER ALLOCATED OR DELETED.
+;    A FILE IS DELETED IF:
+;	A) IT IS MARKED FOR DELETE
+;	B) IT HAS EXTENSION 'TMP'
+;	C) IT HAS NO ASSOCIATED ACCOUNTING ENTRY
+;    WHEN A FILE IS KEPT (ALLOCATED), THE FLAG BIT IS TURNED ON
+;    IN ALL DIRECTORY ENTRIES ASSOCIATED WITH THAT FILE.
+; 4. THE DIRECTORY IS SCANNED AGAIN.  EVERY ENTRY WHICH DOES NOT HAVE
+;    ITS FLAG BIT ON IS ZEROED (MAKING IT AN EMPTY ENTRY)
+;    EVERY ENTRY WITH ITS FLAG BIT ON IS KEPT, AND THE FLAG BIT
+;    IS TURNED OFF.
+
+; TO ALLOCATE A FILE:
+; 1. THE ACCOUNTING ENTRY IS READ, MARKED, AND THE FILE CLUSTER SIZE
+;    IS OBTAINED.
+; 2. THE LINKS FROM THE ACCOUNTING ENTRY (ATTRIBUTE ENTRIES) ARE
+;    FOLLOWED, AND THE ATTRIBUTE ENTRIES ARE MARKED
+; AT THIS POINT, IF THE NAME ENTRY IS A UFD ENTRY (IN [1,1]),
+;    WE ARE FINISHED, SINCE THERE ARE NO RETIREVAL ENTRIES.
+; 3. THE CHAIN OF RETRIEVAL ENTRIES IS FOLLOWED.
+;    EACH ONE IS MARKED, AND THE ASSOCIATED CLUSTERS (AT THE FILE
+;    CLUSTER SIZE) ARE ALLOCATED.
+; 4. THE NAME ENTRY IS MARKED.
+;    THE BITS US.UPD (OPEN FOR UPDATE) AND US.WRT (OPEN FOR WRITE)
+;    ARE CLEARED, AS IS THE ACCESS COUNT.
+;
+; TO ALLOCATE A RETRIEVAL ENTRY:
+; 1. THE NUMBER OF PACK CLUSTERS PER RETRIEVAL POINTER IS COMPUTED.
+; 2. EACH RETRIEVAL POINTER IS CONVERTED TO A BIT (OR BITS) IN THE
+;    SAT.  IF THE BIT IS NOT YET ON, THE CLUSTER IS NOT IN USE
+;    AND IS ALLOCATED.  IF THE BIT IS ON, CONFLICTS ARE CHECKED.
+;    IF NO ERROR IS FOUND (I.E. THE CONFLICT IS ONLY WITH [0,1]BADB.SYS)
+;    THE CLUSTER IS ALLOCATED.
+;
+; TO CHECK FOR CONFLICTS:
+; THE ENTIRE MFD IS SCANNED, EACH UFD IS SCANNED, AND THE CONFLICTING
+; CLUSTER IS COMPARED AGAINST EVERY ALREADY-ALLOCATED CLUSTER.
+; IF THE CONFLICT IS WITH BADB.SYS, IT IS SKIPPED AND THE SEARCH
+; CONTINUES.  OTHERWISE, IF A REAL CONFLICT IS FOUND, THE TWO ITEMS
+; WHICH CONTAIN THE SAME BLOCK ARE PRINTED, AND THE USER IS GIVEN
+; THE OPTION OF DELETING ONE OF THEM.  THE CLEAN IS THEN RESTARTED FROM
+; THE TOP (OUCH!).
+
+.SBTTL	MACROS AND DEFINITIONS
+
+.MACRO	I.MESS
+	TMPORG	CLNTXT
+.NLIST	BEX
+.ENDM	I.MESS
+
+.SBTTL	ORDER THE CSECTS
+
+	DEFORG	CLN
+	DEFORG	CLNCTL
+	DEFORG	CLNTXT
+	ORG	CLN
+
+.EQUATE	UL.LNK,	UL.BLO!UL.CLO!UL.ENO	;LINK WORD BITS USED IN LINK PART
+.EQUATE	UL.FLG,	<^C<UL.LNK>>		;LINK WORD FLAG BITS
+
+.SBTTL	CLEAN UP A DISK PACK
+;+
+; CLEAN - CLEAN UP A DISK PACK, BUILDING A NEW SAT
+;
+; CALL:	ALL FIP AND SAT PARAMETERS MUST BE SET UP
+;	BADB.SYS AND SATT.SYS MUST BE OPEN ON THE DISK
+;	CALL	CLEAN
+;
+; BACK:	DISK HAS BEEN CLEANED, VALID SAT IS IN SATBUF (AND ON DISK)
+;
+; THE MFD IS SCANNED.  EACH ACCOUNT HAS ITS UFD ALLOCATED.
+;	EACH ACCOUNT IS SCANNED. EACH FILE IS DELETED IF
+;		MARKED FOR DELETE OR EXTENSION 'TMP',
+;		ELSE FILE IS ALLOCATED
+;	DOUBLE ALLOCATIONS (EXCEPT TO BADB.SYS[0,1]) ARE FATAL,
+;		AND PROMPT THE USER TO DELETE ONE OF THE ENTITIES
+;		CAUSING THE ALLOCATION PROBLEM.
+;
+; MESSAGES: AT START,
+;	"Disk is being rebuilt - wait ..."				;000
+;-
+
+.ENABL	LSB
+
+CLEAN::	MESSAG	<<177><200>"Disk is being rebuilt - wait ..."<200><12>>	;000
+	NOP			;debugging				;009
+	MOV	SP,CLNSP	;REMEMBER SP FOR RESTARTING THE CLEAN
+CLEANR:	MOV	CLNSP,SP	;START WITH A CLEAN STACK
+	CLR	SILFBL		;Indicate nothing in SILBUF		;005
+	CLR	SILFBM		; nothing at all			;005
+	CALLX	READPL		;Read the pack label			;000
+	MOV	FIBUF+PLVL,REVNUM ;Save the pack rev. level		;000
+	MOV	FIBUF+PSTAT,PAKFLG ;Save pack status flags		;000
+	CALLX	WRITE		;REWRITE THE DIRTY BIT
+	MOV	#1,MFDDCN	;Assume old disk			;000
+	BIT	#UC.NEW,PAKFLG	;"new" flag set in pack status?		;000
+	BEQ	5$		;No					;000
+	MOV	FIBUF+MDCN,MFDDCN ;Yes, save MFD starting DCN		;000
+5$:	MOV	SYSSZL,R2	;GET SIZE OF DISK BEING CLEANED (LSB)
+	MOV	SYSSZM,R3	; AND MSB
+	MOV	DCS,R1		;R1 = DCS OF DISK
+	BIT	#UC.NEW,PAKFLG	;New disk?				;000
+	BNE	10$		;Yes, don't monkey with the size	;000
+	CMP	SYSNDX,#IDX$DB	;RP04 family disk?			;000
+	BEQ	7$		;Yes					;000
+	CMP	SYSNDX,#IDX$DR	;One more chance			;000
+	BNE	10$		;Nope					;000
+7$:	CMP	R3,#2		;Check for RP04/05 MSB size		;000
+	BNE	9$		;No match, maybe an RP06		;000
+	CMP	R2,#40724.	;Low order match?			;004
+	BNE	10$		;If not it's not an RP04		;000
+	MOV	#36128.,R2	;Set to old low-order size		;000
+	BR	8$		; and continue				;000
+
+9$:	CMP	R3,#5		;RP06 high order size?			;000
+	BNE	10$		;No, must be something else		;000
+	CMP	R2,#12984.	;Low order ok?				;004
+	BNE	10$		;No, must be something else		;000
+	MOV	#6720.,R2	;Set to old low-order size		;000
+8$:	CALL	SETSA2		;Call fake set-SAT routine		;000
+10$:	ASR	R1		;SHIFT
+	BCS	20$		; TO COMPUTE
+	;CLC
+	ROR	R3		;  MAXIMUM
+	ROR	R2		;   DCN IN R2
+	BR	10$
+
+20$:	MOV	R2,MAXDCN
+	.BR	SETBB		;Go set up bad block data		;000
+
+.DSABL	LSB
+
+GLOBAL	<FIBUF,SYSNDX,SYSSZL,SYSSZM,DCS>
+
+.SBTTL	ALLOCATE THE BAD BLOCKS FIRST
+
+.ENABL	LSB
+
+SETBB:	CLR	-(SP)		;ALLOCATE SPACE FOR LENGTH OF BADB.SYS
+	CALLX	PTRSB2		;GET A POINTER TO AUXILIARY SAT BUFFER
+	MOV	(SP)+,R1	; AND START THE MMU IF NECESSARY
+	MOV	SATSYN,R2	;R2 = NUMBER OF (GOOD) BLOCKS IN SATT
+	SWAB	R2		;CONVERT TO WORD COUNT
+10$:	CLR	(R1)+		;CLEAR IT OUT
+	SOB	R2,10$
+	CALLX	RSTSB2		;TURN OFF MMU IF NECESSARY
+	CALLX	CLNSAT		;GET GOOD CLEAN SAT IN SATBUF
+	MOV	#FCBADB,R1	;R1 -> FCB FOR BAD BLOCK FILE
+	CALLX	RNB		;GET ITS NAME ENTRY
+	ADD	#UAA,R5		;POINT TO LINKS
+	MOV	(R5)+,-(SP)	;SAVE LINK TO ACCOUNTING ENTRY
+20$:	MOV	(R5),R3		;R3 = LINK TO FIRST/NEXT R.E. IN BADB.SYS
+	BIC	#UL.FLG,R3	;REMOVE FLAG BITS
+	BEQ	CLNALL		;NO MORE, GO CLEAN ALL THE DISK
+	CALL	RDBCHK		;GET THE BADB.SYS R.E.
+	BCS	90$		;BAD LINK!
+	TST	(R5)+		;SKIP THE LINK WORD
+30$:	MOV	(R5)+,R0	;R0 = DCN IN BADB.SYS
+	BEQ	CLNALL		;NONE, SO DONE
+	DEC	R0		;CONVERT DCN TO PCN
+	MOV	CLURAT,R1	; BY DIVIDING BY CLURAT
+40$:	ASR	R1		;SHIFT DIVISOR
+	BCS	50$		;DONE
+	;CLC
+	ROR	R0
+	BCC	40$		;DCN REALLY OUGHT TO BE ON PC BOUNDARY
+	MESSAGE
+	 .ASCIZ	"Warning - DCN in BADB.SYS not on pack cluster boundary"<200>
+	 UNORG
+	BR	40$		;BUT USE IT ANYWAY
+
+50$:	CALLX	FIXREG		;CONVERT TO BIT/BYTE
+	CMP	R4,SATSYS+BYTS	;IS IT WITHIN RANGE?
+	BHIS	80$		;NO, WARN HIM
+	BITB	BITBYT(R2),SATBUF(R4) ;YES, IS IT ALREADY ALLOCATED?
+	BEQ	60$		;NO
+	MESSAGE
+	 .ASCIZ	"Warning - bad block doubly allocated in BADB.SYS"<200>
+	 UNORG
+	BR	70$		;SKIP IT
+
+60$:	BISB	BITBYT(R2),SATBUF(R4) ;ALLOCATE IT IN THE SAT
+	MOV	R4,-(SP)	;PUSH SAT OFFSET
+	CALLX	GETSB2		;GET THE BYTE FROM THE BADB.SYS SAT
+	BISB	BITBYT(R2),(SP)	;ALLOCATE THE BAD BLOCK IN THE BADB.SYS SAT
+	CALLX	PUTSB2		;REPLACE THE BYTE IN AUXILIARY BUFFER
+	ADD	PCS,2(SP)	;ACCUMULATE SIZE OF BADB.SYS
+70$:	BIT	R5,#17		;DONE THIS R.E.?
+	BNE	30$		;NO
+	SUB	#20,R5		;POINT TO LINK WORD
+	BR	20$		;DO ANOTHER
+
+80$:	MESSAGE	<"Warning - DCN in BADB.SYS too big"<200>>
+	BR	70$		;IGNORE IT
+
+90$:	MESSAGE
+	 .ASCII	"Warning - Link in BADB.SYS is bad."<200>
+	 .ASCIZ	"  Bad blocks may be lost."<200>
+	 UNORG
+	CLR	(R5)		;BREAK THE CHAIN HERE
+	MARK	FIBUF		;Write it back				;000
+	.BR	CLNALL		;CONTINUE
+
+.DSABL	LSB
+
+GLOBAL	<SATSYS,BITBYT,SATBUF,PCS,SATSYN,FCBADB,CLURAT>
+
+.SBTTL	MAIN LOOP - CLEAN EVERY ACCOUNT
+
+.ENABL	LSB
+
+CLNALL:	MOV	(SP)+,R3	;RESTORE LINK TO BADB.SYS ACCOUNTING ENTRY
+	CALLX	RDB		;GET IT
+	MOV	(SP)+,USIZ(R5)	;SET UP THE SIZE
+	MARK	FIBUF
+	CALL	CLNPL		;Clean the pack label			;000
+	BIT	#UC.NEW,PAKFLG	;New type disk?				;000
+	BNE	10$		;Yes					;000
+	JMP	CLNOLD		;No, do it the old way			;000
+
+10$:	CALL	CLNMFD		;Clean the MFD first			;000
+	CLR	CLNPPN		;We'll start cleaning PPNs at the bottom ;000
+20$:	MOV	MFDDCN,R2	;Get MFD's starting DCN			;000
+	CALLX	CNVRIB		;Convert to FBN				;000
+	ADD	#2,R2		;Point to GFD attribute table		;000
+	ADC	R3		; double precision			;000
+	CALL	REDSIL		;Read it into the SIL buffer		;005
+	CLR	R0		;To avoid sign extension		;000
+	BISB	CLNPPN+1,R0	;Get group number			;000
+	ASL	R0		;Word offset				;000
+	MOVB	#255.,CLNPPN	;Indicate we're working on a GFD now	;000
+	CMPB	CLNPPN+1,#255.	;Is this the invalid group number?	;000
+	BEQ	60$		;Yes, so entry had better be zero	;000
+	MOV	SILBUF(R0),R1	;Attributes present?			;000
+	BEQ	40$		;No					;000
+	BIT	#UL.FLG,R1	;Flags in link word set?		;000
+	BEQ	30$		;No, good				;000
+	CALLX	READ		;Yes, read into FIBUF to fix link	;005
+	BIC	#UL.FLG,R1	;Fix the link word			;000
+	MOV	R1,FIBUF(R0)	;Now update it in the buffer		;000
+	MARK	FIBUF		;Mark the buffer			;000
+30$:	MOV	R1,-(SP)	;Save attribute link			;000
+	CALLX	READMF		;Re-read MFD label to get cluster map	;000
+	MOV	(SP)+,R3	;Restore the link to the attributes	;000
+	CALL	CLNCHN,R4	;Mark the chain as allocated		;000
+	 GENTXT	<"group attributes in group ">				;000
+	 BR	110$		;If bad, delete the chain		;000
+40$:	MOV	MFDDCN,R2	;Get MFD's starting DCN			;000
+	CALLX	CNVRIB		;Convert to FBN				;000
+	ADD	#1,R2		;Point to GFD DCN table			;000
+	ADC	R3		; double precision			;000
+	CALLX	READ		;Read that block			;000
+	CLR	R0		;To avoid sign extension		;000
+	BISB	CLNPPN+1,R0	;Get group number			;000
+	ASL	R0		;Word offset				;000
+	MOV	FIBUF(R0),R2	;Get starting DCN for this group	;000
+	BNE	130$		;Yes, process it			;000
+50$:	JMP	240$		;Otherwise do the next one		;000
+
+60$:	CALLX	READ		;Read into FIBUF for simplicity		;005
+	MOV	MFDDCN,R2	;Get MFD's starting DCN			;000
+	CALLX	CNVRIB		;Convert to FBN				;000
+	ADD	#1,R2		;Point to GFD DCN table			;000
+	ADC	R3		; double precision			;000
+	TST	FIBUF(R0)	;Attributes present for group 255?	;000
+	BEQ	70$		;No, good				;000
+	CLR	FIBUF(R0)	;Yes, clear them			;000
+	CALLX	READSV		;Read the DCN table			;000
+	CLR	FIBUF(R0)	;Clear the DCN pointer			;000
+	BR	80$		;Merge with common code			;000
+
+70$:	CALLX	READ		;Read the DCN table			;000
+	TST	FIBUF(R0)	;Entry empty there too?			;000
+	BEQ	50$		;Yes, that's good			;000
+	CLR	FIBUF(R0)	;Clear the DCN entry			;000
+80$:	MARK	FIBUF		;Mark the buffer
+	MESSAGE	<"Invalid group [255,*] found in MFD -- entry deleted"<200>> ;000
+	JMP	CLNFIN		;Otherwise we're done			;000
+
+90$:	MOVB	ACCZD,R0	;Get error code				;000
+	CALL	ACCERR		;Tell the user the bad news		;000
+	MOV	MFDDCN,R2	;Get MFD DCN				;000
+	CALLX	CNVRIB		;Convert it				;000
+	ADD	#1,R2		;Point to GFD pointer table		;000
+	ADC	R3							;000
+	CALLX	READ		;Read the table				;000
+	CLR	R0		;Avoid sign extension			;000
+	BISB	CLNPPN+1,R0	;Get group number			;000
+	ASL	R0		;Word offset				;000
+	CLR	FIBUF(R0)	;Clear out the DCN pointer		;000
+	MARK	FIBUF		;Write it back				;000
+	ADD	#1,R2		;Now point to pointer table		;000
+	ADC	R3							;000
+	TSTB	ACCZD		;Zero or delete?			;000
+	BNE	100$		;Just zero, so we're done for now	;000
+	CALLX	READ		;Delete, clear out the attributes too	;000
+	CLR	FIBUF(R0)	;Clear the pointer			;000
+	MARK	FIBUF		;Write it back				;000
+100$:	JMP	CLEANR		;Restart to keep things clean		;000
+	
+110$:	CALL	PRTPPC		;Print offending group name		;000
+	MESSAGE	<" -- attributes lost"<200>>				;000
+	TST	R2		;Have previous link?			;000
+	BNE	120$		;Yes, just truncate the chain		;000
+	MOV	MFDDCN,R2	;Get MFD DCN				;000
+	CALLX	CNVRIB		;Convert it to FBN			;000
+	ADD	#2,R2		;Point to group attribute link table	;000
+	ADC	R3							;000
+	CALLX	READ		;Read the table				;000
+	CLR	R0		;Avoid sign extension			;000
+	BISB	CLNPPN+1,R0	;Get group number			;000
+	ASL	R0		;Word offset				;000
+	CLR	FIBUF(R0)	;Delete the attribute chain		;000
+	MARK	FIBUF		;Write it back				;000
+	BR	40$		;Continue				;000
+
+120$:	MOV	R2,R3		;Copy link				;000
+	CALL	RDB		;Read previous entry			;000
+	BIC	#UL.LNK,(R5)	;Clear it to truncate chain		;000
+	MARK	FIBUF		;Mark the buffer			;000
+	BR	40$		;Now go on				;000
+
+130$:	MOV	R2,GFDDCN	;Save GFD DCN				;000
+	CALL	CLNGFD		;Clean the GFD basic structure		;000
+	TSTB	ACCZD		;Something wrong with this GFD?		;000
+	BPL	90$		;Ouch.  Go delete the GFD		;000
+	CLRB	CLNPPN		;Start at user number 0			;000
+140$:	MOV	GFDDCN,R2	;Retrieve the GFD's DCN			;000
+	CALLX	CNVRIB		;Convert to FBN				;000
+	ADD	#1,R2		;Point to UFD DCN table			;000
+	ADC	R3							;000
+	CALLX	READ		;Read it				;000
+	ADD	#1,R2		;Point to group attribute link table	;000
+	ADC	R3		; double precision			;000
+	CLR	R0		;Avoid sign extending			;000
+	BISB	CLNPPN,R0	;Get user number			;000
+	ASL	R0		;Word offset				;000
+	MOV	FIBUF(R0),UFDDCN ;Save the UFD DCN			;000
+	CALL	REDSIL		;Read the name entry link table		;005
+	BIT	#UL.FLG,SILBUF(R0) ;Flags set?				;005
+	BEQ	150$		;No, good				;000
+	CALLX	READ		;Read that block into FIBUF now		;005
+	BIC	#UL.FLG,FIBUF(R0) ;Fix it up				;005
+	MARK	FIBUF		;Write it back				;000
+150$:	MOV	SILBUF(R0),R1	;Get link to name entry			;005
+	BEQ	200$		;No account here, go on			;000
+	MOV	GFDDCN,R2	;Get GFD DCN again			;000
+	CALLX	READRF		;Read the GFD label block		;000
+	MOV	R1,R3		;Copy link				;000
+	CALL	RDBCHK		;Read the name entry			;000
+	BCC	160$		;Ok, clean it				;000
+	MESSAGE	<"Link to name block for ">				;000
+	CALL	PRTPPC		;Print the offender's name		;000
+	MESSAGE	<" is bad">						;000
+	CLR	ACCZD		;We'll delete this account		;000
+	CLR	CLNUFL		;No valid N.E. link			;000
+	BR	170$		;Kill this account			;000
+
+160$:	TSTB	USTAT(R5)	;Marked for delete?			;000
+	BMI	210$		;Yes, so delete it			;000
+.ASSUME	US.DEL EQ 200							;000
+	CALL	CLNACC		;Clean this account			;000
+170$:	MOVB	ACCZD,R0	;Get error code, if any			;000
+	BMI	220$		;Ok					;000
+	CALL	ACCERR		;Report the bad news, ask for OK to delete ;000
+	MOV	GFDDCN,R2	;Get GFD DCN				;000
+	CALLX	READRF		;Read its first block			;000
+	MOV	CLNUFL,R3	;Get link to this UFD N.E.		;000
+	BEQ	180$		;Skip this if there isn't one		;000
+	CALLX	RDB		;Read it				;000
+	CLR	UAR(R5)		;Clear the UFD DCN pointer in the N.E.	;000
+	MARK	FIBUF		;Make sure it's written back		;000
+180$:	MOV	GFDDCN,R2	;Get GFD DCN				;000
+	CALLX	CNVRIB		;Convert to FBN				;000
+	ADD	#2,R2		;Point to N.E. link table		;000
+	ADC	R3							;000
+	CLR	R0		;Avoid sign extension			;000
+	BISB	CLNPPN,R0	;Get user number			;000
+	ASL	R0		;Word offset				;000
+	TSTB	ACCZD		;Zero or delete?			;000
+	BNE	190$		;Zero, skip the delete step		;000
+	CALLX	READ		;Read the name block link table		;000
+	CLR	FIBUF(R0)	;Clear the pointer to delete the account ;000
+	CALLX	WRITE		;Write it back				;000
+190$:	SUB	#1,R2		;Back up to UFD DCN table		;000
+	SBC	R3							;000
+	CALLX	READ		;Read it in				;000
+	CLR	FIBUF(R0)	;Clear out the pointer			;000
+	MARK	FIBUF		;Make sure we'll write it back		;000
+	TSTB	ACCZD		;Did we merely zero?			;000
+	BNE	220$		;Yes, move on				;000
+	JMP	CLEANR		;Start over				;000
+
+200$:	TST	UFDDCN		;Do we have a UFD pointer?		;000
+	BEQ	220$		;If no N.E. there shouldn't be one	;000
+	MESSAGE	<"UFD pointer present for non-existent account ">	;000
+	CALL	PRTPPC		;Print its name				;000
+	MESSAGE	<" -- will be zeroed"<200>>				;000
+210$:	MOV	GFDDCN,R2	;Get GFD DCN again			;000
+	CALL	CNVRIB		;Convert to FBN				;000
+	ADD	#1,R2		;Point to DCN table			;000
+	ADC	R3							;000
+	CALLX	READ		;Read it				;000
+	CLR	R0		;Avoid sign extension			;000
+	BISB	CLNPPN,R0	;Get user number			;000
+	ASL	R0		;Word offset				;000
+	CLR	FIBUF(R0)	;Clear DCN pointer			;000
+	ADD	#1,R2		;Now advance to name entry link table	;000
+	ADC	R3							;000
+	CALLX	READSV		;Write one, read the other		;000
+	CLR	FIBUF(R0)	;Clear that entry also			;000
+	MARK	FIBUF		;Mark buffer for write			;000
+220$:	INCB	CLNPPN		;Advance user number			;000
+	BEQ	230$		;Done with this group			;000
+	JMP	140$		;Not done, do another user		;000
+
+230$:	MOV	GFDDCN,R2	;Get GFD DCN one last time		;000
+	CALLX	READRF		;Read the first block of the GFD	;000
+	CALL	FINGFD		;Finish up this GFD			;000
+240$:	INCB	CLNPPN+1	;Increment the group number		;000
+	BEQ	CLNFIN		;Done, finish up			;000
+	JMP	20$		;Do another group			;000
+
+.DSABL	LSB
+
+GLOBAL	<SILBUF>							;005
+
+.SBTTL	Clean a disk the old way
+
+.ENABL	LSB
+
+CLNOLD:	CALLX	READMF		;ENSURE THE MFD IN IN FIBUF
+	MOV	#1,GFDDCN	;UFD entries are found starting here	;000
+	CLR	POST11		;NO POST-PASS ON [1,1]			;000
+	MOV	#FIBUF,R5	;POINT TO LINK TO FIRST ACCOUNT IN MFD
+	CLR	R3		;CLEAR LINK TO PREVIOUS
+10$:	MOV	R3,R2		;SAVE LINK TO PREVIOUS
+	MOV	(R5),R3		;R3 = LINK (IN MFD) TO NEXT NAME ENTRY
+	BIC	#UL.FLG,R3	;REMOVE FLAG BITS
+	BEQ	CLNFIN		;DONE
+	CALL	RDBCHK		;READ IN THE NAME ENTRY (CHECKING)
+	BCS	MFLBAD		;OUCH, LINK TO N.E. IN MFD IS BAD!
+	BITB	#US.UFD,USTAT(R5) ;IS THIS AN ACCOUNT?
+	BEQ	10$		;NO, IT'S A FILE IN [1,1]
+	MOV	R2,-(SP)	;SAVE LINK TO PREVIOUS
+	MOV	UNAM(R5),CLNPPN	;Remember which PPN we're cleaning	;000
+	CALL	CLNACC		;CLEAN THE ACCOUNT
+	MOV	(SP)+,R2	;RESTORE LINK TO PREVIOUS
+	MOVB	ACCZD,R0	;GET DELETE/ZERO FLAG FROM ACCOUNT CLEANER
+	BMI	10$		;ACCOUNT WAS OK
+	CALL	ACCERR		;Tell the user the bad news and ask for ok ;000
+	CALLX	READMF		;Re-read the MFD			;000
+	MOV	CLNUFL,R3	;Get link to this UFD N.E.		;000
+	CALLX	RDB		;Read it				;000
+	CLR	UAR(R5)		;ZERO THE ACCOUNT (NOP IF DELETING)
+	TSTB	ACCZD		;ZERO OR DELETE?
+	BNE	20$		;ZERO, JUST LEAVE IT AT THAT
+	MOV	(R5),-(SP)	;SAVE LINK TO NEXT
+	MOV	R2,R3		;COPY LINK TO PREVIOUS
+	CALLX	RDB		;READ THE PREVIOUS NAME ENTRY
+	BIC	#UL.FLG,(SP)	;REMOVE FLAG BITS FROM LINK TO NEXT
+	BIC	#UL.LNK,(R5)	;REMOVE LINK FROM PREVIOUS N.E.
+	BIS	(SP)+,(R5)	;LINK PREVIOUS TO NEXT
+20$:	MARK	FIBUF		;REWRITE IT
+	MOV	(PC),POST11	;MUST DO FINAL PASS ON [1,1]
+	BR	10$		;Do the next account			;000
+
+GLOBAL	<FIBUF>
+
+	TMPORG	CLNCTL
+POST11:	.WORD	0		;POST-PASS REQUIRED ON [1,1]
+	UNORG
+
+.DSABL	LSB
+
+.SBTTL	PROCESS BAD LINK IN MFD BY TERMINATING THE CHAIN
+
+.ENABL	LSB
+
+MFLBAD:	MESSAGE
+	 .ASCII	"MFD name entry contains a bad link"<200>
+	 .ASCIZ	"All [1,1] files and accounts beyond "			;003
+	 UNORG
+	CALL	PRNTNE		;PRINT THE NAME ENTRY
+	MESSAGE	<" will be deleted">					;003
+	CALL	CONFRM		;CONFIRM IT
+	BCS	MFLBAD		;ASK AGAIN IF BAD ANSWER
+	CLR	(R5)		;ZAP OUT THE LINK
+	MARK	FIBUF		;AND FORCE IT OUT
+	MOV	(PC),POST11	;DO A POST-PASS TO CLEAN [1,1]
+
+.DSABL	LSB
+
+.SBTTL	DONE WITH CLEAN, FINISH UP AND EXIT
+
+.ENABL	LSB
+
+CLNFIN:	CALLX	READMF		;Read in the MFD			;000
+	TSTB	REVLVL		;New disk?				;000
+	BNE	50$		;Yes, just clear the flags		;000
+	TST	POST11		;NEED TO POST-PASS [1,1]?
+	BEQ	60$		;NO
+	CALL	UFDLUP		;FIRST REMOVE MARKS FROM ALL ENTRIES
+10$:	BIC	#UL.CLN,(R5)
+	MARK	FIBUF
+	CALL	@(SP)+		;GET NEXT ENTRY
+	BNE	10$
+	CLR	R3		;R3 = 0 FOR LINK TO MFD HEADER
+	CALLX	RDB		;GET THE HEADER
+	BIS	#UL.CLN,(R5)	;MARK IT IN USE
+	MARK	FIBUF		;AND REWRITE IT
+	MOV	(R5),-(SP)	;SAVE LINK TO FIRST NAME ENTRY
+20$:	MOV	(SP)+,R3	;GET NEXT NAME ENTRY LINK
+	BIC	#UL.FLG,R3	;REMOVE FLAG BITS
+	BEQ	50$		;DONE, GO DO FINAL PASS
+	CALLX	RDB		;READ THE N.E.
+	BIS	#UL.CLN,(R5)	;IT'S IN USE
+	MARK	FIBUF
+	MOV	(R5),-(SP)	;SAVE LINK TO NEXT N.E.
+	MOV	UAR(R5),-(SP)	;SAVE LINK TO RETRIEVAL ENTRIES
+	BITB	#US.UFD,USTAT(R5) ;BUT IF IT'S A UFD
+	BEQ	30$		; THEN
+	CLR	(SP)		;  IT'S NOT A LINK, IGNORE IT
+30$:	MOV	UAA(R5),R3	;R3 -> A.E.
+40$:	CALLX	RDB		;GET THE ACCOUNTING OR ATTRIBUTE ENTRY
+	BIS	#UL.CLN,(R5)	;IT IS IN USE
+	MARK	FIBUF
+	MOV	(R5),R3		;GET THE NEXT ONE
+	BIC	#UL.FLG,R3
+	BNE	40$		;IF ANY
+	MOV	(SP)+,R3	;RESTORE POINTER TO RETRIEVAL ENTRY
+	BEQ	20$		;IF NONE, DONE. GO DO NEXT NAME ENTRY
+	CLR	-(SP)		;ELSE MARK A LINKED CHAIN, THEN STOP
+	BR	40$		;GO MARK THEM
+
+50$:	CALL	CLRMRK		;Clear the marks			;000
+60$:	CALL	OLDSAT		;SAVE THE OLD DISK COPY OF THE SATT
+	CALLX	WOMSAT		;WRITE OUT THE SATT
+	CALL	WIPER		;REMOVE WIPE OUT FILES FOR SECURITY NUTS
+	CALLX	READPL		;READ THE PACK LABEL AGAIN		;000
+	BIC	#UC.MNT,FIBUF+PSTAT ;THE DISK IS NOW CLEAN		;000
+	CALLRX	WRITE		;WRITE OUT THE CLEAN LABEL, RETURN
+
+.DSABL	LSB
+
+.SBTTL	Ask about deleting an erroneous account
+
+ACCERR:	MOV	50$(R0),30$	;GET MESSAGE TEXT			;000
+	CMP	CLNPPN,#0*400+1 ;NO, WAS IT IN [0,1]?			;000
+	BEQ	40$		;YES, WE ARE DEAD
+	CMP	DIRLVL,#2	;Cleaning a GFD?			;000
+	BNE	10$		;No					;000
+	CMP	CLNPPN,#0*400+255. ;Yes, was it [0,*]?			;000
+	BEQ	40$		;Yes, that's it				;000
+10$:	TSTB	REVLVL		;New pack?				;000
+	BNE	20$		;Yes, so [1,1] isn't special		;000
+	CMP	CLNPPN,#1*400+1 ;WAS THE ERROR IN [1,1]?		;000
+	BEQ	40$		;YES, DEAD AGAIN
+20$:	CALL	TYPECR		;Return carriage			;003
+	CALL	PRTPPC		;Print the account			;003
+	MOV	30$,R0		;FETCH POINTER TO MESSAGE
+	CALLX	ASCIZ0		;PRINT THE MESSAGE
+	CALL	CONFRM		;ASK FOR CONFIRMATION
+	BCS	20$		;BAD ANSWER, TRY AGAIN
+	RETURN			;Done, go back to do the delete/zero	;000
+
+30$:	.WORD			;STORAGE FOR POINTER TO MESSAGE
+40$:	JMP	DEAD		;ERROR IN STUFF FOR [0,1] OR [1,1]
+
+50$:	GENTXT	<" will be deleted">					;003
+	GENTXT	<" will be zeroed">					;003
+
+.SBTTL	SETSA2	Recompute SATT parameters based on passed disk size
+
+;+									;000
+; Entry:								;000
+;	R2 =	Disk size (LSB)						;000
+;	R3 =	Disk size (MSB)						;000
+;									;000
+; Exit:									;000
+;	SATSYN and SATSYS parameters (BITS, BYTS, SEGS) updated		;000
+;-									;000
+
+SETSA2:	REGSCR			;Save all registers			;000
+	MOV	PCS,R5		;RESTORE THE PACK CLUSTER SIZE		;000
+	MOV	R2,R1		;GET DISK SIZE (LSB)			;000
+	MOV	R3,R0		;GET DISK SIZE (MSB)			;000
+	SUB	R5,R1		;SUBTRACT PCS BLOCKS USED IN CLU 0	;000
+	SBC	R0		; FROM THE DISK SIZE IN BLOCKS		;000
+10$:	ASR	R5		;DIVIDE SIZE BY PCS			;000
+	BCS	20$		;TIL CARRY SETS				;000
+	;CLC								;000
+	ROR	R0		;SHIFT SIZE RIGHT			;000
+	ROR	R1							;000
+	BR	10$		;HANG IN THERE				;000
+
+20$:	MOV	R1,SATSYS+BITS	;SAVE NUMBER OF PACK CLUSTERS		;000
+	CLR	R0		;SET UP FOR DIVIDE			;000
+	ADD	#7777,R1	;ROUND UP BY 4095 AND			;000
+	ADC	R0							;000
+	ASHC	#-12.,R0	; DIVIDE BY 4096. BITS PER BLOCK	;000
+	MOV	R1,SATSYN	;SAVE NUMBER OF BLOCKS WITH FREE CLUS	;000
+	CALLX	FIXCLU		;ROUND UP TO NEAREST CLUSTER @PCS	;000
+	MOV	R1,SATSYS+SEGS	;STORE  # BLOCKS IN SYS DISK SAT	;000
+	MUL	#512.,R1	;AT 512. BYTES PER BLOCK		;000
+	MOV	R1,SATSYS+BYTS	;GIVES # BYTES IN SYS DISK SAT		;000
+	RETURN								;000
+
+GLOBAL	<SATSYS,SATSYN>							;000
+
+
+.SBTTL	Clear all flags in a directory and clean out unused entries
+
+CLRMRK:	CALL	UFDLUP		;NOW CLEAR UNMARKED ENTRIES, UNMARK ALL
+10$:	BIT	#UL.CLN,(R5)	;IN USE?
+	BNE	30$		;YES, LEAVE IT IN USE
+	CLR	-(SP)		;No non-zeroes cleared yet		;000
+	ADD	#20,R5		;NO, CLEAR IT OUT
+20$:	BIS	-(R5),(SP)	;Record non-zeroness
+	CLR	(R5)
+	BIT	R5,#17
+	BNE	20$
+	TST	(SP)+		;Any non-zeroes?			;000
+	BEQ	40$		;If all was zero, don't mark buffer	;000
+30$:	BIC	#UL.CLN,(R5)	;REMOVE THE MARK
+	MARK	FIBUF		;REWRITE THE BLOCK
+40$:	CALL	@(SP)+		;DO THE WHOLE MFD			;000
+	BNE	10$		;UNTIL DONE!
+	RETURN			;Now exit				;000
+
+.SBTTL	FINGFD	Finish up cleaning a GFD
+
+;+									;000
+; Entry:								;000
+;	First block of GFD in FIBUF					;000
+;-									;000
+
+FINGFD:	CALL	CLRMRK		;Clear out the flags			;000
+	RETURN			;That's all for now			;000
+
+
+.SBTTL	CLNPL	Clean the pack label
+
+.ENABL	LSB
+
+CLNPL:	CALL	READPL		;Read the pack label back in		;000
+	CLR	R0		;Indicate no fixups yet			;003
+	CMP	FIBUF+2,#-1	;Reserved field correct?		;003
+	BEQ	10$		;Yes					;003
+	MOV	#-1,FIBUF+2	;No, fix it				;003
+	INC	R0		;One thing found			;003
+10$:	BIT	#UC.NEW,PAKFLG	;Old pack?				;000
+	BEQ	50$		;Yes, deal with that			;000
+	CMPB	REVLVL,#1	;Level 1 pack?				;000
+	BNE	70$		;No, we can't hack it			;000
+	BIT	#1,SATBUF	;Is cluster 1 already allocated (by BADB.SYS?) ;000
+	BNE	90$		;Yes, die				;000
+	BIS	#1,SATBUF	;Otherwise allocate this cluster for the label ;000
+	TSTB	REVMIN		;Is minor level ok?			;000
+	BNE	30$		;Yes					;000
+20$:	MOV	#1*400+1,FIBUF+PLVL ;Set it				;000
+	MOV	#1*400+1,REVNUM	; in both places			;003
+30$:	CMPB	REVMIN,#2	;Above minor level 2?			;006
+..MLVL	==	.-2	;**PATCH** to allow minor level > 2		;006
+	BHI	80$		;Yes, so quit				;003
+	TST	R0		;Anything fixed up?			;003
+	BEQ	40$		;No, skip				;003
+	MESSAGE	<"Pack label fields fixed up"<200>>			;003
+	MARK	FIBUF		;Mark buffer for write			;000
+40$:	RETURN			;All done				;000
+
+50$:	TST	REVNUM		;Rev level is undefined in old disks	;000
+	BNE	60$		;If non-zero, clear it for cleanliness	;000
+	TST	FIBUF+MDCN	;This field unused in old disks		;000
+	BEQ	30$		;Ok					;000
+60$:	CLR	FIBUF+PLVL	;Mark as level 0.0 pack			;000
+	CLR	FIBUF+MDCN	;No, make it good			;000
+	BR	30$		;Exit					;003
+
+70$:	TSTB	REVLVL		;Marked as level 0?			;000
+	BEQ	20$		;Yes, fix it up				;000
+80$:	MESSAGE	<"Pack revision level is too high -- cannot be rebuilt"<200>> ;003
+	EXIT			;Quit completely			;000
+
+90$:	MESSAGE	<"Cluster 1 (required by pack label) is marked as bad"<200>> ;000
+	JMP	DEAD		;That's it, folks			;000
+
+.DSABL	LSB
+
+GLOBAL	<FIBUF,SATBUF,FIBEND,DCS>
+
+.SBTTL	CLNMFD	Do initial cleaning of an MFD
+
+.ENABL	LSB
+
+CLNMFD:	MOV	MFDDCN,R2	;Pass the starting DCN			;000
+	CLR	R4		;Indicate CLNDIR should look up clusiz	;002
+	MOV	#255.*400+255.,CLNPPN ;Indicate we're working on the MFD ;000
+	CLR	DIRLVL		;Indicate we're working on the top level ;000
+	CALL	CLNDIR		;Do initial directory cleanup		;000
+	TSTB	ACCZD		;Error?					;000
+	BPL	30$		;Yes, quit (message already printed)	;000
+	CLR	R3		;To read label again			;000
+	CALLX	RDB		;Read it				;000
+	MOV	FIBUF+MALNK,R3	;Get MFD (system) attribute chain	;000
+	CALL	CLNCHN,R4						;000
+	 GENTXT	<"system attributes in MFD -- attributes lost"<200>>	;000
+	 BR	10$		;Bad chain, truncate it			;000
+	RETURN			;That's all for now			;000
+
+10$:	MOV	R2,R3		;Copy link to predecessor		;000
+	CALLX	RDB		;Read it				;000
+	TST	R2		;Was it the first one we lost?		;000
+	BNE	20$		;No					;000
+	ADD	#MALNK,R5	;Yes, point to the link word in label	;000
+20$:	BIC	#UL.LNK,(R5)	;Truncate/kill the attribute chain	;000
+	MARK	FIBUF		;Mark the buffer			;000
+	RETURN			;Done					;000
+
+30$:	JMP	DEAD		;Give up on this pack			;000
+
+.DSABL	LSB
+
+GLOBAL	<FIBUF,FIBMAP>
+
+.SBTTL	CLNGFD	Do initial cleaning of a GFD
+
+.ENABL	LSB
+
+CLNGFD:	MOVB	#255.,CLNPPN	;Indicate we're working on the GFD	;000
+	CLR	R4		;Tell CLNDIR should look up clusiz	;002
+	MOV	#2,DIRLVL	;Indicate we're working on 2nd level	;000
+	CALL	CLNDIR		;Do initial directory cleanup		;000
+	RETURN			;That's all for now			;000
+
+.DSABL	LSB
+
+GLOBAL	<FIBUF>
+
+.SBTTL	Clean a directory
+
+;+
+; Entry:
+;	R2 = starting DCN of directory
+;	R4 = directory clustersize
+;	DIRLVL = 0 for MFD
+;		 2 for GFD
+;		 4 for UFD
+;-
+
+.ENABL	LSB
+
+CLNDIR:	MOV	SP,CLNASP	;Preserve SP for error handling		;000
+	TST	CLNDBG		; Debug enabled ?			;010
+	BEQ	CLNDI2		;No					;001
+	CALL	PRTPPC		;Print out current directory		;001
+	CALLX	TYPECR		;Return the carriage			;001
+
+CLNDI2:	MOV	#-2,ACCZD	;Indicate nothing wrong yet		;000
+	CMP	R2,MAXDCN	;IS THE DCN OUT OF RANGE?
+	BLO	10$		;NO, IT'S OK
+	CALL	ERRACC,R0	;PRINT ERROR, RETURN AND ZERO THE ACCOUNT
+	 GENTXT	<<2>" has first DCN out of range">
+
+10$:	MOV	R2,UFDRP	;SAVE THE UFD RP
+	CALLX	READRF		;READ IN BLOCK GIVEN RP IN R2
+	CMP	UFDRP,FIBENT	;FIRST RP AGREES?			;000
+	BNE	90$		;NO, DIE QUICKLY (POPPING RP)
+	TSTB	REVLVL		;New pack?				;000
+	BNE	20$		;Yes, pack label isn't in a UFD		;000
+	CMP	CLNPPN,#1*400+1	;DON'T MUCK UP THE PACK LABEL
+	BEQ	70$
+20$:	CLR	R1		;Indicate nothing wrong yet		;000
+	CMP	FIBUF+2,#-1	;Reserved field ok?			;003
+	BEQ	30$		;Yes					;003
+	MOV	#-1,FIBUF+2	;No, fix it				;003
+	INC	R1		;Count it				;003
+30$:	CMP	FIBUF+LPPN,CLNPPN ;Check account number			;000
+	BEQ	40$		;Ok					;000
+	MOV	CLNPPN,FIBUF+LPPN ;Fix it				;000
+	INC	R1		;One fix done				;000
+40$:	MOV	DIRLVL,R0	;Get level we're at			;000
+	CMP	FIBUF+LID,DIRID(R0) ;Marked with the right tag?		;000
+	BEQ	50$		;Yes, fine				;000
+	MOV	DIRID(R0),FIBUF+LID ;Fix up ID				;000
+	INC	R1		;One more thing fixed			;000
+50$:	TST	R1		;Any problems?				;000
+	BEQ	70$		;No					;000
+	MARK	FIBUF		;Yes, make sure changes are written back ;000
+	MESSAGE	<"Label ID fields for ">				;000
+	CALL	PRTPPC		;Print the directory name		;000
+60$:	MESSAGE	<" fixed"<200>>						;003
+70$:	CALL	UFDLUP		;LOOP THROUGH ALL ENTRIES IN THE UFD
+	MOV	#FIBENT,R2	;POINT TO FDCM				;000
+	CMP	UFDRP,(R2)	;IS FIRST R.P. IN FIBMAP = R.P. IN A.E.?
+	BNE	90$		;NO, BADDIE
+	MOV	#CLNMAP,R3	;POINT TO OUR COPY
+	TST	-(R2)		;Point to clustersize in map		;002
+	TST	R4		;Did we get an expected clustersize?	;002
+	BNE	80$		;Yes, check that it matches
+	MOV	(R2),R4		;No, pick it up				;002
+	BIC	#100000,R4	;Get rid of the flag for the moment	;002
+	MOV	R4,-(SP)	;Copy it				;002
+	DEC	(SP)		;Build mask to check for power of 2	;002
+	BIT	(SP)+,R4	;Good clustersize?			;002
+	BNE	110$		;No, quit				;002
+	CMP	PCS,#16.	;large disk in clean?			;009
+	BLOS 	73$		;no, so do std check			;009
+	CMP	R4,#16.		;large disk, must be clustersize 16 here;009
+	BNE	110$		;not, so error				;009
+	BR	75$		;join common code			;009
+
+73$:	CMP	R4,PCS		;Large enough?				;002
+	BLO	110$		;Not if smaller than PCS		;002
+	CMP	R4,#16.		;A valid clustersize?			;009
+	BHI	110$		;no, never on Small clustersize disk	;009
+75$:	CMP	DIRLVL,#2	;MFD or GFD?				;002
+	BHI	80$		;No, all set				;002
+	CMP	R4,#4		;MFD or GFD must be at least 4		;002
+	BLO	110$		;Otherwise quit				;002
+	BIS	#100000,R4	;Now set the flag in the clustersize	;002
+80$:	CMP	R4,(R2)	;YES, IS THE CLUSTERSIZE SAME IN MAP & A.E.	;002
+	BEQ	120$		;YUP, IT CHECKS
+	MOV	(R2),-(SP)	;Get offending clustersize entry	;000
+	XOR	R4,(SP)		;See what differs			;000
+	CMP	(SP)+,#100000	;Just the flag bit?			;000
+	BNE	100$		;If not, we're in trouble		;000
+	MOV	R4,(R2)		;Just the flag, fix it			;000
+	MARK	FIBUF		;Make sure it's written back		;000
+	BR	120$							;000
+
+90$:	CALL	ERRACC,R0	;PRINT ERROR, RETURN AND ZERO THE ACCOUNT
+	 GENTXT	<<2>" cluster map disagrees with "<176>>		;000
+
+100$:	CALL	ERRACC,R0	;Print error message			;000
+	 GENTXT	<<2>" clustersize is incorrect">			;000
+
+110$:	CALL	ERRACC,R0	;Print error message			;002
+	 GENTXT	<<2>" has invalid clustersize">				;002
+
+120$:	MOV	(R2)+,(R3)+	;Copy the clustersize			;000
+130$:	MOV	(R2),(R3)+	;COPY THE MAP FOR LATER CHECKING
+	TST	R4		;FOUND A 0 IN THE FDCM YET?
+	BNE	140$		;NO, NEXT CAN BE 0 OR <>0
+	TST	(R2)		;YES, REMAINDER MUST BE 0
+	BNE	150$		;IF NOT, ERROR
+140$:	MOV	(R2)+,R4	;GET THE FDCM ENTRY
+	CMP	R4,MAXDCN	;IS THE CLUSTER NUMBER IN RANGE?
+	BHIS	160$		;NOPE, ERROR HERE
+	CMP	#FIBMAP+17,R2	;DONE?
+	BHIS	130$		;NO
+	CLR	R4		;YES, SET FLAG FOR NO FDCM ERROR YET
+	BR	UNMARK		;ENTER THE LOOP (NOT A NEW MAP NOW)
+
+150$:	CALL	ERRACC,R0	;PRINT ERROR, RETURN AND ZERO THE ACCOUNT
+	 GENTXT	<<2>" has holes in cluster map">
+
+160$:	CALL	ERRACC,R0	;PRINT ERROR, RETURN AND ZERO THE ACCOUNT
+	 GENTXT	<<2>" has cluster number in map which is too big">	;000
+
+170$:	MOV	#FIBMAP,R2	;POINT TO NEW BLOCK'S MAP
+	MOV	#CLNMAP,R3	;POINT TO MAP FROM FIRST BLOCK
+	CMP	(R2)+,(R3)+	;Match on clustersizes?			;000
+	BEQ	180$		;Yes, good				;000
+	MOV	R0,-(SP)	;Save R0				;000
+	MOV	-(R2),R0	;Get the wrong one			;000
+	MOV	-(R3),-(SP)	; and the good one			;000
+	XOR	R0,(SP)		;See what's different			;000
+	CMP	(SP)+,#100000	;Just the flag?				;000
+	BNE	200$		;If not, that's bad			;000
+	MOV	(SP)+,R0	;Restore that register			;000
+	MOV	(R3)+,(R2)+	;Fix the flag				;000
+	MARK	FIBUF		;Mark for writing			;000
+180$:	CMP	(R2)+,(R3)+	;IS IT THE SAME?
+	BEQ	220$		;YES, AOK
+	TST	-(R3)		;THE ONLY VALID ERROR IS A ZERO IN 1ST MAP
+	BNE	200$		; (NOT THE CASE HERE)
+	TST	R4		;GOT AN ERROR IN MAPS BEFORE?
+	BNE	190$		;IF SO, DISAGREEMENT MUST BE IN SAME PLACE
+	MOV	R3,R4		;IF NOT, SET LOCATION OF ERROR
+190$:	CMP	R3,R4		;ERROR IN MAP AT THE RIGHT PLACE?
+	BEQ	210$		;YES, WE CAN FIX IT
+200$:	CALL	ERRACC,R0	;PRINT ERROR, RETURN AND ZERO THE ACCOUNT
+	 GENTXT	<<2>" has inconsistent cluster maps">
+
+210$:	MOV	(R3)+,-2(R2)	;REMOVE BOGUS CLUSTER FROM NTH MAP
+	MARK	FIBUF		;MARK FOR REWRITE
+220$:	BIT	R2,#17		;END OF MAP?
+	BNE	180$		;NO, DO IT ALL
+UNMARK:	BIT	#UL.BAD!UL.CLN,(R5) ;ARE THERE BITS TO CLEAR?
+	BEQ	230$		;NO, SKIP THE REWRITE IF POSSIBLE
+	BIC	#UL.BAD!UL.CLN,(R5) ;CLEAR OUT THE 'CONTAINS BAD BLOCK' BIT
+	MARK	FIBUF		;MARK FIBUF FOR REWRITE
+230$:	CALL	@(SP)+		;NEXT UFD ENTRY
+	BCS	UNMARK		;IF MORE IN SAME BLOCK, GO DO THE LINK
+	BNE	170$		;IF NEW BLOCK, GO CHECK MAP
+	TST	R4		;Did we find anything wrong in cluster maps? ;000
+	BEQ	240$		;No					;000
+	MESSAGE	<"Cluster maps in "> ;Yes, report that			;000
+	CALL	PRTPPC		;Print the directory name		;000
+	MESSAGE	<" fixed"<200>>						;003
+
+; ALLOCATE THE CLUSTERS
+
+240$:	MOV	#FIBMAP,R5	;R5 -> DIRECTORY CLUSTER MAP		;000
+	MOV	(R5)+,R1	;R1 = UFD CLUSTER SIZE (FOR ALLOCATER)
+	CALL	CLEAU7		;GO ALLOCATE 7 CLUSTERS OF SIZE (R1)
+	BCS	260$		;Error if misaligned directory		;000
+	MOV	BADFLG,ACCBAD	;SET ACCBAD IF UFD HAS BAD BLOCKS
+	MOV	#FIBUF,R5	;R5 -> UFD LINK HEAD
+	BIC	#UL.FLG,(R5)	;CLEAR OUT FLAG BITS
+	BIS	#UL.CLN,(R5)	;MARK THE UFD HEADER ENTRY IN USE
+	MARK	FIBUF		;Make sure that's written back		;000
+	TSTB	REVLVL		;New pack?				;000
+	BEQ	250$		;No					;000
+	BIS	#UL.USE,(R5)	;Yes, set low bit in directory label	;000
+250$:	RETURN								;000
+
+260$:	CALL	ERRACC,R0	;Error in this directory		;000
+	 GENTXT	<<2>" cluster not aligned on clustersize boundary">	;000
+
+DIRID:	.RAD50	"MFD"		;ID fields for each level directory	;000
+	.RAD50	"GFD"							;000
+	.RAD50	"UFD"							;000
+
+.DSABL	LSB
+
+GLOBAL	<FIBMAP,FIBENT,CLNDBG>						;010
+
+.SBTTL	CLEAN AN ACCOUNT
+
+.ENABL	LSB
+
+CLNACC:	MOV	R3,CLNUFL	;SAVE LINK IN MFD TO UFD NAME ENTRY
+	MOV	SP,CLNASP	;SAVE STACK POINTER			;000
+	CALL	FIBSAV		;SAVE FBN CONTAINING UFD NAME ENTRY	;000
+	CLR	ACCBAD		;NO BADDIES IN UFD
+	CLR	CLNFNL		;WE ARE ABOUT TO ALLOCATE THE UFD ITSELF
+	MOV	CLNPPN,R2	;Get PPN being scanned			;000
+	BEQ	10$		;ERROR IF 0 PPN
+	CMP	R2,UNAM(R5)	;Check against name block		;000
+	BNE	20$		;Didn't match, that's bad		;000
+	MOV	R2,SCAN11	;FLAG FOR MFD
+	SUB	#1*256.+1,SCAN11 ; IS ZERO IF [1,1] IS BEING CLEANED
+	BISB	REVLVL,SCAN11	; but it isn't special on new packs	;000
+	MOV	R2,SCAN01	;SET PPN IN [0,1] FLAG WORD
+	DEC	SCAN01		; TO 0 IF [0,1] IS BEING CLEANED
+	BEQ	30$		;OF COURSE, [0,1] IS A GOOD PPN
+	INCB	R2		;OTHERWISE, CHECK FOR [*,255]
+	BEQ	10$		; BAD IF SO
+	SWAB	R2		;GET PROJECT IN LOW BYTE
+	CMP	REVNUM,(PC)+	;V9.0 DISK?				;006
+	 .BYTE	 2,1							;006
+	BHIS	5$		;YES, [0,*] OK ([0,0] ALREADY NUKED)	;006
+	TSTB	R2		;NO, [0,*]? (bytes swapped)		;006
+	BEQ	10$		;BAD NEWS ([0,1] ALREADY OK)		;006
+5$:	INCB	R2		;CHECK FOR [255,*]
+	BNE	30$		;NO, IT'S OK
+10$:	CALL	ERRACC,R0	;PRINT ERROR, RETURN AND DELETE THE ACCOUNT
+	 GENTXT	<<0>" is not a valid account number">
+
+20$:	CALL	ERRACC,R0	;Print error message			;000
+	 GENTXT	<<0>" name block specifies wrong PPN">			;000
+
+30$:	MOV	(PC),SCANBB	;SET FLAG SAYING NO SCANNING BADB.SYS
+	TST	UACNT(R5)	;Left-over stuff in access count?	;005
+	BEQ	35$		;No, skip				;005
+	CLR	UACNT(R5)	;Yes, clean it up			;005
+	MARK	FIBUF		; and have it written back		;005
+35$:	MOV	UAR(R5),R2	;R2 = RP TO FIRST BLOCK OF UFD		;005
+	MOV	UAA(R5),R3	;R3 = LINK TO ACCOUNTING ENTRY
+	BIT	#UL.LNK,R3	;Null link?				;000
+	BEQ	40$		;Yes, that's illegal			;000
+	MOV	R3,UFDAA	;SAVE LINK TO AE IN MFD
+	CALL	RDBCHK		;GET IT
+	BCC	50$		;LINK IS VALID
+40$:	CALL	ERRACC,R0	;PRINT ERROR, RETURN AND DELETE THE ACCOUNT
+	 GENTXT	<<0>" has invalid accounting entry link">
+
+50$:	MOV	UCLUS(R5),R4	;R4 = CLUSTER SIZE OF UFD
+	CMP	PCS,#16.	;Large cluster disk?			;009
+	BLOS	55$		;no so do standard checks		;009
+	CMP	R4,#16.		;yes, so clustersize MUST be 16		;009
+	BNE	60$		;not so, so error			;009
+	BR	57$		;join common code			;009
+55$:	CMP	R4,PCS		;TOO SMALL FOR THIS PCS?
+	BLO	60$		;YUP
+	CMP	R4,#16.		;VALID CLUSTERSIZE?
+	BHI	60$		;NOT FOR A UFD
+57$:	MOV	R4,-(SP)	;CHECK IT FOR
+	DEC	(SP)		; A POWER OF 2
+	BIT	R4,(SP)+	;IS IT?
+	BEQ	110$		;YES, GO READ THE UFD AND CHECK THE FIRST MAP
+60$:	CALL	ERRACC,R0	;PRINT ERROR, RETURN AND DELETE THE ACCOUNT
+	 GENTXT	<<0>" has invalid clustersize">
+
+70$:	CALL	ERRACC,R0	;Delete this account			;000
+	 GENTXT	<<0>" accounting entry is doubly allocated">		;000
+
+80$:	CALL	ERRACC,R0	;Delete the account			;000
+	 GENTXT	<<0>" name entry is doubly allocated">			;000
+
+90$:	CALL	PRTPPC		;This is the account			;000
+	MESSAGE	<" -- attributes lost"<200>>				;000
+	MOV	R2,R3		;Get link to last good one		;000
+	BNE	100$		;There was one				;000
+	MOV	CLNUFL,R3	;None, so it was the name entry		;000
+100$:	CALLX	RDB		;Read it				;000
+	BIC	#UL.LNK,(R5)	;Truncate the chain			;000
+	MARK	FIBUF		;Mark the buffer			;000
+	BR	130$		; and continue				;000
+
+110$:	TSTB	REVLVL		;New pack?				;000
+	BEQ	140$		;No, will mark UFD's entries later	;000
+	BIT	#UL.CLN,(R5)	;Doubly allocated?			;000
+	BNE	70$		;Yes, that's bad news
+	BIC	#UL.FLG,(R5)	;Clear flags in accounting entry	;000
+	BEQ	120$		;Null link, good			;000
+	CLR	(R5)		;Not null, make it that way		;000
+	MESSAGE	<"Link from accounting entry of ">			;000
+	CALL	PRTPPC		;Print offending PPN			;000
+	MESSAGE	<" cleared"<200>>					;003
+120$:	BIS	#UL.USE!UL.CLN,(R5) ;Mark in use and marked		;000
+	MARK	FIBUF		;Make sure it's written back		;000
+	MOV	CLNUFL,R3	;Get name block pointer			;000
+	MOV	R2,-(SP)	;Save UFD cluster pointer		;000
+	CALLX	RDB		;Read the name block			;000
+	BIT	#UL.CLN,(R5)	;Already allocated?			;000
+	BNE	80$		;Yes, quit on this account		;000
+	BIS	#UL.CLN,(R5)	;Mark it				;000
+	MARK	FIBUF		;Make sure buffer is written		;000
+	MOV	(R5),R3		;Get link to attributes, if any		;000
+	CALL	CLNCHN,R4	;Clean the chain			;000
+	 GENTXT	<"account attributes in ">				;000
+	 BR	90$		;Go here if trouble			;000
+	CLR	QUOTAL		;Assume no quota block to update	;007
+	CMP	REVNUM,(PC)+	;Check rev level			;007
+	 .BYTE	2,1							;007
+	BLO	130$		;1.1 or below, so skip search		;007
+	CMP	CLNPPN,#0*400+1	;1.2, but cleaning [0,1]?		;007
+	BEQ	130$		;Yes, no quota block for that account	;007
+	MOV	CLNUFL,R3	;Get name block link again		;007
+	CALLX	RDB		;Read it				;007
+125$:	MOV	(R5),R3		;Get link to next attribute		;007
+	BIC	#UL.FLG,R3	;Clear flags				;007
+	BEQ	180$		;End of list, error!			;007
+	CALLX	RDB		;Read next attribute			;007
+	CMPB	UATYP(R5),#AA.QUO ;Is this the quota block?		;007
+	BNE	125$		;No, search further			;007
+	MOV	R3,QUOTAL	;Yes, save link for later		;007
+	CLR	LTOTAL		;Initialize low order total		;007
+	CLR	HTOTAL		; and high order			;007
+130$:	MOV	(SP)+,R2	;Restore UFD cluster number		;000
+140$:	TST	R2		;IS THE UFD R.P. ZERO?
+	BEQ	CLNAEX		;Yes, that's easy			;000
+	MOV	#4,DIRLVL	;Indicate we're working on the 3rd level ;000
+	CALL	CLNDI2		;Do initial directory cleanup		;000
+	CLR	R3		;PREVIOUS LINK IS TO HEADER
+
+; LOOP THROUGH EACH NAME ENTRY ALLOCATING FILES
+
+150$:	MOV	R3,R2		;LINK TO THIS BECOMES LINK TO PREVIOUS
+	MOV	(R5),R3		;R3 = LINK TO NEXT ENTRY
+	BIC	#UL.FLG,R3	;REMOVE FLAG BITS
+	BEQ	FINACC		;NONE, SO WE ARE DONE WITH THIS UFD
+	CALL	RDCHEK,R4	;READ IN THE NAME ENTRY FOR THE FILE
+	 GENTXT	<"entry following name">
+	 BR	160$		;BAD LINK TO NAME ENTRY!
+	CALL	CLNFIL		;AND CLEAN UP THE FILE (OR ACCOUNT ENTRY IN [1,1])
+	ADD	FILSZL,LTOTAL	;Accumulate low order size		;007
+	ADC	HTOTAL							;007
+	ADD	FILSZM,HTOTAL	; and high order			;007
+	BR	150$		;GO DO ANUDDER FILE
+
+160$:	MOV	R2,R3		;RESTORE LINK TO LAST FINDABLE NAME ENTRY
+	CALLX	RDB		;GET IT BACK AND POINT TO IT
+	MESSAGE	<"All files in ">					;003
+	CALL	PRTPPC		;PRINT [P,PN] BEING CLEANED
+	TST	R3		;IS THE BAD LINK IN THE LIST HEAD?
+	BEQ	170$		;YES, THAT'S ALL FILES
+	MESSAGE	<" after ">	;NO, ONLY SOME FILES
+	CALL	PRNTNE		;PRINT THE LAST FILE LEFT
+170$:	MESSAGE	<" will be deleted">					;003
+	CALL	CONFRM		;HE'S GOTTA AGREE
+	BCS	160$		;KEEP AFTER HIM
+	BIC	#UL.LNK,(R5)	;ZAP THE LINK TO MAKE THIS THE LAST NAME ENTRY
+	MARK	FIBUF		;REWRITE IT
+
+180$:	CALL	ERRACC,R0	;Error, missing quota block		;007
+	 GENTXT	<<0>" does not have a quota attribute block">		;007
+
+.DSABL	LSB
+
+GLOBAL	<PCS,FIBMAP,FIBUF>
+
+.ENABL	LSB
+
+; DONE WITH ALL FILES (& ACCOUNTS IF [1,1])
+; REMOVE MARKS AND CLEAR OUT UNMARKED ENTRIES
+
+FINACC:	CALL	CLRMRK		;Clear all marks and unused entries	;000
+CLNAEX:	CALL	FIBRES		;RESTORE BLOCK IN MFD WITH UFD NE
+	MOV	QUOTAL,R3	;Get link to quota block if relevant	;007
+	BEQ	45$		;Don't need to update it		;007
+	CALLX	RDB		;Read it				;007
+	CMP	LTOTAL,AQ.CRL(R5) ;Match on low size?			;007
+	BNE	42$		;No, so update it			;007
+	CMPB	HTOTAL,AQ.CRM(R5) ;Yes, but is high size ok too?		;007
+	BEQ	45$		;Yes, skip				;007
+42$:	MOV	LTOTAL,AQ.CRL(R5) ;Set low order usage			;007
+	MOVB	HTOTAL,AQ.CRM(R5) ; and high order			;007
+	MARK	FIBUF		;Write it back				;007
+45$:	MOV	ACCBAD,R0	;GET FLAG OF BADS IN UFD		;007
+	BEQ	50$		;NONE IS EASY
+	MOV	UFDAA,R3	;GET LINK TO ACCOUNING ENTRY IN MFD
+	CALLX	RDB		;GET THAT
+	BIS	R0,(R5)		;SET UL.BAD IN THE A.E.
+	MARK	FIBUF		;REWRITE THIS
+50$:	MOV	CLNUFL,R3	;GET THE N.E. AGAIN
+	CALLRX	RDB		;RETURN (C=0 FROM RDB)
+
+.DSABL	LSB
+
+; ERROR DETECTED, PRINT MESSAGE AND RETURN TO DELETE OR ZERO
+; THE ACCOUNT
+
+.ENABL	LSB
+
+ERRACC:	MOV	(R0),R0		;POINT TO TRAILING TEXT OF MESSAGE
+	MOVB	(R0)+,ACCZD	;SET FLAG FOR ACCOUNT DELETE/ZERO
+	MOV	CLNASP,SP	;RESTORE STACK POINTER
+	CALL	PRTPPC		;Print the directory name		;000
+	MOV	R0,-(SP)	;Save the pointer			;000
+10$:	CMPB	(R0),#176	;Marker to insert name of next thing up? ;000
+	BEQ	20$		;Yes					;000
+	TSTB	(R0)+		;End of string?				;000
+	BNE	10$		;No					;000
+	MOV	(SP)+,R0	;Restore pointer			;000
+	CALLRX	ASCIZ0		;PRINT FURTHER TEXT
+
+20$:	MOV	(SP)+,R0	;Restore pointer			;000
+	CALLX	ASCIZ0		;Print the text				;000
+	MOV	DIRLVL,R0	;Get level number			;000
+	MOV	30$(R0),R0	;Point to text				;000
+	CALLRX	ASCIZ0		;Print that				;000
+
+30$:	GENTXT	<"pack label">						;000
+	GENTXT	<"MFD">							;000
+	GENTXT	<"GFD">							;000
+
+.DSABL	LSB
+
+.SBTTL		CLEAN A FILE ENTRY
+
+;+
+;	R2 =  LINK TO PREVIOUS ENTRY IN UFD
+;	R3 =  LINK TO NAME ENTRY OF FILE TO CLEAN
+;	R5 -> NAME ENTRY IN FIBUF
+;	FIBUF CONTAINS A BLOCK OF THE UFD
+;
+;	CALL	CLNFIL
+;
+;	R3 =  LINK TO NAME ENTRY
+;	(R3) = LINK TO NEXT NAME ENTRY TO CHECK
+;	R5 -> NAME ENTRY
+;
+;	R0, R1, R2, R4 CLOBBERED
+;-
+
+.ENABL	LSB
+
+; DELETE IF MARKED FOR DELETE OR FILE EXT = 'TMP' OR LINK TO A.E. = 0
+
+CLNFIL:	MOV	R3,CLNFNL	;SAVE THE LINK IN UFD TO THE FILE NE
+	CLR	FILSZL		;ACCUMULATED FILE SIZE = 0 SO FAR	;008
+	CLR	FILSZM							;008
+	TST	CLNDBG		;Debugging?				;001
+	BEQ	10$		;No					;001
+	CALL	PRTPNC		;PRINT CURRENT [P,PN]FILNAM.EXT		;001
+	CALLX	TYPECR		;Return carriage			;001
+
+10$:	MOV	(R5)+,R4	;SAVE LINK TO NEXT N.E. IN THE UFD
+.ASSUME	UNAM EQ 2							;000
+	CALL	CKBADB,R0,SCANBB ;SET SCANBB=0 IF FILE NAME = BADB.SYS
+	CALL	CKSATT,R0,SCNSAT ;Set SCNSAT=0 if file name = SATT.SYS	;000
+	ADD	#USTAT-UNAM,R5	;Point to status			;000
+	BIT	#UL.LNK,UAA-USTAT(R5) ;IS THE LINK TO THE A.E. = 0?
+	BEQ	80$		;YES, WE MUST DELETE THIS THING
+	TSTB	(R5)		;IS IT MARKED FOR DELETE?
+.ASSUME	US.DEL EQ 200
+	BMI	80$		;DELETE IT IF MARKED FOR DELETE
+	BITB	#US.UFD,(R5)	;IS THIS AN ACCOUNT?
+	BNE	20$		;YES, DON'T CHECK FOR AN EXTENSION
+	CMP	UNAM+4-USTAT(R5),#^RTMP ;IS IT A 'TMP' FILE?
+	BEQ	80$		;YES, GO DELETE IT
+	BR	30$
+
+20$:	TST	SCAN11		;IS THE SO-CALLED UFD REALLY IN OLD [1,1]? ;000
+	BNE	50$		;IF NOT, GO COMPLAIN
+30$:	BIS	#UL.CLN,ULNK-USTAT(R5) ;MARK THE NAME ENTRY IN USE
+	MARK	FIBUF		;REWRITE THE MARK
+	MOV	(R5)+,CLNUST	;SAVE USTAT
+	CLR	(R5)+		;Make sure access count is cleared	;005
+.ASSUME	UACNT EQ USTAT+2						;005
+	MOV	(R5)+,R3	;GET LINK TO ACCOUNTING ENTRY
+.ASSUME	UAA EQ UACNT+2							;005
+	MOV	R3,CLNUAA	;SAVE IT IN MEMORY, TOO
+	MOV	(R5)+,CLNUAR	;SAVE LINK TO FIRST RETRIEVAL ENTRY
+.ASSUME	UAR EQ UAA+2							;000
+	CALL	RDCHEK,R4	;READ AE, CHECK FOR GOOD LINK & NO LOOPS
+	 GENTXT	<"accounting">
+	 BR	70$		;IF ERROR, GO DELETE FILE
+	MOV	UCLUS(R5),R1	;GET THE FILE CLUSTER SIZE
+	CMP	R1,PCS		;ARE WE LESS THAN THE PACK CLUSTER SIZE?
+	BLO	40$		;YES, BAD FILE C.S.
+	CMP	R1,#256.	;ARE WE LEGAL?
+	BHI	40$		;NO, TOO BIG
+	MOV	R1,R0		;COPY THE CLUSTERSIZE
+	DEC	R0		;COMPUTE C.S.-1
+	BIT	R1,R0		;IS THE CLUSTERSIZE A POWER OF 2?
+	BEQ	100$		;YES, ALL IS OK
+40$:	MESSAGE	<"Invalid clustersize for file ">
+	BR	60$
+
+50$:	MESSAGE <"User file looks like UFD: ">
+60$:	CALL	PRTCLF		;PRINT THE FILE NAME
+70$:	MESSAGE	<" - file deleted"<200>>
+	BIC	#UL.CLN,(R5)	;REMOVE THE MARK FROM THE FILE'S NAME ENTRY
+	MARK	FIBUF		; AND REWRITE THAT
+80$:	MOV	R2,R3		;POINT TO PREVIOUS NAME ENTRY
+	CALLX	RDB		;READ IT (NOTE R3<-R2 => PREVIOUS NOW CURRENT)
+	BIC	#UL.FLG,R4	;REMOVE FLAG BITS FROM LINK TO NEXT NE
+	BIC	#UL.LNK,(R5)	;ISOLATE FLAG BITS IN LINK WORD OF PREV.
+	BIS	R4,(R5)		;LINK PREVIOUS TO NEXT
+	MARK	FIBUF		;FIBUF HAS CHANGED
+	RETURN
+
+90$:	MESSAGE	<"Cluster not aligned on file cluster boundary in ">	;002
+	BR	60$		;Print file name and delete it		;002
+
+100$:	BIS	SCAN01,SCANBB	;ARE WE CLEANING BADB.SYS?		;011
+	BNE	104$		;NO, so skip this check			;011
+	CMP	UCLUS(R5),PCS	;Is the clustersize legal?		;011
+	BEQ	108$		; YES					;011
+	MESSAGE	<"[0,1]BADB.SYS">					;011
+	BR	106$		; continue with error			;011
+
+104$:	BIS	SCAN01,SCNSAT	;Working on [0,1]SATT.SYS?		;011
+	BNE	108$		;No, skip				;011
+	CMP	UCLUS(R5),PCS	;Is the clustersize legal?		;011
+	BEQ	108$		; YES					;011
+	MESSAGE	<"[0,1]SATT.SYS">					;011
+106$:	MESSAGE <" clustersize is not = PCS"<200>>			;011
+	JMP	DEAD		;Sorry, can't do any more for you.	;011
+
+108$:	CLR	R0		;CLEAR FOR DIVIDE
+	DIV	DCS,R0		;COMPUTE # OF DEVICE CLUSTERS PER FILE CLU
+	MOV	R0,FILDCC	;SAVE FILE'S DEV CLU/CLU
+	CLR	REHOLE		;NO HOLES IN CLUSTER MAP
+	CLR	FILCTG		;DON'T SAY NON-CONTIGUOUS YET
+	CLR	FILDCN		;START DCN = 0 SO FAR
+	MOV	UCLUS(R5),R1	;GET CLUSTER SIZE OF FILE AGAIN FOR CLEAL7
+	CLR	FILBAD		;NO CONFLICTS WITH BADB.SYS FOUND YET
+	MOV	USIZ(R5),TRUSZL	;SAVE LSB FILE SIZE FROM DIRECTORY
+	CLR	TRUSZM		;ASSUME NO MSB FILE SIZE
+	TST	URTS(R5)	;THAT'S TRUE IF THERE'S A RTS NAME
+	BNE	110$
+	MOV	URTS+2(R5),TRUSZM ;SAVE MSB FILE SIZE FROM DIRECTORY
+
+; CHAIN THROUGH ACCOUNTING & ATTRIBUTE ENTRIES AND MARK THEM ALL
+
+110$:	BIC	#UL.FLG,R3	;REMOVE FLAG BITS FROM LINK TO AE OR AT
+	BEQ	130$		;END OF CHAIN (NEVER 1ST TIME FOR AE)
+	CALL	RDCHEK,R4	;READ THE ENTRY
+	 GENTXT	<"attribute">
+	 BR	120$		;BAD LINK OR ENTRY IN USE
+	BIC	#UL.FLG,(R5)	;REMOVE FLAG BITS FROM LINK TO NEXT
+	BIS	#UL.CLN!UL.USE,(R5) ;SET IN USE AND MARK IT
+	MARK	FIBUF		;REWRITE IT
+	MOV	R3,R2		;SAVE A BACKUP POINTER			;000
+	MOV	(R5),R3		;GET LINK TO NEXT ATTRIBUTE ENTRY
+	BR	110$		;TRY FOR IT
+
+120$:	MESSAGE	<" - attributes lost"<200>>
+	MOV	R2,R3		;RESTORE POINTER TO ENTRY LINKING TO BADDIE
+	CALLX	RDB		;FETCH IT
+	MOV	#UL.CLN!UL.USE,(R5) ;STOP THE ATTRIBUTE LIST HERE
+	MARK	FIBUF		;REWRITE IT
+
+; CHAIN THROUGH RETRIEVAL ENTRIES AND MARK THEM, ALLOCATING CLUSTERS
+
+130$:	BIT	#US.UFD,CLNUST	;IS THIS A UFD?
+	BNE	200$		;YES, THERE ARE NO RETRIEVAL ENTRIES
+	MOV	CLNUAR,R3	;GET LINK TO FIRST RETRIEVAL ENTRY
+	CLR	R4		;NO PREVIOUS ENTRY (THIS LINK WAS IN NE)
+140$:	BIC	#UL.FLG,R3	;REMOVE FLAG BITS FROM THE LINK
+	BEQ	200$		;NO MORE CLUSTERS
+	CALL	RDCHEK,R4	;READ THE RETRIEVAL ENTRY
+	 GENTXT	<"retrieval">
+	 BR	160$		;OOPS, BAD LINK
+	BIC	#UL.FLG,(R5)	;TURN OFF FLAG BITS IN LINK TO NEXT
+	BIS	#UL.CLN,(R5)+	;SET IT IN USE
+	MARK	FIBUF		;REWRITE CHANGES
+	BIT	#US.OUT,CLNUST	;IS THIS FILE OUT OF SAT (HISTORICAL) ?
+	BNE	150$		;YES, DON'T EVEN TRY TO ALLOCATE IT
+	BIS	SCAN01,SCANBB	;ARE WE CLEANING BADB.SYS?
+	BEQ	150$		;YUP, THAT'S ALREADY MARKED
+	CALL	CLEAL7		;ALLOCATE THE SEVEN RETRIEVAL POINTERS
+	BCS	90$		;Delete the file if not aligned right	;002
+	TST	(R5)		;IS THERE AT LEAST ONE RETRIEVAL POINTER?
+	BEQ	170$		;NO -- DELETE RE THAT LOOKS FREE
+	MOV	BADFLG,R0	;GET FLAG OF BADB.SYS CONFLICTS
+	BEQ	150$		;NO BAD CLUSTERS IN THIS ENTRY
+	BIS	R0,FILBAD	;SET MASTER FLAG FOR BAD BLOCK IN FILE
+	BIS	R0,-2(R5)	;FLAG A BAD CLUSTER IN THIS ENTRY
+	MARK	FIBUF		;CHANGES TO FIBUF
+150$:	MOV	R3,R4		;REMEMBER LINK TO THIS RE
+	MOV	-(R5),R3	;GET LINK TO NEXT RETRIEVAL ENTRY
+	BR	140$		;PROCESS IT
+
+160$:	MESSAGE	<" - file truncated"<200>>
+170$:	MOV	R4,R3		;GET LINK TO LAST RETRIEVAL ENTRY
+	BNE	180$		;THERE WAS ONE -- FINE.
+	MOV	CLNFNL,R3	;PREVIOUS POINTER WAS TO NAME ENTRY
+180$:	CALLX	RDB		;READ BACK THE BLOCK WITH THE LINK
+	TST	R4		;WAS LINK IN NAME ENTRY OR RE?
+	BNE	190$		;RETRIEVAL ENTRY, AT OFFSET ZERO
+	ADD	#UAR,R5		;SET OFFSET OF RETRIEVAL LINK IN NAME ENTRY
+190$:	BIC	#UL.LNK,(R5)	;TURN OFF ALL BUT FLAG BITS
+	MARK	FIBUF		;MODIFIED
+
+; MARK THE NAME ENTRY AND CLEAN IT UP
+
+200$:	MOV	CLNFNL,R3	;GET LINK TO NAME ENTRY
+	CALLX	RDB		;REREAD IT
+	BIT	CLNUST,#US.UFD!US.OUT ;OUT OF SAT OR UFD?
+	BNE	210$		;YUP, DON'T DOUBLE-CHECK SIZE		;000
+	BIS	SCAN01,SCANBB	;DON'T FIX BADB.SYS[0,1]
+	BNE	220$		;Wasn't, so go check file size		;000
+210$:	JMP	390$							;000
+
+220$:	TST	REHOLE		;TELL HIM WE FIXED HOLES IN RETRIEVAL ENTRIES? ;000
+	BEQ	230$		;NO
+	MESSAGE	<"Invalid retrieval entries for file ">
+	CALL	PRTPNC		;PRINT CURRENT [P,PN]FILNAM.EXT
+	MESSAGE	<" fixed"<200>>						;003
+230$:	MOV	FILSZL,R2	;GET COMPUTED FILE SIZE
+	MOV	FILSZM,R3	;IN (R3,R2)
+	BIS	SCAN01,SCNSAT	;Working on [0,1]SATT.SYS?		;000
+	BNE	260$		;No, skip				;000
+	TSTB	FILCTG		;Is it contiguous?			;000
+	BNE	310$		;No, but it should be			;000
+	TST	R3		;Large file?				;000
+	BNE	240$		;Yes, that's large enough		;000
+	CMP	R2,SATSYS+SEGS	;Big enough for SAT?			;000
+	BLO	320$		;No way, die				;000
+240$:	TST	TRUSZM		;Does UFD say large file?		;000
+	BNE	260$		;Yes, that's good enough		;000
+	MOV	R1,-(SP)	;Save a register			;000
+	MOV	SATSYS+BITS,R1	;Get number of clusters in SAT		;000
+	CLR	R0							;000
+	ADD	#7777,R1	;Round up to multiple of 4096.		;000
+	ASHC	#-12.,R0	;Divide by bits/block			;000
+	CMP	TRUSZL,R1	;Does UFD have large enough size?	;000
+	BHIS	250$		;Yes, so we're all set			;000
+	MOV	R1,TRUSZL	;No, so change it			;000
+	MOV	UAA(R5),R3	;Get link to accounting  entry		;000
+	CALLX	RDB		;Read it				;000
+	MOV	R1,USIZ(R5)	;Update size in UFD			;000
+	MARK	FIBUF		;Have it written back			;000
+	MOV	R1,FCSATT+FCSIZ	;Also update size in FCB		;000
+	MESSAGE	<"Size of [0,1]SATT.SYS fixed"<200>>			;003
+	MOV	CLNFNL,R3	;Get name entry link again		;000
+	CALLX	RDB		;Read it				;000
+	MOV	FILSZM,R3	;Restore R3				;000
+250$:	MOV	(SP)+,R1	;Restore R1				;000
+260$:	CMP	R3,TRUSZM	;COMPARE WITH DIRECTORY FILE SIZE
+	BNE	270$
+	CMP	R2,TRUSZL	;MSB MATCHED, CHECK LSB
+	BEQ	390$		;EXACT MATCH IS FINE
+270$:	BHI	330$		;COMPUTED > DIRECTORY -- HANDLE ELSEWHERE
+
+; DIRECTORY HAS SIZE TOO LARGE.  MAYBE THAT'S BECAUSE MSB FILESIZE IN
+; DIRECTORY HAS BEEN TRASHED.  SEE IF MAKING IT ZERO WOULD BE OK.
+
+	TST	TRUSZM		;IS DIRECTORY MSB FILESIZE TRASH?
+	BEQ	300$		;NO -- A GENUINE ERROR
+	TST	R3		;COMPARE (R3,R2) WITH (0,TRUSZL)
+	BNE	280$
+	CMP	R2,TRUSZL	;MSB MATCHED, CHECK LSB
+	BLO	300$		;DIRECTORY SIZE STILL LARGER -- REAL ERROR
+280$:	SUB	R1,R2		;DECREMENT COMPUTED SIZE BY FCS
+	SBC	R3		;NOTE (R3,R2) WAS GREATER THAN ZERO
+	BNE	290$		;COMPARE (R3,R2) WITH (0,TRUSZL)
+	CMP	R2,TRUSZL	;MSB MATCHED, CHECK LSB
+	BLO	360$		;DIR SIZE SOMEWHERE IN LAST CLUSTER IS OK
+290$:	ADD	R1,R2		;ADD FILE CLUSTER SIZE BACK IN
+	ADC	R3
+300$:	MESSAGE	<"UFD has size too large for file ">
+	BR	350$		;GO DO IT
+
+310$:	MESSAGE	<"[0,1]SATT.SYS is not contiguous"<200>>		;000
+	JMP	DEAD		;Quit					;000
+									;000
+320$:	MESSAGE	<"[0,1]SATT.SYS is too small for SAT"<200>>		;000
+	JMP	DEAD		;Give up on this one also		;000
+
+; DIRECTORY SIZE SMALLER THAN COMPUTED SIZE.  IF IT'S SOMEWHERE IN THE
+; LAST FILE CLUSTER, THAT'S FINE.
+
+330$:	SUB	R1,R2		;DECREMENT COMPUTED SIZE BY FCS
+	SBC	R3
+	CMP	R3,TRUSZM	;COMPARE (R3,R2) WITH (TRUSZM,TRUSZL)
+	BNE	340$
+	CMP	R2,TRUSZL	;MSB MATCHED, CHECK LSB
+340$:	BLO	390$		;DIRECTORY > (COMPUTED-FCS), THAT'S FINE
+	ADD	#1,R2		;SET TO USE 1 BLOCK IN LAST FILE CLUSTER
+	ADC	R3
+	MESSAGE	<"UFD has size too small for file ">
+350$:	CALL	PRTPNC		;PRINT CURRENT [P,PN]FILNAM.EXT
+	MOV	R2,TRUSZL	;SAVE SIZE WE DECIDED TO USE
+	MOV	R3,TRUSZM
+	MESSAGE	<" - changed to ">
+	CALLX	DBLZER		;TELL HIM THE NEW SIZE
+	CALLX	TYPECR							;003
+	MOV	R3,-(SP)	;SAVE R3 (MSB SIZE)
+	MOV	UAA(R5),R3	;POINT TO THE ACCOUNTING ENTRY
+	CALLX	RDB		;READ IT
+	MOV	R2,USIZ(R5)	;FIX LSB SIZE IN THE DIRECTORY
+	MOV	(SP)+,R3	;RESTORE MSB SIZE
+	BEQ	370$		;ZERO IS SPECIAL
+	MOV	R3,URTS+2(R5)	;FIX MSB SIZE IN THE DIRECTORY
+	CLR	URTS(R5)	;MAKE SURE IT LOOKS LIKE A SIZE
+	BR	380$		;DONE FIXING
+
+; ENTER HERE TO CLEAR MSB SIZE BUT LEAVE LSB SIZE ALONE.
+
+360$:	MOV	UAA(R5),R3	;POINT TO THE ACCOUNTING ENTRY
+	CALLX	RDB		;READ IT
+	CLR	TRUSZM		;CLEAR SAVED MSB SIZE
+370$:	TST	URTS(R5)	;DOES THE FILE HAVE AN RTS NAME?
+	BNE	380$		;YES, MSB FILE SIZE IS ALREADY ZERO
+	MOV	#^R RS,URTS(R5)	;NO, PUT IN A BOGUS RTS NAME " RSTS"
+	MOV	#^RTS ,URTS+2(R5)
+380$:	MARK	FIBUF
+390$:	MOV	FILBAD,R0	;GET BADB FLAG FOR THIS FILE
+	BEQ	410$		;NO BAD BLOCKS IN THE FILE
+	MOV	CLNUAA,R3	;GET LINK TO ACCOUNTING ENTRY
+	CALLX	RDB		; AND READ IT
+	MOV	CLNUAR,R3	;GET LINK TO FIRST RETRIEVAL ENTRY
+	BIS	R0,(R5)		;MARK THE AE OF THE FILE WITH THE BADB FLAG
+400$:	MARK	FIBUF		;REWRITE THE MARK
+	BIC	#UL.FLG,R3	;TRIM RETRIEVAL ENTRY LINK
+	BEQ	410$		;NO MORE
+	CALLX	RDB		;READ A RETRIEVAL ENTRY
+	MOV	(R5),R3		;GET LINK TO NEXT
+	XOR	R0,R3		;INVERT SENSE OF BAD FLAG IN LINK WORD
+	MOV	R3,(R5)		;SAVE THE CHANGED FLAG BIT
+	BR	400$		;GO MARK FIBUF AND REPEAT
+
+410$:	MOV	CLNFNL,R3	;RESTORE LINK TO NAME ENTRY OF THIS FILE
+	CALLX	RDB		;READ IT BACK
+	BICB	#US.DEL!US.UPD!US.WRT,USTAT(R5) ;TURN OFF SOME BITS
+	BICB	FILCTG,USTAT(R5) ;TURN OFF US.NOX IF NOT TRULY CTG
+	TST	TRUSZM		;IS FILE LARGER THAN 65535 BLOCKS?
+	BEQ	420$
+	BICB	#UP.RUN,UPROT(R5) ;YES, DON'T ALLOW RUN
+420$:	BIC	#UL.FLG-UL.CHE,UAA(R5)	;TRIM THE LINK TO ACCOUNTING ENTRY
+	BIT	#US.UFD,USTAT(R5) ;IS THE ENTRY FOR A UFD?
+	BNE	430$		;ALL BITS IN UAR ARE SIGNIFICANT FOR UFD
+	BIC	#UL.FLG,UAR(R5)	;TRIM THE LINK TO FILE RETRIEVAL ENTRY
+430$:	BIC	#UL.FLG-UL.CHE,(R5)	;TRIM THE LINK TO THE NEXT NAME ENTRY
+	BIS	#UL.CLN,(R5)	;MARK THIS NAME ENTRY IN USE
+	MARK	FIBUF		;MARK FIBUF BLOCK AS CHANGED
+	RETURN
+
+.DSABL	LSB
+
+	TMPORG	CLNCTL
+CLNUAA:	.WORD	0		;LINK TO ACCOUNTING ENTRY OF FILE
+CLNUAR:	.WORD	0		;LINK TO RETRIEVAL ENTRY OF FILE
+CLNUST:	.WORD	0		;USTAT VALUE OF FILE BEING CLEANED
+	UNORG
+
+GLOBAL	<PCS,DCS,SATSYS,FCSATT,CLNDBG>					;010
+
+.ENABL	LSB
+
+RDCHEK:	MOV	(R4)+,50$	;SAVE TYPE OF ENTRY WE ARE TRYING TO READ
+	CALL	RDBCHK		;READ IT
+	BCS	10$		;SKIP IF BAD LINK
+	BIT	#UL.CLN,(R5)	;IS THIS ENTRY DOUBLY ALLOCATED?
+	BNE	20$		;YES, GO ERROR HIM
+	MOV	(R5),-(SP)
+	BIS	2(R5),(SP)+	;ARE FIRST TWO WORDS OF ENTRY BOTH ZERO?
+	BEQ	30$		;YES, LINK POINTS TO A HOLE
+	TST	(R4)+		;SKIP TO NO-ERROR RETURN
+	RETURN	R4
+
+10$:	MESSAGE	<"Bad link to ">
+	BR	40$
+
+20$:	MESSAGE	<"Doubly allocated ">
+	BR	40$
+
+30$:	MESSAGE	<"Entry is a hole: ">
+40$:	CALLX	MESSAG,R5	;PRINT THE ENTRY TYPE
+50$:	 .WORD	0
+	MESSAGE	<" entry in UFD for file ">
+	CALL	PRTCLF		;PRINT THE FILE WE ARE CLEANING
+	RETURN	R4		;TAKE THE ERROR EXIT
+
+.DSABL	LSB
+
+.SBTTL	ALLOCATE UP TO 7 CLUSTERS
+
+.ENABL	LSB
+
+CLEAU7:	TST	(PC)+		;CLEAR CARRY, SKIP SEC
+CLEAL7:	SEC			;C=1 IF FILE, 0 IF UFD BEING CLEANED
+	ROR	CLEAUF		;CLEAUF < 0 IFF FILE BEING CLEANED
+	BIC	#100000,R1	;Clear the flag bit from clustersize	;000
+	REGSCR			;SAVE REGISTERS
+	CLR	-(SP)		;Indicate no alignment errors yet	;000
+	CLR	BADFLG		;NO BADB.SYS CONFLICT YET FOR THIS RE
+	CLR	R0		;CLEAR FOR DIVIDE
+	DIV	PCS,R0		;FILE CLUSTER SIZE/PCS = # BITS PER RP
+	BNE	5$		;valid, so ok				;009
+	INC	R0		;Large disk, so fcs<pcs, set it	ok	;009
+5$:	MOV	R0,R1		;R1 = BITS TO SET PER CLUSTER
+
+; LOOP THROUGH EACH RP IN THE DIRECTORY ENTRY
+
+10$:	MOV	(R5)+,R4	;GET NEXT RP
+	BNE	20$		;Got one, process it			;000
+	JMP	EORE		;Done, make sure the rest are all 0	;000
+
+20$:	MOV	FILDCN,R3	;GET PREVIOUS CLUSTER NUMBER
+	BEQ	30$		;NONE, THIS IS THE FIRST
+	ADD	FILDCC,R3	;ADD IN NUMBER OF DEV CLUS PER FILE CLU
+	CMP	R3,R4		;THIS SHOULD = CURRENT CLUSTER IF CTG
+	BEQ	30$		;AND IT DOES, SO IT'S CONTIGUOUS HERE
+	MOV	#US.NOX,FILCTG	;TURN OFF THE CONTIGUOUS FLAG LATER
+30$:	MOV	R4,FILDCN	;SAVE THIS CLUSTER FOR NEXT TIME
+	ADD	TOS.R1+2(SP),FILSZL ;ADD ONE CLUSTER TO THE SIZE	;000
+	ADC	FILSZM		;DOUBLE PRECISION INTEGER
+	DEC	R4		;PCN = (DCN - 1) / CLUSTER RATIO
+	MOV	CLURAT,R3	;GET CLUSTER RATIO
+40$:	ASR	R3		;DIVIDE BY IT
+	BCS	50$
+	;CLC
+	ROR	R4
+	BCC	40$		;THIS BETTER BE ON A PCN BOUNDARY
+	MESSAGE	<"Cluster allocated to ">
+	CALL	CLNPRT		;PRINT THE ITEM
+	MESSAGE	<" is not on a pack cluster boundary">
+	BR	170$		;DIE
+
+50$:	CMP	SATSYS+BITS,R4	;IS THIS WITHIN THE LIMIT OF PACK CLUS?
+	BLOS	160$		;NOPE
+	;CLC			;C=0 SINCE 'BLO'='BCC'
+	MOV	R1,R0		;Copy bits/file cluster			;000
+	DEC	R0		;Make into a mask			;000
+	BIT	R0,R4		;Check the alignment			;000
+	BEQ	60$		;It's good				;000
+	BIC	R0,R4		;Fix it					;000
+	MOV	#1,(SP)		;Flag it for error exit status		;000
+60$:	MOV	R4,R2		;COPY PACK CLUSTER NUMBER
+	BIC	#^C<7>,R2	;COMPUTE BIT NUMBER
+	MOVB	BITBYT(R2),R2	;GET BIT TO CHECK
+	ROR	R4		;COMPUTE BYTE WITHIN SATBUF
+	ASR	R4		; BY DIVIDING
+	ASR	R4		;  BY 8.
+	MOV	R4,R3		;COPY BYTE WITHIN SATBUF
+	ADD	#SATBUF,R3	; AND CHANGE TO TRUE ADDRESS
+	MOV	R1,R0		;COPY COUNT OF BITS TO SET
+	CMP	R1,#8.		;DO WE SET 8 OR MORE BITS?
+	BGT	100$		;YES, DO IT BY BYTES (FASTER)
+
+; ALLOCATE UP TO 4 PACK CLUSTERS, A BIT AT A TIME
+
+70$:	BITB	R2,(R3)		;BAD OR DOUBLY ALLOCATED BLOCK?
+	BEQ	90$		;NO, GO ALLOCATE
+	MOV	R4,-(SP)	;YES, PUSH SATBUF OFFSET
+	CALLX	GETSB2		;GET BYTE FROM BUFFER 2
+	BITB	R2,(SP)		;IS THIS BLOCK IN BADB.SYS (AND NO OTHER FILE)?
+	BEQ	80$		;NOPE, IT REALLY IS DOUBLY ALLOCATED
+	BICB	R2,(SP)		;YES, REMOVE IT FROM MAP (SINCE IT'S IN A FILE)
+	CALLX	PUTSB2		; SO THAT FUTURE HITS YIELD DOUBLE ALLOCATION
+	CALL	GOTBAD		;GIVE HIM THE OPTION OF DELETING THE FILE
+	BR	90$		;IF NO DELETION, ALLOCATE THE FILE
+
+80$:	TST	(SP)+		;DUMP BYTE
+	CALL	SCNBIT		;FIND OUT WHY
+90$:	BISB	R2,(R3)		;MARK THE BIT
+	ASL	R2		;GO TO NEXT
+	SOB	R0,70$		;DO FOR EACH PACK CLU IN THE FILE CLUSTER
+	BR	150$
+
+GLOBAL	<PCS,CLURAT,SATSYS,BITBYT,SATBUF>
+
+; ALLOCATE 8 OR MORE PACK CLUSTERS, 8 BITS AT A TIME
+
+100$:	CMP	R4,SATSYS+BYTS	;STILL IN SAT RANGE?
+	BHIS	160$		;NO
+	TSTB	(R3)		;ANY PACK CLU HERE BAD OR DOUBLY ALLOCATED?
+	BEQ	140$		;NO, JUST ALLOCATE
+	MOV	R4,-(SP)	;YES, PUSH SATBUF OFFSET
+	CALLX	GETSB2		;GET BYTE OF BADB.SYS MAP
+	CLR	-(SP)		;FIRST, REPLACE IT WITH 0 (ALL ARE IN FILE)
+	CALLX	PUTSB2		; SO FUTURE FINDS WILL GIVE DOUBLE ALLOC
+	BICB	(SP)+,(R3)	;TAKE BAD CLUSTERS OUT OF SATBUF
+	BNE	110$		;STILL SOME ALLOCATED, RESOLVE DOUBLE ALLOCATION
+	CALL	GOTBAD		;ONLY BAD BLOCKS, SO ALLOW HIM TO DELETE FILE
+	BR	140$		;NO DELETE, GO ALLOCATE
+
+110$:	MOV	#1,R2		;SCAN EACH BIT FOR DOUBLE ALLOCATION
+120$:	BITB	R2,(R3)		;IS THIS BIT ON?
+	BEQ	130$		;NO
+	CALL	SCNBIT		;YES, SCAN OUT FOR CONFLICT
+130$:	ASLB	R2		;NEXT BIT
+	BCC	120$		;BRANCH IF NOT DONE
+140$:	MOVB	#377,(R3)+	;SET THE WHOLE BYTE IN USE
+	INC	R4		;ADVANCE TO NEXT BYTE
+	SUB	#10,R0		;AND COUNT DOWN 8 MORE PACK CLUSTERS
+	BNE	100$		;OK, GO ON
+
+; DONE ALLOCATION OF THIS RP.  TRY FOR MORE OR RETURN
+
+150$:	BIT	R5,#17		;DONE WITH ALL 7 ENTRIES?
+	BNE	10$		;NO
+	ROR	(SP)+		;Return status				;000
+	RETURN
+
+160$:	MESSAG	<"Directory entry for ">
+	CALL	CLNPRT		;PRINT THE ITEM WE WERE WORKING ON
+	MESSAG	<" contains pack cluster number which is too big">
+170$:	JMP	CLNERR		;GO MAKE SURE HE WANTS IT DELETED
+
+; 0 ENTRY FOUND IN R.E., SO THE REST OF THE R.E. BETTER BE 0
+
+180$:	CLR	-(R5)		;ZAP ANY CLUSTER FOLLOWING A HOLE
+	INC	REHOLE		;INDICATE A HOLE
+	MARK	FIBUF		;SHIP OUT THE ZAPPED R.E.
+190$:	TST	(R5)+		;IF NOT END OF R.E., BETTER ALL BE 0
+	BNE	180$		;NOPE, CLOBBER IT
+EORE:	TST	CLEAUF		;CLEANING UFD?
+	BPL	200$		;YUP, CLUSTER MAP ALREADY CHECKED
+	BIT	R5,#17		;DONE WITH THIS RETRIEVAL ENTRY?
+	BNE	190$		;NO, CHECK FOR NON-0  ENTRY AFTER HOLE
+	BIT	#UL.LNK,-20(R5)	;ZERO R.P. MEANS LINK BETTER BE 0
+	BEQ	200$		;AND IT IS
+	BIC	#UL.LNK,-20(R5)	;NO LINK NOW
+	BIS	#UL.CLN,-20(R5)	; BUT IT'S IN USE
+	INC	REHOLE		;NOPE, INDICATE A HOLE IN THE R.E.
+	MARK	FIBUF		;REWRITE THE ZAPPED ENTRY
+200$:	ROR	(SP)+		;Return status				;000
+	RETURN
+
+.DSABL	LSB
+	TMPORG	CLNCTL
+CLEAUF:	.WORD	0		;<0 IF FILE, >= 0 IF UFD
+	UNORG
+
+GLOBAL	<PCS,CLURAT,SATSYS,BITBYT,SATBUF>
+
+.ENABL	LSB
+
+CLNCHN:	MOV	(R4)+,70$	;SAVE TYPE OF ENTRY WE ARE TRYING TO READ ;000
+	CLR	R2		;Indicate no previous link		;000
+10$:	BIC	#UL.FLG,R3	;Clear out flags from link		;000
+	BEQ	20$		;Branch if null link			;000
+	CALL	RDBCHK		;READ IT				;000
+	BCS	30$		;SKIP IF BAD LINK			;000
+	BIT	#UL.CLN,(R5)	;IS THIS ENTRY DOUBLY ALLOCATED?	;000
+	BNE	40$		;YES, GO ERROR HIM			;000
+	MOV	(R5),-(SP)						;000
+	BIS	2(R5),(SP)+	;ARE FIRST TWO WORDS OF ENTRY BOTH ZERO? ;000
+	BEQ	50$		;YES, LINK POINTS TO A HOLE		;000
+	BIS	#UL.CLN,(R5)	;Mark this item as in use		;000
+	MARK	FIBUF		;Write it back				;000
+	MOV	R3,R2		;Save link to this one			;000
+	MOV	(R5),R3		;Pick up link to next one		;000
+	BR	10$		;Go process it				;000
+
+20$:	TST	(R4)+		;SKIP TO NO-ERROR RETURN		;000
+	RETURN	R4							;000
+
+30$:	MESSAGE	<"Bad link to ">					;000
+	BR	60$							;000
+
+40$:	MESSAGE	<"Doubly allocated ">					;000
+	BR	60$							;000
+
+50$:	MESSAGE	<"Entry is a hole: ">					;000
+60$:	CALLX	MESSAG,R5	;PRINT THE ENTRY TYPE			;000
+70$:	 .WORD	0							;000
+	RETURN	R4		;TAKE THE ERROR EXIT			;000
+
+.DSABL	LSB
+
+.SBTTL	SCAN THE DIRECTORY FOR THE ITEM WHICH CONFLICTS
+
+.ENABL	LSB
+
+SCNBIT:	REGSCR			;PRESERVE REGISTERS
+	ASH	#3,R4		;SAT OFFSET * 8
+10$:	ASR	R2		;SHIFT BIT MASK
+	BCS	20$		;NO HIGHER CLUSTER NUMBER
+	INC	R4		;BUMP THE PACK CLU #
+	BR	10$		;LOOP
+
+20$:	MOV	CLURAT,R5	;R4 = PCN * (PCS/DCS)
+30$:	ASR	R5
+	BCS	40$
+	ASL	R4
+	BR	30$
+
+40$:	CLR	CHKPPN		;No account being checked yet		;000
+	TSTB	REVLVL		;New pack?				;000
+	BEQ	50$		;If not, don't check for pack label	;000
+	TST	R4		;Is he pointing at pack label?		;000
+	BNE	50$		;No, just as well			;000
+	JMP	CLNDBL		;Yes, the rat!				;000
+
+50$:	INC	R4		;Add 1 to get DCN = RP of bad cluster	;000
+	CALL	FIBSAV		;SAVE CURRENT FIP BLOCK NUMBER
+	CALLX	READMF		;READ IN THE FIRST BLOCK OF THE MFD
+	MOV	FIBUF,-(SP)	;SAVE LINK TO FIRST MFD NAME ENTRY
+	MOV	#NXTOLD,-(SP)	;Use old way of going through directories ;000
+	MOV	#1,CHKDCN	; which means MFD starts at 1		;000
+	TSTB	REVLVL		;Old style pack?			;000
+	BEQ	100$		;Yes, go to it				;000
+	CLR	2(SP)		;Start at PPN [0,1]			;000
+	MOV	#NXTNEW,(SP)	; and use new way of scanning		;000
+	MOV	#255.*400+255.,CHKPPN ;We'll check MFD first		;000
+	MOV	#FIBMAP,R5	;Point to cluster map			;000
+	MOV	(R5)+,R1	;Get clustersize			;000
+	MOV	SP,CHEKBB	;Not checking BADB.SYS			;000
+	CALL	CHK7RP		;Check the MFD cluster map		;000
+60$:	CLR	-(SP)		;Start with group [0,*]			;000
+70$:	CMPB	(SP),CLNPPN+1	;Beyond the current group?		;000
+	BHI	90$		;Yes, start checking UFDs		;000
+	MOVB	(SP),CHKPPN+1	;Now we're checking this GFD		;000
+	MOV	MFDDCN,R2	;Get MFD starting DCN			;000
+	CALLX	CNVRIB		;Convert to FBN				;000
+	ADD	#1,R2		;Point to DCN table			;000
+	ADC	R3							;000
+	CALLX	READ		;Read it				;000
+	MOV	(SP),R0		;Get group number			;000
+	ASL	R0		;Word offset				;000
+	MOV	FIBUF(R0),R2	;Get GFD starting DCN			;000
+	BEQ	80$		;None, do next one			;000
+	CALLX	READRF		;Read its first block			;000
+	MOV	#FIBMAP,R5	;Point to cluster map			;000
+	MOV	(R5)+,R1	;Get clustersize			;000
+	CALL	CHK7RP		;Check this GFD				;000
+80$:	INC	(SP)		;Next group				;000
+	BR	70$		;Go process it				;000
+
+90$:	TST	(SP)+		;Clean up the stack			;000
+
+; SCAN EACH ACCOUNT IN THE MFD TRYING TO FIND THE CONFLICT
+
+100$:	CALL	@(SP)		;Go get the next account's name entry	;000
+	BCS	150$		;WHAT? WE NEVER FOUND THE OFFENDER??	;000
+	MOV	R3,CHKUFL	;SAVE LINK (IN MFD) TO UFD NE BEING CHECKED
+	CLR	CHKFNL		;CLEAR LINK TO FILE NAME SO CHECK IS UFD
+	MOV	UNAM(R5),CHKPPN	;Save PPN currently being checked	;000
+	MOV	UAR(R5),R2	;GET RP TO THE FIRST BLOCK OF THE UFD
+	BEQ	100$		;OH, AN ACCOUNT WITH NO UFD.  EASY
+
+; FOUND AN ACCOUNT IN THE MFD.  CHECK IT AND ALL FILES IN IT
+
+	MOV	UNAM(R5),CHEK01	;YES, SET CHEK01 TO THE PPN
+	DEC	CHEK01		;CHEK01 = 0 IFF PPN = [0,1]
+	MOV	(PC),CHEKBB	;CHEKBB<>0, SO NOT SCANNING BADB.SYS[0,1]
+	CALLX	READRF		;READ IN FIRST BLOCK OF UFD (RP IN R2)
+	MOV	#FIBMAP,R5	;R5 -> UFD CLUSTER MAP
+	MOV	(R5)+,R1	;R1 = CLUSTER SIZE OF UFD
+	CALL	CHK7RP		;CHECK OUT THE CLUSTER MAP OF THE UFD
+	CLR	CHKFNL		;SET CHKFNL FLAG TO INDICATE UFD
+	MOV	FIBUF,-(SP)	;SAVE LINK TO FIRST NAME ENTRY IN THE UFD
+
+; LOOP THROUGH ALL FILES IN THE UFD, CHECKING EACH FOR CONFLICTS
+
+110$:	MOV	(SP)+,R3	;RESTORE LINK TO NEXT NAME ENTRY
+	CMP	CHKUFL,CLNUFL	;ARE WE CHECKING THE UFD THAT HAD THE ERROR?
+	BNE	120$		;NO
+	CMP	CHKFNL,CLNFNL	;YES, ARE WE CHECKING THE EXACT BAD FILE?
+	BEQ	140$		;YES, NOTHING CONFLICTING FOUND, RETURN
+120$:	BIC	#UL.FLG,R3	;REMOVE FLAG BITS
+	BEQ	100$		;Done with this account, do another	;000
+	MOV	R3,CHKFNL	;REMEMBER LINK IN UFD TO FILE
+	CALLX	RDB		;GET NAME ENTRY (A REPEAT, SO ERROR IMPOSSIBLE)
+	MOV	(R5)+,-(SP)	;SAVE LINK TO NEXT NAME ENTRY
+.ASSUME	UNAM EQ 2							;000
+	CALL	CKBADB,R0,CHEKBB ;SET CHEKBB=0 IF NAME = BADB.SYS
+	ADD	#USTAT-UNAM,R5	;Point to status			;000
+	BIT	#US.UFD!US.OUT,(R5)+ ;UFD OR OUT OF SAT?
+	BNE	110$		;YUP, NO RETRIEVAL ENTRIES WORTH NOTING
+	TST	(R5)+		;SKIP ACCESS COUNT
+	MOV	(R5)+,R3	;R3 = LINK TO ACCOUNTING ENTRY
+.ASSUME	UAA EQ USTAT+4							;000
+	MOV	(R5)+,R2	;SAVE LINK TO RETRIEVAL ENTRIES
+.ASSUME	UAR EQ UAA+2							;000
+	CALLX	RDB		;READ ACCOUNTING ENTRY
+	MOV	UCLUS(R5),R1	;R1 = CLUSTER SIZE OF FILE
+
+; LOOP THROUGH ALL RETRIEVAL ENTRIES CHECKING FOR CONFLICT
+
+130$:	MOV	R2,R3		;R3 = LINK TO RETRIEVAL ENTRY
+	BIC	#UL.FLG,R3	;REMOVE FLAG BITS
+	BEQ	110$		;DONE WITH THIS FILE
+	CALL	RDBCHK		;READ RETRIEVAL ENTRY (MAY BE LATER IN SAME FILE!)
+	BCS	150$		;IF ERROR, WE HAVE A REAL PROBLEM
+	MOV	(R5)+,R2	;SAVE LINK TO NEXT
+	CALL	CHK7RP		;CHECK OUT THE RETRIEVAL POINTERS
+	BR	130$		;KEEP MOVING
+
+140$:	CMP	(SP)+,(SP)+	;Fix up the stack			;000
+	CALL	FIBRES		;RESTORE BLOCK IN FIBUF WHEN WE BEGAN
+	RETURN			;AND DONE
+
+150$:	ERF	<"Rebuild bug -  failed to find allocation error">
+
+.DSABL	LSB
+
+GLOBAL	<CLURAT,FIBUF,FIBMAP>
+
+.SBTTL	Go through MFD/GFD looking for accounts
+
+.ENABL	LSB
+
+NXTOLD:	CALLX	READMF		;Re-read the MFD			;000
+	MOV	4(SP),R3	;Get link to next item			;000
+	BIC	#UL.FLG,R3	;Clear out flags			;000
+	BEQ	10$		;No accounts left!			;000
+	CALLX	RDB		;Read the name entry			;000
+	MOV	(R5),4(SP)	;Save link to next			;000
+	CLC			;Indicate happiness			;000
+	RETURN								;000
+
+10$:	SEC			;End of chain				;000
+	RETURN
+
+
+
+NXTNEW:	INC	4(SP)		;Advance PPN				;000
+	CMP	4(SP),CLNPPN	;Beyond the current PPN?		;000
+	BHI	10$		;Done if so				;000
+	MOV	MFDDCN,R2	;Get DCN of MFD				;000
+	CALLX	CNVRIB		;Convert to FBN				;000
+	ADD	#1,R2		;Point to GFD DCN table			;000
+	ADC	R3							;000
+	CALLX	READ		;Read that				;000
+	CLR	R0		;Avoid sign extension			;000
+	BISB	4+1(SP),R0	;Get group number			;000
+	ASL	R0		;Word offset				;000
+	MOV	FIBUF(R0),R2	;Get GFD starting DCN			;000
+	BNE	20$		;Found it				;000
+	BISB	#377,4(SP)	;Start on next group now		;000
+	BR	NXTNEW		;Go for it				;000
+
+20$:	MOV	R2,CHKDCN	;Save DCN of GFD being looked into	;000
+	CALLX	CNVRIB		;Convert to FBN				;000
+	ADD	#2,R2		;Point to name entry link table		;000
+	ADC	R3							;000
+	CALLX	READ		;Read that				;000
+	CLR	R0		;Avoid sign extension			;000
+	BISB	4(SP),R0	;Get user number			;000
+	ASL	R0		;Word offset				;000
+	MOV	FIBUF(R0),R0	;Save link				;000
+	BEQ	NXTNEW		;If none, get the next one		;000
+	MOV	CHKDCN,R2	;Re-get starting DCN			;000
+	CALLX	READRF		;Read GFD's first block			;000
+	MOV	R0,R3		;Pick up link value			;000
+	CALLRX	RDB		;Read it and exit
+
+.DSABL	LSB
+
+.SBTTL	CHECK RETRIEVAL POINTERS FOR CONFLICTS
+
+CHK7RP:	BIS	CHEK01,CHEKBB	;CHECKING BADB.SYS[0,1]?
+	BEQ	40$		;YES, DON'T DO IT
+	BIC	#100000,R1	;Clear funny flag			;000
+	MOV	R1,-(SP)	;REMEMBER FILE CLUSTER SIZE
+	CLR	R0		;CLEAR FOR DIVIDE
+	DIV	DCS,R0		;R0 = # OF DEV CLUS PER RP
+10$:	MOV	(R5)+,R1	;R1 = RP = DCN
+	BEQ	30$		;NO MORE
+	CMP	R1,R4		;IS THIS RP >= FAILING RP?
+ 	BHI	20$		;YES, NO WAY IT COULD BE BAD
+	ADD	R0,R1		;NO, SET R1 = FIRST UNUSED DCN
+	CMP	R1,R4		;IS JUST BEYOND THIS AREA > FAILING RP?
+	BHI	CLNDBL		;YUP, WE FOUND THE DOUBLE ALLOCATION
+20$:	BIT	R5,#17		;TRY THE NEXT RP
+	BNE	10$		;IF ANY
+30$:	MOV	(SP)+,R1	;RESTORE R1
+40$:	RETURN
+
+GLOBAL	<DCS>
+
+.SBTTL	FOUND A BAD BLOCK.  ASK FOR DELETE OF FILE OR ACCOUNT
+
+.ENABL	LSB
+
+GOTBAD:	REGSCR			;SAVE REGS
+	CALL	FIBSAV		;SAVE BLOCK NUMBER IN FIBUF
+	CALLX	RCTRLO		;SPEAK
+	CALL	CLNPRT		;PRINT THE OFFENDING FILE NAME
+	MESSAG	<" has a bad block."<200>>
+	MOV	#CLNUFL,R4	;TELL HIM IT HAS A BADDIE
+	CALL	DLTABL		;IS IT DELETABLE?
+	BCC	10$		;YES
+	MESSAG	<"It cannot be deleted."<200>>
+	BR	20$		;RESTORE THE WORLD AND SET THE FLAG
+
+10$:	TSTB	AUTOQS		;AUTO-RESTART?
+	BMI	20$		;YES, DON'T DELETE THE FILE
+	CALLX	YESNO,R5	;ASK FOR DELETION
+	 GENTXT	<<177>"Delete? ">
+	 GENTXT
+	  .ASCII "Type 'YES' to delete the file (or account) with the bad block."<200>
+	  .ASCII "Type 'NO' to retain it and mark it in the directory."<200>
+	  .ASCIZ <177><12>"Should this file (or account) be deleted? "
+	 UNORG
+	 BR	10$		;^Z -- REPEAT THE QUESTION
+	 BR	10$		;LF -- REPEAT THE QUESTION
+	 BR	20$		;NO -- MARK IT BAD AND CONTINUE
+	 BR	CLNERR		;YES -- GO DELETE IT
+
+20$:	BIS	#UL.BAD,BADFLG	;SET FLAG FOR CALLER SAYING BAD BLOCK
+	CALL	FIBRES		;RESTORE THE BLOCK IN FIBUF
+	RETURN			;RESTORE REGS, RETURN
+
+.DSABL	LSB
+
+GLOBAL	<AUTOQS>
+
+.SBTTL	HANDLE DOUBLY ALLOCATED CLUSTERS
+
+.ENABL	LSB
+
+CLNDBL:	REGSCR			;SAVE REGISTERS
+	CALL	FIBSAV		;SAVE THE BLOCK IN FIBUF
+10$:	MESSAG	<<177><12>"Doubly allocated block found at device cluster ">
+	MOV	TOS.R4+4(SP),R0	;GET THE OFFENDING RP
+	CALLX	DECZER		;PRINT IT
+	MESSAG	<<200>"The block is allocated to ">
+	TST	CHKPPN		;The pack label?			;000
+	BNE	20$		;No					;000
+	MESSAGE	<"the pack label">					;000
+	BR	40$		;Go on					;000
+
+20$:	CALL	CLNPRC		;THE EARLIER ONE IS PRINTED FIRST	;000
+	CMP	CLNPPN,CHKPPN	;Same PPN for both?			;000
+	BNE	40$		;No					;000
+	CMPB	CLNPPN,#255.	;GFD/MFD?				;000
+	BEQ	30$		;Yes, no further check			;000
+	CMP	CLNFNL,CHKFNL	;Same file?				;000
+	BNE	40$		;No					;000
+30$:	MESSAGE	<" twice">						;000
+	BR	CLNERR		;Just tell the user to delete this one	;000
+
+40$:	MESSAGE	<" and ">						;000
+	CALL	CLNPRT		;NOW THE LATER ONE
+	MOV	#CHKUFL,R4	;POINT TO THE ONE WE CHECKED
+	TST	(R4)		;Pack label?				;000
+	BEQ	CLNERR		;Yes, that can't be deleted		;000
+	CALL	DLTABL		;IS IT DELETABLE?
+	BCS	CLNERR		;NO, HE HAS NO CHOICE
+	MOV	#CLNUFL,R4	;YES, IS THE OTHER ONE DELETABLE?
+	CALL	DLTABL
+	MOV	#CHKUFL,R4	;(PRESET THE DELETABLE ONE)
+	BCS	CLNDEL		;NO, AGAIN HE HAS NO CHOICE
+	MESSAGE
+	 .ASCII	<200>"You must delete one of these to proceed."<200>
+	 .ASCII	"Type '1' to delete the first, '2' to delete the second"<200>
+	 .ASCIZ	<177><12>"Which do you want to delete? "
+	 UNORG
+	CALLX	GETIN		;GET AN ANSWER
+	MOV	#CHKUFL,R4	;POINT TO THE FIRST
+	CMP	(R1),#'1	;ONE?
+	BEQ	CLNDEL		;YUP, GO DOUBLE CHECK
+	CMP	(R1),#'2	;TWO?
+	BNE	10$		;NO, ERROR
+
+.DSABL	LSB
+
+.SBTTL	DELETE AN OFFENDING ENTITY
+
+.ENABL	LSB
+
+CLNERR:	MOV	#CLNUFL,R4	;POINT TO THE THING FOUND BY CLEAN
+CLNDEL:	CALL	DLTABL		;IS THE ENTITY DELETABLE?
+	BCS	DEAD		;NO, HE'S IN BIG TROUBLE
+	MESSAGE	<<177><200>>						;003
+	MOV	R4,-(SP)	;SAVE POINTER TO ENTITY DATA
+	CALL	CLNPRN		;TYPE IT
+	MOV	(SP)+,R4	;RESTORE ENTITY
+	MESSAGE	<" will be deleted">					;003
+	CALL	CONFRM		;CONFIRM THE DELETION
+	BCS	CLNDEL		;TRY AGAIN
+	CMPB	6(R4),#255.	;Deleting a GFD?			;000
+	BEQ	10$		;Yes					;000
+	BISB	#US.DEL,USTAT(R5) ;MARK IT FOR DELETION
+	CALLX	WRITE		;FORCE THE INDICATION OUT
+	MOV	CLNSP,SP	;RESET THE STACK
+	JMP	CLEANR		;RESTART THE CLEANING
+
+10$:	MOV	MFDDCN,R2	;Get MFD starting DCN			;000
+	CALLX	CNVRIB		;Convert it				;000
+	ADD	#1,R2		;Point to DCN table			;000
+	ADC	R3							;000
+	CALLX	READ		;Read it				;000
+	CLR	R0		;Avoid sign extension			;000
+	BISB	7(R4),R0	;Get group number			;000
+	ASL	R0		;Word offset				;000
+	CLR	FIBUF(R0)	;Clear out the DCN pointer		;000
+	ADD	#1,R2		;Point to attribute table		;000
+	ADC	R3							;000
+	CALLX	READSV		;Write one, read the other		;000
+	CLR	FIBUF(R0)	;Delete any attributes			;000
+	MARK	FIBUF		;Mark for write				;000
+	JMP	CLEANR		;Now restart				;000
+
+DEAD:	MESSAGE
+	 .ASCII	<177><200><12>"The disk structure cannot be rebuilt!"
+	 .ASCIZ	<200><12>
+	 UNORG
+	EXIT
+
+.DSABL	LSB
+
+.SBTTL	CHECK FOR AN ENTITY BEING DELETABLE
+
+;+
+; DLTABL - CHECK FOR A FILE OR ACCOUNT BEING DELETABLE
+;
+;	R4 -> DESCRIPTOR (UFD LINK IN GFD/MFD, FILE LINK IN UFD, GFD/MFD DCN) ;000
+;
+;	CALL	DLTABL
+;
+;	C=0 IF DELETION IS LEGAL
+;	C=1 OTHERWISE
+;
+;	R0, R2, R3, R5 RANDOM
+;-
+
+DLTABL:	TSTB	REVLVL		;New pack?				;000
+	BEQ	10$		;No					;000
+	CMP	6(R4),(PC)+	;MFD?					;000
+	 .BYTE	255.,255.						;000
+	BEQ	80$		;Yes, can't delete that			;000
+	CMP	6(R4),(PC)+	;[0,*] GFD?				;000
+	 .BYTE	255.,0							;000
+	BEQ	80$		;Yes, can't delete that either		;000
+10$:	MOV	4(R4),R2	;Pick up starting DCN of GFD/MFD	;000
+	CALLX	READRF		;Read its first block			;000
+	MOV	(R4),R3		;GET LINK TO ACCOUNT IN QUESTION
+	CALLX	RDB		;POINT TO ACCOUNT NAME ENTRY
+	TSTB	REVLVL		;New type pack?				;000
+	BNE	20$		;If so, don't fuss over [1,1]		;000
+	CMP	UNAM(R5),#1*400+1 ;THE MFD?
+	BEQ	40$		;YES, IF NO FILE, WE'RE IN TROUBLE
+20$:	CMP	UNAM(R5),#0*400+1 ;THE SYSTEM FILE ACCOUNT?
+	BEQ	50$		;YES, MUST BE FILE NOT IN OUR LIST
+30$:	CLC			;NO PROBLEM DELETING
+	RETURN
+
+40$:	TST	(PC)+		;Indicate we're looking at [1,1]	;000
+50$:	SEC			;Indicate we're looking at [0,1]	;000
+	ROR	-(SP)		;Save flag
+	TST	2(R4)		;IS IT THE ENTIRE [1,1] OR [0,1] ACCT?
+	BEQ	90$		;YUP, THAT'S A BADDIE			;000
+60$:	MOV	UAR(R5),R2	;GET RP FOR ACCOUNT UFD
+	BEQ	90$		;OOPS AGAIN				;000
+	CALLX	READRF		;GET FIRST BLOCK OF ACCOUNT UFD
+	MOV	2(R4),R3	;R3 -> OFFENDING NAME ENTRY
+	CALLX	RDB		;POINT TO IT
+	BITB	#US.NOK,USTAT(R5) ;Marked as no-kill?			;000
+	BNE	90$		;Yes, so don't				;000
+	TST	(SP)+		;Looking at [0,1]?			;000
+	BPL	30$		;No, so we're all set			;000
+	CMP	#^RSYS,UNAM+4(R5) ;REQUIRED FILES ARE ALL SYS FILES
+	BNE	30$		;IT'S OK TO DELETE IT
+	MOV	#100$,R2		;R2 -> TABLE OF REQUIRED NAMES IN [0,1]
+70$:	MOV	(R2)+,R3	;NEXT NAME
+	BEQ	30$		;NONE, SO NO MATCH, SO DELETABLE
+	CMP	(R2)+,UNAM+2(R5) ;CHECK 2ND WORD OF NAME
+	BNE	70$		;NO MATCH
+	CMP	R3,UNAM(R5)	;MATCH.  CHECK FIRST WORD
+	BNE	70$		;NO, TRY MORE
+80$:	SEC			;SET UNDELETABLE FLAG
+	RETURN
+
+90$:	COM	(SP)+		;Clean the stack			;000
+	RETURN								;000
+
+100$:	.RAD50	/BADB  /
+	.RAD50	/SATT  /
+	.RAD50	/INIT  /
+	.WORD	0
+
+.SBTTL	LOOP FOR EACH ENTRY IN A DIRECTORY
+
+;+
+; UFDLUP -- COROUTINE TO LOOP THROUGH ALL ENTRIES IN A DIRECTORY
+;
+; FIRST ENTRY:
+;	FIBUF CONTAINS ANY BLOCK OF THE DIRECTORY (FIBENT IS VALID)
+;
+;	CALL	UFDLUP
+;
+;	R5 -> ENTRY
+;	C=0, Z=0
+;	TOP OF STACK HAS COROUTINE LINKAGE
+;
+; SUBSEQUENT ENTRIES:
+;	CALLER MUST PRESERVE R0, R1, R5, FIBUF
+;
+;	CALL	@(SP)+
+;
+;	IF Z=0	R5 -> NEXT ENTRY
+;		C=0 IF START OF NEW BLOCK; C=1 OTHERWISE
+;		TOP OF STACK HAS COROUTINE LINKAGE
+;
+;	IF Z=1	FIBUF CONTAINS FIRST BLOCK OF DIRECTORY
+;		R0, R1, R5 RANDOM, C=0
+;		NO COROUTINE LINKAGE ON STACK
+;-
+
+UFDLUP:	CLR	R0		;R0 = OFFSET INTO FIBMAP
+10$:	CLR	R1		;R1 = BLOCK WITHIN DIRECTORY CLUSTER
+	TST	(R0)+		;NEXT FIBENT ENTRY
+20$:	MOV	FIBMAP(R0),R2	;R2 = RP TO A DIRECTORY CLUSTER
+	BEQ	50$		;NO MORE
+	CALLX	CNVRIB		;CONVERT RP TO FBN IN R2/R3
+	ADD	R1,R2		;ADVANCE TO BLOCK WITHIN CLUSTER
+	ADC	R3
+	CALLX	READ		;READ INTO FIBUF
+	MOV	#FIBUF,R5	;R5 -> ENTRY
+	CLC			;C = 0 INDICATES A NEW BLOCK IN FIBUF
+30$:	CALL	@(SP)+		;COROUTINE CALL
+	ADD	#20,R5		;NEXT ENTRY
+	CMP	R5,#FIBMAP	;DONE ALL 31.?
+	BLO	30$		;NOT YET (C=1)
+	TST	(R5)		;New style GFD/MFD?			;000
+	BPL	40$		;No					;000
+	CMP	R0,#2		;First cluster?				;000
+	BNE	40$		;No, nothing special			;000
+	TST	R1		;Just finished first block?		;000
+	BNE	40$		;No					;000
+	TST	(R1)+		;Yes, skip block numbers 1 and 2	;000
+40$:	INC	R1		;NEXT BLOCK IN CLUSTER
+	CMPB	R1,(R5)		;UP TO DIR CLUSTER SIZE?		;000
+	BLO	20$		;NOT YET
+	CMP	R0,#16		;YES, DONE 7TH CLUSTER?
+	BLO	10$		;NO, THERE MAY BE MORE
+50$:	MOV	FIBENT,R2	;R2 = RP TO FIRST DIR BLOCK
+	CALLX	READRF		;READ IT IN
+	TST	#0		;FLAG C=0 AND Z=1
+	RETURN
+
+GLOBAL	<FIBMAP,FIBUF,FIBENT>
+
+.SBTTL	PRINT A FAILING FILE NAME
+
+; LEAVES R5 -> PRINTED ENTITY'S NAME ENTRY
+
+.ENABL	LSB
+
+CLNPRT:	MOV	#CLNUFL,R4	;PRINT THE FILE NAME FOUND BY CLEAN
+	BR	CLNPRN
+
+CLNPRC:	MOV	#CHKUFL,R4	;PRINT THE FILE NAME FOUND BY CHECKER
+CLNPRN:	CMPB	6(R4),#255.	;GFD or MFD failed?			;000
+	BEQ	20$		;Yes, that's all we print		;000
+	CALL	20$		;Otherwise print account id first	;000
+	MOV	4(R4),R2	;Get GFD/MFD DCN			;000
+	CALLX	READRF		;READ GFD/MFD				;000
+	MOV	(R4)+,R3	;R3 = LINK TO BAD ACCOUNT IN MFD
+	CALLX	RDB		;POINT TO IT
+	MOV	UAR(R5),R2	;R2 = DCN OF FIRST UFD BLOCK
+	BEQ	60$		;NONE, SO DONE
+	TST	(R4)		;AH, BUT WAS THE WHOLE ACCOUNT OFFENSIVE?
+	BEQ	60$		;YUP, DONE
+	CALLX	READRF		;READ FIRST BLOCK OF UFD
+	MOV	(R4)+,R3	;R3 = LINK TO FAILING FILE
+	CALLX	RDB		;READ FAILING NB
+	.CALLR	PRNTNE		;PRINT THE FILE NAME
+
+.SBTTL	PRINT NAME ENTRY AS [N,M] OR NNNNNN.EEE
+
+PRNTNE:	MOV	R0,-(SP)	;PRESERVE R0
+	BITB	#US.UFD,USTAT(R5) ;CHECK STATUS OF N.E. W/ BAD LINK
+	BNE	30$		;IT'S A UFD, PRINT ITS PPN
+	CMP	UNAM(R5),#-1	;IS IT A VALID RAD50 NAME?
+	BNE	10$		;YES -- PRINT THE FILE NAME
+	MESSAGE	<"label">	;No -- it's a UFD/GFD/MFD label		;000
+	BR	50$		;DONE
+
+10$:	MOV	UNAM(R5),R0	;PRINT THE FILE NAME
+	CALLX	RADZER
+	MOV	UNAM+2(R5),R0
+	CALLX	RADZER
+	MESSAGE	<".">
+	MOV	UNAM+4(R5),R0
+	CALLX	RADZER
+	BR	50$		;DONE
+
+20$:	MOV	R0,-(SP)	;Save R0				;000
+	MOV	6(R4),-(SP)	;Get failing account number		;000
+	BR	40$		;Print it				;000
+
+30$:	MOV	UNAM(R5),-(SP)	;GET THE PPN ON THE STACK
+40$:	CMP	(SP),(PC)+	;MFD?					;000
+	 .BYTE	255.,255.						;000
+	BEQ	70$		;Yes					;000
+	MESSAGE	<"[">
+	CLR	R0		;PRINT THE PPN
+	BISB	1(SP),R0
+	CALLX	DECZER
+	MESSAGE	<",">
+	CLR	R0
+	BISB	(SP)+,R0
+	CMPB	R0,#255.	;GFD?					;000
+	BEQ	80$		;Yes					;000
+	CALLX	DECZER
+	MESSAGE	<"]">
+50$:	MOV	(SP)+,R0	;RESTORE R0
+60$:	RETURN
+
+70$:	MESSAGE	<"MFD">							;000
+	TST	(SP)+		;Pop that PPN				;000
+	BR	50$		;Restore things and exit		;000
+
+80$:	MESSAGE	<"*]">		;Print tail end of GFD name		;000
+	BR	50$		;Exit					;000
+
+PRTPPN:	MOV	R0,-(SP)	;ENTER HERE TO PRINT PPN IN R0
+	MOV	(SP),-(SP)	;SAVE IT AGAIN
+	BR	40$		;ENTER THE LOOP
+
+PRTCLF:	MOV	CLNFNL,R3	;GET LINK TO FILE IN UFD
+	CALLX	RDB		;POINT TO IT
+PRTPNC:	MOV	#PRNTNE,-(SP)	;PRINT NAME AFTER PPN
+PRTPPC:	MOV	R0,-(SP)	;SAVE REGISTER
+	MOV	CLNPPN,-(SP)	;PUSH PPN TO PRINT
+	BR	40$		;ENTER THE LOOP
+
+.DSABL	LSB
+
+.SBTTL	SAVE/RESTORE BLOCK IN FIBUF
+
+; CAUTION - THESE ROUTINES MAY NOT BE ENTERED WITH 'CALLR'
+
+FIBSAV:	MOV	(SP),-(SP)	;PUSH RETURN ADDRESS
+	MOV	FIBPHS,2(SP)	;SAVE LSB FBN ON STACK
+	MOV	(SP),-(SP)	;PUSH RETURN ADDRESS
+	MOV	FIBPHS+2,2(SP)	;SAVE MSB FBN ON STACK
+	RETURN			;BACK
+
+FIBRES:	MOV	2(SP),R3	;RESTORE MSB FBN TO R3
+	MOV	(SP)+,(SP)	;POP RETURN ADDRESS ONTO STACK
+	MOV	2(SP),R2	;RESTORE LSB FBN TO R2
+	MOV	(SP)+,(SP)	;POP RETURN ADDRESS ONTO STACK
+	CALLRX	READ		;DO THE READ AND RETURN
+
+GLOBAL	<FIBPHS>
+
+.SBTTL	CHECK FOR NAME OF BADB.SYS
+
+.ENABL	LSB
+
+CKSATT:	MOV	R3,-(SP)	;Save R3				;000
+	MOV	#40$,R3		;Point to "SATT.SYS" in RAD50		;000
+	BR	10$							;000
+
+CKBADB:	MOV	R3,-(SP)	;SAVE R3
+	MOV	#30$,R3		;POINTER TO "BADB.SYS" IN RAD50
+10$:	MOV	R5,-(SP)	;Save the name pointer			;000
+	CLR	-(SP)		;FLAG WORD OF 0
+20$:	MOV	(R3)+,-(SP)	;GET NAME WORD
+	SUB	(R5)+,(SP)	;SUBTRACT FILE NAME WORD
+	BIS	(SP)+,(SP)	;TURN ON BITS IF NOT EQUAL
+	TST	(R3)		;DONE?
+	BNE	20$		;NO
+	MOV	(SP)+,@(R0)+	;YES, SET THE FLAG
+	MOV	(SP)+,R5	;Restore R5				;000
+	MOV	(SP)+,R3	;RESTORE R3
+	RETURN	R0		;BACK
+
+30$:	.RAD50	/BADB  SYS/
+	.WORD	0		;STOPPER
+
+40$:	.RAD50	/SATT  SYS/						;000
+	.WORD	0		;Stopper				;000
+
+.SBTTL	ASK FOR A CONFIRMATION
+
+CONFRM:	MESSAG	<" - "<177>"Confirm (Y or CONTROL/C)? ">
+	CALLX	GETIN		;GET ANSWER
+	CMPB	(R1),#'Y	;YUP?
+	BEQ	50$		;YUP, C=0 FOR RETURN
+	MESSAGE
+	 .ASCII	"Type 'YES' to do the deletion and continue rebuilding."<200> ;003
+	 .ASCIZ	"Type CONTROL/C to abort the rebuild process."<200><12>	;003
+	 UNORG
+	SEC			;C=1
+50$:	RETURN
+
+.DSABL	LSB
+
+.SBTTL	READ BLOCK (LIKE RDB) BUT RETURN C=1 IF BAD LINK
+
+RDBCHK:	MOV	R2,-(SP)	;SAVE R2
+	MOV	R3,-(SP)	;SAVE R3
+	MOV	R5,-(SP)	;SAVE R5 IN CASE OF ERROR
+	BIC	#UL.FLG,R3	;TRIM FLAG BITS FROM R3
+	BEQ	10$		;ENTRY #0 IS RESERVED FOR UFD HEADER
+	MOV	R3,R5		;COPY THE LINK WORD
+	BIC	#UL.ENO,R3	;REMOVE ENTRY OFFSET FROM R3
+	BIC	R3,R5		;REMOVE ALL BUT ENTRY OFFSET IN R5
+	ADD	#FIBUF,R5	;R5 = ABSOLUTE ADDRESS WITHIN FIBUF
+	CMP	R5,#FIBMAP	;IS THIS TRYING TO HIT THE CLUSTER MAP?
+	BEQ	10$		;YES, THAT'S A BAD PLACE FOR AN ENTRY
+	SWAB	R3		;GET CLUSTER OFFSET INTO LOW BYTE
+	MOV	R3,R2		;COPY IT (AND BLOCK OFFSET)
+	BIC	#^C<UL.CLO/400>,R2 ;ISOLATE CLUSTER OFFSET * 2 IN R2
+	CMP	R2,#UL.CLO/400	;CLUSTER MUST BE 0 TO 6, NEVER 7
+	BHIS	10$		; SO REJECT CLUSTER 7
+	MOV	FIBENT(R2),R2	;GET THE RETRIEVAL POINTER FROM THE MAP
+	BEQ	10$		;0 => ERROR, RETURN C=1
+	ASH	#-4,R3		;SHIFT OFF THE CLUSTER OFFSET
+	CMP	R3,FIBMAP	;IS IT WITHIN THE DIRECTORY CLUSTER SIZE?
+	BHIS	10$		;NO, ERROR
+	MOV	R5,(SP)		;ALL IS OK. SAVE R5
+	MOV	R3,R5		;SAVE THE BLOCK WITHIN CLUSTER
+	CALLX	CNVRIB		;CONVERT RP TO FBN
+	ADD	R5,R2		;ADD IN BLOCK WITHIN CLUSTER
+	ADC	R3
+	CALLX	READ		;READ IT
+	TST	(PC)+		;CLEAR CARRY, SKIP NEXT INSTRUCTION
+10$:	SEC			;SET ERROR INDICATOR
+	MOV	(SP)+,R5	;RESTORE NEW (OR OLD) R5
+	MOV	(SP)+,R3	;RESTORE R3/R2
+	MOV	(SP)+,R2
+	RETURN
+
+GLOBAL	<FIBMAP,FIBUF,FIBENT>
+
+.SBTTL	Read a block into SILBUF
+
+REDSIL:	CMP	R2,SILFBL	;Match on low-order FBN?		;005
+	BNE	10$		;No, must read				;005
+	CMP	R3,SILFBM	;Match on high order?			;005
+	BEQ	20$		;Yes, that was easy			;005
+10$:	CALLX	PARSEX,R5,<RFUN,SILBUF> ;Get that data			;005
+	MOV	R2,SILFBL	;Save away low order FBN		;005
+	MOV	R3,SILFBM	; and high order			;005
+20$:	CLC			;Keep carry clear			;005
+	RETURN			;Done					;005
+
+GLOBAL	<SILBUF>							;005
+
+.SBTTL	PUT THE DISK COPY OF THE SATT IN SATBF2
+
+.ENABL	LSB
+
+OLDSAT:	CALLX	SAVSAT		;SAVE THE JUST BUILT SATT
+	BIT	#FS.OPN,FQSATT+FQSTAT ;THE FILE BETTER BE THERE!
+	BEQ	10$		;A CRIME DESERVING MURDER
+	MOV	#FCSATT,R1	;R1 -> FCB FOR SATT.SYS
+	MOV	FCSIZ(R1),R0	;R0 = SIZE OF SATT.SYS IN BLOCKS
+	SWAB	R0		;R0 = SIZE OF SATT.SYS IN WORDS
+	CLR	FCNVB(R1)	;START READING AT THE FIRST BLOCK
+	CALLX	READ.,R5,<SATBUF> ;PUT IT IN SATBUF
+	CALL	SWPSAT		;BRING BACK THE JUST BUILT SATT
+	RETURN
+
+10$:	ERF	<"INIT BUG - no SATT.SYS at wipeout time">
+
+.DSABL	LSB
+
+.SBTTL	SWAP SATBUF WITH SATBUFF2
+
+.ENABL	LSB
+
+SWPSAT:	MOV	#SATBUF,R0	;R0 -> SATBUF
+	CLR	R1		;OFFSET INTO SATBF2
+	MOV	#16.*256.*2,R2	;NUMBER OF BYTES TO MOVE
+10$:	MOV	R1,-(SP)	;(SP) OFFSET IN SATBF2 FOR BYTE
+	CALLX	GETSB2		;GET THE BYTE OUT OF SATBF2
+	MOVB	(R0),R3		;GET THE BYTE OUT OF SATBUFF
+	MOVB	(SP),R4		;GET THE BYTE THAT WAS IN SATBF2
+	XOR	R3,R4		;SWAP THE WORDS USING THIS AGE OLD TRICK
+	XOR	R4,R3
+	XOR	R3,R4
+	MOV	R4,(SP)		;PUT SWAPED WORD ON STACK FOR RETURN TO SATBF2
+	MOVB	R3,(R0)+	;STORE THE BYTE IN SATBUFF
+	CALLX	PUTSB2		;ALSO STORE IN SATBF2
+	INC	R1		;NEXT BYTE TO GET OUT OF SATBF2
+	SOB	R2,10$		;CONTINUE TILL DONE
+	RETURN
+
+.DSABL	LSB
+
+GLOBAL	<FQSATT,FCSATT>
+
+.SBTTL	ROUTINE TO REMOVE HALF REMOVED WIPEOUT FILES
+
+.ENABL	LSB
+
+WIPER:	CALL	SWPSAT		;GET THE OLD SATT IN SATBUFF
+	MOV	#SATBUF,R0	;POINT TO IT
+	CLR	R1		;R1 = OFFSET TO NEW SATT IN SATBF2
+	MOV	#16.*256.,R2	;R2 = SIZE OF SATBUFF
+10$:	MOV	R1,-(SP)	;SET OFFSET TO GET WORD OUT OF SATBF2
+	CALLX	GETSB2		;GET THE WORD
+	BIC	(SP)+,(R0)+	;AND STORE PCS'S NO LONGER IN SATT IN SATBUFF
+	TST	(R1)+		;NEXT WORD PLEASE
+	SOB	R2,10$		;UNTIL ALL ARE CHECKED
+	CALLX	SAVSAT		;SAVE WHAT WE JUST DID
+	MOV	#SATBUF,R0	;R0 -> SATBUF
+	MOV	#16.*256.,R2	;R2 = SIZE OF SATBUFF
+20$:	CLR	(R0)+		;EMPTY THE SATBUF
+	SOB	R2,20$		;ALL OF IT YOU FOOL
+	CLR	-(SP)		;STARTING OFFSET IN SATBF2
+	CLR	-(SP)		;FETCH WORD AT STARTING OFFSET IN SATBF2
+	CALLX	GETSB2		;FETCH THAT WORD, PROMENADE WITH YOUR CORNER
+	MOV	(SP)+,R0	;R0 = BITMAP OF CLUSTERS TO WIPE-OUT
+	MOV	SATSYS+BITS,R5	;R5 = TRUE NUMBER OF PCS'S
+	CLR	R1		;R1 = CURRENT PCN
+	CLR	R4		;R4 = CURRENT BIT IN SATT WORD
+30$:	BIT	BITWRD(R4),R0	;IS THIS PCN NO LONGER BEING USED?
+	BEQ	40$		;NO, GO TO NEXT ONE
+	MOV	R1,R2		;MAKE A COPY OF THE PCS
+	CALLX	CN2SEG		;AND CONVERT TO FBN IN R2,R3
+	MOV	R4,-(SP)	;Save the bit poition register		   ;009
+	MOV	PCS,R4		;Lets do PCS calcs here			   ;009
+	MOV	R4,I.DSQ+DSQCNT	;Set Blk cnt (If over 16, 16 will be done) ;009
+	SWAB	I.DSQ+DSQCNT	;I MEANT WORD COUNT!
+	ASH	#-4.,R4		;Divide it by 16. to get loop counter	   ;009
+	BNE	37$		;PCS was 16 or greater, so ok		   ;009
+	INC	R4		;Was <16, so make 1 pass		   ;009
+37$:	CALLX	SEXPAR,R5,<WFUN,SATBUF> ;DO A SEXY PARSEX FOR ONLCLN'S SAKE
+	ADD	#16.,R2		;lets point to the next (if needed)	   ;009
+	ADC	R3		;Full numbers please			   ;009
+	DEC	R4		;we did one, so count it		   ;009
+	BNE	37$		;lets do another			   ;009
+	MOV	(SP)+,R4	;Restore the position register		   ;009
+40$:	INC	R1		;ADVANCE PCN COUNTER
+	TST	(R4)+		;ADVANCE BIT IN SATT WORD COUNTER
+	TST	BITWRD(R4)	;ARE WE DONE WITH THIS WORD?
+	BNE	50$		;NO, CONTINUE WITH THIS WORD
+	CLR	R4		;START WITH NEXT WORD; BIT 0
+	INC	(SP)		;ADVANCE POINTER INTO SATBF2
+	INC	(SP)		;TO THE NEXT WORD
+	MOV	(SP),-(SP)	;MAKE A COPY OF THAT NUMBER, SIR
+	CALLX	GETSB2		;FETCH THAT WORD
+	MOV	(SP)+,R0	;THEN DUMP THAT WORD
+50$:	CMP	R1,R5		;ARE ALL PCN'S CHECKED OUT?
+	BLOS	30$		;NO, CONTINUE
+	TST	(SP)+		;DUMP THAT GARBAGE OFF MY STACK
+	RETURN			;YUP
+
+.DSABL	LSB
+
+GLOBAL	<I.DSQ,PCS>
+
+.SBTTL	DATA AREA
+
+	ORG	CLNCTL
+
+CLNSP:	.BLKW			;RESTART STACK POINTER ON ERROR
+MAXDCN:	.BLKW			;MAXIMUM DCN FOR DISK
+CLNASP:	.BLKW			;STACK POINTER FOR ERROR RESET
+UFDAA:	.BLKW			;LINK TO AE OF ACCOUNT IN MFD
+FILSZL:	.BLKW			;FILE SIZE ACCUMULATED DURING ALLOCATION
+FILSZM:	.BLKW			;MSB
+TRUSZL:	.BLKW			;FILE SIZE FROM FILE'S ACCOUNTING ENTRY
+TRUSZM:	.BLKW			;MSB
+LTOTAL:	.BLKW			;Account total allocation		;007
+HTOTAL:	.BLKW			;MSB ditto				;007
+QUOTAL:	.BLKW			;Link to quota block if 1.2 disk	;007
+
+; The following items must remain in this order				;000
+CLNUFL:	.BLKW			;LINK IN MFD TO NAME ENTRY OF ACCOUNT
+CLNFNL:	.BLKW			;LINK IN UFD TO NE OF FILE BEING CLEANED
+GFDDCN:	.BLKW			;DCN of GFD/MFD containing this account	;000
+CLNPPN:	.BLKW			;PPN OF ACCOUNT BEING CLEANED		;000
+CHKUFL:	.BLKW			;LINK IN MFD TO NE OF ACCT BEING CHECKED
+CHKFNL:	.BLKW			;LINK IN UFD TO NE OF FILE BEING CHECKED
+CHKDCN:	.BLKW			;DCN of GFD/MFD containing acct being checked ;000
+CHKPPN:	.BLKW			;PPN of account being checked		;000
+; End of items to remain in order					;000
+
+SCAN01:	.BLKW			;0 IF ACCOUNT [0,1] BEING SCANNED
+SCAN11:	.BLKW			;0 IF ACCOUNT [1,1] BEING SCANNED
+SCANBB:	.BLKW			;0 IF BADB.SYS BEING SCANNED
+SCNSAT:	.BLKW			;0 if SATT.SYS being scanned		;000
+CHEK01:	.BLKW			;0 IF ACCOUNT [0,1] BEING CHECKED
+CHEKBB:	.BLKW			;0 IF BADB.SYS BEING CHECKED
+BADFLG:	.BLKW			;= BADBLK IF DOUBLE ALLOCATION W/ BADB
+UFDRP:	.BLKW			;LINK TO UFD R.E. FOR CHECKING
+ACCBAD:	.BLKW			;FLAG IF ACCOUNT UFD IS BAD
+FILBAD:	.BLKW			;FLAG IF FILE BEING CLEANED IS BAD
+CLNMAP:	.BLKW	8.		;COPY OF UFD CLUSTER MAP
+FILDCC:	.BLKW			;DEVICE CLUSTERS PER FILE CLUSTER
+FILCTG:	.BLKW			;0 IF CONTIGUOUS, ELSE US.NOX
+FILDCN:	.BLKW			;PREVIOUS FILE RETRIEVAL POINTER
+REHOLE:	.BLKW			;<>0 IF HOLE IN FILE RETRIEVAL ENTRY
+ACCZD:	.BLKW			;FLAG FOR UFD DELETE/ZERO
+REVNUM:				;Pack revision number			;000
+REVMIN:	.BLKB			;Minor version number			;000
+REVLVL:	.BLKB			;Revision level (major version number)	;000
+MFDDCN:	.BLKW			;Starting DCN of MFD			;000
+UFDDCN:	.BLKW			;Starting DCN of UFD			;000
+PAKFLG:	.BLKW			;Pack status flags			;000
+DIRLVL:	.BLKW			;Level number of directory for CLNDIR	;000
+SILFBL:	.BLKW			;Low order block number in SILBUF	;005
+SILFBM:	.BLKW			;High order block number in SILBUF	;005
+
+BITWRD:	.WORD	1,2,4,10,20,40,100,200,400,1000,2000,4000,10000,20000,40000
+	.WORD	100000,0
+
+ENDOVL	<CLN,CLNCTL,CLNTXT>,200
+
+.END

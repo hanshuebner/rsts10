@@ -1,0 +1,207 @@
+.INCLUDE	/CMN:COMMON.MAC/					;003
+.INCLUDE	/CMN:KERNEL.MAC/					;003
+.INCLUDE	/CMN:FLDEF.MAC/						;003
+TITLE	TRU,<TRUNCATE>,0A,10-MAY-91,WRM/JFM/DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR TRU
+
+;+
+;
+;				[RSTS V9.5]
+;  000  WRM  28-Jul-87  CREATION 
+;
+;				[RSTS V9.6]
+;  001  WRM  01-Dec-87	fix quota update problem
+;  002	DRP  06-Jan-88	Change PUSH #18$ to be PIC
+;
+;				[RSTS V9.7]
+;  003	JFM  17-Aug-88	Source clear V9.6 MONITR.CMD patch, to fix quota update
+;			algorithm.  Added .INCLUDEs.
+;  004	DRP  21-Sep-88	Fix problem with falsely returning an INUSE error if
+;			the file to be truncated is open in special modes.
+;
+;-
+
+
+FQFSRT	TRU
+
+;+
+; TRUFQ - TRUNCATE A FILE.
+;
+;	R4 -> WRK (from the XRB but looks like a FIRQB)
+;		FIRQB  =  QUEUE LINK
+;		FQJOB   =  JOB #*2
+;		FQFUN  =  FIP FUNCTION CODE
+;		FQFIL  =  HIGHEST BLOCK # (MSB IN BITS 0-7)
+;		FQPPN   =  CHANNEL # *2
+;		FQPPN+1 =  HANDLER INDEX (=0)
+;		FQNAM1  =  HIGHEST BLOCK # (LSB)
+;		<FQNAM1+2> =  ->WCB
+;		
+;-
+
+.ENABL	LSB
+
+
+110$:	ERROR	INUSE			;Me or someone else is using file
+
+120$:	ERROR	PRVIOL			;In accessible
+
+130$:	ERROR	HNGDEV			;Disc write protected
+
+140$:	ERROR	EOF			;Read past EOF
+
+150$:	ERROR	BADDIR			;Bad directory linkage
+
+160$:	CRASH
+
+
+
+	FQFENT	TRU,,<>		;TRUNCATE A FILE
+
+	NOP				;FOR DEBUG ONLY
+	MOV	<FQNAM1+2>(R4),R3	;SET UP R3->WCB
+	MOV	W$FCB-W$JBNO(R3),R2 	;SET UP R2->FCB
+					;AT INPUT R4->WRK
+	SUB	#W$JBNO,R3		;point to top of wcb
+	SUB	#F$CLUS,R2		;point to top of FCB
+	MOV	R3,-(SP)		;save WCB ptr for the future
+	CMP	F$WCB(R2),R3		;is the 1st WCB in list us?
+	BNE	110$			;NO- error, in use by another
+	BIT	#^C<37>,W$WCB(R3)	;Any more WCB's? (Ignore flag bits) ;004
+	BNE	110$			;No-error, the presences of others
+	TSTB	W$PR(R3)		;Check pending I/O?
+	BNE	110$			;YES- error, in use
+	BITB	#<US.NOK!US.UFD!US.OUT>,F$STAT(R2) ;File stat check
+	BNE	120$			;Not permitted, prot violation
+	MOVB	F$UNT(R2),@#FIPUNT	;Set up fip controls
+	CLRB	@#FIPGEN		;...
+	BIT	#DDWLO,W$IDX(R3)	;Can we write to file?
+	BNE	120$			;No, prot violation
+	CMPB	F$SIZM(R2),FQFIL(R4) 	;Trying to truncate past EOF
+	BLO	140$			;Yes, error read past eof
+	BHI	10$			;No, msb's ok, don't care about lsb's
+	CMP	F$SIZL(R2),FQNAM1(R4) 	;msb's =,test lsb's
+	BLO	140$			; yes, error read past eof
+10$:	MOV	R3,R1			;Get ->WCB for name entry read
+	CALLX	RNE			;Read name entry to fibuf
+	CALLX	RAE			;Read accounting entry(r5->entry)
+	TST	URTS(R5)		;is it large file on disk?
+	BNE	15$			;no- don't update MSB no matter what
+	BICB	#377,<URTS+2>(R5)	;Update file size in DIR entry
+	BISB	FQFIL(R4),<URTS+2>(R5) 	; msb's are in funny place
+	BR	20$			;only 3 states valid, so skip 4th
+
+15$:	TSTB	FQFIL(R4)		;is truncated file size large?
+	BNE	150$			;yes- don't walk on RTS name
+20$:	MOV	FQNAM1(R4),USIZ(R5)	;lsb's of size
+	MARK	FIBUF			;Mark buffer to write out
+	PUSH	<R2,R4,R5>		;Make some working room		;001
+	MOVPIC	#18$,-(SP)		;Set return addr for CNTENT, done ;002
+					; because data is passed on stack ;002
+
+	MOV	F$CLUS(R2),R1		;Get ORIGINAL file cluster size	;003
+	MOV	F$SIZL(R2),R0		;Get ORIGINAL file size LSB	;003
+	MOVB	F$SIZM(R2),R3		;Get ORIGINAL file size MSB	;003
+	DEC	R1			;Make cluster size a bit mask	;003
+	ADD	R1,R0			;Round LSB to next cluster size	;003
+	ADCB	R3			;Adjust for overflow into MSB	;003
+	BIC	R1,R0			;Clear bitmask to leave LSB	;003
+					;  exactly on cluster boundary	;003
+	PUSH	<R0,R3>			;Save ORIGINAL rounded LSB, MSB ;003
+
+	MOV	FQNAM1(R4),R0		;Get NEW file size LSB		;003
+	MOVB	FQFIL(R4),R3		;Get NEW file size MSB		;003
+	ADD	R1,R0			;Round LSB to next cluster size	;003
+	ADCB	R3			;Adjust for overflow into MSB	;003
+	BIC	R1,R0			;Clear bitmask to leave LSB	;003
+					;  exactly on cluster boundary	;003
+
+	SUB	R0,2(SP)		;Subtract old from new LSB	;003
+	SBCB	(SP)			;Adjust for overflow into MSB	;003
+	SUB	R3,(SP)			;Subtract old from new LSB	;003
+	INC	R1			;Back to real fcs from mask	;003
+	;								;003
+	; Inputs to CNTENT are:						;003
+	;								;003
+	;   R1  = File cluster size					;003
+	;  (SP) = MSB of number of blocks truncated off file		;003
+	; 2(SP) = LSB of number of blocks truncated off file		;003
+	;	  (Note the above two are difference of the number	;003
+	;	  of blocks after original and new file sizes have 	;003
+	;	  been rounded up to cluster boundary.)			;003
+	; 4(SP) = Address of 18$, the address to return to.  CNTENT 	;003
+	;	  pops the MSB and the LSB and then RETURNS to 18$.	;003
+	;								;003
+	JMP	@#CNTENT		;Update quota block		;003
+18$:	POP	<R5,R4,R2>		;clean house			;001
+	MOV	(SP)+,R3		;Restore ptr to WCB
+	MOVB	FQFIL(R4),F$SIZM(R2) 	;Update file size in memory FCB
+	MOV	FQNAM1(R4),F$SIZL(R2) 	;Now the lsb's
+	CLR	R0			;Load R0,R1 w/ new file size
+	BISB	FQFIL(R4),R0		;and compute clusters needed
+	MOV	FQNAM1(R4),R1		;....
+	MOVB	R0,W$NVBM(R3)		;Update last block # used
+	MOV	R1,W$NVBL(R3)		;also the LSB...
+	DIV	F$CLUS(R2),R0		;#blocks/file cl size=# of clusters
+	TST	R1			;are we at a cluster boundary?
+	BEQ	25$			;yes- # of clusters correct
+	INC	R0			;no-add 1 to cover remainder of blocks
+25$:	TST	R0			;Truncating to 0 length?
+	BNE	29$			;No- do normal procedure
+	MOV	R3,R1			;Yes-must update NAME ENTRY blockette
+	CALLX	RNE			;before trashing clusters
+	MOV	R5,R3			;make 1st retrival pointer look like
+					;a link
+	ADD	#UAR,R3			;its at UAR in Name blockette
+	BR	45$			;and do special condition process.
+
+29$:	MOV	R3,R1			;->WCB for RFE
+	MOV	R2,R5			;Set up 1st retrival ptr (FBB)
+	ADD	#F$WFND,R5		; it is in FCB
+	CALLX	RFE			;Read 1st file retrival blockette
+30$:	SUB	#7,R0			;Count down seven clusters/blockette
+	BEQ	40$			;Special boundary condition =7
+	BMI	50$			;We have the last blockette to keep
+	MOV	(R5),R3			;Not here cycle to next,get link
+	CALLX	RDECHK			;Read next blockette
+	BNE	30$			;Branch if new read to top
+	JMP	150$			;error-bad dir, ran out of blockettes
+
+40$:	MOV	R5,R3			;R3->link word
+45$:	MOV	#-1,R5			;set special condition flag
+	BR	60$			;process it 
+
+50$:	ADD	#10,R0			;Compute offset into blockette
+	ASL	R0			;Times 2
+	BEQ	40$			;Safety check for boundary
+	MOV	R5,R3			;R3->link word
+	ADD	R0,R5			;R5->cluster entry to begin return w/
+60$:	MOV	F$CLUS(R2),R1		;Get file cluster size
+	CALLX	XREP			;They'll all be gone when were back
+	RETURN				;That's all folks!
+.DSABL	LSB
+
+GLOBAL	<FIPUNT,CNTENT,FIPGEN,UNTCNT,FIUSER>
+
+FQFEND									
+.END

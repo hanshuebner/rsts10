@@ -1,0 +1,518 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+.LIBRARY /CMN:NETDEF.SML/				;001
+TITLE	TERAPT,<APT subroutines>,0B,21-JUN-91,KPH/DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	TERAPT EDIT HISTORY
+
+;+
+;
+;  000  KPH  03-Jun-87	Creation - extract from TTDVR.MAC
+;
+;			[RSTS/E V9.7]
+;  001	DRP  06-Dec-88	Modified this entire module to make APT work with
+;			the new terminal driver.
+;  002	DRP  08-Feb-88	Fix enable APT bug.
+;  003	DRP  08-Mar-89	Add support for set/clear DHBRKS flag bit.
+;
+;			[RSTS/E V10.1]
+;  004	DRP  06-Jun-91	Clear byte count in the XRB if the write request
+;			is with stall.
+;-
+
+.SBTTL	Define our .PSECTS
+
+	DEFORG	TERAPT
+
+	.MCALL	$CCB
+	$CCB		;Define CCB offsets
+
+	ORG	TERAPT
+
+;+									;001
+;
+;	The HSDH module gives RSTS users the ability to transmit large
+; blocks of data to a terminal line capable of doing DMA transfers. The
+; maximum number of characters that can be transmitted in one burst under
+; the standard RSTS/E terminal handler is 30. These modules allow for the
+; transmission of up to 8070. characters per burst. They require the use
+; of the extended buffer pool (XBUF) instead of the general buffer pool.
+; For this reason, at least 8K words of XBUF must be allocated by using
+; the DEFAULT option of INIT. Failing to do this will cause the general
+; buffer pool to be depleted and thereby seriously degrading the
+; performance of the system.
+;
+;	At one point in time the following documents existed which explained
+; the features of these modules. If you should happen to ever find them, you
+; can throw them out because they will no longer reflect reality.
+;
+;	PRELIMINARY FUNCTIONAL SPECIFICATION FOR APT-RSTS/E DH-11
+;		LARGE BLOCK DMA MODULE
+;
+;	DESIGN SPECIFICATION FOR APT-RSTS/E V06C MODIFICATIONS AND
+;		AND APPLICATIONS TEST PROGRAM
+;
+;-									;001
+
+
+.SBTTL	Buffer Shortage Handler for Input Data
+
+;+									;001
+;
+; HSBUFO - Buffer Shortage Handler for Input Data
+;
+;	Inputs:
+;		R0 =  Keyboard Number * 2
+;		R1 -> DDB
+;		R2 =  Incoming Character
+;		Priority is PR5
+;
+;	Call Format:
+;		CALLM	HSBUFO,APTAP5
+;
+;	Outputs:
+;		C  = 0 DMA was not enabled
+;		R4 =   Random
+;
+;		- else -
+;
+;		C  = 1 DMA was enabled and line was shut off.
+;		R3 ->  CSR
+;		R4 =   Random
+;
+;	This routine is called by the STOREX routine in the "Input
+;	Character Process" (TERINC.MAC) module to handle input buffer
+;	shortages on lines that have the  DMA feature enabled. If the
+;	line has the DMA feature enabled, then the line is shut off
+;	(input speed set to 0) and the small buffers allocated to it
+;	(both input and output) are returned to the systems general
+;	buffer pool.
+;
+;	Note: This routine expects the Class Driver to be mapped through
+;	       APR 6 when called.
+;-									;001
+
+HSBUFO::MOV	R1,R4		;;Copy the DDB ->			;001
+	ADD	TTAUXB,R4	;;-> to Auxiliary Driver fields @ TTAFLG ;001
+	TSTB	(R4)		;;Is DMA enabled for this line (C=0)	;001
+	BPL	10$		;;No, nothing to do			;001
+.ASSUME	DHHS	EQ	200
+.ASSUME	TTAFLG	EQ	0
+	BIS	#DHDSAB,(R4)	;;Set the line disabled flag		;001
+	CALLX	DSBLLN		;; and disable the line			;001
+	CALLX	CLRBUF,R5,DDBUFC+EP ;;Clear the output buffer chain	;001
+	CALLX	CLRBUF,R5,TTINPT+EP ;;Clear the input buffer chain	;001
+	CLR	TTIPTR(R1)	;;Clear the input pointer		;001
+	SEC			;;Return DMA enabled status		;001
+10$:	RETURN			;;Return to our caller			;001
+
+GLOBAL	<TTAUXB>							;001
+
+.SBTTL	User Level Read Service for APT
+
+;+									;001
+; HSBUFE - Checks to see if the line was shut off by HSBUFO.
+;
+;	Inputs:
+;		R0 =  Keyboard Number * 2
+;		R1 -> DDB
+;		R2 =  2 (.READ)
+;		R3 -> XRB @ XRBC
+;		R4 =  XRMOD (from XRB)
+;		R5 -> User buffer thru KISAR6
+;
+;	Call Format:
+;		CALLM	HSBUFE,APTAP5
+;
+;	Outputs:
+;		C  = 0 Line was not shut off
+;		C  = 1 Line was shut off
+;
+;	This routine is called by the "User Level Input Service"
+;	routine in the module KBDVR.MAC to determine if the line
+;	has been shut off by the HSBUFO routine.
+;-
+
+HSBUFE::MOV	R1,-(SP)	;Preserve current DDB ->		;001
+	ADD	TTAUXB,R1	;-> to Auxiliary Driver fields @ TTAFLG ;001
+	CLC			;Default to line not shut off		;001
+	BIT	#DHDSAB,(R1)	;Has the line been shut off?		;001
+	BEQ	10$		;No, good we guessed correctly		;001
+.ASSUME	TTAFLG	EQ	0
+	DEC	(R1)		;Clear the shut off flag		;001
+.ASSUME	DHDSAB	EQ	1
+	SEC			;Return line disabled status (C=1)	;001
+10$:	MOV	(SP)+,R1	;Restore the original DDB ->		;001
+	RETURN			;Return to our caller			;001
+
+GLOBAL	<TTAUXB>							;001
+
+.SBTTL	Dispatch Routine
+
+;+									;001
+; HSDDSP - Dispatch routine
+;
+;	Inputs:
+;		R1 -> DDB
+;		R5 -> DDB @ Auxiliary Driver Cells
+;
+;	Call Format:
+;		CALL	TTAAUX(Rn)
+;
+;	Outputs:
+;		R5 = Random
+;
+; This dispatch routine is called by the Class Driver and is required by
+; all auxiliary drivers. However, the only time we should ever come here
+; is for Output Completion. Any other reason we'll simply return.
+;-									;001
+
+HSDDSP:	CMP	#AX$XMT,TTADSP(R5) ;Transmit completed?			;001
+	BEQ	HSDHEX		;Yes, Go take care of it		;001
+	RETURN			;No, simply return			;001
+
+GLOBAL	<TTAUXB>							;001
+
+.SBTTL	Output Completion Routine
+
+;+									;001
+; HSDHEX - Output Completion Routine
+;
+;	Inputs:
+;		R1 -> DDB
+;		R5 -> DDB @ Auxiliary Driver Cells
+;		Priority is 5
+;
+;	Call Format:
+;		CALLM	HSDHEX,APTAP5
+;
+;	Outputs:
+;		R4 =  0	(Never another CCB to process)
+;
+;	This routine is called, indirectly by way of our dispatch
+;	handler, by the Class Driver's (TERCLS.MAC) DHBUFF routine
+;	when a large block DMA request has completed. The routine
+;	will return the data buffer to the XBUFF pool and the CCB
+;	to the general buffer pool.
+;
+;	Note: On return the DHBUFF routine expects us to return in
+;	R4 the address of another CCB, if there is one to be processed,
+;	or zero if there is none. We will always return zero.
+;-									;001
+
+HSDHEX:	TST	(R5)		;;Was a DMA in progress on this line?	;001
+	BPL	10$		;;No, nothing else to do		;001
+.ASSUME	DHHSON	EQ	100000
+.ASSUME	TTAFLG	EQ	0
+	BIC	#DHHSON,(R5)	;;Indicate the DMA has completed	;001
+	MOV	R5,-(SP)	;;Get a scratch register		;001
+	MOV	TTACCB(R5),R5	;;Get the CCB ->			;001
+	CALL	RETBUF		;;Return the CCB and Data Buffer	;001
+	CALLX	IOFINI,R5,<JSTIM> ;;Post the time out bit		;001
+	MOV	(SP)+,R5	;;Restore the DDB @ TTAUXB ->		;001
+10$:	CALLX	TTSJS2		;;Set the output ready flag		;001
+	CLR	R4		;;There's not another CCB to process	;001
+	RETURN			;;Return to our caller			;001
+
+.SBTTL	User Level Output Service for APT
+
+;+									;001
+; HSDHEN - User Level Output Service
+;
+;	Inputs:
+;		R0 =  Keyboard Number * 2
+;		R1 -> DDB
+;		R2 =  4 (.WRITE)
+;		R3 -> XRB @ XRBC
+;		R4 =  Job Number * 2
+;		R5 -> User Buffer
+;
+;	Call Format:
+;		JMPM	HSDHEN,APTAP5
+;
+;	Outputs:
+;
+;	This routine is jumped to by the "User Level Output Service"
+;	routine in the module KBDVR.MAC to do a host of things. However,
+;	its primary function is to do large block DMA writes. Large block
+;	DMAs are done by way of the Class and Port Drivers auxiliary
+;	driver handling routines. In order to do this, the Class
+;	Driver expects us to pass it a CCB (Communication Buffer) and
+;	a data buffer pair.
+;
+;	A CCB is a small buffer which is obtained from the general
+;	buffer pool and contains such needed items as the MMU address
+;	and virtual address of the data buffer, the APT MMU address
+;	(APTAP5 value), and the address of the APT completion routine
+;	(HSDHEX). The CCB and data buffer are allocated to the keyboard
+;	when a request to perform a DMA transfer is made. If we are not
+;	able to allocate either buffer then a "?No buffers available" error
+;	will be returned to the	caller.
+;-									;001
+
+HSDHEN::MOV	R1,R4		;Copy the DDB ->			;001
+	ADD	TTAUXB,R4	;-> to Auxiliary Driver fields @ TTAFLG	;001
+.ASSUME	TTAFLG	EQ	0
+	TSTB	(R4)		;Enabled?				;001
+	BMI	40$		;Yes, go check for things to do		;001
+.ASSUME	DHHS	EQ	200
+	BIT	#DHEABL,XRMOD-XRBC(R3) ;Requesting to enable it?	;001
+	BNE	30$		;Yes, go enable it			;002
+	SETERR	DATERR,@IOSTS	;No, give the user a data error		;001
+	BR	80$		; and give control back to the user	;001
+
+30$:	BIS	#DHHS,(R4) 	;Enable the DMA feature for this KB	;001
+	BIS	#DDAPT,(R1)	;Indicate controlled by the APT driver ;001
+	MOV	APTAP5,TTAAP5(R4) ;Set our APR 5 value in the DDB	;001
+	MOV	#HSDDSP,TTAAUX(R4); and address of our dispatch routine ;001
+40$:	BIT	#DHDABL,XRMOD-XRBC(R3) ;Disable this feature?		;001
+	BEQ	50$		;No, check for more things to do	;001
+	BIC	#DHHS,(R4)	;Yes, disable the feature		;001
+	BIC	#DDAPT,(R1)	;Clear the APT driver indicator		;001
+	CLR	TTAAP5(R4)	; and APR 5 mapping value		;001
+	CLR	TTAAUX(R4)	; and completion routine address	;001
+	BR	80$		;Now give control back to the user	;001
+
+50$:	BIT	#DHDONE,XRMOD-XRBC(R3) ;Check for DMA completion?	;001
+	BEQ	60$		;No, check for more things to do	;001
+	TST	(R4)		;Is there a DMA in progress?		;001
+	BPL	60$		;No, check for more things to do	;001
+.ASSUME	DHHSON	EQ	100000
+	SETERR	NOTAVL,@IOSTS	;Yes, return an error to the user	;001
+	BR	80$		; and give control back to the user	;001
+
+60$:	BIT	#DHPUT,XRMOD-XRBC(R3) ;Requesting a DMA transfer?	;001
+	BNE	PUTDAT		;Yes, go do it				;001
+	BIT	#DHBRK,XRMOD-XRBC(R3) ;Break control request?		;001
+	BEQ	80$		;No, simply return control to the user	;001
+	SPLC	5		;Lock out interrupts			;001
+	BIT	#DHBRON,XRMOD-XRBC(R3) ;;Is it a set break request?	;001
+	BEQ	70$		;;No, clear break request		;001
+	BIS	#DHBRKS,(R4)	;;Set BREAK enabled flag in TTAFLG	;003
+	CALLX	SETBRK		;;Yes, then go set break		;001
+	BR	75$		;; and give control back to the user	;001
+
+70$:	BIC	#DHBRKS,(R4)	;;Clear BREAK enabled flag in TTAFLG	;003
+	CALLX	CLRBRK		;;Go clear the break			;001
+75$:	SPLC	3		;Enable interrupts again		;001
+80$:	JMPX	IOEXIT		;Return control back to the user	;001
+
+GLOBAL	<TTAUXB,APTAP5>							;001
+
+.SBTTL	Large Block DMA Data Transfer Processing
+
+;+									;001
+;	On entry:
+;		R0 =  Keyboard Number * 2
+;		R1 -> DDB
+;		R2 =  4 (.WRITE)
+;		R3 =  XRB @ XRBC
+;		R4 -> DDB @ TTAUXB
+;		R5 -> User Buffer
+;-									;001
+
+PUTDAT:	TST	(R3)		;Is it a zero or less byte count?	;001
+	BEQ	20$		;Zero, Nothing to do			;001
+	BLT	10$		;Less than zero, that's an error	;001
+	CMP	#8070.,(R3)	;Is it greater than the max we allow?	;001
+	BHIS	30$		;No, than the byte count is okay	;001
+10$:	SETERR	BADCNT,@IOSTS	;Illegal byte count, return an error	;001
+20$:	JMPX	IOEXIT		; and control to the user		;001
+
+30$:	TST	(R4)		;Line busy doing an HSDH DMA?		;001
+	BMI	35$		;Yes, then redo the I/O			;001
+.ASSUME	DHHSON	EQ	100000
+	REGSAV			;Preserve all registers			;001
+	SPLC	5		;;Lock out interrupts			;001
+	CALLX	LINSTS		;;Is the line active?			;001
+	SPLC	3		;Re-enable interrupts			;001
+	BCC	50$		;Lines not active			;001
+	REGRES			;Restore the saved register context	;001
+	BR	40$		; and redo the I/O operation		;001
+				; leaving the output bit (JSTEL) set	;001
+				;  Note: JSTEL is set by the caller	;001
+35$:	MOV	JOB,R4		;Get job number * 2			;001
+	MOV	#JSTIM,JBWAIT(R4) ; and set the timeout bit (JSTIM)	;001
+40$:	MOV	#4,R2		;Restore the .WRITE indicator		;001
+	JMPX	IOREDO		; and try again later			;001
+
+50$:	MOV	TOS.R4(SP),R4	;Get the saved DDB @ TTAUXB pointer	;001
+	CALL	ALOCCB		;Try to allocate a CCB			;001
+	BCS	55$		;Failed, return error to user		;001
+	MOV	TOS.R3(SP),R3	;Get our saved XRB @ XRBC pointer	;001
+	MOV	(R3),R1		;Get the data size (XRBC)		;001
+	CALL	ALOBUF		;Now try to allocate a data buffer	;001
+	BCC	60$		;Got a buffer, continue processing	;001
+	CALL	RETCCB		;First return the CCB			;001
+55$:	SETERR	NOBUFS,@IOSTS	;No buffers, return an error to the user ;001
+	REGRES			;Restore the saved register context	;001
+	BR	20$		; and return control back to the user	;001
+
+60$:	MOV	R1,R0		;Set the monitor's count		;001
+	MOV	(R3),R2		; and byte count for the transfer	;001
+	MOV	R5,-(SP)	;Save the CCB ->			;001
+	MOV	TOS.R5+2(SP),R5	;Get the saved User Buffer ->		;001
+	CALL	MOVAPT		;Now move the data			;001
+	MOV	(SP)+,R4	;Restore the CCB -> in R4		;001
+	MOV	TOS.R1(SP),R1	;Get the saved DDB ->			;001
+	CALLX	SNDCCB		;Now do the transmit			;001
+	REGRES			;Restore saved register contents	;001
+	BIS	#DHHSON,(R4)	;Set DMA in progress flag		;001
+	BIT	#DHSTAL,XRMOD-XRBC(R3) ;Stall requested?		;001
+	BEQ	20$		;No, return control back to the user	;001
+	CLR	(R3)		;Clear the byte count so it doesn't get	;004
+				; sent again when we re-enter		;004
+	BR	35$		;Yes, do it				;001
+
+GLOBAL	<JBWAIT>							;001
+
+.SBTTL	Allocate a CCB
+
+;+									;001
+; ALOCCB - Allocate a CCB
+;
+;	Inputs:
+;		R4 -> DDB @ TTAUXB
+;
+;	Call Format:
+;		CALL	ALOCCB
+;
+;	Outputs:
+;		C = 0 CCB allocated
+;			R5 -> CCB
+;
+;		C = 1 No buffers available to allocate CCB
+;			R5 = Random
+;-									;001
+
+ALOCCB:	REGSCR			;Save all registers			;001
+	CLR	R0		;Initialize inhibit mask		;001
+	MOV	#1,R1		;Set to get one buffer			;001
+	MOV	#100.,R2	;Leaving 100. in the pool		;001
+	MOV	#MONPOL,R4	;Get it from MONPOL			;001
+	CALLX	GETBUF		;Try to allocate that space		;001
+	BCS	10$		;Error, forget it			;001
+	ADD	#CC.BUF+10,R4	;Point to the end of the CCB		;001
+.ASSUME	CC.BUF+10	EQ	40
+.REPT	40/2
+	CLR	-(R4)		;Clear out the CCB			;001
+.ENDR
+	;CLC			;Indicate goodness (from CLR above)	;001
+	MOV	R4,TOS.R5(SP)	;Save the -> to the CCB			;001
+10$:	RETURN			;Finished, now return our caller	;001
+
+GLOBAL	<MONPOL>							;001
+
+.SBTTL	Buffer returner
+
+;+									;001
+; RETBUF - Return the CCB and Data Buffer
+;
+;	Inputs:
+;		R5 -> CCB
+;
+;	Call Format:
+;		CALL	RETBUF
+;		CALL	RETCCB
+;
+;	Outputs:
+;		None
+;-									;001
+
+RETBUF:	MOV	CC.BUF+BF.ADR(R5),R4 ;;Now get the -> to the data buffer ;001
+	BEQ	RETCCB		;;None, nothing to return		;001
+	BUFFER	RETURN		;;Got one, return it			;001
+RETCCB:	MOV	R5,R4		;;Copy the CCB ->			;001
+	BEQ	10$		;;None, nothing to return		;001
+	BUFFER	RETSML		;;Return the buffer			;001
+10$:	RETURN			;Return to our caller			;001
+
+.SBTTL	Allocate a Data Buffer
+
+;+									;001
+; ALOBUF - Allocate a Data Buffer
+;
+;	Inputs:
+;		R1 =  Byte count of data to transfer
+;		R5 -> CCB
+;
+;	Call Format:
+;		CALL	ALOBUF
+;
+;	Outputs:
+;		C = 0 if buffer allocated:
+;			R0 =  Random
+;			R1 =  Size of data buffer
+;			R2 =  Random
+;			R3 =  Unchanged
+;			R4 -> Data buffer (XBUFF contorted address)
+;
+;		C = 1 if buffer not allocated:
+;			R0 =  Random.
+;			R1 =  Random.
+;			R2 =  Random.
+;			R3 =  Unchanged
+;			R4 =  Random.
+;-									;001
+
+ALOBUF:	MOV	R3,-(SP)	;Get a scratch register			;001
+	CLR	R0		;Set the cache inhibit flag		;001
+	ADD	#BUFHDR,R1	;Add overhead for buffer header words	;001
+	MOV	#-1,R2		;Don't ever use MONPOL			;001
+	CALLX	BUFFER,R5,EXTPOL ;Now try to allocate a data buffer	;001
+	BCS	10$		;Failure, simply exit			;001
+	CALLX	MAPBUF		;Got one, now map it			;001
+	MOV	R4,CC.BUF+BF.ADR(R5) ;Save buffer's contorted,		;001
+	MOV	R3,CC.BUF+BF.VIR(R5) ; and virtual address		;001
+	MOV	@DPAR6,CC.BUF+BF.MMU(R5) ;Save the MMU address away	;001
+	CLC			;Indicate that buffer is allocated	;001
+10$:	MOV	(SP)+,R3	;Restore our scratch register		;001
+	RETURN			; and exit				;001
+
+GLOBAL	<EXTPOL>							;001
+
+.SBTTL	Move data from user's space to data buffer
+
+;+									;001
+; MOVAPT - Move data from user's space to data buffer
+;
+;	Inputs:
+;		R0 =  Monitor's count
+;		R2 =  Byte count to transfer
+;		R4 -> Data buffer (contorted address)
+;		R5 -> User's Buffer
+;
+;	Call Format:
+;		CALL	MOVAPT
+;
+;	Outputs:
+;		R0 =  Byte count actually moved to data buffer
+;-									;001
+
+MOVAPT:	MAP	TTUSRM,APR=6,DATA ;Map the user buffer			
+	CALLX	BLKMOV		;Go move that data			
+	MAP	TERAP6,APR=6,DATA ;Re-map terminal service		;001
+	RETURN			;And we're done				
+
+GLOBAL	<TTUSRM,TERAP6>							;001
+.END

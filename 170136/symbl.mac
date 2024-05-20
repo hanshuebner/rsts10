@@ -1,0 +1,600 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element SYMBL.MAC
+;  *3    18-AUG-1986 11:27:59 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:57:59 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:46:37 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element SYMBL.MAC
+	.NLIST							;Edit Level 04
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	SYMBL	- Symbol scanner and related routines
+	.SBTTL	SYMBL	- Symbol scanner and related routines
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Too many people to list here
+;
+;   Created:	From the dust and dirt
+;
+;  Abstract:	SYMBL	- Symbol scanner and related routines
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;	001	Jrw	27-Jul-83	Update for 8-bit support.
+;	002	Jrw	27-Mar-84	Add printable characters to highlight
+;					table.
+;	003	Jrw	24-Jan-85	Save pointer to END of symbol for
+;					STMNT bug fix. (SYMEND)
+;	004	Jrw	12-Dec-85	Add HEX support conditionalized.
+;--
+
+
+	PURE	PUREI,I
+
+.SBTTL	DNC  - Decimal number conversion to ASCII
+.SBTTL	DNCF - Any base number conversion to ASCII
+
+;+
+; DNC
+; DNCF
+; These two routines handle number conversion. DNC handles
+; only decimal conversion, while DNCF handles conversion
+; using any base.
+;
+;	R1	= Number to convert to ASCII
+;	R2	-> Text buffer to insert number into
+;	R3	= Conversion base (DNCF ONLY)
+;
+;	CALL	DNC?
+;
+;	R2	-> Updated text buffer after number
+;
+; R0,R1,R3	Destroyed.
+;-
+
+DNC::	MOV	#10.,R3		;R3 = Divisor
+DNCF::	CLR	R0		;Clear high part of dividend
+	DIV	R3,R0		;Divide R1
+	MOV	R1,-(SP)	;Save remainder
+	MOV	R0,R1		;Set for next divide
+	BEQ	10$		;Branch if zero, done.
+	CALL	DNCF		;Else recurse
+10$:	MOV	(SP)+,R1	;Retrieve number
+	ADD	#DIG.0,R1	;Convert it to ASCII
+	MOVB	R1,(R2)+	;Store in user buffer
+	RETURN			;
+
+
+.IF	NDF,PDPV45
+
+.SBTTL	DIV/DIVH - Software divide   (DIV R3,R0)
+.SBTTL	MUL/MULH - Software multiply (MUL R3,R0)
+
+;+
+; DIV
+; MUL
+; These routines attempt to emulate the hardware EIS instructions
+; MUL and DIV. ALthough they don't return overflow conditions, they
+; do obtain the correct results. These routines are entered though
+; the vectors $$$DIV/$$$MUL. These vectors normaly point to MUL/DIV,
+; on NON-EIS systems. On EIS systems however, they are pointed to
+; the routines DIVH/MULH to speed things up.
+;
+;	CALL	MUL/DIV
+;-
+.ENABL LSB
+
+MULIT	= 070003	;MUL	R3,R0
+DIVIT	= 071003	;DIV	R3,R0
+
+
+DIV::	MOV	#16.,-(SP)	;Set loop count
+	CLR	-(SP)		;Result
+10$:	ASL	@SP		;Shift result
+	ASL	R1		;Shift work registers
+	ROL	R0		; double register
+	CMP	R0,R3		;Big enough for operation?
+	BLT	20$		;Branch if not.
+	SUB	R3,R0		;Else subtract it
+	INC	@SP		;Bump result
+20$:	DEC	2(SP)		;Test for end
+	BNE	10$		;Branch if loop should continue.
+	MOV	R0,R1		;Else place remainder in R1
+	MOV	(SP)+,R0	;Result to R0
+25$:	TST	(SP)+		;Prune stack
+	RETURN			;
+
+
+MUL::	MOV	R0,-(SP)	;Get first number
+	CLR	R0		;Clear results
+	CLR	R1		;
+30$:	TST	@SP		;Through?
+	BEQ	25$		;Branch if so, use DIV's exit.
+	ROR	@SP
+	BCC	40$
+	ADD	R3,R1
+	ADC	R0
+40$:	ASL	R3
+	BR	30$
+.DSABL LSB
+
+DIVH::	DIVIT			;Do hardware divide
+	RETURN			;
+MULH::	MULIT			;Do hardware multiply
+	RETURN			;
+
+	.PSECT	ROODAT,RW,D,GBL,REL,CON,SAV
+
+$$$MUL::.WORD	MULH		;-> Hardware multiply routine
+$$$DIV::.WORD	DIVH		;-> Hardware divide routine
+
+	PURE	PUREI,I
+
+.ENDC;	NDF,PDPV45
+
+
+.SBTTL	GETSYM -  Scan a RAD50 symbol
+.SBTTL	GETSYF -  Scan a RAD50 symbol (Can begin with a number)
+
+;+
+; GETSYM, GETSYF
+; Scan off a RAD50 symbol. Leave with scan pointer set at next non-blank
+; char past end of symbol. Symbol buffer clear and Z set if no symbol
+; seen; In this case scan pointer is unaltered.
+;-
+.ENABL LSB
+
+GETSYF::MOV	R1,-(SP)	;Save work register
+	MOV	#CT.ALP!CT.NUM,-(SP) ;Save test for first char
+	BR	10$		;Join common code
+
+GETSYM::MOV	R1,-(SP)	;Save work register
+	MOV	#CT.ALP,-(SP)	;Save test for first char
+
+10$:	MOV	CHRPNT,SYMBEG	;Save scan pointer in case of rescan
+	MOV	#SYMBOL+4,R1	;Point at end of symbol buffer
+	CLR	-(R1)		;Now clear it
+	CLR	-(R1)
+	BITB	CTTBL(R5),(SP)+	;Test first char for alphabetic
+	BEQ	4$		;Exit if not with Z set
+1$:	MOVB	CTTBL2(R5),R0	;Map to RAD50
+	BLE	3$		;Exit if not
+	ASL	R0		;Make word index
+	MOV	R50TB1(R0),(R1)	;Load the high char
+	GETCHR			;Get another char
+	MOVB	CTTBL2(R5),R0	;Handle it as above
+	BLE	3$
+	ASL	R0
+	ADD	R50TB2(R0),(R1)
+	GETCHR			;Now get low order char
+	MOVB	CTTBL2(R5),R0	;Map and test it
+	BLE	3$
+	ADD	R0,(R1)+	;Just add in the low char, advance pointer
+2$:	GETCHR			;Get following char
+	CMP	R1,#SYMBOL+4	;Test if at end of symbol buffer
+	BNE	1$		;Go again if no
+	TSTB	CTTBL2(R5)	;Flush to end of symbol if yes
+	BGT	2$
+3$:	MOV	CHRPNT,SYMEND	;Save pointer to character AFTER symbol
+	SETNB			;Now scan to a non blank char
+4$:	MOV	(SP)+,R1	;Restore work register
+	MOV	SYMBOL,R0	;Set Z if no symbol found
+	RETURN			;
+.DSABL LSB
+
+
+.SBTTL	TABLES - Symbol scanner tables
+
+;+
+; Table CTTBL2
+; Index with 7 bit ASCII value to get corresponding RAD50 value
+; If EQ 0 then space, if LT 0 then not RAD50; Other bits reserved.
+;-
+.NLIST	BEX
+
+	PURE	DPURE,D
+
+CTTBL2:	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	000,200,200,200,033,200,200,200	;    $
+	.BYTE	200,200,200,200,200,200,034,200	;      .
+	.BYTE	036,037,040,041,042,043,044,045	;01234567
+	.BYTE	046,047,200,200,200,200,200,200	;89
+	.BYTE	200,001,002,003,004,005,006,007	; ABCDEFG
+	.BYTE	010,011,012,013,014,015,016,017	;HIJKLMNO
+	.BYTE	020,021,022,023,024,025,026,027	;PQRSTUVW
+	.BYTE	030,031,032,200,200,200,200,200	;XYZ
+	.BYTE	200,001,002,003,004,005,006,007	; abcdefg
+	.BYTE	010,011,012,013,014,015,016,017	;hijklmno
+	.BYTE	020,021,022,023,024,025,026,027	;pqrstuvw
+	.BYTE	030,031,032,200,200,200,200,200	;xyz
+	.BYTE	200,200,200,200,200,200,200,200	; C1 and GR codes below
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+	.BYTE	200,200,200,200,200,200,200,200	;
+
+;+
+; Tables R50TB1 and R50TB2
+; Multiply up the two high order chars in a RAD50 word
+;-
+
+$$$=0
+R50TB1:	.REPT	50
+	.WORD	$$$
+$$$=$$$+3100
+	.ENDR
+$$$=0
+R50TB2:	.REPT	50
+	.WORD	$$$
+$$$=$$$+50
+	.ENDR
+.LIST	BEX
+
+	PURE	PUREI,I
+
+
+.SBTTL	MULR50	- Multiply R0 by 50.
+
+;+
+; MULR50
+; This routine simply handles arithmatic for RAD50
+; base handling.
+;
+;	R0	= Multiplicand
+;
+;	CALL	MULR50
+;
+;	R0	= Result
+;-
+
+MULR50::MOV	R0,-(SP)	;Save multiplicand
+	ASL	R0		;Shift
+	ASL	R0
+	ADD	(SP)+,R0	;Add it in
+	ASL	R0		;Shift
+	ASL	R0
+	ASL	R0
+	RETURN			;Return to caller.
+
+
+.SBTTL	GETR50	- Get next RAD50 character
+.SBTTL	TSTR50	- Map character in R0 to RAD50 in R0
+
+GETR50::GETCHR			;Get next character
+	MOV	R5,R0
+TSTR50::MOVB	CTTBL2(R0),R0	;Map to RAD50
+	RETURN			;Exit with N set if not RAD50
+
+
+.SBTTL	CVTNUM	- Convert text to numeric
+
+;+
+; CVTNUM
+; This routine converts the text string starting at the current
+; text pointer, using the radix passed, into numeric form.
+;
+;	CHRPTR	-> Buffer pointer
+;	R2	= Radix to use
+;
+;	CALL	CVTNUM
+;
+;	HIGH BIT OF R0=OVERFLOW FLAG.
+;	HIGH BYTE OF R0=CHARACTER COUNT.
+;	LOW BYTE OF R0=OVERSIZE COUNT.
+;-
+
+CVTNUM::CALL	SAVREG		;Save registers
+	CLR	R0		;Result flag register
+	CLR	R1		;Numeric accumulator
+	MOV	CHRPNT,SYMBEG	;Save for possible rescan
+1$:	MOV	R5,R3		;Get a copy of the current char
+	SUB	#DIG.0,R3	;Convert to absolute
+	CMP	R3,#9.		;Numeric?
+.IF	DF,YHEX
+	BLOS	10$		;Yes
+	CMP	R3,#LET.A-DIG.0	;Letter?
+	BLO	9$		;No, done
+	SUB	#LET.A-DIG.0-10.,R3	;Make into a number
+	CMP	R3,#15.		;Valid hex digit?
+.ENDC;	DF,YHEX
+	BHI	9$		;Branch if not, we are though!
+10$:	CMP	R3,R2		;Else is it less than radix?
+	BLO	2$		;Branch if so, OK.
+	INC	R0		;Else bump "N" error count
+2$:
+.IF	NDF,PDPV45
+
+	MOV	R2,R4		;Copy of current radix
+	CLR	-(SP)		;Temp accumulator
+3$:	ASR	R4		;Shift radix
+	BCC	4$		;Branch if no accumulation
+	ADD	R1,@SP		;Add in
+	BCC	4$		;Branch if no overflow			;JR
+	BIS	#100000,R0	;Else flag it				;JR
+4$:	TST	R4		;Any more bits to process?
+	BEQ	5$		;Branch if not.
+	ASL	R1		;Else shift pattern
+	BCC	3$		;Branch if no overflow
+	BIS	#100000,R0	;Oh, oh.  Flag it!
+	BR	3$
+
+5$:	MOV	(SP)+,R1	;Set new number
+
+.IFF;	NDF,PDPV45
+
+	MOV	R0,-(SP)	;Save R0 (Flags)
+	MOV	R1,R0		;Copy intermediate result into r0
+	MUL	R2,R0		;Multiply it by the radix
+	BCC	55$		;Branch if no overflow
+	TST	R0		;Else, check the high-order result
+	BEQ	55$		;Branch if it's null
+	BIS	#100000,(SP)	;Else, indicate truncation error
+55$:	MOV	(SP)+,R0	;Restore R0 (Flags)
+
+.ENDC;	NDF,PDPV45
+
+	ADD	R3,R1		;Add in current number
+	CALL	GETCHR		;Get another character
+	ADD	#000400,R0	;Tally character count
+	BR	1$
+
+9$:	MOV	R1,VALUE	;Return  result in "VALUE"
+	RETURN			;Return, testing R0 (SAVREG)
+
+
+.SBTTL	GSARG	- Get symbolic argument
+.SBTTL	GSARGF	- GSARG alternate entry
+
+;+
+; **-GSARG-GET SYMBOLIC ARGUMENT
+; **-GSARGF-ALTERNATE ENTRY
+;-
+.ENABL LSB
+
+GSARG::	CALL	TSTARG		;Test general
+	BEQ	20$		;Branch if null, exit
+GSARGF::CALL	GETSYM		;Get a symbol
+	BEQ	10$		;Branch if not a symbol, error
+	CMP	R0,#<^R.  >	;Trailing character a dot  "."?
+	BNE	20$		;Branch if not, aok.
+10$:	ERROR	A
+	CLR	R0		;Treat all errors as null
+20$:	RETURN
+.DSABL	LSB
+
+
+.SBTTL	TSTARG	- Test for a symbolic argument
+
+;+
+; TSTARG
+;	R5	-> Input line buffer
+;
+;	CALL	TSTARG
+;
+;	R0	-> Character flags
+;-
+
+TSTARG::MOVB	CTTBL(R5),R0	;Get characteristics
+	BLE	12$		;Through if eol or semi-colon
+	TST	ARGCNT		;First argument?
+	BEQ	11$		;Branch if so, good enough as it is.
+	BIT	#CT.COM,R0	;Else are we at a comma?
+	BNE	10$		;Branch if so, BYPASS it.
+	TST	EXPFLG		;Else, was a comma required?
+	BEQ	2$		;Branch if not, ok.
+	ERROR	A		;Else flag error
+
+2$:	CMP	CHRPNT,ARGPNT	;Did anybody use anything?
+	BNE	11$		;Branch if so ok.
+3$:	CALL	GETCHR		;Else, bypass to avoid loops
+	BITB	#CT.PC+CT.SP+CT.TAB-CT.COM-CT.SMC,CTTBL(R5)
+	BNE	3$		;Bypass junk
+	CALL	SETNB		;Set to non-blank
+	ERROR	A		;Flag error
+	BR	TSTARG		;Try again
+
+10$:	CALL	GETNB		;Bypass comma
+11$:	INC	ARGCNT		;Increment argument count
+12$:	CLR	EXPFLG		;Clear expression flags
+	MOV	CHRPNT,ARGPNT	;Save pointer
+	BIC	#177600,R0	;Set flags
+	RETURN
+
+
+.SBTTL	SETSYM	- Set symbol for rescan
+.SBTTL	GETNB	- Get next non-blank character
+.SBTTL	SETNB	- Set next non-blank character
+.SBTTL	GETCHR	- Get next character
+.SBTTL	CHSCAN	- Scan buffer by character
+
+;+
+; SETSYM
+; GETNB
+; SETNB
+; GETCHR
+; SETCHR
+; CHSCAN
+;-
+
+SETSYM::MOV	SYMBEG,CHRPNT	;RESET POINTER
+	BR	SETCHR		;SET CHARACTER AND FLAGS
+GETNB::	INC	CHRPNT		;BUMP POINTER
+SETNB::	SETCHR			;SET REGISTERS AND FLAGS
+	BITB	#CT.SP!CT.TAB,CTTBL(R5)	;BLANK?
+	BNE	GETNB		;  YES, BYPASS
+	BR	SETCHR		;EXIT, SETTING FLAGS
+GETCHR::INC	CHRPNT		;BUMP POINTER
+SETCHR::CALL	SETCH8		;Get a good character
+	BITB	#CT.LC,CTTBL(R5) ;Lowercase?
+	BEQ	1$		;No
+	SUB	#40,R5		;Convert to upper
+1$:	TSTB	R5		;Set condition codes on char value
+	RETURN
+
+GETCH8::INC	CHRPNT		;Bump pointer
+SETCH8::CLR	R5		;Avoid sign extension
+	BISB	@CHRPNT,R5	;Get character
+	BEQ	1$		;Null is ok
+	TSTB	CTTBL(R5)	;Valid?
+	BEQ	GETCH8		;No, get another
+1$:	RETURN			;Done
+
+CHSCAN::TST	(R0)+		;End of buffer?
+	BEQ	20$		;Branch if so, done.
+	CMP	(R0)+,R5	;This the one?
+	BNE	CHSCAN		;Branch if not.
+	TST	-(R0)		;Else move pointer back
+	MOV	CHRPNT,SYMBEG	;Save current pointer
+	CALL	GETNB		;Get next non-blank
+20$:	MOV	-(R0),R0	;Move addr or zero into R0
+	RETURN
+
+
+;+
+; CTTBL
+; Character classification table and definitions
+;-
+
+	.PSECT	..CT..,ABS,GBL,D,OVR
+..CT..:
+
+CT.EOL	== 000+..CT..			;End of line
+CT.COM	== 001+..CT..			;Comma
+CT.TAB	== 002+..CT..			;Tab
+CT.SP	== 004+..CT..			;Space
+CT.PCX	== 010+..CT..			;Printing character
+CT.NUM	== 020+..CT..			;Number
+CT.ALP	== 040+..CT..			;Alphabetic, dot, or dollar
+CT.LC	== 100+..CT..			;Lower case alphabetic
+CT.SMC	== 200+..CT..			;Semicolon
+CT.PC	== <CT.COM!CT.SMC!CT.PCX!CT.NUM!CT.ALP>	;Printing characters
+CT.SPT	== <CT.SP!CT.TAB>		;Space or tab
+
+.MACRO	GENCTT	ARG	;Generate character type table
+
+	.IRP	A,	<ARG>
+	.BYTE	CT.'A
+	.ENDM
+
+.ENDM	GENCTT
+
+	PURE	DPURE,D
+
+CTTBL::	GENCTT	<EOL, EOL, EOL, EOL, EOL, EOL, EOL, EOL>	;  0 -   7
+;
+	GENCTT	<EOL, TAB, EOL, EOL, EOL, EOL, EOL, EOL>	; 10 -  17
+;
+	GENCTT	<EOL, EOL, EOL, EOL, EOL, EOL, EOL, EOL>	; 20 -  27
+;
+	GENCTT	<EOL, EOL, EOL, EOL, EOL, EOL, EOL, EOL>	; 30 -  37
+;
+	GENCTT	<SP , PCX, PCX, PCX, ALP, PCX, PCX, PCX>	; 40 -  47
+;		 " "  "!"  """  "#"  "$"  "%"  "&"  "'"
+	GENCTT	<PCX, PCX, PCX, PCX, COM, PCX, ALP, PCX>	; 50 -  57
+;		 "("  ")"  "*"  "+"  ","  "-"  "."  "/"
+	GENCTT	<NUM, NUM, NUM, NUM, NUM, NUM, NUM, NUM>	; 60 -  67
+;		 "0"  "1"  "2"  "3"  "4"  "5"  "6"  "7"
+	GENCTT	<NUM, NUM, PCX, SMC, PCX, PCX, PCX, PCX>	; 70 -  77
+;		 "8"  "9"  ":"  ";"  "<"  "="  ">"  "?"
+	GENCTT	<PCX, ALP, ALP, ALP, ALP, ALP, ALP, ALP>	;100 - 107
+;		 "@"  "A"  "B"  "C"  "D"  "E"  "F"  "G"
+	GENCTT	<ALP, ALP, ALP, ALP, ALP, ALP, ALP, ALP>	;110 - 117
+;		 "H"  "I"  "J"  "K"  "L"  "M"  "N"  "O"
+	GENCTT	<ALP, ALP, ALP, ALP, ALP, ALP, ALP, ALP>	;120 - 127
+;		 "P"  "Q"  "R"  "S"  "T"  "U"  "V"  "W"
+	GENCTT	<ALP, ALP, ALP, PCX, PCX, PCX, PCX, PCX>	;130 - 137
+;		 "X"  "Y"  "Z"  "["  "\"  "]"  "^"  "_"
+	GENCTT	<PCX, LC , LC , LC , LC , LC , LC , LC >	;140 - 147
+;		 "`"  "a"  "b"  "c"  "d"  "e"  "f"  "g"
+	GENCTT	<LC , LC , LC , LC , LC , LC , LC , LC >	;150 - 157
+;		 "h"  "i"  "j"  "k"  "l"  "m"  "n"  "o"
+	GENCTT	<LC , LC , LC , LC , LC , LC , LC , LC >	;160 - 167
+;		 "p"  "q"  "r"  "s"  "t"  "u"  "v"  "w"
+	GENCTT	<LC , LC , LC , PCX, PCX, PCX, PCX, EOL>	;170 - 177
+;		 "x"  "y"  "z"  "{"  "|"  "}"  "~"
+	GENCTT	<EOL, EOL, EOL, EOL, EOL, EOL, EOL, EOL>	;200 - 207
+;
+	GENCTT	<EOL, TAB, EOL, EOL, EOL, EOL, EOL, EOL>	;210 - 217
+;
+	GENCTT	<EOL, EOL, EOL, EOL, EOL, EOL, EOL, EOL>	;220 - 227
+;
+	GENCTT	<EOL, EOL, EOL, EOL, EOL, EOL, EOL, EOL>	;230 - 237
+;
+	GENCTT	<EOL, PCX, PCX, PCX, EOL, PCX, EOL, PCX>	;240 - 247
+;		      "¡"  "¢"  "£"       "¥"       "§"
+	GENCTT	<PCX, PCX, PCX, PCX, EOL, EOL, EOL, EOL>	;250 - 257
+;		 "¨"  "©"  "ª"  "«"
+	GENCTT	<PCX, PCX, PCX, PCX, EOL, PCX, PCX, PCX>	;260 - 267
+;		 "°"  "±"  "²"  "³"       "µ"  "¶"  "·"
+	GENCTT	<EOL, PCX, PCX, PCX, PCX, PCX, EOL, PCX>	;270 - 277
+;		      "¹"  "º"  "»"  "¼"  "½"       "¿"
+	GENCTT	<ALP, ALP, ALP, ALP, ALP, ALP, ALP, ALP>	;300 - 307
+;		 "À"  "Á"  "Â"  "Ã"  "Ä"  "Å"  "Æ"  "Ç"
+	GENCTT	<ALP, ALP, ALP, ALP, ALP, ALP, ALP, ALP>	;310 - 317
+;		 "È"  "É"  "Ê"  "Ë"  "Ì"  "Í"  "Î"  "Ï"
+	GENCTT	<EOL, ALP, ALP, ALP, ALP, ALP, ALP, ALP>	;320 - 327
+;		      "Ñ"  "Ò"  "Ó"  "Ô"  "Õ"  "Ö"  "×"
+	GENCTT	<ALP, ALP, ALP, ALP, ALP, ALP, EOL, ALP>	;330 - 337
+;		 "Ø"  "Ù"  "Ú"  "Û"  "Ü"  "Ý"       "ß"
+	GENCTT	<LC , LC , LC , LC , LC , LC , LC , LC >	;340 - 347
+;		 "à"  "á"  "â"  "ã"  "ä"  "å"  "æ"  "ç"
+	GENCTT	<LC , LC , LC , LC , LC , LC , LC , LC >	;350 - 357
+;		 "è"  "é"  "ê"  "ë"  "ì"  "í"  "î"  "ï"
+	GENCTT	<EOL, LC , LC , LC , LC , LC , LC , LC >	;360 - 367
+;		      "ñ"  "ò"  "ó"  "ô"  "õ"  "ö"  "÷"
+	GENCTT	<LC , LC , LC , LC , LC , LC , EOL, EOL>	;370 - 377
+;		 "ø"  "ù"  "ú"  "û"  "ü"  "ý"
+
+	.PSECT	IMPLIN,D,GBL,RW
+
+ARGCNT::.BLKW	1		;Argument count
+ARGPNT::.BLKW	1		;Start of last argument
+EXPFLG::.BLKW	1		;Set when comma required
+
+	PURE	PUREI,I
+
+
+	.END

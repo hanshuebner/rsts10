@@ -1,0 +1,1196 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:LATDEF/
+.INCLUDE /CMN:KBDEF/
+.LIBRARY /CMN:NETDEF.SML/
+TITLE	LATAPP,<LAT Application Terminal Routines>,0E,16-AUG-91,DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for LATAPP
+
+;+
+;			[RSTS V10.0]
+;  000  DRP  11-Oct-89	Creation
+;  001	DRP  02-Jan-90	Fix retry counter bug.
+;  002	DRP  09-Jan-90	Fix bug in RIDPRM.
+;  003	DRP  10-Jan-90	Make code review changes.
+;			Moved start slot processing of application
+;			terminals to LATPRT.
+;			Added get updated status functionality to
+;			request updated info on queued requests.
+;  004	DRP  17-Mar-90	Modify KILSOL to delete the port if the
+;			pending delete flag is set.
+;  005	DRP  21-May-90	Implement code review changes.
+;			Fix bug with 11/44 crashes when calling MOVMEM.
+;  006	DRP  07-Aug-90	Source clear range check and handling of
+;			SRC_NODE_STATUS field patches.
+;
+;			[RSTS V10.1]
+;  007	DRP  23-May-91	Source clear patch 3.4.3, "Host-initiated LAT
+;			connections may crash the system".
+;			Reset timer in STSMSG if request already queued
+;			status is returned.
+;  008	DRP  31-Jul-91	Change symbol name L.FLAG to L.FLG
+;			Change RESMSG to not discard response messages
+;			from servers who are at an ECO higher than what
+;			we us.
+;  009	DRP  13-Aug-91	Modify RESMSG routine to discard messages from
+;			agents.
+;-
+
+	DEFORG	LATAPP
+
+
+.SBTTL	TIMER1	Application Terminal Timer Service Entry Point
+
+;+
+; TIMER1 - Application Terminal Timer Service
+;
+; Called by TIMER in LATDSP to service application terminals.
+;-
+
+.ENABL	LSB
+
+TIMER1::MOV	#LATCTL+L.SOBL,R3 ; Get list head
+10$:	MOV	(R3),R4		; Get an entry
+	BEQ	40$		; None, then we're done
+	CALLX	MAPBUF		; Got one, now map it
+	TSTB	SO.TMR(R3)	; Is the timer running?
+	BEQ	30$		; No, check next block
+	DECB	SO.TMR(R3)	; Decrement the timer
+	BNE	30$		; Time left, check next block
+	DECB	SO.RTC(R3)	; Decrement retry count
+	BNE	20$		; Not done, try to retransmit
+	BITB	#SOS.WS,SO.STS(R3) ; Waiting for start slot?		;003
+	BEQ	15$		; No, time this one out			;003
+	BITB	#SOS.WR,SO.STS(R3) ; Waiting for a response to CMND msg	;003
+	BNE	15$		; Yes, server not responding		;003
+	CALL	SNDSTS		; Must be on the queue, get new status	;003
+	BR	30$		; Try the next block			;003
+
+15$:	INC	SO.TMO(R3)	; Inc the timeout counter		;003
+	MOVB	#HNGDEV,R0	; It timed out, say it's hung
+	CLR	R2		;  with no reject reason code
+	CALL	SOLERR		;  and kill it
+	BR	30$		; Try the next block
+
+20$:	CALL	SOLRTY		; Try to retransmit the solicit
+30$:	ADD	#SO.LNK,R3	; Setup pointer to the next block
+	BR	10$		;  and go check it out
+
+40$:	RETURN
+
+GLOBAL	<HNGDEV>
+
+.DSABL	LSB
+
+.SBTTL	SOLERR	Solicit Connection Error Processing
+
+;+
+; SOLERR - Solicit Connection Error Processing
+;
+; Inputs:
+;	R0 =  Error code
+;	R2 =  Reject reason code
+;	R3 =  Virtual address of Solicit Block
+;	R4 =  Contorted address of Solicit Block
+;	      mapped through APR 6
+;
+; Outputs:
+;	All registers preserved
+;
+; Called when a failure during the solicit operation or
+; a timeout has occured. The error code and reject reason
+; code is passed to us and we in turn set them in the Solicit
+; Block.
+;-
+
+.ENABL	LSB
+
+SOLERR:	REGSCR			; Save current register contents
+	CALL	RESAPP		; Reset the port			;003
+	MOVB	#SOS.ER,SO.STS(R3) ; Now set status = error		;003
+	MOVB	R0,SO.ERR(R3)	; Save the error code
+	MOVB	R2,SO.RJR(R3)	;  and reject reason code (if any)
+	MOV	SO.SES(R3),R1	; Get the Session Block pointer		;003
+	CALL	GETDDB		;  and the DDB pointer
+	CALLX	IOFINI,R5,<JSTIM!JSTEL!JS.KB> ; Make the job runnable
+	RETURN			; Return to our caller			;003
+
+.DSABL	LSB
+
+.SBTTL	SOLRTY	Retry Solicit Connection or Solicit Information
+
+;+
+; SOLRTY - Retry Solicit Connection or Solicit Information
+;
+; Inputs:
+;	R3 =  Virtual address of Solicit Block
+;	R4 =  Contorted address of Solicit Block
+;	      mapped through APR 6
+;
+; Outputs:
+;	All registers preserved
+;
+; This routine is called by the timer service routine
+; TIMER1 to resend a Solicit Information Message or
+; Solicit Command Message because no response has
+; been received on our initial request.
+;-
+
+.ENABL	LSB
+
+SOLRTY: REGSCR			; Save all register contents
+	MAP	PUSH,APR=6,DATA	; Save the current APR 6 data mapping	;003
+	INC	SO.RTY(R3)	; Inc the retry counter			;003
+	MOV	SO.CCB(R3),R5	; Is there a CCB?
+	BNE	10$		; Yes, good do the retry
+	MOV	SO.SES(R3),R3	; Get the Session Block ->
+	CALL	SOLCNT		; Send another Solicit Info. message	;003
+	BR	30$		; Restore mapping and exit		;003
+
+10$:	MOV	SO.SES(R3),CC.LLB(R5) ; Save the Session Block ->
+	INC	CC.LLB(R5)	; Make it an odd address
+	CLR	SO.CCB(R3)	; No longer any outstanding CCB		;003
+	BITB	#SOS.WI,SO.STS(R3) ; Waiting for solicit information?
+	BEQ	20$		; No, must be command message then
+	MOVB	#SOS.WT!SOS.WI,SO.STS(R3) ; Yes, set waiting for transmit
+				;  to complete and solicit info
+	CLRB	SO.TMR(R3)	; Clear the timer
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Map the message buffer	;003
+	CALL	XMTSOL		;  and retransmit the solicit		;003
+	BR	30$		; Restore mapping and exit		;003
+
+20$:	MOVB	#SOS.WT!SOS.WS,SO.STS(R3) ; Set waiting for transmit
+				;  to complete and start slot
+	CLR	CC.DDB(R5)	; Set the offset needed by DSPDLL	;003
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Map the message buffer	;003
+	CALLX	XMTMG1		;  and go retransmit the message	;003
+30$:	MAP	POP,APR=6,DATA	; Restore APR 6 data mapping		;003
+	RETURN			;  and return to our caller		;003
+
+.DSABL	LSB
+
+.SBTTL	SOLSTS	Return Solicit Status
+
+;+
+; SOLSTS - Return Solicit Status
+;
+; Inputs:
+;	R3 -> Session Block
+;	R4 -> Solicit Block
+;
+; Outputs:
+;	R0 =  Status Byte
+;	R3 =  Random
+;
+; This routine is called by the get port status routine in LATPRT
+; to return the status of the local LAT port.
+;-
+
+.ENABL	LSB
+
+SOLSTS::CALLX	MAPBUF		; Map the Solicit Block
+	MOVB	SO.STS(R3),R0	; Return the status byte		;003
+	RETURN			; Return to the port driver		;003
+
+.DSABL	LSB
+
+.SBTTL	KILSOL	Kill any Outstanding Solicits
+
+;+
+; KILSOL - Kill any Outstanding Solicits
+;
+; Inputs:
+;	R4 -> Solicit Block
+;
+; Outputs:
+;	R4 =  Preserved
+;
+; This routine is called by the close routine in LATPRT			;004
+; and the delete port routine in LTU to kill any outstanding		;004
+; solicits on the port. If the pending delete flag bit is set in	;004
+; SO.FLG, then we go and delete the port. Otherwise, we'll reset	;004
+; the ports Session and Solicit Blocks.					;004
+;-
+
+.ENABL	LSB
+
+KILSOL::CALLX	MAPBUF		; Map the Solicit Block
+	BITB	#SOS.WS,SO.STS(R3) ; Waiting for a start slot?
+	BEQ	10$		; No, nothing to blow away
+	TST	SO.QUE(R3)	; Are we on the server's queue?
+	BEQ	10$		; No, nothing to cancel
+	MOV	R3,-(SP)	; Save the virtual address		;004
+	MOV	R4,-(SP)	;  the Solicit Block pointer
+	MAP	PUSH,APR=6,DATA	;  and mapping
+	CALL	SNDCAN		; Cancel the solicit request		;004
+	MAP	POP,APR=6,DATA	; Remap our Solicit Block
+	MOV	(SP)+,R4	;  restore the Solicit Block pointer
+	MOV	(SP)+,R3	;  and virtual address			;004
+	TSTB	SO.FLG(R3)	; Deleting this port?			;005
+.ASSUME	SOF.PD	EQ	200						;005
+	BPL	10$		; No					;005
+	CALLR	DELPRT		; Yes, go delete the port		;004
+
+10$:	CALLR	RESAPP		; Reset the port
+
+.DSABL	LSB
+
+.SBTTL	SOLCON	Solicit a Connection
+
+;+
+; SOLCON - Solicit a Connection
+;
+; Inputs:
+;	R0 =  Access type flag
+;		Bit   Value  Setting
+;		2!3 =   0    Use defaults
+;		  2 =   1    NOQUEUED
+;		  3 =   1    QUEUED
+;	R3 -> Session Block
+;	R4 -> Solicitation Block
+;
+; Outputs:
+;	R3 =  Random
+;
+; This routine is called by LATPRT as the result of a user opening
+; or allocating an application terminal. This routine will default
+; the current settings (SO.CUR) to the default settings (SO.DEF)
+; and then start the process of initiating a connection.
+;-
+
+.ENABL	LSB
+
+10$:	ERROR	NOTAVL		; Say it's not available
+
+SOLCON::CALLX	MAPBUF		; Map the Solicit Block
+	TSTB	SO.RNL(R3)	; Do we have a remote node name?
+	BEQ	10$		; No, remote port parameters not set
+	BITB	#SOS.WR!SOS.WT!SOS.WI!SOS.WS,SO.STS(R3)
+				; Soliciting now?
+	BEQ	20$		; No, then do it			;003
+	RETURN			; Yes, don't start another one		;003
+
+20$:	MOVB	SO.DEF(R3),SO.CUR(R3) ; Default to the default settings
+	BITB	#<ACSNOQ!ACSQUD>,R0 ;Access type specified?		;003
+	BEQ	30$		;No, then defaults it is		;003
+	BISB	#SOD.QD,SO.CUR(R3) ;Assume QUEUED access wanted
+	BITB	#ACSQUD,R0	;Is it QUEUED access?			;003
+	BNE	30$		;Yes, good guess			;003
+	BICB	#SOD.QD,SO.CUR(R3) ;They want NOQUEUE access
+30$:	MOV	SO.SES(R3),R3	;Restore the Session Block pointer	;003
+	.BR	SOLCNT		; and send a Solicit Info. Message
+
+.DSABL	LSB
+
+.SBTTL	SOLCNT	Send a Solicit Information Message
+
+;+
+; SOLCNT - Send a Solicit Information Message
+;
+; Inputs:
+;	R3 -> Session Block
+;	R4 -> Solicit Block
+;
+; Outputs:
+;	All registers are trashed
+;
+; This routine is called to send a Solicit Information message
+; in order to obtain the ethernet address of the server we want to
+; initiate a connection to. We're called as a result of the user
+; opening (SOLCNO) or assigning (SOLCNA) the device.
+;-
+
+.ENABL	LSB
+
+SOLCNT:	CALLX	COMGET		; Get a comm. buffer (CCB)
+	BCC	10$		; Got one
+	ERROR	NOBUFS		; None, return error to user
+
+	;+
+	; On return from COMGET:
+	;	R5 -> CCB
+	;
+	; Note: The code immediately following stores the Session
+	;	Block -> in the CCB and makes it an odd address.
+	;	This is done to flag the request as a Solicit
+	;	request. Ideally it would have been better to save
+	;	the Solicit Block -> instead, but it's a contorted
+	;	address and therefore bit 0 may be on or off.
+	;	We can't check for a contorted address because the
+	;	Circuit Block -> which is stored in the same cell
+	;	for non-solicit requests will always have bit 1 on.
+	;	By using the address of the Session Block we can
+	;	easily obtain the Solicit Block.
+	;-
+
+10$:	MOV	R3,CC.LLB(R5)	; Save the Session Block ->
+	INC	CC.LLB(R5)	; Flag it as a solicit request		;003
+	CALLX	MAPBUF		; Map the Solicit Block
+	CLR	SO.ERR(R3)	; No errors or reject reason code	;005
+.ASSUME	SO.RJR	EQ	SO.ERR+1					;005
+	CLR	SO.QUE(R3)	;  or queue position
+	MOVB	#SOS.WT!SOS.WI,SO.STS(R3) ; Set waiting for transmit
+				; to complete and response message
+	CALL	SETID		; Get and set the Solicit ID		;003
+	MOVB	#5.,SO.RTC(R3)	; Allow five retries
+	CLRB	SO.TMR(R3)	; Clear timer cell
+	MOVB	SO.RNL(R3),R2	; Save the destination node name length
+	MOV	@DPAR6,R0	 ; and MMU address of Sol. Block
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Map the buffer
+	MOV	#140000+BUFHDR+<EP.SIZ-2>,R3 ;  -> to start of message
+	MOVB	#MT.SIM,(R3)+	; Set Msg. type 14(decimal), M-R = 0	;003
+	CLRB	(R3)+		; Protocol format = 0
+	MOVB	#PROVER,(R3)	; Set high protocol version		;005
+	MOVB	(R3)+,(R3)	;  Low protocol version			;005
+	MOVB	(R3)+,(R3)+	;  and current protocol version supported ;005
+	MOVB	#PROECO,(R3)+	; Set current protocol ECO supported
+	MOV	LATCTL+L.MCTP,R1 ; Get -> to multicast message
+	MOV	M.FSIZ(R1),(R3)+ ; Set DATA_LINK_RCV_FRAME_SIZE field
+	MOV	R4,(R3)+	; Set the Solicit Id
+	MOVB	LATCTL+L.XMTV,(R3)+ ; Set response timer value
+	CLRB	(R3)+		; Clear the high byte
+
+	;+
+	; Now we need to copy the destination node name from the	;005
+	; Solicit Block into the buffer. At this point we expect	;005
+	; the registers to be as follows:				;005
+	;
+	;	R0 =  MMU address of the Solicit Block
+	;	R2 =  Length of Destination Node Name
+	;	R3 -> Multicast buffer
+	;-
+
+	MOV	#120000+SO.RNM,R1 ; R1 -> Remote Node Name (APR 5)
+	MOVB	R2,(R3)+	; Store the length in the buffer
+	CALL	COPY1		; Now copy the node name to the buffer	;005
+	MOV	LATCTL+L.NODE,R1 ; R1 -> Node Block
+	MOV	R1,R2		; Copy the ->
+.ASSUME	N.GRPL	EQ	0
+.ASSUME	N.GRP	EQ	N.GRPL+1
+	CALL	COPY2		; Copy the group codes to the buffer	;005
+	MOV	R1,R2		; Get the Node Block -> again
+	ADD	#N.NAML,R2	; R2 -> Node Name Length
+.ASSUME	N.NNAM	EQ	N.NAML+1
+	CALL	COPY2		; Copy the node name to the buffer	;005
+	CLRB	(R3)+		; DESTINATION_SERVICE_LENGTH is 0
+	CLRB	(R3)+		;  and no parameter codes
+	SUB	#140000+BUFHDR,R3 ; Get the message length
+	MOV	R3,@#140000+BF.CNT ;  and set that in the buffer
+	CALL	XMTSOL		; Send the multicast message
+30$:	RETURN			; Return back to our caller
+
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	XMTSOL	Transmit a Solicit Information Message
+	
+;+
+; XMTSOL - Transmit a Solicit Information Message
+;
+; Inputs:
+;	R5 -> CCB
+;	      Message buffer mapped through APR 6
+;
+; Outputs:
+;
+;	All registers trashed
+;
+; This routine is called by retry service (SOLRTY) and the Solicit
+; Information routine (SOLCNT) to do initiate the transmit. It
+; sets the destination address in the ethernet header of the message
+; and dispatches to the LAT Dispatcher (LATDSP) to do the actual
+; sending of the message.
+;-
+
+.ENABL	LSB
+
+XMTSOL:	MOV	#140000+BUFHDR+EP.DST,R3 ; -> to ethernet header
+					;     @ destination address
+	MOV	LATCTL+L.MCTP,R1 ; Get -> to multicast message
+	MOV	(R1)+,(R3)+	; Set up ethernet address to send to
+	MOV	(R1)+,(R3)+	; ...
+	MOV	(R1)+,(R3)+	; ...
+	BISB	#LF.SOL,LATCTL+L.FLG ; Set solicit flag			;008
+	CALLX	SNDMCT		; Now do the multicast
+	BICB	#LF.SOL,LATCTL+L.FLG ; Clear the solicit flag		;008
+	RETURN			;  and return to our caller
+	
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	SNDCAN	Send a Cancel Message to a Server
+	
+;+
+; SNDCAN - Send a Cancel Message to a Server
+;
+; Inputs:
+;	R3 =  Virtual address of Solicit Block
+;	      Mapped through APR 6
+;	R4 -> Solicit Block
+;
+; Outputs:
+;	R5 -> CCB
+;	All other registers trashed
+;
+; This routine is called by KILSOL to tell the server to cancel the
+; outstanding solicit request for the port being closed.
+;-
+
+.ENABL	LSB
+
+SNDCAN:	MOV	SO.CCB(R3),R5	; Do we still have a CCB around?
+	BNE	10$		; Yes, use that one
+	CALLX	COMGET		; Try to get one
+	BCC	10$		; Got one, send a command message
+	RETURN			; None, let the server time it out
+
+10$:	MOV	SO.SES(R3),CC.LLB(R5) ; Save the Session Block ->
+	INC	CC.LLB(R5)	; Flag it as a solicit request		;003
+	CLR	SO.TMR(R3)	; No timer or retry count		;005
+.ASSUME	SO.RTC	EQ	SO.TMR+1					;005
+	CLR	SO.CCB(R3)	;  and no outstanding CCB
+	MOVB	#SOS.WT,SO.STS(R3) ; Say waiting for transmit
+				;  to complete
+	MOV	SO.SID(R3),R4	; Get the Solicit Id
+	MOV	#CANCLE,R1	; Command Type = cancel entry
+	CLR	R2		; No command modifier
+	BR	BLDMSG		; Finish the message and send it	;005
+
+.DSABL	LSB
+
+.SBTTL	SNDSTS	Send a Send Status Message to a Server
+	
+;+									;003
+; SNDSTS - Send a Send Status Message to a Server
+;
+; Inputs:
+;	R3 =  Virtual address of Solicit Block
+;	      Mapped through APR 6
+;	R4 -> Solicit Block
+;
+; Outputs:
+;	All registers preserved
+;	APR 6 mapping saved
+;
+; This routine is called by TIMER1 to request the server to send
+; us updated status on the queued entry.
+;-									;003
+
+.ENABL	LSB
+
+SNDSTS:	REGSCR			; Save all registers			;003
+	MOV	SO.CCB(R3),R5	; Do we still have a CCB around?	;003
+	BNE	10$		; Yes, use that one			;003
+	CALLX	COMGET		; Try to get one			;003
+	BCS	20$		; None, try again later			;003
+10$:	MOV	SO.SES(R3),CC.LLB(R5) ; Save the Session Block ->	;003
+	INC	CC.LLB(R5)	; Flag it as a solicit request		;003
+	MOVB	#5,SO.RTC(R3)	; Set the retry counter			;003
+	CLRB	SO.TMR(R3)	;  no timer				;003
+	CLR	SO.CCB(R3)	;  and no outstanding CCB		;003
+	BISB	#SOS.WT,SO.STS(R3) ; Waiting for transmit to complete	;003
+	MOV	SO.SID(R3),R4	; Get the Solicit Id			;003
+	MOV	#SNDSTE,R1	; Command Type = Send status of entry	;003
+	CLR	R2		; No command modifier			;003
+	MAP	PUSH,APR=6,DATA	; Save current APR 6 mapping		;003
+	CALL	BLDMSG		; Finish the message and send it	;003
+	MAP	POP,APR=6,DATA	; Restore the saved APR6 mapping	;003
+20$:	RETURN			; Return to our caller			;003
+
+.DSABL	LSB
+
+.SBTTL	SNDCMD	Send a Command Message to a Server
+	
+;+
+; SNDCMD - Send a Command Message to a Server
+;
+; Inputs:
+;	R3 =  Virtual address of Solicit Block
+;	      Mapped through APR 6
+;	R4 -> Solicit Block
+;
+; Outputs:
+;	R5 -> CCB
+;	All other registers trashed
+;
+; This routine is called by RESMSG after a response message is received
+; from the server and we have the ethernet address of the server we want
+; to initiate a connection to. This routine will form the Solicit Command
+; Message and send it off to the server to start the actual connection.
+;-
+
+.ENABL	LSB
+
+SNDCMD:	MOV	SO.CCB(R3),R5	; Do we still have a CCB?
+	BNE	10$		; Yes, good use that one
+	CALLX	COMGET		; No, try to get one
+	BCC	10$		; Got one
+	MOV	#NOBUFS,R0	; None, set the error code
+	CLR	R2		;  with no reject reason code
+	JMP	SOLERR		;  and kill the solicit
+
+10$:	MOV	SO.SES(R3),CC.LLB(R5) ; Save the Session Block ->
+	INC	CC.LLB(R5)	; Flag it as a solicit request		;003
+	MOVB	#5,SO.RTC(R3)	; Set the retry count			;001
+	CLRB	SO.TMR(R3)	;  clear the timer
+	CLR	SO.CCB(R3)	;  show no outstanding CCB
+	CLR	SO.QUE(R3)	;  not on the server's queue
+	CLR	SO.EID(R3)	;  and no Entry ID yet
+	MOVB	#SOS.WT!SOS.WS,SO.STS(R3) ; We're waiting for transmit
+				;  to complete and start slot
+	CALL	SETID		; Get and set a solicit ID		;003
+	MOV	#QUEUED,R1	; Command Type = queued access
+	TSTB	SO.CUR(R3)	; Current setting queued access?
+.ASSUME	SOD.QD	EQ	200
+	BMI	20$		; Yes, good guess
+	MOV	#NOQUED,R1	; No, set to non-queued access
+20$:	MOV	#2,R2		; Command Modifier = Status on queue change
+	.BR	BLDMSG		; Build the message and send it		;003
+
+.DSABL	LSB
+
+.SBTTL	BLDMSG	Build and Transmit a Command Message
+	
+;+									;003
+; BLDMSG - Build and Transmit a Command Message
+;
+; Inputs:
+;	R1 =  Command Type
+;	R2 =  Command Modifier
+;	R3 =  Virtual address of Solicit Block
+;	      Mapped through APR 6
+;	R4 =  Request Id
+;	R5 -> CCB
+;
+; Outputs:
+;	R5 -> CCB
+;	All other registers trashed
+;
+; This routine is called by SNDCMD, SNDCAN and SNDSTS routines to build
+; and send a command message to the server. Each calling routine passes
+; the COMMAND_TYPE, COMMAND_MODIFIER and REQUEST_IDENTIFIER to be placed
+; in the message.
+;-									;003
+
+.ENABL	LSB
+
+BLDMSG:	MOVB	SO.RPL(R3),-(SP) ; Save the remote port name length	;003
+	MOVB	SO.RSL(R3),-(SP) ;  remote service name length
+	MOVB	SO.LPL(R3),-(SP) ;  local port name length
+	MOVB	SO.RNL(R3),-(SP) ;  and remote node name for later
+	MOV	R2,-(SP)	; Save the command modifier
+	MOV	R1,-(SP)	;  command type
+	MOV	SO.EID(R3),-(SP) ; and Entry Id if any
+	MOV	@DPAR6,R0	; Save the MMU address of Solicit Block
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Map the buffer
+	MOV	#140000+BUFHDR+EP.DST,R3 ; R3 -> Destination address
+
+	; First we move the Destination Node's ethernet address into
+	; the message buffer.
+
+	MOV	#120000+SO.NAD,R1 ; R1 -> Remote Node's ethernet address
+	MOV	#6,R2		; All six bytes worth
+	CALL	COPY1		; Load it in the message buffer		;005
+
+	;+
+	; Now we want to begin to setup the message itself. At this
+	; point the stack contains several pieces of data saved away
+	; from the Solicit Block to avoid alot of mapping. We expect
+	; the stack to look as follows:
+	;		(SP) = Entry Id
+	;		 +2  = Command Type
+	;		 +4  = Command Modifier
+	;		 +6  = Remote Node Name Length
+	;		 +10 = Local Port Name Length
+	;		 +12 = Remote Service Name Length
+	;		 +14 = Remote Port Name Length
+	;-
+
+	MOV	#140000+BUFHDR+<EP.SIZ-2>,R3 ; -> to start of message
+	MOVB	#MT.SCM,(R3)+	; Set msg type 12(decimal), M-R = 0	;003
+	CLRB	(R3)+		; Protocol format = 0
+	MOVB	#PROVER,(R3)	; Set high protocol version		;005
+	MOVB	(R3)+,(R3)	;  Low protocol version			;005
+	MOVB	(R3)+,(R3)+	;  and current protocol version supported ;005
+	MOVB	#PROECO,(R3)+	; Set current protocol ECO supported
+	MOV	LATCTL+L.MCTP,R1 ; Get -> to multicast message
+	MOV	M.FSIZ(R1),(R3)+ ; Set DATA_LINK_RCV_FRAME_SIZE field
+	MOV	R4,(R3)+	; Set the Solicit Id
+	MOV	(SP)+,(R3)+	;  and Entry Id
+	MOVB	(SP)+,(R3)+	; Set command type
+	MOVB	(SP)+,(R3)+	;  and command modifier
+
+	; Now we need to copy the Destination Node name into the
+	; message buffer.
+
+	MOV	#120000+SO.RNM,R1 ; R1 -> Remote Node Name
+	MOVB	(SP)+,R2	; Get the saved node name length
+	MOVB	R2,(R3)+	;  and put it in the buffer
+	CALL	COPY1		; Now go do the Node Name itself	;005
+
+	; Now we need to set our node name, group codes and port
+	; name in the message buffer.
+
+	MOV	LATCTL+L.NODE,R1 ; R1 -> Node Block
+	MOV	R1,R2		; Copy the ->
+.ASSUME	N.GRPL	EQ	0
+.ASSUME	N.GRP	EQ	N.GRPL+1
+	CALL	COPY2		; Copy our group codes			;005
+	MOV	R1,R2		; Get the Node Block -> again
+	ADD	#N.NAML,R2	; R2 -> Node Name Length
+.ASSUME	N.NNAM	EQ	N.NAML+1
+	CALL	COPY2		; Copy our node name			;005
+
+	; Next we do the Local Port Name
+
+	MOV	#120000+SO.LPN,R1 ; R1 -> Local Port Name
+	MOVB	(SP)+,R2	; Get saved length
+	MOVB	R2,(R3)+	;  and store in the buffer
+	CALL	COPY1		; Now do the Local Port Name		;005
+	CLRB	(R3)+		; No Subject Description
+
+	; Now we do the Remote Service Name
+
+	MOV	#120000+SO.RSN,R1 ; R1 -> Remote Service Name
+	MOVB	(SP)+,R2	; Get the saved length
+	MOVB	R2,(R3)+	;  and store it in the buffer
+	BEQ	40$		; Nothing to move
+	CALL	COPY1		; We have a service, go move it		;005
+
+	; Finally we do the Remote Port Name
+
+40$:	MOV	#120000+SO.RPN,R1 ; R1 -> Remote Port Name
+	MOVB	(SP)+,R2	; Get the saved length
+	MOVB	R2,(R3)+	;  and store it in the buffer
+	BEQ	50$		; Nothing to move
+	CALL	COPY1		; We have a port, go move it		;005
+50$:	CLRB	(R3)+		; No parameters
+	SUB	#140000+BUFHDR,R3 ; Compute the message length
+	MOV	R3,@#140000+BF.CNT ;  and set it in the buffer
+	CLR	CC.DDB(R5)	; Set the offset needed by DSPDLL	;003
+	CALLRX	XMTMG1		;  and go transmit the message		;003
+
+GLOBAL	<NOBUFS>							;003
+
+.DSABL	LSB
+
+.SBTTL	RESMSG	Process Response Information Message
+
+;+
+; RESMSG - Process Response Information Message
+;
+; Inputs:
+;	R5 -> CCB (buffer mapped through APR 6)
+;
+; Outputs:
+;	All registers trashed
+;
+; This routine is call by the LAT Dispatcher (LATDSP) to process
+; the response message sent to us by a server that responded to
+; our Solicit Information Message. This routine saves the ethernet
+; address of the server in the Solicit Block and then calls on
+; SNDCMD to send a Solicit Command Message back to the server.
+; If the server is disabled or not allowing solicits then we terminate
+; the solicit. The receive buffer is always returned back to the
+; ethernet driver when processing of the message is completed.
+;-
+
+.ENABL	LSB
+
+RESMSG::MOV	@DPAR6,R0	; Save the MMU address of the buffer
+	MOV	#140000+BUFHDR+<EP.SIZ-2>,R1 ; Compute -> to message
+	BIT	#<MF.RRF!MF.MST>,(R1) ; M and R should be 0		;005
+.ASSUME	RM.MT	EQ	0						;005
+	BNE	30$		; It's not, drop the message		;009
+	CMPB	#PROVER,RM.CPV(R1) ; Protocol version okay?
+	BNE	30$		; No, then drop the message		;009
+	CMPB	#PROECO,RM.ECO(R1) ; How about the ECO level
+	BHI	30$		; No, drop the message			;009
+	TSTB	RM.PFM(R1)	; Ethernet protocol format?		;006
+.ASSUME	ETHFMT	EQ	0						;006
+	BNE	30$		; No, then drop the message		;009
+	TST	RM.RST(R1)	; Any response status?			;006
+	BNE	30$		; Yes, service not offered		;009
+	MOV	R1,R2		; Copy the message ->			;006
+	ADD	#RM.NAD,R2	;  and point to the node address	;006
+	MOV	#140000+BUFHDR+EP.SRC,R4 ; R4 -> at the source address	;009
+	MOV	#3.,R3		; Three words to check			;006
+10$:	CMP	(R2)+,(R4)+	; Do they match?			;009
+	BNE	30$		; No, drop the message			;009
+	SOB	R3,10$		; Try the next word			;009
+
+	;+								;009
+	; We need to save the node status word because on return from
+	; FNDSOL our message will no longer be mapped to APR6.
+	;-								;009
+
+	MOV	RM.NST(R1),-(SP) ; Save the node status word		;009
+	MOV	RM.SID(R1),R2	; Get the solicit id from the message
+	CALL	FNDSOL		;  and find the Solicit Block
+	MOV	(SP)+,R2	; Restore the saved status word
+	BCS	30$		; Solicit Block not found		;009
+	BITB	#SOS.WI,SO.STS(R3) ; Are we expecting a response?	;009
+	BEQ	30$		; No, ignore this message		;009
+	BICB	#SOS.WI,SO.STS(R3) ; No longer waiting for response	;006
+	BIC	#^C<R.DSBL!R.SMSG!R.SCMD>,R2 ; Mask out unused bits	;006
+	ASR	R2		; Node disabled?			;006
+.ASSUME	R.DSBL	EQ	1						;006
+	BCS	30$		; Yes, drop this message		;009
+	BEQ	30$		; Can't send Start or Command Msg either ;009
+	ASR	R2		; Accepting solicits?			;006
+.ASSUME R.SCMD	EQ	4						;006
+	BEQ	30$		; No, then drop this message		;009
+
+	;+
+	; Everything checks out. At this point the registers
+	; must be as follows:
+	;	R0 =  MMU address of message buffer
+	;	R1 =  Virtual address of message buffer (APR 6)
+	;		no longer mapped at this point however
+	;	R3 =  Virtual address of Solicit Block
+	;		mapped through APR 6
+	;	R4 =  Contorted address of Solicit Block
+	;-
+
+	SUB	#20000,R1	; Make buffer -> APR 5 value		;006
+	ADD	#RM.NAD,R1	;  and point at the node's address
+	MOV	R3,-(SP)	; Save the virtual address
+	ADD	#SO.NAD,R3	; R3 -> Solicit Block @ node address
+	MOV	#6.,R2		; Six bytes worth to move
+	CALL	COPY1		; Now go move them			;005
+	CALLX	SUPBFR		; Return the receive buffer		;003
+				;  back to the ethernet driver		;003
+	MOV	(SP)+,R3	; Restore the saved virtual address
+	JMP	SNDCMD		;  and send a solicit command
+
+30$:	JMPX	SUPBFR		; Return the receive buffer back	;009
+
+GLOBAL	<NOTAVL>
+
+.DSABL	LSB
+
+.SBTTL	STSMSG	Process Status Message
+
+;+
+; STSMSG - Process Status Message
+;
+; Inputs:
+;	R5 -> CCB (buffer mapped through APR 6)
+;
+; Outputs:
+;	All registers trashed
+;
+; This routine is called by the LAT Dispatcher (LATDSP) to process
+; the Status Information Message sent to us by the server. A Status
+; Message is sent for a number of reasons:
+;
+;	1) The server cannot immediately honor our solicit request
+;	   and either queued it or rejected it.
+;	2) The server is updating us on the status of our request
+;	   that's on it's queue.
+;	3) The server has deleted our request from it's queue.
+;
+; Once we're done processing the message, we return the buffer back to
+; the ethernet driver.
+;-
+
+.ENABL	LSB
+
+STSMSG::MOV	#140000+BUFHDR+<EP.SIZ+10>,R1 ; R1 -> message @ ENTRY_COUNTER
+	MOVB	(R1)+,R0	; Get number of entries in message
+	BEQ	80$		; None, nothing to do
+	MOVB	(R1)+,R2	; Get SUBJECT_NODE_NAME_LENGTH
+	ADD	R2,R1		; Add that in
+10$:	INC	R1		; Make sure the resulting address	;007
+	BIC	#1,R1		;  is even				;003
+
+	; At this point R1 -> to the first entry in the message
+	; at ENTRY_LENGTH
+
+	MOV	12(R1),-(SP)	; Stack the MIN_QUEUE_POSITION		;007
+	MOV	6(R1),-(SP)	;  ENTRY_ID
+	MOVB	2(R1),-(SP)	;  ENTRY_ERROR
+	MOVB	1(R1),-(SP)	;  ENTRY_STATUS
+	MOV	4(R1),R2	; Pickup the REQUEST_ID
+	CALL	FNDSOL		;  and go find the Solicit Block
+	BCS	70$		; No match, skip to next entry
+	BITB	#SOS.WS,SO.STS(R3) ; Waiting for a start slot?
+	BEQ	70$		; No, skip this entry
+	TSTB	(SP)		; Status = rejected			;003
+.ASSUME	ES$CMR	EQ	200						;003
+	BPL	60$		; No, update queue position		;003
+50$:	MOVB	2(SP),R2	; Get reject reason code
+	MOV	R0,-(SP)	; Save the entries counter
+	MOV	#NOTAVL,R0	; Say not available
+	CALL	SOLERR		;  and kill the solicit
+	MOV	(SP)+,R0	; Restore the saved counter
+	BR	70$		; Skip to the next entry
+
+60$:	BITB	#ES$RAQ,(SP)	; Status = already queued?		;003
+	BNE	65$		; Yes, skip to the next entry		;007
+	MOV	4(SP),SO.EID(R3) ; Save the Entry Id
+65$:	MOV	6(SP),SO.QUE(R3) ;  and our queue position		;007
+	MOVB	#1,SO.RTC(R3)	; No retries (TIMER1 decs it 1st)	;003
+	MOVB	#60.,SO.TMR(R3)	; Set a 60 second timer -		;003
+				;  waiting for start slot
+				;  or next status message
+..STMR	==	.-4	;** PATCH ** Status message timeout value	;005
+	BICB	#SOS.WR,SO.STS(R3) ; Clear waiting for response
+70$:	ADD	#10,SP		; Clean up the stack
+	MAP	CC.BUF+BF.MMU(R5),APR=6,DATA ; Remap the buffer
+	BIC	#177400,(R1)	; Clear the high byte of ENTRY_LENGTH	;003
+	ADD	(R1),R1		; Add in the ENTRY_LENGTH		;007
+	INC	R1		;  + one for ENTRY_LENGTH itself	;007
+	SOB	R0,10$		; Process the next entry		;007
+80$:	CALLRX	SUPBFR		; Return the receive buffer		;003
+				;  back to the ethernet driver		;003
+
+.DSABL	LSB
+
+.SBTTL	TXCMPS	Process Transmit Completions of Solicits
+
+;+
+; TXCMPS - Process Transmit Completions of Solicits
+;
+; Inputs:
+;	R1 =  0 (Solicit Information Message)
+;	   =  Address of Session Block (Odd value!)
+;	R5 -> CCB
+;
+; Outputs:
+;	All registers saved
+;
+; This routine is called from the LAT Dispatcher whenever our Solicit
+; Information Message or Solicit Command Message has been transmitted.
+; Once we received confirmation that our message has been sent we will
+; save the message address and initiate the timer. From this point on
+; the timer service TIMER1 will worry about it.
+;-
+
+.ENABL	LSB
+
+TXCMPS::REGSCR			; Save all registers
+	MOV	CC.LLB(R5),R2	; Get saved Session Block ->
+	BEQ	50$		; None, nothing to do
+	BIC	#1,R2		; Clear odd address - flag bit
+	MOV	S.SOLB(R2),R2	; Get the Solicit Block ->
+	BEQ	30$		; None, still nothing to do
+	MOV	#LATCTL+L.SOBL,R3 ; Get head of Sol. Blk. list
+10$:	MOV	(R3),R4		; Pick up the 1st entry
+	BEQ	50$		; Not in the list, ignore this
+	CALLX	MAPBUF		;  and map it
+	CMP	R2,R4		; Is this the one?
+	BEQ	20$		; Yes, then we're done
+	ADD	#SO.LNK,R3	; R3 -> Sol. Blk. @ link to next
+	BR	10$		; Go check it out
+
+20$:	TST	SO.CCB(R3)	; Any outstanding CCB?
+	BNE	50$		; Yes, don't queue this one
+	BITB	#SOS.WT,SO.STS(R3) ; Waiting for transmit complete?
+	BEQ	50$		; No, don't queue this one
+	BICB	#SOS.WT,SO.STS(R3); Yes, say it's completed
+	TST	R1		; Is this a solicit command?
+	BNE	30$		; Yes, go process that
+
+	; Processing a solicit information message completion
+
+	BITB	#SOS.WI,SO.STS(R3) ; Waiting for response message?
+	BEQ	50$		; No, don't queue this one
+	MOV	R5,SO.CCB(R3)	; Save CCB in case of retransmit
+	BR	40$		; Done
+
+	; Processing a solicit command completion
+
+30$:	BITB	#SOS.WS,SO.STS(R3) ; Waiting for start slot?
+	BEQ	50$		; No, don't queue this one
+	BISB	#SOS.WR,SO.STS(R3) ; Flag we're waiting for a response
+				;  either status message or start slot
+	MOV	R5,SO.CCB(R3)	; Save CCB in case of retransmit
+	CLR	(R5)		;  and no link...
+.ASSUME	CC.LNK	EQ	0
+40$:	MOVB	LATCTL+L.XMTV,SO.TMR(R3) ; Set up timer value
+	RETURN			; Return to our caller
+
+50$:	CALLRX	COMRET		; Return the resource
+
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	RESPRT	Reset the Port
+
+;+
+; RESPRT - Reset the Port
+; RESAPP - Reset the Port with Solicit Block mapped
+;
+; Inputs:
+;	RESPRT -
+;	R3 -> Session Block
+;
+;	RESAPP -
+;	R3 =  Virtual address of Solicit Block
+;	R4 -> Solicit Block
+;
+; Outputs:
+;	All registers saved if RESPRT is called
+;
+;	Otherwise -
+;	R3 =  Virtual address of Solicit Block
+;	R4 -> Solicit Block
+;	R5 -> Session Block
+;-
+
+.ENABL	LSB
+
+RESPRT::REGSCR			; Save all registers
+	MOV	S.SOLB(R3),R4	; Get the Solicit Block pointer
+	CALLX	MAPBUF		;  and map it
+
+	; First we cleanup the Solicit Block
+
+RESAPP:	CLRB	SO.STS(R3)	; Reset the status byte
+	CLR	SO.TMR(R3)	;  the timer and retry count		;005
+.ASSUME	SO.RTC	EQ	SO.TMR+1					;005
+	CLR	SO.EID(R3)	;  the entry id				;003
+	CLR	SO.QUE(R3)	;  and queue position
+	MOV	SO.CCB(R3),R5	; Any CCB to return?
+	BEQ	10$		; No, that's easy
+	CALLX	COMRET		; Got one, go return it
+	CLR	SO.CCB(R3)	;  and clear the pointer
+
+	; Now we take care of the Session Block
+
+10$:	MOV	SO.SES(R3),R5	; Pick up the Session Block ->
+	CLR	S.CIR(R5)	; No more circuit block
+	CLR	S.OUTL(R5)	; No link to next on xmit queue
+	CLRB	S.FLAG(R5)	; Clear the flag byte
+	RETURN			; Return to our caller
+
+.DSABL	LSB
+
+.SBTTL	DELPRT	Delete an outbound LAT port
+
+;+
+; DELPRT - Delink and delete an outbound LAT port
+;
+; Inputs:
+;	R4 -> Solicit Block
+;
+; Output:
+;	All registers preserved
+;	APR 6 mapping preserved
+;
+; This routine is called when the DELETE PORT directive is issued.
+; This routine finds the Solicit Block of the port being deleted
+; on the Solicit Block list maintained in the LAT Control Region
+; and delinks the block and returns the buffer back their respective
+; pools.
+;
+; Note: The Solicit Block has to be in the Solicit Block
+;	list maintained in the LAT Control Region. If it's not there
+;	then we have a software error and we'll want to crash immediately
+;	to preserve the current state of memory.
+;-
+
+.ENABL	LSB
+
+DELPRT::REGSCR			; Save the world
+	MAP	PUSH,APR=6,CODE,DATA ;  and APR 6 mapping as well
+	CALLX	MAPBUF		; Map the Sol. Blk being deleted
+	MOV	SO.SES(R3),R1	; Save the Session Block ->		;003
+	MOV	SO.LNK(R3),R0	; Get the link to the next block
+	MOV	R4,R2		; Copy the Sol. Blk ->
+	MOV	#LATCTL+L.SOBL,R3 ; R3 -> Solicit Block list
+	MOV	R3,R5		; Make it the current one
+10$:	MOV	(R3),R4		; Get the Sol. Blk it points to
+	BEQ	40$		; End of list, didn't find it
+	CMP	R2,R4		; Is this the entry?
+	BEQ	20$		; Yes, then go remove it
+	CALLX	MAPBUF		; No, map the entry
+	ADD	#SO.LNK,R3	;  and -> at the link to next
+	MOV	R4,R5		; Make it the current one
+	BR	10$		; Go check it out
+
+20$:	MOV	R0,(R3)		; Put next -> from our block
+				;  into the previous block
+	BNE	30$		; More blocks on list
+	MOV	R5,LATCTL+L.SOBL+2 ; Otherwise, link current one to
+				;  the end of the list
+30$:	BUFFER	RETURN		; Return the Sol. Block to XBUF
+	CALL	GETDDB		; Get DDB -> from Session Block ->	;003
+	CALLM	REMKBD,KBDAP5	; Now go return this KB.
+	MAP	POP,APR=6,CODE,DATA ; Restore APR 6 mapping
+	RETURN			;  and return to our caller
+
+40$:	CRASH			; Crash, noting "forced by software"
+
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	FNDSOL	Find Solicit Block on Solicit Block List
+
+;+
+; FNDSOL - Find Solicit Block on Solicit Block List
+;
+; Inputs:
+;	R2 =  Solicit Id
+;
+; Outputs:
+;	R2 =  Solicit Id
+;	R3 =  Virtual address of Solicit Block (APR 6)
+;	R4 =  Contorted address of Solicit Block
+;
+;	C  =  0 - Match found
+;	C  =  1 - No match found
+;
+; This routine is called when we receive a response back from a server.
+; When the server responds it passes us the Solicit Id we provided it
+; when the solicit message was sent. This routine seaches the Solicit
+; Block list in the LAT Control Region looking for a match. If no
+; match is found then we return with carry set.
+;-
+
+.ENABL	LSB
+
+FNDSOL::MOV	#LATCTL+L.SOBL,R3 ; Get head of Sol. Blk. list		;003
+10$:	MOV	(R3),R4		; Pick up the 1st entry
+	BEQ	30$		; Not in the list, ignore this
+	CALLX	MAPBUF		;  and map it
+	CMP	R2,SO.SID(R3)	; Is this the one?
+	BEQ	20$		; Yes, then we're done
+	ADD	#SO.LNK,R3	; R3 -> Sol. Blk. @ link to next
+	BR	10$		; Go check it out
+
+20$:	TST	(PC)+		; Say we found it (C=0)
+30$:	SEC			; Say we didn't find it
+	RETURN			; Return to our caller
+
+GLOBAL	<LATCTL>
+
+.DSABL	LSB
+
+.SBTTL	GETDDB	Get the DDB Pointer
+
+;+
+; GETDDB - Get the DDB Pointer
+;
+; Inputs:
+;	R1 -> Session Block
+;
+; Outputs:
+;	R1 -> DDB
+;-
+
+.ENABL	LSB
+
+GETDDB:	SUB	KBDDBX,R1	; Calculate DDB ->
+	SUB	KBDDBX,R1	; ...
+	SUB	#KBDDBS,R1	; ...
+	RETURN			; Return to our caller
+
+GLOBAL	<KBDDBX>							;003
+.DSABL	LSB
+
+;+									;003
+; SETID - Get and set the Solicit ID
+;
+; Inputs:
+;	R3 = Virtual address of the Solicit Block
+;
+; Outputs:
+;	R3 = Virtual address of the Solicit Block
+;	R4 = Destroyed							;005
+;-									;003
+
+.ENABL	LSB
+
+SETID:	MOV	LATCTL+L.NCIR,R4 ; Get a Solicit Id
+	MOV	R4,SO.SID(R3)	; Set it in the Solicit Block
+	INC	LATCTL+L.NCIR	; Set up next circuit id
+	BNE	10$		; Check for zero
+	INC	LATCTL+L.NCIR	; Can't have zero id	
+10$:	RETURN			; Return to our caller			;003
+
+GLOBAL	<LATCTL>							;003
+
+.DSABL	LSB
+
+.SBTTL	COPY1	Copy Data to the Message Buffer Via MOVMEM
+
+;+									;005
+; COPY1 - Copy Data to the Message Buffer Via MOVMEM
+;
+; Inputs:
+;	R0  = MMU address of source
+;	R1 -> Source
+;	R2  = Length of data to move
+;	R3 -> Destination
+;
+; Outputs:
+;	R0  = MMU address of source
+;	R1  = Random
+;	R2  = Random
+;	R3 -> Next destination address
+;-									;005
+
+.ENABL	LSB
+
+COPY1:	MOV	R3,-(SP)	;Save the current destination ->	;005
+	ADD	R2,(SP)		;Update to next address for return	;005
+	CALLX	MOVMEM		;Now go move the data			;005
+	MOV	(SP)+,R3	;Return updated destination ->		;005
+	RETURN								;005
+
+.DSABL	LSB
+
+.SBTTL	COPY2	Copy Data to the Message Buffer
+
+;+
+; COPY2 - Copy Data to the Message Buffer Ourselves			;005
+;
+; Inputs:
+;	R2 -> ASCIC string to copy
+;	R3 -> Destination
+;
+; Outputs:
+;	R0 =  Preserved
+;	R2 -> Character after ASCIC string
+;	R3 -> Next destination address
+;-
+
+.ENABL	LSB
+
+COPY2:	MOV	R0,-(SP)	; Get a scratch register		;005
+	MOVB	(R2)+,R0	; Get length of string
+	MOVB	R0,(R3)+	; Insert length in destination
+	BEQ	20$		; Branch if nothing to copy		;005
+10$:	MOVB	(R2)+,(R3)+	; Copy the data				;005
+	SOB	R0,10$		; ... until finished			;005
+20$:	MOV	(SP)+,R0	; Restore the scratch register
+	RETURN			; Return
+
+.DSABL	LSB
+.END

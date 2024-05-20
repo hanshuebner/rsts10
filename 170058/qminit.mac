@@ -1,0 +1,1114 @@
+.INCLUDE	%CMN:COMMON%
+.LIBRARY	%SYSTEM:PBSMAC%
+.LIBRARY	%LB:RMSMAC%
+.NLIST
+.INCLUDE	%SYSTEM:QMDEF%
+.LIST
+TITLE	QMINIT,<QMAN INITIALIZATION>,0A,10-MAY-91,SJM/PRL/KCG/DBM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for QMINIT
+
+;+
+;Edit	By   Date	Reason
+;
+;  000	KCG  23-Apr-84	Creation for Version 9.0
+;  001	PRL  09-May-84	Use MOVBYT macro
+;  002	PRL  27-Sep-84	Rename "QMINIT" as update to work as .OBJ
+;  003	KCG  15-Oct-84	Fetch pointer to RBF after invokation of GETREC macro
+;  004	PRL  30-Oct-84	Rename record type symbols to QR$xxx
+;  005	KCG  01-Nov-84	Inserted new LODSDB for PRL ( tentative server )
+;  006	KCG  01-Nov-84	Put jobs in hold state if they were started in COMPRS
+;  007	KCG  13-Jan-85	Store pointer to JOBCNT table in QMINIT
+;  008	KCG  01-Feb-85	Add code to LODSDB to support /NOSHAREABLE Batch Servers
+;  009	DBM  03-Sep-87	Use a negative clustersize for file creation.
+;
+;			[RSTS/E V9.6]
+;  010	DBM  26-Feb-88	Change method of calling ALLOC to get a PK
+;
+;			[RSTS/E V10.0]
+;  011	DBM  26-Jun-89	OMS support work
+;  012	DBM  18-Dec-89	Automatic queue file compression
+;  013	DBM  09-Jan-90	Return LUN on compression failure
+;  014	DBM  27-Jan-90	Outbound LAT support
+;
+;-
+
+.SBTTL	QMINIT	- INITIALIZE QMINIT PSECT
+
+	.PSECT	QMINIT,RO,CON		;start of QMINIT psect
+
+.SBTTL	QMINIT	- ONE-SHOT INITIALIZATION FOR QMAN
+
+;+
+;
+; QMINIT:
+;
+; Inputs:	None
+;
+; Call:		JSR	PC,QMINIT
+;
+; Back:		R5,UCNTXT -> impure area
+;		(dispatch function bits filled in)
+;
+;		Only return if success
+;		On failure crash QMAN
+;
+;-
+
+	.ENABL	LSB
+
+QMINIT::MOV	#SARGSIZ,R1		;SIZE OF AREA TO GET
+	GETBUF	R0,R1,CLEAR		;GO GET THE BUFFER
+	BCC	10$			;CONTINUE IF ALL IS WELL
+	CRASH				;NO BUFFER THEN CRAP OUT
+
+10$:	MOV	R0,R5			;PUT POINTER TO BLOCK INTO R5
+	MOV	#MAXSEQ,INTSEQ(R5)	;INITIALIZE INTERNAL SEQ NO.
+	CLR	JOBSEQ(R5)		;ENSURE THAT JOB SEQUENCE IS NULL
+	MOV	R5,@UCNTXT		;SAVE POINTER TO COM BLOCK IN UCNTXT
+	MOVB	R1,(R5)			;LENGTH GOES IN FIRST BYTE OF BLOCK
+.ASSUME	BLKSIZ	EQ 0
+	MOV	#$DSBIT,R0		;GET POINTER TO SERVER DISPATCH BITS
+	MOV	#$DSBYT,R1		;AND LENGTH OF BITS IN BYTES
+	MOV	R5,R2			;GET POINTER TO START OF IMPURE
+20$:	MOVB	(R0)+,DSPBIT(R2)	;COPY THEM INTO THE IMPURE AREA
+	INC	R2			;UP THE POINTER
+	SOB	R1,20$			;UNTIL DONE
+	MOV	R5,R2			;GET NON R5 COPY OF IMPURE AREA
+	SUBRIB	USRRIB(R2)		;GET SUB RIB NUMBER
+	SUBRIB	SRVRIB(R2),1		;GET NEXT SUB RIB NUMBER
+	SUBRIB	URPRIB(R2),2		;GET NEXT SUB RIB NUMBER TOO
+	.DATE				;GET SYSTEM DATE/TIME
+	MOV	@#XRB+2,SPLSED(R5)	;SEED THE SERVER BASE
+	CALLX	CRESKD			;CREATE THE PRIMARY SKDB
+	CLRB	SK.JOB(R2)		;MARK THIS SKDB AS PRIMARY
+	MOVB	#SK$PRI+SK$RUN,SK.STS(R2);MARK AS PRIMARY, ACTIVE SKDB
+	CLR	SPAWN(R5)		;ENSURE SPAWN FLAG IS REASONABLE
+	CLR	RESFLG(R5)		;ENSURE RESOURCE WAITING FLAG IS CLEAR
+	CLR	R2			;USE R2 TO CALCUATE
+	ADD	..PPRT,R2		;  THE NUMBER OF SERVERS IN
+	ADD	..PBAT,R2		;    PRIMARY JOB.
+	BEQ	30$			;SKIP FLAG MARKING IF NO SERVERS IN PRI
+	MOV	SP,SPAWN(R5)		;SHOW THAT WE ARE WAITING FOR ACKS
+30$:	CALLX	CLRFQB			;Clear the firqb		;007
+	MOVB	#UU.TB2,@#FIRQB+FQFUN	;set Monitor tables part II fun	;007
+	.UUO				;execute uuo			;007
+	MOV	@#FIRQB+FQSIZ,JOBCNT(R5);save JOBCNT address		;007
+	CALL	LOADDS			;LOAD THE INTERNAL DATA STRUCTURES
+	RETURN
+
+	.DSABL	LSB
+
+GLOBAL	<UCNTXT,..PPRT,..PBAT>
+
+.SBTTL	LOADDS	- LOAD DATA STRUCTURES FROM QUEUE FILE
+
+;+
+;
+; LOADDS:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,LOADDS
+;
+;		THIS ROUTINE IS CALLED ONLY ONCE UPON START UP OF THE 
+;		PACKAGE.
+;
+; NOTE:
+;
+;	RMS IS INITED, THE FAB AND RAB ARE CREATED, AND THE QUEUE FILE IS 
+;	OPENED IN THIS ROUTINE.
+;
+;
+; BACK:
+;
+;		ALL QUEUE DEFINITION BLOCK (QDB), SERVER DEFINITION BLOCK
+;		(SDB), ASSIGNED SERVER BLOCK (ASB), AND FONT DEFINITION 
+;		BLOCKS (FDB) LOADED INTO ON LINE TABLES IF THERE ARE ANY.
+;
+;
+;		ALL REGISTERS PRESERVED
+;
+;
+;-
+
+LOADDS:	SAVREG
+	$INITIF			;INIT THE RMS WORLD IF WE NEED TO
+	CALL	CRQFAB		;CREATE THE FAB
+	CALL	CRQRAB		;CREATE THE RAB
+
+	MOV	QFAB(R5),R2	;GET AN EASY COPY OF THE FAB
+	MOV	QRAB(R5),R3	;GET AN EASY COPY OF THE RAB
+
+	GETLUN	R0		;GET A LUN FOR THE QUEUE FILE
+	ASR	R0		;WE DON'T WANT X 2
+
+	$STORE	R0,LCH,R2	;STORE THE LOGICAL UNIT NUMBER
+
+	$OPEN	R2		;TRY TO OPEN THE QUEUE FILE
+	TST	O$STS(R2)	;ANY ERRORS?
+	BPL	10$		;NO
+	CMP	#ER$FNF,O$STS(R2) ; WAS THE ERROR FILE NOT FOUND?
+	BEQ	80$		;YES, SO THERE IS NOTHING TO DO.
+	MOV	O$STS(R2),R1	;NO, SET ERROR
+	CRASH			;AND CRASH, THERE IS SOME FATAL CONDITION
+
+10$:	$CONNECT R3		;CONNECT THE DATA STREAM
+	TST	O$STS(R3)	;ANY ERRORS?
+	BPL	20$		;NO
+	MOV	O$STS(R2),R1	;YES, SET ERROR
+	CRASH			;AND CRASH, UNEXPECTED FATAL ERROR
+
+20$:	CLRTMP			;clear out the temp work block
+	MOV	R5,R2		;get base of impure area
+	ADD	#TMPBLK,R2	;R2 -> temp work block
+	MOVB	#17,(R2)	;load max queue type for keyed search
+	MOV	#GETGT,R0	;init mode for GET GT
+30$:	GETREC	R0,#JOBKEY,R2,#3 ;get the next record
+	MOV	#GETNXT,R0	;change to GET NEXT mode
+	BCC	40$		;got a record, so continue
+	CMP	#ER$EOF,O$STS(R3) ; WAS ERROR END OF FILE?
+	BEQ	80$		;YES TERMINATE NORMALLY
+	CMP	#ER$RNF,O$STS(R3) ; WAS RECORD NOT FOUND
+	BEQ	80$		;YES TERMINATE NORMALLY
+	MOV	O$STS(R3),R1	;NO,SET THE ERROR
+	CRASH			;AND CRASH (FATAL ERROR)
+
+40$:	$FETCH	R1,RBF,R3	;get pointer to record buffer if any	;003
+	MOVBYT	JB.QUE(R1),R4	;SET IN THE RECORDS QUE FIELD		;001
+	CMPB	R4,#QR$BAD	;is this a valid record type?
+	BHIS	50$		;no, so delete the bad record
+	ASH	#-3,R4		;SHIFT OVER MEANINGFUL BITS
+	BIC	#1,R4		;ENSURE AN EVEN WORD BOUNDARY
+	BNE	60$		;HOUSTON, WE HAVE A GOOD VALUE
+50$:	BPT
+	$DELETE R3		;DELETE THE BAD RECORD
+	BR	30$		;AND GET THE NEXT ONE
+
+60$:	CMP	JB.SEQ(R1),INTSEQ(R5)	;IS THIS NUM > THAN THE CURRENT SEQ NUM
+	BLOS	70$			;NO, SO DON'T UPDATE THE SEQ NUM
+	MOV	JB.SEQ(R1),INTSEQ(R5)	;YES, UPDATE THE INTERNAL SEQ NUM
+
+70$:	ADD	#LODTBL-2,R4	;SET IN DISPATCH ADDR
+	CALL	@(R4)		;AND DISPATCH
+	BR	30$		;GET NEXT DATA STRUCTURE RECORD
+
+80$:	ASNSEQ	#1,R4		;CORRECT THE INTERNAL SEQ NUM TO NEXT AVAILABLE
+	$DISCONNECT R3		;DISCONNECT THE DATA STREAM
+	MOV	QFAB(R5),R2	;RESTORE THE QFAB
+	$CLOSE	R2		;CLOSE THE FILE
+	$FETCH	R0,LCH,R2	;GET THE CHANNEL NUMBER
+	ASL	R0		;WE WANT X 2
+	RETLUN	R0		;RETURN THE LUN
+	RETBUF	R2,#FB$BLN	;RETURN THE FAB BUFFER 
+	RETBUF	R3,#RB$BLN	;RETURN THE RAB BUFFER
+	CLR	QFAB(R5)	;CLEAR OUT THE OLD ENTRIES
+	CLR	QRAB(R5)
+
+	RETURN
+
+.SBTTL	LOADDS	- QUEUE TYPE DISPATCH TABLE
+
+	.SAVE
+	.PSECT	PURE
+
+; Ensure that QDB record type is ordered properly
+
+.ASSUME	QR$QDB GT QR$ENT
+.ASSUME	QR$QDB LT QR$SDB
+.ASSUME	QR$QDB LT QR$FNT
+.ASSUME	QR$QDB LT QR$ASB
+
+;+
+; LODTBL is the dispatch table that will dispatch according
+; to record type
+;-
+
+	.EVEN
+
+LODTBL:	.WORD	LODQDB	; LOAD QDB RECORD
+	.WORD	LODSDB	; LOAD SDB RECORD
+	.WORD	LODFDB	; LOAD FDB RECORD
+	.WORD	LODASB	; LOAD ASB RECORD
+
+	.RESTORE
+
+.SBTTL	LODQDB	- LOAD QDB RECORDS FROM QUEUE FILE
+
+;+
+;
+; LODQDB:
+;
+;
+; INPUTS:
+;
+;		R1 -> QDB RECORD
+;		R3 -> QRAB
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,LODQDB
+;
+;		THIS ROUTINE IS CALLED FROM LOADDS ( IT IS ACTUALLY A SUB
+;		PROGRAM OF LOADDS ).
+;
+;
+; BACK:
+;
+;		A QDB IS SET UP.  IF THE RECORD WAS NOT A QDB, THEN WE WOULDN'T
+;		HAVE GOT HERE.  THE DEFAULT QUEUE IS THE SAME AS IT WAS AT 
+;		LAST SHUT DOWN.
+;
+;
+;		ALL REGISTERS PRESERVED
+;
+;
+;-
+
+	.ENABL	LSB
+
+LODQDB:	SAVREG
+
+	MOV	R5,R2		;GET SPARE COPY OF IMPURE AREA POINTER
+	ADD	#QUELST,R2	;R2 -> HEAD OF QDB LINKED LIST
+5$:	TST	(R2)		;FIND TAIL OF LIST
+	BEQ	7$		; TAIL FOUND
+	MOV	(R2),R2		; NOT FOUND, TRY NEXT
+	BR	5$		
+
+7$:	MOV	R1,R4		;GET SAFE COPY OF RECORD POINTER
+
+	MOV	#QU.LEN,R1	;SET THE LENGTH OF BUFFER WE WANT
+	GETBUF	R0,R1,CLEAR ;GET US A BUFFER FOR THE QDB
+	BCC	10$		;ALL OK, GO ON
+	MOV	#ER$MEM,R1	;SET ERROR 
+	CRASH			;FAILURE, OUCH !
+
+10$:	MOV	R1,QU.ILN(R0)	;SET IN THE REAL LENGTH
+	MOV	(R2),QU.NXT(R0)	;INSERT AT TAIL OF THE LIST
+	MOV	R0,(R2)		;
+
+	MOV	R0,R1		;SET UP DESTINATION ADDRESS
+	ADD	#QU.SEQ,R1	;SET UP FOR QDB RECORD COPY
+	MOV	R4,R0		;SET UP SOURCE ADDRESS
+	MOVSTR	R0,R1,#QU.LEN-QU.SEQ ;PERFORM COPY
+	CLR	QU.JOB-QU.SEQ(R1) ; CLEAR OUT THE QU.JOB COUNTER
+	CLR	QU.ASB-QU.SEQ(R1) ; CLEAR OUT THE ASB LINKED LIST
+	BICB	#^C<17>,QU.QUE-QU.SEQ(R1) ;clear record type bits 7:4	;004
+
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	LODSDB	- LOAD SDB RECORDS FROM QUEUE FILE
+
+;+
+;
+; LODSDB:
+;
+; Inputs:	R1 -> SDB record
+;		R3 -> QRAB
+;		R5 -> impure area
+;
+; Call:		JSR	PC,LODSDB
+;
+; Back:		An SDB is created in memory from SDB record.
+;		If print type, then device is validated.
+;		If /NOSHAREABLE, then device is allocated.
+;
+;		All registers preserved
+;
+;-
+
+	.ENABL	LSB
+
+LODSDB:	SAVREG
+	BIT	#SP$MDL,SP.STS-SP.SEQ(R1) ;is this server marked for deletion?
+	BNE	10$			;yes, so trash the SDB record
+	BIC	#SP$DIS,SP.STS-SP.SEQ(R1) ;assume server as enabled
+	MOVB	SP.QUE-SP.SEQ(R1),R0	;no, get server's queue type
+	BICB	#QR$SDB,R0		;clear SDB record type
+	CMPB	#QT$PRI,R0		;is this a print queue?
+	BNE	30$			;no, so skip .FSS check on device name
+	CALLX	CLRXRB			;yes, clear out XRB for .FSS
+	MOV	R1,R0			;get base of SDB record
+	ADD	#<SP.DVL-SP.SEQ>,R0 	;R0 -> device name length
+	MOVBYT	(R0)+,R2		;R2 = no. bytes in device name
+	BEQ	10$			;no device, so trash this SDB record
+	MOV	R2,@#XRB+XRLEN		;copy length into XRLEN
+	MOV	R2,@#XRB+XRBC		;and into XRBC
+	MOV	R0,@#XRB+XRLOC		;copy addr of device name into XRLOC
+.ASSUME	SP.DEV	EQ SP.DVL+1		;ensure device name follows length byte
+	.FSS				;.FSS the device name
+	TSTB	@#FIRQB			;any errors?
+	BNE	10$			;yes, so trash this SDB record
+	BIT	#20000,@#XRB+10		;any device name found in string?
+	BEQ	10$			;no, so trash this SDB record
+	BIT	#<1!10!20!200!2000>,@#XRB+10 ;yes, anything else found in string?
+	BNE	10$			;yes, so trash this SDB record
+	TST	@#XRB+10		;no, is device name a physical device?
+	BPL	20$			;yes, so continue checking
+	BIT	#SP$TEN,SP.STS-SP.SEQ(R1) ;no, is this a tentative SDB?
+	BNE	10$			;yes, so trash the SDB record
+	CMPB	#LPTHND,@#XRB+14	;is device an LP device?
+	BEQ	20$			;yes, so continue
+	CMPB	#TTYHND,@#XRB+14	;no, is it a KB device?
+	BEQ	20$			;yes, continue testing
+10$:	$DELETE	R3			;no, so delete the SDB record
+	BR	100$			;and exit
+
+20$:	MOV	R1,R2			;get copy of SDB record pointer
+	SUB	#SP.SEQ,R2		;fake real SDB pointer
+	CALLX	DEVDIS			;Is the device disabled?
+	BCC	30$			;No, continue checking
+	BIS	#SP$DIS,SP.STS(R2)	;set the device as disabled
+30$:	MOV	R5,R2			;yes, get base of impure area
+	ADD	#SPLLST,R2		;R2 -> head of SDB linked list
+40$:	TST	(R2)			;any more SDB's?
+	BEQ	50$			;no, so we're pointing at tail
+	MOV	(R2),R2			;yes, get next SDB
+	BR	40$			;and continue searching list
+
+50$:	MOV	R1,R4			;save SDB record pointer
+	MOV	#SP.LEN,R1		;set up the length of buffer to get
+	GETBUF	R0,R1,CLEAR 		;get a buffer for the SDB
+	BCC	60$			;all OK, so continue
+	MOV	#ER$MEM,R1		;error, so set error code
+	CRASH				;and crash
+
+60$:	MOV	R1,SP.ILN(R0)		;set in the real length
+;	CLR	SP.NXT(R0)		;clear pointer to next SDB
+	MOV	R0,(R2)			;add new SDB to tail of list
+	MOV	R0,R2			;R2 -> new SDB
+	MOV	R4,R0			;R0 -> source address for copy
+	MOV	R2,R1			;get base of SDB
+	ADD	#SP.SEQ,R1		;R1 -> destination address for copy
+	MOVSTR	R0,R1,#SP.LEN-SP.SEQ 	;copy fields from record into SDB
+	BIC	#IN$STS,SP.STS(R2)	;set SDB to a known status
+	CLR	SP.RCV(R2)		;clear out prev receiver
+	MOV	#SPLIDL,SP.STA(R2)	;set SDB to a known message state
+	CLR	SP.JOB(R2)		;clear job and no seize flag
+	CLR	SP.JBS(R2)		;show no job running on this SDB
+	MOV	R2,R1			;get copy of SDB pointer
+	ADD	#SP.SEQ,R1		;R1 ->SDB record
+	$STORE	R1,RBF,R3		;set record pointer
+	$UPDATE	R3			;update the SDB on disk
+	BICB	#QR$SDB,SP.QUE(R2)	;clear internal record type
+	BIT	#SP$DIS,SP.STS(R2)	;is this server disabled?
+	BNE	100$			;yes, so skip allocate check
+	BIT	#SP$ALC,SP.STS(R2)	;no, is this device marked NOSHARE?
+	BEQ	100$			;no, don't allocate the device
+	BIC	#SP$ALC,SP.STS(R2)	;fool allocate routine that were not
+	CMPB	#QT$BAT,SP.QUE(R2)	;Is this a batch server?
+	BNE	70$			;No, don't allo PK
+	MOV	#BIT8,SP.PKN(R2)	;Yes, start at PK0
+70$:	CALLX	ALLOC			;yes, try to allocate the device
+	BCC	90$			;got it, so continue
+	CMPB	#QT$BAT,SP.QUE(R2)	;Batch server?
+	BNE	80$			;no, this device is in resource wait
+	CMPB	#NOROOM,R1		;was '?No Logins' in effect?
+	BEQ	90$			;Yes, no sweat, we got it
+
+;010	CMPB	#ER$LBY,R1		;ALLOC now increments SP.PKN	;010
+;010	BNE	80$			; so we don't have to.		;010
+;010	INC	SP.PKN(R2)		; It either found one, or not	;010
+;010	BR	70$			;  so this code isn't needed	;010
+
+80$:	BIS	#SP$RES,SP.STS(R2) 	;failed, so show waiting for resource
+	MOV	SP,RESFLG(R5)		;and tell QMAN to try allocation later
+90$:	BIS	#SP$ALC,SP.STS(R2)	;set the allocate flag
+100$:	RETURN				;exit
+
+	GLOBAL	<SPLIDL,NOROOM>
+
+IN$STS = <SP$NRD!SP$OFL!SP$HNG!SP$JOB!SP$SYN!SP$NIU!SP$SPN!SP$RES!SP$TEN!SP$LAT>
+					;define initial SDB status
+
+	.DSABL	LSB
+
+.SBTTL	LODASB	- LOAD ASB RECORDS FROM QUEUE FILE
+
+;+
+;
+; LODASB:
+;
+;
+; INPUTS:
+;
+;		R1 -> ASB RECORD
+;		R3 -> QRAB
+;		R5 -> IMPURE AREA
+;
+; CALL:
+;	JSR	PC,LODASB
+;
+;		THIS ROUTINE IS CALLED FROM LOADDS ( IT IS ACTUALLY A SUB
+;		PROGRAM OF LOADDS ).
+;
+;
+; BACK:
+;
+;		AN ASB IS SET UP.
+;
+;
+;		ALL REGISTERS PRESERVED
+;
+;
+;-
+
+	.ENABL	LSB
+
+LODASB:	SAVREG
+	MOV	R1,R4			;SAVE ASB RECORD ADDR
+	FNDQSQ	<AQ.QSQ-AQ.SEQ(R1)>	;FIND QDB QITH MATCHING SEQ NO.
+	BCC	20$			;QUEUE FOUND (QDB IN R1)
+10$:	$DELETE R3			;QUEUE NOT FOUND, DELETE IT
+	BR	60$			;AND EXIT
+
+20$:	FNDSSQ	<AQ.SSQ-AQ.SEQ(R4)>	;FIND SDB WITH MATCHING SEQ NO.
+	BCS	10$			;SDB NOT FOUND, DELETE IT
+	MOV	#AQ.LEN,R3		;SDB FOUND, GET LEN OF ASB
+	GETBUF	R0,R3,CLEAR		;GET THE MEMORY BLOCK
+	BCC	30$			;ALL OK
+	MOV	#ER$MEM,R1		;OTHERWISE SET ERROR
+	CRASH				; AND FAIL
+
+30$:	MOV	R3,AQ.ILN(R0)		;SET IN REAL LENGTH
+	MOV	R0,R3			;GET COPY OF ASB ADDRESS
+	ADD	#AQ.SEQ,R3		;R3 -> START OF COPY TARGET
+	MOVSTR	R4,R3,#AQ.LEN-AQ.SEQ	;PERFORM COPY
+	MOV	R2,AQ.SPL(R0)		;SET IN SDB ADDR
+	ADD	#QU.ASB,R1		;R1 -> QUEUE'S ASB LIST
+40$:	TST	(R1)			;ANY MORE ASB'S?
+	BEQ	50$			;NO, ADD NEW ASB
+	MOV	(R1),R1			;YES, GET NEXT ASB
+	BR	40$			;AND ON TO NEXT
+	
+50$:	MOV	R0,(R1)			;LINK NEW ASB AT END
+	BICB	#^C<17>,AQ.QUE(R0)	;clear record type bits 7:4	;004
+60$:	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	LODFDB	- LOAD FDB RECORDS FROM QUEUE FILE
+
+;+
+;
+; LODFDB:
+;
+;
+; INPUTS:
+;
+;		R5 -> IMPURE AREA
+;		R0 -> FUNCION BITS TABLE
+;
+; CALL:
+;	JSR	PC,LODFDB
+;
+;		THIS ROUTINE IS CALLED FROM LOADDS ( IT IS ACTUALLY A SUB
+;		PROGRAM OF LOADDS ).
+;
+;
+; BACK:
+;
+;		ALL FDBS ARE SET UP.  IF THERE ARE NO FDBS, THEN NONE ARE SET 
+;		UP.  DEFAULT QUEUE IS THE SAME AS IT WAS AT LAST SHUT DOWN.
+;
+;
+;		ALL REGISTERS PRESERVED
+;
+;
+;-
+
+	.ENABL	LSB
+
+LODFDB:	;SAVREG
+
+;	TO BE DEFINED
+
+	RETURN
+
+	.DSABL	LSB
+
+.SBTTL	CMPRSS	- CREATE/COMPRESS SYSTEM QUEUE FILE
+
+;+
+;
+; CMPRSS:
+;
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL:
+;	JSR	PC,CMPRSS
+;
+;
+; BACK:
+;
+;		R5,UCNTXT -> IMPURE AREA
+;			SYSTEM QUEUE FILE CREATED OR
+;			COMPRESSED IF ALREADY IN EXISTENCE
+;			OR ZONKED AND RE-CREATED IF 'INVALID?'
+;
+;
+;	ONLY RETURN IF SUCCESS
+;	ON FAILURE CRASH SERVER
+;
+;	A complete re-write was done for this code during edit 012 (DBM)
+;	to add support for on-line compressions.  Without an RMS change
+;	to support reset closes, an error during compression will cause
+;	the queue file to be invalid.  The old compression algorithm had
+;	the same problem, so this isn't too serious of a restriction.
+;
+;-
+
+	.ENABL	LSB
+
+CMPRSS::NOP			;For debugging.  *** REMOVE for final release
+	SAVREG				;Save the world
+	$INITIF				;Initialize RMS if needed
+	MOV	#QCFAB,R1		;Get FAB ptr for compress file
+	MOV	#QCRAB,R2		;Get RAB ptr for compress file
+	MOV	#1,KILCNT(R5)		;Assume this is an on-line compression
+	MOV	QFAB(R5),R3		;Get FAB ptr for current queue file
+	MOV	QRAB(R5),R4		;Get RAB ptr for current queue file
+	BNE	10$			;Valid RAB = on-line compression
+	CLR	KILCNT(R5)		;Initial compression (KILCNT = 0)
+	GETLUN	R0			;Get a LUN for the old queue file
+	BCS	BUGCHK			;Crash if no LUNs available
+	ASR	R0			;Convert LUN to RSTS channel number
+	CALL	CRQFAB			;Create a FAB for the queue file
+	CALL	CRQRAB			;Create a RAB for the queue file
+	MOV	QFAB(R5),R3		;Get FAB ptr for current queue file
+	MOV	QRAB(R5),R4		;Get RAB ptr for current queue file
+	$STORE	R0,LCH,R3		;Store logical channel number in FAB
+	$OPEN	R3			;Open the old queue file (If it exists)
+	$CONNECT R4			;Connect to the data stream
+	.BR	10$			;Ready to begin compression
+
+10$:	GETLUN	R0			;Get a LUN for the new queue file
+	BCS	RETRY1			;Uh oh.  No more LUNs available
+	ASR	R0			;Convert LUN to RSTS channel number
+	$STORE	R0,LCH,R1		;Store channel number in FAB
+	$CREATE	 R1			;Create a new queue file
+	MOV	O$STS(R1),R0		;Any error?
+	BMI	RETRY1			;Yes, retry it again later
+	$CONNECT R2			;Connect to the data stream
+	MOV	O$STS(R2),R0		;Any error?
+	BPL	20$			;No, so continue
+RETRY:	$DISCONNECT R2			;Disconnect data stream
+	$FETCH	R0,LCH,R1		;Get the channel # from the FAB
+	NEG	R0			;Make it negative
+	$STORE	R0,LCH,R1		;Store new value back in FAB
+	$CLOSE	R1			;Perform a reset close on the channel
+	NEG	R0			;Back to channel #		;013
+	ASL	R0			;Convert channel # to LUN #	;013
+	RETLUN	R0			;Return it to the LUN pool	;013
+RETRY1:	TST	KILCNT(R5)		;Is this the initial compression?
+	BEQ	BUGCHK			;Yes.  That's bad, very bad
+;	CALLX	SNDCMP			;We should tell someone
+	SEC				;Signal failure
+	RETURN				;and return
+
+BUGCHK:	CRASH				;Die a horrible death
+
+20$:;	CLR	JOBSEQ(R5)		;Start at sequence number 1
+	$STORE	#QVERL,RSZ,R2		;Set length of version flag
+	$STORE	#QVER,RBF,R2		;Point to version packet
+	$PUT	R2			;Store header record in the file
+	RMSERR	R2,RETRY		;No errors are expected
+	$STORE	#SEQKEY,KRF,R4		;Set key to the primary key
+	$STORE	#SEQKLN,KSZ,R4		;Set length of primary key
+	$STORE	#QVER,KBF,R4		;Pointer to version packet
+	$STORE	#RB$SEQ,RAC,R4		;Ensure sequential access to file
+	$REWIND	R4			;Start at top of file
+30$:	$GET	R4			;Read in header record from old queue file
+	TST	O$STS(R4)		;Any error?
+	BPL	40$			;No, continue
+	CMP	#ER$RLK,O$STS(R4)	;Was error due to record lock?
+	BNE	80$			;Nope, so assume EOF (Hope for the best)
+	$FREE	R4			;Unlock any locks
+	MOV	#2,@#XRB		;Take a short nap
+	.SLEEP				;Zzzzz...
+	BR	30$			;Now try it again
+
+40$:	PUSH	<R1,R2,R3>		;We'll need a few work registers...
+	$FETCH	R0,RSZ,R4		;Get length of version flag packet
+	CMP	#QVERCL,R0		;Is it long enough?
+	BHI	60$			;No
+	$FETCH	R0,RBF,R4		;Yes, get pointer to version packet
+	MOV	#QVER,R1		; and ours
+	MOV	#QVERCL,R3		;R3 = Length to match
+50$:	CMPB	(R0)+,(R1)+		;Do they match?
+	BNE	60$			;No
+	SOB	R3,50$			;This byte does, check the rest
+	TST	(PC)+			;They match, clear carry and skip
+60$:	SEC				;No match, set carry
+	POP	<R3,R2,R1>		;Restore the work registers
+	BCS	80$			;If the old file was bad, don't use it
+	CLR	COPCNT			;Say no records copied
+70$:	$GET	R4			;Get next record from old queue file
+	TST	O$STS(R4)		;Any error?
+	BPL	90$			;No, continue
+	CMP	#ER$RLK,O$STS(R4)	;Was error due to record lock?
+	BNE	80$			;Nope, so assume EOF (Hope for the best)
+	$FREE	R4			;Unlock any locks
+	MOV	#2,@#XRB		;Take a short nap
+	.SLEEP				;Zzzzz...
+	BR	70$			;Now try it again
+
+80$:	JMP	160$			;Intermediate branch point
+
+90$:	$FETCH	R0,RBF,R4		;Get pointer to record buffer
+	BITB	#^C<17>,JB.QUE(R0)	;Is this an entry record?	;004
+.ASSUME	QR$ENT	EQ 0			;Ensure entry record type is 0
+	BNE	130$			;No, so always save it
+	CMP	#JB.LEN,O$RSZ(R4)	;Is record at least minimum length?
+	BHI	70$			;No, so skip over it
+	TST	KILCNT(R5)		;Is this a compress? (KILCNT <> 0?)
+	BNE	100$			;Yes, check for entry's QDB
+	CMP	#JS$STR,JB.STS(R0)	;Was job running when we died?
+	BLO	70$			;Job ended/aborted, so chuck it
+	BNE	100$			;Not running, so leave it alone
+	MOV	#JS$NRD,JB.STS(R0)	;Job was active, place it on hold
+	CLR	JB.SDA(R0)		;Show no start date
+	CLR	JB.STI(R0)		;Show no start time
+	CLRB	JB.DVL(R0)		;Show no device
+100$:	PUSH	R1			;Save R1
+	FNDQSQ	JB.QSQ(R0)		;Find the QDB for this job (R1 = QDB)
+	BCC	110$			;Found it
+	POP	R1			;Not found, restore R1
+105$:	BR	70$			; and scrap record
+
+110$:	TST	KILCNT(R5)		;Is this a compress?
+	BNE	125$			;Yes, don't change QU.JOB or state ;011
+	INC	QU.JOB(R1)		;No, inc job count for correct value
+	CMPB	JB.QUE(R0),#QT$PRI	;Is this a print entry?		;011
+	BNE	125$			;Nope.				;011
+	CMP	JB.STS(R0),#JS$FRM	;Yes, in FORMS_WAIT state?	;011
+	BNE	120$			;Nope, but it might be READY	;011
+	MOV	#JS$RDY,JB.STS(R0)	;Set it to READY for now	;011
+120$:	MOV	R0,R1			;Point R1 at job record		;011
+	CALLX	CHKFRM			;Find out its current status	;011
+125$:	POP	R1			;Restore work register		;011
+	CMP	JOBSEQ(R5),JB.SEQ(R0)	;Is it's sequence number higher?
+	BHI	130$			;No so keep ours
+	MOV	JB.SEQ(R0),JOBSEQ(R5)	;Yes, so use it
+130$:	MOV	O$RSZ(R4),O$RSZ(R2)	;Copy record size from old RAB to new
+	MOV	O$RBF(R4),O$RBF(R2)	;Copy buffer ptr from old RAB to new
+	$PUT	R2			;Store record in new file
+	MOV	O$STS(R2),R0		;Any error?
+	BMI	140$			;Abort compression on error
+	TST	KILCNT(R5)		;First time compression?
+	BEQ	105$			;Yes, get next record
+	$FETCH	R0,RBF,R4		;Get pointer to record buffer
+	BITB	#^C<17>,JB.QUE(R0)	;Is this an entry record?
+.ASSUME	QR$ENT	EQ 0			;Ensure entry record type is 0
+	BNE	105$			;No.  We've reached the internal recs
+	INC	COPCNT			;Count the number of entries copied
+	BIT	COPCNT,#7		;Multiple of 8 entries copied?
+CMPCOP	== .-2			; *** Frequency of PMB checks
+	BNE	105$			;Nope, continue with compression
+	PUSH	R5			;Save R5 for a millisecond
+	MOV	SJOB,R5			;Fetch our sub-job number * 2
+	ASR	R5			;Need it * 1 for CHKMSG
+	CALLX	CHKMSG			;Any messages pending?
+	POP	R5			;Restore R5 first
+	BCC	105$			;Nope, continue with compression
+140$:	JMP	RETRY		  	;Retry compression later
+
+160$:	$DISCONNECT	R4		;All done.  Disconnect data stream
+	$CLOSE	R3			;Close the old queue file
+	$FETCH	R0,LCH,R3		;Get channel to return
+	ASL	R0			;Convert back to LUN
+	RETLUN	R0			;Return it
+	RETBUF	R3,#FB$BLN		;Return the FAB buffer
+	RETBUF	R4,#RB$BLN		;Return the RAB buffer
+	ASNSEQ	#0,R3			;Set JOBSEQ(R5) to next available seq #
+	$DISCONNECT R2			;Disconnect data stream on new file
+	CALLX	CLRFQX			;Clear out FIRQB/XRB
+	MOVB	#UU.FIL,@#FIRQB+FQFUN	;Set function code
+	MOVB	O$LCH(R1),@#FIRQB+FQFIL ; and channel
+	MOVB	#128.,@#FIRQB+FQFIL+1	;Sub function code
+	MOVB	#128.!4.,@#FIRQB+20	;Flags byte
+	.UUO				;Flag it for CACHE/RAN
+..NOCA==.-2		; ** PATCH TO NOP TO DISABLE CACHE/RAN OF QUEUE FILE
+	$CLOSE	 R1			;Close tentative file to make permanent
+	RMSERR	 R1,140$		;Errors are unexpected
+	$FETCH	R0,LCH,R1		;Get channel # we were using
+	CALL	CRQFAB			;Create new FAB
+	CALL	CRQRAB			;Create new RAB
+	MOV	QFAB(R5),R1		;Get FAB pointer
+	MOV	QRAB(R5),R2		;And RAB pointer
+	$STORE	R0,LCH,R1		;Set channel # to use
+	$OPEN	R1			;Re-open file
+	RMSERR	 R1,170$		;If it fails, go crap out
+	$CONNECT R2			;Re-connect the data stream
+	RMSERR	 R2,170$		;If it fails, go crap out
+	;CLC				;Carry is clear since RMSERR does a TST
+	RETURN				;All done.
+
+170$:	JMP	BUGCHK			;Too far to branch
+
+; Ensure job states are ordered correctly
+
+.ASSUME	JS$STR LT JS$SUC
+.ASSUME	JS$STR LT JS$FAI
+.ASSUME	JS$STR LT JS$KIL
+.ASSUME	JS$STR LT JS$ABO
+
+	.DSABL	LSB
+
+.SBTTL	DEFINE QUEUE FILE HEADER RECORD
+
+	.SAVE
+	.PSECT	PURE
+
+	.EVEN
+QVER:	.BLKB0	<JB.STS>		; ENSURE THAT ALL KEYS ARE ZERO
+	.WORD	<P.VER+60>		;AND QUE FILE VERSION NUMBER (ASCII)
+	.WORD	JS$RDY			; SHOW QUEUE AS READY
+QVERCL=.-QVER
+	.ASCII	/Queue Manager Version 9.0    /
+QVERL=.-QVER
+	.EVEN
+	.RESTORE
+
+.ASSUME	JB.STS+2 EQ JB.FLG
+
+.SBTTL	CRQFAB	- CREATE DEFAULT FAB FOR QUEUE IN MAPPED BUFFER
+
+;+
+;
+; CRQFAB:
+;
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL:
+;	JSR	PC,CRQFAB
+;
+;
+; BACK:
+;
+;		QFAB(R5) POINTS TO MAPPED/SET FAB
+;
+;	ONLY RETURN IF SUCCESS
+;	ON FAILURE CRASH SERVER
+;
+;-
+
+CRQFAB:	SAVREG				;SAVE THEM FOR GOOD LUCK
+	MOV	#FB$BLN,R1		;SIZE OF ONE FAB
+	GETBUF	R0,R1,CLEAR		;GO GET THE BUFFER
+	BCC	10$			;CONTINUE ONLY IF ALL IS WELL
+	CRASH				;NO BUFFER THEN CRAP OUT
+
+10$:	MOV	R0,QFAB(R5)		;SALT THE FAB POINTER
+	$STORE	#FB$BID,BID,R0		;FILL IN BID FIELD IN FAB
+	$STORE	#FB$BLN,BLN,R0		;FILL IN BLN FIELD IN FAB
+;	$STORE	#QCLUST+QCLUST,ALQ,R0	;INITIAL ALOCATION 2 CLUSTERS
+	MOV	#QCLUST+QCLUST,O$ALQ(R0) ;INITIAL ALOCATION 2 CLUSTERS
+	$STORE	#1	,BKS,R0		;BUCKET SIZE OF 1
+;	$STORE	#512.	,BLS,R0		;BLOCK SIZE ON MT
+	$STORE	#QCLUST	,DEQ,R0		;EXTENSIONS OF 1 CLUSTER
+	$STORE	#FB$DEL!FB$GET!FB$PUT!FB$UPD,FAC,R0 ;ALLOW MOST REC OPS
+	$STORE	#QNAM	,FNA,R0		;FILE SPEC
+	$STORE	#QNAML	,FNS,R0		;LENGTH OF FILE SPEC
+	$STORE	#0	,FOP,R0		;Nothing special for FOP bits	;012
+;	$STORE	#?	,LCH,R0		;RSTS CHANNEL TO USE
+;	$STORE	#?	,MRN,R0		;MAX REC # FOR REL FILES
+;	$STORE	#0	,MRS,R0		;NO MAX RECORD SIZE
+	$STORE	#0	,NAM,R0		;NO NAME BLOCK
+	$STORE	#FB$IDX	,ORG,R0		;THIS IS AN INDEX FILE
+	$STORE	#FB$CR	,RAT,R0		;IMPLIED CARRAGE CONTROL
+	$STORE	#FB$VAR	,RFM,R0		;CONTAINS VARIABLE LEN RECORDS
+
+;	$STORE	#QCLUST	,RTV,R0		;FILE CLUSTER SIZE		;009
+;	Can't store clustersize since we need to pass a negative value	;009
+
+	$STORE	#FB$WRI	,SHR,R0		;SHARE WRITE ACCESS (HOPE THEY DON'T)
+	$STORE	#0	,XAB,R0		;No need for XAB's on existing file ;012
+	RETURN
+
+
+.SBTTL	CRQRAB	- CREATE DEFAULT RAB FOR QUEUE IN MAPPED BUFFER
+
+;+
+;
+; CRQRAB:
+;
+;
+; INPUTS:
+;
+;	NONE
+;
+; CALL:
+;	JSR	PC,CRQRAB
+;
+;
+; BACK:
+;
+;		QRAB(R5) POINTS TO MAPPED/SET RAB
+;
+;	ONLY RETURN IF SUCCESS
+;	ON FAILURE CRASH SERVER
+;
+;-
+
+CRQRAB:	SAVREG				;SAVE THEM FOR GOOD LUCK
+	MOV	#RB$BLN,R1		;SIZE OF ONE RAB
+	GETBUF	R0,R1,CLEAR		;GO GET THE BUFFER
+	BCC	10$			;CONTINUE ONLY IF ALL IS WELL
+	CRASH				;NO BUFFER THEN CRAP OUT
+
+10$:	MOV	R0,QRAB(R5)		;SALT THE RAB POINTER
+	$STORE	#RB$BID,BID,R0		;FILL IN BID FIELD IN RAB
+	$STORE	#RB$BLN,BLN,R0		;FILL IN BLN FIELD IN RAB
+
+;	$STORE	#0	,BKT,R0		;START AT THE BEGINING
+	$STORE	QFAB(R5),FAB,R0		;INPUT FAB POINTER
+;	$STORE	#KEYBUF	,KBF,R0		;KEY BUFFER POINTER
+	$STORE	#0	,KRF,R0		;START WITH PRIMARY KEY
+;	$STORE	#KEYBFL	,KSZ,R0		;LENGTH OF KEY BUFFER
+;	$STORE	#0	,MBC,R0		;DO 1 BLOCK I/O'S
+	$STORE	#4	,MBF,R0		;BUFFERS (INCREASE TO CACHE)
+	$STORE	#RB$KEY	,RAC,R0		;START WITH KEYED ACCESS
+	$STORE	#RECBUF	,RBF,R0		;POINTER TO RECORD BUFFER
+;	$STORE	#0	,RHB,R0		;NO VFC HEADER BUFFER
+	$STORE	#RB$KGE	,ROP,R0		;SEARCH INDEX FOR >= MOD	;012
+	$STORE	#RECBFL	,RSZ,R0		;SIZE OF RECORD BUFFER
+	$STORE	#RECBUF	,UBF,R0		;ALSO POINTER TO RECORD BUFFER
+	$STORE	#RECBFL	,USZ,R0		;ALSO SIZE OF RECORD BUFFER
+	RETURN
+
+.SBTTL	DEFINE QUEUE FILE NAME AND BUFFER
+
+	.SAVE
+
+	.PSECT	PURE
+
+QNAM:	.ASCII	%PB%<$$PKLO>%$:PBS.SYS/CL:-16%				;009
+	QNAML=.-QNAM
+
+QCNAM:	.ASCII	%PB%<$$PKLO>%$:PBS.SYS/CL:-16/MO:32%			;012
+	QCNAML=.-QCNAM							;012
+	.EVEN
+
+;+
+; The I/O record buffer is given its own .PSECT so that it does not have
+; to live within the QMINIT segment.  This will allow the .ODL file to
+; pull the .PSECT up into the queue managers 'ROOT', and the rest of the
+; QMINIT module can be overlaid against other code.
+;-
+
+	.PSECT	RECBUF,RW,D,GBL,REL,OVR					;011
+
+	.EVEN
+RECBUF:	.BLKB0	512.			;RECORD BUFFER
+	RECBFL=.-RECBUF
+	.EVEN
+
+QCLUST=16.
+
+	.PSECT	IMPURE
+
+COPCNT:	.WORD	0			;Counter for # of records copied
+
+.SBTTL	Define queue FAB for compress file
+
+	.PSECT	IMPURE
+
+QCFAB:	FAB$B
+		F$ALQ	32.		;INITIAL ALOCATION
+		F$BKS	1		;BUCKET SIZE OF 1
+;		F$BLS	512.		;BLOCK SIZE ON MT
+		F$DEQ	QCLUST		;EXTENSIONS OF 1 CLUSTER
+		F$FAC	FB$PUT		;Allow PUTs only		;012
+		F$FNA	QCNAM		;FILE SPEC			;012
+		F$FNS	QCNAML		;LENGTH OF FILE SPEC		;012
+		F$FOP	FB$DFW!FB$SUP	;DEFER WRITES SUPER SEED ON CREATES
+;		F$LCH	1		;RSTS CHANNEL TO USE
+;		F$MRN			;MAX REC # FOR REL FILES
+		F$MRS	0		;NO MAX RECORD SIZE
+		F$NAM	0		;NO NAME BLOCK
+		F$ORG	FB$IDX		;THIS IS AN INDEX FILE
+		F$RAT	FB$CR		;IMPLIED CARRAGE CONTROL
+		F$RFM	FB$VAR		;CONTAINS VARIABLE LEN RECORDS
+		F$RTV	0		;FILE CLUSTER SIZE		;009
+;	Can't store clustersize since we need to pass a negative value	;009
+
+
+		F$SHR	FB$NIL		;Can't share tentative file acces ;012
+		F$XAB	QXAB0		;Will need to create XABs	;012
+	FAB$E
+
+.SBTTL	DEFINE QUEUE RAB
+
+QCRAB:	RAB$B
+		R$BKT	0		;START AT THE BEGINING
+		R$FAB	QCFAB		;INPUT FAB POINTER
+;		R$KBF	KEYBUF		;KEY BUFFER POINTER
+		R$KRF	0		;START WITH PRIMARY KEY
+;		R$KSZ	KEYBFL		;LENGTH OF KEY BUFFER
+		R$RAC	RB$SEQ		;START WITH SEQUENTIAL ACCESS
+		R$MBC	0		;DO 1 BLOCK I/O
+		R$MBF	0		;USE FEW BUFFERS (INCREASE TO CACHE)
+		R$RBF	RECBUF		;POINTER TO RECORD BUFFER
+		R$RHB	0		;NO VFC HEADER BUFFER
+		R$ROP	RB$KGE		;SEARCH INDEX FOR >= RECORD
+		R$RSZ	RECBFL		;SIZE OF RECORD BUFFER
+		R$UBF	RECBUF		;ALSO POINTER TO RECORD BUFFER
+		R$USZ	RECBFL		;ALSO SIZE OF RECORD BUFFER
+	RAB$E
+
+.SBTTL	DEFINE QUEUE KEY DESCRIPTORS
+
+	.NLIST	BEX
+
+K0NAM:	FIXSTG	<%Sequential Key (SEQ)%>,32.	;key #0 (primary) descrip
+K1NAM:	FIXSTG	<%Dequeuer Key (QUE,IPR,EDA,ETI)%>,32. ;key #1 descrip
+K2NAM:	FIXSTG	<%After date/time Key (AFD,AFT)%>,32. ;key #2 descrip
+
+	.LIST 	BEX
+
+.SBTTL	QXAB0	- DEFINE PRIMARY KEY (#0) XAB
+
+;+
+; This key is used to retrieve a record from the queue by its sequence
+; number assigned.  The key consists of the single field:
+;
+;		sequence number
+;
+; This key is a 16-bit unsigned integer.  It does not allow duplicates,
+; and may not be changed.  It indexes all records, regardless of key
+; value.
+;
+;-
+
+QXAB0:	XAB$B	KEY			;PRIAMARY KEY
+		X$DAN	0		;USE AREA ZERO (ONLY ONE WE GOT)
+		X$DFL	0		;1/2 FILE THE FILE
+		X$DTP	XB$BN2		;16-BIT UNSIGNED INTEGER KEY
+		X$FLG	0		;NO DUPS, NO CHANGE
+		X$IAN	0		;USE AREA ZERO
+		X$IFL	0		;1/2 FILL UPPER KEY BUCKETS TOO
+		X$KNM	K0NAM		;POINTER TO KEY NAME
+		X$LAN	0		;USE AREA 0
+		X$NUL	0		;NULL FILL KEY
+		X$NXT	QXAB1		;AND ON TO THE NEXT KEY
+		X$POS	<JB.SEQ>	;POINT TO KEY
+		X$REF	0		;THIS IS THE PRIMARY KEY
+		X$SIZ	<SEQKLN>		;KEY LENGTH
+	XAB$E
+
+.SBTTL	QXAB1	- DEFINE KEY #1 XAB
+
+;+
+; This key is used to schedule jobs to start, and to display jobs.  The
+; key consists of the following fields:
+;
+;		queue type		<- MSB
+;		internal priority
+;		entry date
+;		entry time		<- LSB
+;
+; This key is a 6 byte non-segmented string key.  It supports duplicate
+; keys, and may be changed. It indexes all records, regardless of key
+; value.
+;-
+
+QXAB1:	XAB$B	KEY			;PRIAMARY KEY
+		X$DAN	0		;USE AREA ZERO (ONLY ONE WE GOT)
+		X$DFL	0		;1/2 FILE THE FILE
+		X$DTP	XB$STG		;6 BYTE STRING KEY
+		X$FLG	XB$DUP!XB$CHG	;ALLOW DUPS, CHANGE
+		X$IAN	0		;USE AREA ZERO
+		X$IFL	0		;1/2 FILL UPPER KEY BUCKETS TOO
+		X$KNM	K1NAM		;POINTER TO KEY NAME
+		X$LAN	0		;USE AREA 0
+		X$NUL	0		;NULL FILL KEY
+		X$NXT	QXAB2		;AND ON TO THE NEXT KEY
+		X$POS	<JB.QUE>	;POINT TO START OF KEY
+		X$REF	1		;THIS IS A SECONDARY KEY
+		X$SIZ	<QUEKLN>		;KEY LENGTH
+	XAB$E
+
+.ASSUME	JB.QUE EQ JB.SEQ+2
+.ASSUME	JB.IPR EQ JB.QUE+1
+.ASSUME	JB.EDA EQ JB.IPR+1
+.ASSUME	JB.ETI EQ JB.EDA+2
+.ASSUME JB.AFT EQ JB.ETI+2
+.ASSUME	JB.AFD EQ JB.AFT+2
+
+.SBTTL	QXAB2	- DEFINE KEY #2 XAB
+
+;+
+; This key is used to schedule jobs with non-null after date/time fields,
+; Jobs with both fields null are not indexed by this key.  The key consists
+; of the following fields:
+;
+;		internal after date	<- MSB
+;		internal after time	<- LSB
+;
+; This key allows duplicates, and may be changed. It only indexes records
+; with non-null key values.
+;-
+
+QXAB2:	XAB$B	KEY			;THIRD KEY
+		X$DAN	0		;USE AREA ZERO (ONLY ONE WE GOT)
+		X$DFL	0		;1/2 FILE THE FILE
+		X$DTP	XB$BN4		;UNSIGNED NUMERIC KEY
+		X$FLG	XB$DUP!XB$CHG!XB$NUL ;ALLOW DUPS, CHANGE, NO NULL KEYS
+		X$IAN	0		;USE AREA ZERO
+		X$IFL	0		;1/2 FILL UPPER KEY BUCKETS TOO
+		X$KNM	K2NAM		;POINTER TO  KEY NAME
+		X$LAN	0		;USE AREA 0
+		X$NUL	0		;NULL FILL KEY
+		X$NXT	QXAB3		;ON TO THE NEXT KEY
+		X$POS	<JB.AFT>	;START OF KEY
+		X$REF	2		;THIS IS THE THIRD KEY
+		X$SIZ	<AFTKLN>		;KEY LENGTH
+	XAB$E
+
+.ASSUME 	JB.AFD EQ JB.AFT+2
+
+.SBTTL	QXAB3	- DEFINE PROTECTION CODE XAB
+
+QXAB3:	XAB$B	PRO			;PROTECTION XAB
+		X$PRG	0		;DEFAULT P
+		X$PRJ	0		;DEFAULT PN
+		X$PRO	188.		;<188.> FOR SOME SECURITY
+		X$NXT	0		;END OF XABS
+	XAB$E
+
+	.RESTORE
+
+	.END

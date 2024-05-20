@@ -1,0 +1,157 @@
+
+
+	.TITLE	FSTMAP
+
+	.IDENT	/01.00/
+;
+;		COPYRIGHT (c) 1986 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD
+;	 MASSACHUSETTS.  ALL RIGHTS RESERVED.
+;
+; THIS  SOFTWARE  IS  FURNISHED  UNDER  A LICENSE AND MAY BE USED
+; AND  COPIED  ONLY IN  ACCORDANCE WITH THE TERMS OF SUCH LICENSE
+; AND WITH  THE INCLUSION  OF THE ABOVE  COPYRIGHT  NOTICE.  THIS
+; SOFTWARE  OR ANY OTHER  COPIES  THEREOF, MAY NOT BE PROVIDED OR
+; OTHERWISE MADE  AVAILABLE TO ANY OTHER PERSON.  NO TITLE TO AND
+; OWNERSHIP OF THE SOFTWARE IS HEREBY TRANSFERED.
+;
+; THE INFORMATION  IN THIS DOCUMENT IS SUBJECT  TO CHANGE WITHOUT
+; NOTICE AND SHOULD NOT BE CONSTRUED AS A COMMITMENT  BY  DIGITAL
+; EQUIPMENT CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR RELIABILITY OF
+; ITS SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.
+;
+;
+;
+; L. PETERSON	24-APR-86
+;
+; R. E. GOODWIN 25-JUL-87
+;	REG001	ADD RSTS CONDITIONALS
+;
+
+	.IF	NDF,R$RSTS	;++RSTS			;REG001
+	.MCALL	TFEA$C
+	.ENDC			;++RSTS			;REG001
+
+; DEFINE REGION DESCRIPTOR FLAGS AND OFFSETS
+; DEFINE WINDOW BLOCK FLAGS AND OFFSETS
+
+	RGDF	,,S
+	WDBDF	,,S
+
+
+	.PSECT	$$FSTM	I,RO,LCL,REL,OVR
+
+
+;+
+; **-$FSTIN-Test if fast mapping is allowed 
+;
+; This routine tests if fast mapping is allowed on the current system
+; If it is re-resolve .NFMAP/.NFMAP to $FSTMP, otherwise reset symbol to
+; RETURN instruction in $$RTS psect in OVDAT
+;
+;-
+
+$FSTIN::
+	MOV	#FSTMP,N.FMAP(R1)	; Assume fast mapping available
+	.IF	NDF,R$RSTS		;++RSTS			;REG001
+	TFEA$C	T4$FMP,$$FSTM		; Is fast mapping available?
+	CMP	$DSW,#IS.SET		; Check directive status
+	BEQ	FSTMP			; If EQ, yes
+	.IFF				;++RSTS			;REG001
+	BR	FSTMP			;++RSTS FAST MAPPING	;REG001
+	.ENDC				;++RSTS			;REG001
+	MOV	#FSTRT,N.FMAP(R1)	; Set to $$RTS return
+	RETURN
+
+
+;+
+; **-FSTMAP-Perform fast map if possible
+;
+; This routine performs a fast map between two different window blocks if:
+;
+; 	1) They start at the same virtual address (apr)
+;	2) They have the same window size (rounded up to the next 4k boundary)
+;	3) They map the same region (same region id or both zero)
+;
+; Inputs:
+;
+;	R2 = Address of segment descriptor of segment to be mapped  	
+;	R4 = Address of window descriptor block of segment to be unmapped
+;	R5 = Address of segment descriptor of segment to be unmapped  	
+;
+; Outputs:
+;
+;	If Fast Map is successful window is mapped and W$NFLG is set or
+;	If Fast Map is unsuccessful window isn't mapped and W$NFLG is left unset
+;
+;-
+
+FSTMP:
+	JSR	PC,$SAVAL	; Preserve all registers
+	MOV	R2,-(SP)	; Save address of segment to be mapped
+	MOV	T$RWDP(R2),R3	; Get address of its window block
+
+; At this point R2=SDB to map, R3=WDB to map, R5=SDB to unmap, R4=WDB to unmap
+
+	CMP	T$RWDP(R5),R4	; Doing I-space or D-space windows?
+	BEQ	5$		; If EQ, I-space
+	MOV	16(R2),R2	; Get D-space APR and size to map
+	CLRB	R2
+	MOV	16(R5),R5	; Get D-space APR and size to unmap
+	CLRB	R5
+	CMP	R2,R5		; D-space APR and size same?
+	BNE	100$		; If NE, no
+	BR	10$
+
+; Check for same virtual starting address and (rounded) window size
+
+5$:	CMPB	16(R2),16(R5)	; I-space APR and size same?
+	BNE	100$		; If NE, no
+
+; Check for same region - either  W.NRID(R1)=W.NRID(R3) or both W.NRIDs and 
+; W$NREGs are 0
+	
+10$:	MOV	W.NRID(R3),R2	; Get region ID to map
+	BNE	20$		; If NE, it was specified
+	TST	W$NREG(R3)	; Is there a region definition block?
+	BNE	100$		; If NE, yes - not attached yet, can't fast map
+20$:	
+	MOV	W.NRID(R4),R5	; Get region ID to unmap
+	
+	CMP	R2,R5		; Region IDs same?
+	BNE	100$		; If NE, no
+
+; Set up for Fast Map
+
+	MOV	W.NLEN(R3),R2	; Set up window size to map
+	MOVB	W.NAPR(R3),R0	; Set up APR to map
+	MOV	W.NOFF(R3),R1	; Set up offset field to map
+	ASL	R0		; Convert to Fast Map ID
+	ASL	R0
+	ASL	R0
+	BIS	#100000,R0	; Indicate length set
+
+; Perform Fast Map
+
+	IOT
+	TST	R0		; Successful?
+	BMI	100$		; If MI, no
+	MOV	(SP),R0		; Get address of new mapped segment
+	BIC	#TR$MEM,(R0)	; Mark as in memory
+	MOV	T$RWDP(R0),R0	; Get WDB address
+	BIS	#WF$MAP,W$NFLG(R0) ; Set window mapped flag
+100$:	
+	TST	(SP)+		; Clean stack
+	RETURN
+
+
+; PROVIDE A SINGLE RETURN INSTRUCTION FOR USE AS A TARGET ADDRESS WHEN
+; AUTOLOADING DATA SEGMENTS AND FOR OTHER RETURN POINTS
+;
+	.PSECT	$$RTS	I,RO,GBL,REL,OVR
+
+FSTRT:	RETURN			; AUTOLOADABLE SEGMENT RETURN POINT
+
+	.END

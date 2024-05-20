@@ -1,0 +1,1358 @@
+.INCLUDE /CMN:COMMON/							;019
+.INCLUDE /CMN:KERNEL/							;019
+.INCLUDE /CMN:RSXCOM/							;019
+.INCLUDE /CMN:KBDEF/							;019
+TITLE	MCL,<Misc Monitor Calls>,0K,04-JUN-92,KPH/MNB/GPK/FRL/WRM
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR MCL
+
+;+
+;
+;  000	KPH  20-Jan-84	Creation for RSTS V9.0:
+;			Copied some code from LIB.MAC
+;			Copied some code from CAL.MAC
+;			Added .CMDLN directive
+;  001  MNB  24-Jan-84  Asynch I/O change to M.CTRL byte
+;  002	KPH  05-Apr-84	Remove .RSX directive
+;			Include .XPEEK directive (from FSS module)
+;  003	GPK  25-Apr-84	Privilege name changes; add CMDLIN hook
+;  004	KPH  25-Jun-84	Bugfix in .CMDLN
+;  005	KPH  29-Aug-84	Changes for APR5 FIP pool
+;			Change .CMDLN "look at core common" flag
+;			Move MAPWIN to GEN phase
+;  006	KPH  19-Oct-84	Add support for non-SLA libraries
+;  007	KPH  12-Dec-84	Allow more than one non-SLA attach
+;			Hooks for supervisor mode libraries
+;  008	KPH  21-Jan-85	Fix data returned by .PLAS
+;  009	GPK  27-Feb-85	Fix $CHKACC call to pass job number to CHKACJ
+;  010	KPH  06-Mar-85	Fix SLA library minimum APR value check
+;  011	KPH  11-Mar-85	Store SLA pointer in J2FLG2
+;
+;			[RSTS V9.2]
+;  012  KPH  25-Jul-85	Add job control region
+;			Move IOB to FIP pool
+;			Move WDBs to FIP pool
+;  013  KPH  24-Oct-85	Bugfix in map physical memory function
+;
+;			[RSTS V9.3]
+;  014  FRL  24-Mar-86	Large library support
+;  015  KPH  08-Jun-86	Fix library protection problems
+;			Allow mapping up to the end of memory
+;  016  KPH  15-Aug-86	Bugfix in 015
+;
+;			[RSTS V9.4]
+;  017  KPH  23-Jan-87	Changes for new job mapping structure
+;
+;			[RSTS V9.5]
+;  018	WRM  09-Oct-87	Restrict/unrestricted floating library test
+;
+;			[RSTS V9.6]
+;  019  KPH  13-Oct-87	Add .INCLUDEs
+;			Remove global reference to TTPK11
+;  020  WRM  08-Jan-88	Fix UMPWIN for new EXTM$ directive 
+;			Allow MAP$ to handle EXTM$ directive
+;			Suppress prev=super if no more super maps
+;			Add I only LIB to CRAW$
+;  021  WRM  25-May-88	Enable Supervisor LIB in CRAW$
+;
+;			[RSTS  V9.7]
+;  022  WRM  09-Sep-88	Fix Mapping problem in D over I librarys
+;  023  WRM  09-Sep-88	add INC/DEC to region ID for F77 Varrays
+;  024	WRM  15-Nov-88	Fix ATRG$ error condition missed
+;  025	WRM  15-Dec-88	Fix bug in Eliminate window
+;  026  WRM  21-Feb-89	Preserve R0 across SETMDE call
+;
+;			[RSTS V10.0]
+;  027  WRM  22-Feb-90	Add fast map turn on/off to .SET/.CLEAR
+;
+;			[RSTS V10.1]
+;  028	FEK  21-May-92	Clear Super D APRs when Super I or User D are cleared
+;-
+
+.SBTTL	Declare our P-sects
+
+	DEFORG	MCL		;Calls live here
+
+.SBTTL	Handle .ERLOG monitor call
+
+	EMTENT	.ERLOG,,EM2	;.ERLOG comes here			
+
+	TST	(SP)+		; Pop the "RTI3" return
+	CMP	6*2(SP),MAXHGH	; From high segment?
+	BLOS	10$		; Nope, ignore it
+	LOG$CK			; Yes, so log it
+10$:	JMPX	RTI3		;  and exit
+
+GLOBAL	<MAXHGH>
+
+.SBTTL	Handle .RSX monitor call
+
+	EMTENT	.RSX,,EM2	;.RSX comes here
+
+	ERROR	ERRERR		;No such directive anymore...		;002
+
+.SBTTL	Keyword modification calls
+
+.SBTTL	Handle .CLEAR monitor call
+
+.ENABL	LSB
+
+	EMTENT	.CLEAR,,EM2		;.CLEAR comes here		
+
+	CALL	80$			; any changes to fastmapping?	;027
+	BIC	R2,JDFLG4(R0)		;Do the fast mapping changes	;027
+	CALL	30$			; Do the common thing
+	MOV	(R1),-(SP)		; Save old flags		
+	BIC	(R3),(R1)		; Clear some job flag bit(s)
+	MAP	JOBJC6,APR=6,DATA	; Map caller's JCR entry	;012
+	BICB	R2,JCPRI(R5)		;  and possibly clear spec run priority ;012
+	MAP	@UDPAR0,APR=6,DATA	; Re-map caller's first 4K	;012
+	COM	(SP)			; Complement old flags		
+	BIC	(SP)+,(R3)		; Leave only what changed	
+	BIT	#JFSYS,(R3)		; Did we drop temporary privs?	
+	BEQ	50$			; No, done			
+	CALL	60$			; Yes, swap current with saved	
+	RETURN				; Then exit
+
+.SBTTL	Handle .SET monitor call
+
+	EMTENT	.SET,,EM2		; .SET comes here		
+
+	CALL	80$			; any changes to fastmapping?	;027
+	BIS	R2,JDFLG4(R0)		;Do the fast mapping changes	;027
+	MOVB	JOB,R0			; Get caller's job number	
+	CALLX	CHKPRV,R4		; Check privileges		
+	 .BPRIV	TUNE			; Allowed to do tuning things?	;003
+	BCC	10$			; Yes				
+	BIC	#JFLOCK!JFSPRI,(R3)	; No, so don't			;003
+10$:	CALL	30$			; Do the common thing
+	BIT	#JFSYST,(R1)		; Allowed to set JFSYS?
+	BNE	20$			; Yep
+	BIC	#JFSYS!JFSYST,(R3)	; No, so don't allow it
+20$:	MOV	(R1),-(SP)		; Save old flags		
+	MOV	(R3),-(SP)		; Get flags to set		
+	BIS	(SP)+,(R1)		; Set some job flag bit(s)	
+	MAP	JOBJC6,APR=6,DATA	; Map caller's JCR entry	;012
+	BISB	R2,JCPRI(R5)		;  and possibly set spec run priority ;012
+	MAP	@UDPAR0,APR=6,DATA	; Re-map user's first 4K	;012
+	BIC	(SP)+,(R3)		; Find out which ones were changed 
+	BIT	#JFSYS,(R3)		; Did we just set temp privs?	
+	BEQ	25$			; No				
+	CALL	60$			; Yes, swap current with saved	
+25$:	RETURN				; Then exit
+
+30$:	BIC	#^C<JFLOCK!JFSYS!JFPRIV!JFFPP!JFSPRI>,(R3) ; Clear some
+	CLR	R2			; Guess at no spec run priority
+	BIT	(R3),#JFSPRI		; Passing JFSPRI?
+	BEQ	40$			; Nope, leave R2 = 0
+	BIC	#JFSPRI,(R3)		; Yep, remove JFSPRI and
+	CMP	(R2)+,(R2)+		;  make R2 = 4
+40$:	BIT	(R3),#JFPRIV		; Passing JFPRIV?
+	BEQ	50$			; Nope
+	BIC	#JFPRIV,(R3)		; Yep, so remove JFPRIV and
+	BIS	#JFSYS!JFSYST,(R3)	;  add in these bits
+50$:	MOV	JOBJCR,R5		; Set up JCR pointer for niceness ;012
+	RETURN				; Then exit
+
+60$:	MOV	#PRIVSZ/2,R4		; Count to move			
+	MAP	JOBJC6,APR=6,DATA	; And map it			;012
+	MOV	R5,R0			; Copy JCR pointer
+	ADD	#JCSPRV,R0		; Point to privilege save area	;012
+	ADD	#JCPRIV,R5		; Point to mask			;012
+70$:	MOV	(R0),R2			; Pick up a saved mask word	
+	MOV	(R5),(R0)+		; Save current mask		
+	MOV	R2,(R5)+		;  and move in saved one	
+	SOB	R4,70$			; Loop until done		
+	RETURN				; Done				
+
+80$:	MOV	JOBDA,R0		;by definition we must be job	;027+
+	MOV	(R3),R2			;get copy of inbound data
+	BIT	#177400,R2		;any high byte data present?
+	BNE	90$			;yes- then no fastmap switching
+	BIC	#^C<JDFSTM>,R2		;clear all noise but our interest
+	BR	100$			;take the data back with us
+
+90$:	CLR	R2			;assure no changes
+100$:	RETURN				;any change is in R2		;027-
+
+.DSABL	LSB
+
+GLOBAL	<UDPAR0>							;012
+
+.SBTTL	Handle .DATE monitor call
+
+	EMTENT	.DATE,,EM2	; .DATE comes here			
+
+	MOV	DATE,(R3)+	; Return date @ XRB+0
+	MOV	TIME,(R3)+	; Return time @ XRB+2
+	MOV	TIMSEC,(R3)+	; Return seconds/ticks @ XRB+4/+5
+	MOV	JOBJCR,R2	; Point to current job's JCR entry	;012
+	MAP	JOBJC6,APR=6,DATA ; And map it through APR6		;012
+	MOV	JCNAME(R2),R0	; Pick up first part of name		;012
+	MOV	JCNAME+2(R2),R1	; Pick up second part of name		;012
+	MAP	@UDPAR0,APR=6,DATA ; Re-map the user's XRB		;012
+	MOV	R0,(R3)+	; Return program name as		;012
+	MOV	R1,(R3)+	;  2 words @ XRB+6,+10			;012
+	MOV	R.NAME(R5),(R3)+ ; Return RTS name as
+	MOV	R.NAME+2(R5),(R3)+ ;  2 words @ XRB+12,+14
+	RETURN			; Now return
+
+GLOBAL	<UDPAR0>							;012
+
+.SBTTL	Handle .STAT monitor call
+
+.ENABL	LSB
+
+	EMTENT	.STAT,,EM2	;.STAT comes here			
+
+	CALL	60$		; Do the common thing			;012
+	MOVB	JCHDRS(R2),R0	; Get job header size			;012
+	MOVB	JDSIZE-JDIOST(R1),R4 ; Get current K size as a word and	;012
+	SUB	R0,R4		; don't count header size, and		
+	MOV	R4,(R3)+	;  return it @ XRB+0
+	MOVB	R.KSIZ(R5),R4	; Get current RTS K size as a word and
+	MOV	R4,(R3)+	;  return it @ XRB+2
+	MOVB	JCSIZM(R2),R4	; Get current private K max as a word ;012
+	MOVB	JOB,R0		; Get current job number		
+	 CALLX	CHKPRV,R4	; Check for privilege			
+	 .BPRIV	EXQTA		; Can he ignore memory max?		
+	BCS	5$		; No, move on				
+	MOVB	SWPMAX,R4	; Yes, so use system swapmax instead	
+5$:	MOVB	JCHDRS(R2),R0	; Restore header size to R0		;012
+	MOV	JOBRTS,R5	;  and get RTS pointer back		
+	SUB	R0,R4		; Subtract out the job header		
+	CMPB	R4,R.MSIZ(R5)	; It private max < RTS min?
+	BHIS	10$		; No, keep private max
+	MOVB	R.MSIZ(R5),R4	; Yes, use RTS min
+10$:	MOV	R4,(R3)		; Return the maximum @ XRB+4
+	MOVB	R.SIZE(R5),R4	; Get max size for current RTS
+	CMPB	R4,#32.		; Does RTS allow more than 32K words	;002
+	BLOS	15$		; No, not this time			;002
+	MOVB	#32.,R4		; Yes, so set maximum is 32K words	;002
+15$:	CMP	R4,(R3)+	; Is legal max < private max?
+	BHIS	20$		; No, keep private max as is
+	MOV	R4,-2(R3)	; Yes, say private max is RTS max
+20$:	MOV	R4,(R3)+	; Return RTS max @ XRB+6
+	MOV	JOBJD2,R4	; Pick up JDB2 pointer			;012
+	MOV	J2PPN(R4),(R3)+	; Return PPN @ XRB+10			;012
+	MOVB	JCPRI(R2),R4	; Get job priority and return		;012
+	MOV	R4,(R3)+	;      it as a word @ XRB+12
+	MOVB	JCBRST(R2),R4	; Get run burst and return		;012
+	MOV	R4,(R3)+	;      it as a word @ XRB+14
+	MOVB	JOB,R0		; Get job number			
+	CALLX	CHKPRV,R4	; Check privileges			
+	 .BPRIV	TUNE		; Look for alter-priority privilege	;003
+	BCC	30$		; Got it, so pass the info		
+	CLR	-(R3)		; Clear the run burst
+	CLR	-(R3)		;  and the priority
+30$:	RETURN			; Now exit
+
+GLOBAL	<SWPMAX>							
+
+.SBTTL	Handle .TIME monitor call
+
+.DSECT	JCCPU		; Verify timing information order		;012
+
+JCCPU:	.BLKW		; CPU time (LSB)				;012
+JCCON:	.BLKW		; Connect time					;012
+JCKCT:	.BLKW		; KCT'S (LSB)					;012
+JCDEV:	.BLKW		; Device time					;012
+JCKCTM:	.BLKB		; KCT'S (MSB)					;012
+JCCPUM:	.BLKB		; CPU time (MSB)				;012
+
+	UNORG
+
+	EMTENT	.TIME,,EM2	; .TIME comes here			
+
+	CALLX	SAVTIM		; Collect timing information
+	CALL	60$		; Get JCR pointer; set up for mapping	;012
+	ADD	#JCCPU,R2	; Point to LSB cpu time in JCR		;012
+	MOV	(R2)+,(R3)+	; Return (LSB) CPU time @ XRB+0
+	MOV	(R2)+,(R3)+	; Return connect time @ XRB+2
+	MOV	(R2)+,(R3)+	; Return (LSB) KCT's @ XRB+4
+	MOV	(R2)+,(R3)+	; Return device time @ XRB+6
+	MOVB	(R2)+,R4	; Get (MSB) KCT time
+	MOVB	(R2),R0		; Get (MSB) CPU time and
+	MOV	R0,(R3)+	;  return it @ XRB+10
+	MOV	R4,14-12(R3)	; Return (MSB) KCT @ XRB+14
+	MOV	#040000,(R3)	; Guess at detached job @ XRB+12
+	CMP	R5,JCDRTS-JCCPUM(R2) ; Is current RTS the default RTS?	;012
+	BNE	40$		; No
+	BIS	#100000,(R3)	; Yes, so indicate it
+40$:	MAP	FIPPOL		; Map FIP pool for the IOB		;012
+	MOV	@JOBDA,R1	; Get the channel #0 DDB pointer	;012
+.ASSUME	JDIOB	EQ	0
+	CMPB	JOB,DDJBNO(R1)	; Is the job detached?
+	BNE	50$		; Yes, all set
+	BIT	#DDCONS,DDCNT(R1) ; Still might be detached...
+	BEQ	50$		;  and detached it is
+	BIC	#040000,(R3)	; Not detached, so indicate not detached
+	CMPB	TTINTF(R1),#TTPK11 ; Running under a pseudo-keyboard?
+	BNE	50$		; Nope, normal terminal
+	BIS	#020000,(R3)	; Yep, indicate the pk
+50$:	RETURN			; Now exit
+
+60$:	BIS	#JFPOST,(R1)+	; Set up to do posting			;012
+	BIC	#177*400,(R1)	; Set up to post the entire XRB		;012
+.ASSUME	JDIOST EQ JDFLG+2
+	MOV	JOBWRK,R3	; Point to work block			;012
+	MOV	JOBJCR,R2	; Point to job's JCR entry		;012
+	MAP	JOBJC6,APR=6,DATA ; Map this job's JCR entry		;012
+	RETURN			; And go back				;012
+
+.DSABL	LSB
+
+.SBTTL	Handle .NAME monitor call
+
+	EMTENT	.NAME,,EM2	;.NAME comes here			
+
+	MOV	FQNAM1(R4),R0	;Get first part of program name		;012
+	MOV	FQNAM1+2(R4),R1	;Get second part of program name	;012
+	MAP	JOBJC6,APR=6,DATA ;Map the caller's JCR entry		;012
+	MOV	JOBJCR,R2	;And point to it			;012
+	MOV	R0,JCNAME(R2)	;Set the first part			;012
+	MOV	R1,JCNAME+2(R2)	;And the second part			;012
+	RETURN			;Now exit
+
+.SBTTL	HANDLE .PLAS MONITOR CALL
+
+;+
+;	R0 =  THE EMT CODE
+;	R1 -> JOB DATA BLOCK OF CALLER @ JDFLG
+;	R2 -> SECOND JOB DATA BLOCK OF CALLER
+;	R3 -> (MAPPED) XRB OF CALLER
+;	R4 -> (MAPPED) FIRQB OF CALLER
+;	R5 -> RTS BLOCK BEING USED BY CALLER
+;	SP -> "RTI3", R0, R1, R2, R3, R4, R5, PC, PS, ...
+;
+; THE JOB'S 1ST 4K IS MAPPED THROUGH KISAR6.
+;
+; NO ERROR IS INDICATED (JDIOST = 0).
+;
+; THE POSTING PATTERN IS XRB POSTING (<0 IN JDPOST).
+;
+; I/O STATUS POST IS INDICATED (JFIOKY).
+; KEYWORD POSTING IS INDICATED (JFIOKY).
+;
+;	FQERNO = 0  =>	ATTACH TO RESIDENT LIBRARY REGION
+;		 2  =>	DETACH FROM RESIDENT LIBRARY REGION
+;		 4  =>	CREATE ADDRESS WINDOW
+;		 6  =>	ELIMINATE ADDRESS WINDOW
+;		 10 =>	MAP ADDRESS WINDOW
+;		 12 =>	UNMAP ADDRESS WINDOW
+;-
+
+	EMTENT	.PLAS,,EM2	;.PLAS COMES HERE			
+
+LIB:	CMP	(R4)+,(R4)+	;INDEX TO FQERNO
+.ASSUME	FQERNO	EQ	4
+	MOV	(R4)+,R0	;GET THE FUNCTION, INDEX TO PARAMETERS
+	BIC	#^C<16>,R0	;TRIM TO 0,2,4,6,10,12,14, OR 16
+	BIC	#170000,R.GSTS(R4) ;CLEAR OUT RETURNED STATUS BITS
+.ASSUME	W.NSTS	EQ	R.GSTS
+	JMP	@10$(R0)	;NOW DISPATCH ON FUNCTION
+
+10$:	.WORD	ATRG$		; 0	ATTACH REGION
+	.WORD	DTRG$		; 2	DETACH REGION
+	.WORD	CRAW$		; 4	CREATE WINDOW
+	.WORD	ELAW$		; 6	ELIMINATE WINDOW
+	.WORD	MAP$		; 10 	MAP WINDOW
+	.WORD	UMAP$		; 12	UNMAP WINDOW
+	.WORD	ERR		; 14	NOT IMPLEMENTED
+	.WORD	ERR		; 16	NOT IMPLEMENTED
+
+;+
+; UMPWIN - UNMAP A USER'S ADDRESS WINDOW.
+;
+;	R5 -> JOB WDB @ W$NAPR
+;
+;	CALL	UMPWIN
+;-
+
+UMPWIN:	MOV	R0,-(SP)	;Get scratch registers
+	MOV	R1,-(SP)	; ...					;017
+	MOV	R2,-(SP)	; ...					;017
+	MOVB	(R5),R0		;Get base APR of window
+	ASL	R0		;Now get window base * 2
+	MOV	R0,R1		;Copy window base * 2
+	ASL	R1		;Now get window base * 4
+	ADD	R0,R1		;Now get window base * MDSIZE
+.ASSUME	MDSIZE	EQ	6
+	ADD	#JCMDE+MOUSRI,R1 ;Now offset for user mode APRs		;017
+	ADD	JOBJCR,R1	;Now get actual address			;017
+	MOV	W$NBYT(R5),-(SP) ;GET LENGTH OF REGION TO UNMAP IN BYTES
+	MOV	(R5),R2		;Get window flags			;017
+	MAP	JOBJC6,APR=6,DATA ;And map caller's JCR entry		;017
+9$:	BIT	#WS$UIS,R2	;Should we do user mode I-space?	;017
+	BEQ	11$		;No, not this time			;012
+	BITB	BITWRD(R0),APRMSK ;Is base apr split I&D?		;020
+	BNE	10$		;yes,just clear I space, D is someother	;020
+	BIT	#XC$IDS,X.CON	;unless no data spce at all		;020
+	BEQ	10$		;no data spce HW, skip			;020
+	CLR	UDSAR0(R0)	;Yes,clear the D space also, PAR 1st	;020
+	CLR	UDSDR0(R0)	;then PDR of Dspace			;020
+	MOV	#ZERO,<MOUSRD-MOUSRI>(R1) ;Clear D address field in MDE	;020
+	CLR	<MDOFF+MOUSRD-MOUSRI>(R1) ;And offset field of D	;020
+	CLR	<MDDESC+MOUSRD-MOUSRI>(R1) ;And descriptor MDE of D	;020
+	CMP	SISAR0(R0),SDSAR0(R0);Super I=Super D?			;028
+	BEQ	10$		;Yes, so leave alone			;028
+	CLR	SDSAR0(R0)	;Do it for supervisor mode also		;028
+	CLR	SDSDR0(R0)	;Description register also		;028
+10$:	CLR	UISAR0(R0)	;Yes, clear the address register	;020
+	CLR	UISDR0(R0)	;And the description register also	;012
+	MOV	#ZERO,(R1)	;Clear address field			;017
+.ASSUME	MDADDR	EQ	0
+	CLR	MDOFF(R1)	;And offset field			;017
+	CLR	MDDESC(R1)	;And descriptor				;017
+	BR	15$		;if I was on, D has also been handled	;020
+
+11$:	BIT	#WS$UDS,R2	;Window mapped user mode D-space only?	;020
+	BEQ	12$		;No, not this time			;012
+	CLR	UDSAR0(R0)	;Yes, clear the address register	;012
+	CLR	UDSDR0(R0)	;And the description register		;012
+	MOV	#ZERO,<MOUSRD-MOUSRI>+MDADDR(R1) ;Clear address register ;017
+	CLR	<MOUSRD-MOUSRI>+MDOFF(R1) ;And offset register		;017
+	CLR	<MOUSRD-MOUSRI>+MDDESC(R1) ;And descriptor		;017
+	CMP	SISAR0(R0),SDSAR0(R0);Super I=Super D?			;028
+	BEQ	12$		;Yes, so leave alone			;028
+	CLR	SDSAR0(R0)	;Do it for supervisor mode also		;012
+	CLR	SDSDR0(R0)	;Description register also		;012
+12$:	BIT	#WS$SIS,R2	;Should we do supervisor mode I-space?	;017
+	BEQ	15$		;No, not this time			;012
+	CLR	SISAR0(R0)	;Yes, clear address register		;012
+	CLR	SISDR0(R0)	;And description register also		;012
+	MOV	#ZERO,<MOSUPI-MOUSRI>+MDADDR(R1) ;Clear address register ;017
+	CLR	<MOSUPI-MOUSRI>+MDOFF(R1) ;And offset register		;017
+	CLR	<MOSUPI-MOUSRI>+MDDESC(R1) ;And descriptor		;017
+	CMP	UDSAR0(R0),SDSAR0(R0);User D=Super D?			;028
+	BEQ	13$		;Yes, so leave alone			;028
+	CLR	SDSAR0(R0)	;Do it for supervisor mode also		;028
+	CLR	SDSDR0(R0)	;Description register also		;028
+13$:	TST	R0		;Did we just unmap apr0 (superI)?	;020
+	BNE	15$		;No, keep super space alive		;020
+	BIS	#30000,SYSTAK-2	;Yes-Force return PS prev mode to USER	;020
+15$:	TST	(R0)+		;Advance to next APR value		;012
+	ASLB	SWTBLK+1	;advance APR bit mask as well		;020
+	ADD	#MDSIZE,R1	;And next MDE				;017
+	SUB	#4096.*2,(SP)	;DONE?					
+	BHI	9$		;NO, MORE TO DO				;020
+20$:	TST	(SP)+		;TRASH COUNTER
+	MOV	(SP)+,R2	;Restore registers			;017
+	MOV	(SP)+,R1	; ...					;017
+	MOV	(SP)+,R0	; ...
+	CLRB	SWTBLK+1	;clear flag byte, protection word	;020
+	MAP	FIPPOL		;Restore FIP pool mapping		;017
+	BIC	#WS$MAP,(R5)	;MARK IT UNMAPPED, FOR SURE
+	RETURN			;DONE
+
+GLOBAL	<JCMDE,SYSTAK,ZERO,SWTBLK,BITWRD,APRMSK>			;020
+
+.SBTTL	ATTACH REGION (ATRG$)
+
+ATRG$:	TST	R.GNAM(R4)	;Attempting to attach to unnamed region? 
+	BEQ	15$		;Yes, so pretend it doesn't exist	
+	MOV	#LIBLST,R3	;GET ROOT OF RESIDENT LIBRARY LIST
+10$:	MOV	(R3),R3		;GET NEXT IN THE LIST?
+	BNE	20$		;YES, MORE TO DO
+15$:	ERROR	NOSUCH		;END OF LIST, MATCH NOT FOUND	
+
+20$:	CMP	R.GNAM(R4),R.NAME(R3) ;NAME MATCH?
+	BNE	10$		;NO
+	CMP	R.GNAM+2(R4),R.NAME+2(R3) ;REALLY MATCH?
+	BNE	10$		;NO
+	BIT	#RS.DEL!RS.EXT,R.GSTS(R4) ;SPECIFING DELETE OR EXTEND ACCESS?
+	BEQ	30$		;NO, CHECK WRITE ACCESS
+	ERROR	ERRERR		;NOT SUPPORTED
+
+30$:	BIT	#RS.WRT,R.GSTS(R4) ;DOES HE WANT WRITE ACCESS?
+	BEQ	50$		;NO, SIMPLE
+	BIT	#PF.RW,R.FLAG(R3) ;IS THE LIBRARY R/W?
+	BNE	50$		;YES, OK (MAYBE)
+40$:	ERROR	PRVIOL		;CAN'T ACCESS R/W
+
+50$:	MOVB	L.PROT(R3),R1	;GET LIBRARY'S PROTECTION CODE	
+	MOV	L.PPN(R3),R0	; and owning PPN		
+	MOV	R2,-(SP)	;Save R2				;009
+	MOVB	JOB,R2		;Pass job number * 2 to CHKACJ		;009
+	MAP	FIP,CODE	;Map FIP				;005
+	CALL	@$CHKACC	;Check access rights		
+	MAP	@UDPAR0,DATA,APR=6 ;Now map user's first 4K	
+	MOV	(SP)+,R2	;Restore R2				;009
+	BIT	#DDRLO,R0	;READ PROTECTED AGAINST USER?	
+	BNE	40$		;YUP, TOO BAD
+	BIT	#RS.WRT,R.GSTS(R4) ;DOES HE WANT WRITE ACCESS?
+	BEQ	70$		;NO, SIMPLE
+	BIT	#DDWLO,R0	;WRITE PROTECTED AGAINST USER?	
+	BNE	40$		;YUP, TOO BAD
+70$:	CALL	GETWDB		;GET JOB'S WDB (CREATE IF NECESSARY)
+	CLR	R0		;Initialize region ID counter		;007
+	CLR	R1		;Initially, we don't have a slot 	;007
+90$:	INC	R0		;Bump region ID counter			;007
+	MOV	-(R5),R4	;Get library pointer & map count 	;007
+	BEQ	91$		;No library, skip this			;007
+	BIC	#^C<WA$LIB>,R4	;Make only a library pointer 		;015
+	CMP	R4,R3		;Already attached?			;007
+	BEQ	110$		;Yes, so return ID and stuff		;007
+	BR	92$		;No, check the next one			;007
+
+91$:	TST	R1		;Found an open slot yet?		;007
+	BNE	92$		;Yes, we sure have			;007
+	CMP	#1,R0		;Is it region #1?			;023
+	BEQ	92$		;yes, its reserved for Dynamic region	;023
+	MOV	R5,R1		;No, save pointer to it			;007
+	MOV	R0,R2		;And save the region ID			;007
+92$:	BIT	R5,#40-3	;Are we through with this WDB?		;007
+	BNE	90$		;No, more to look at
+	TST	-(R5)		;Yes, is there another WDB?		;007
+	BEQ	95$		;No, so check if we found a slot	;007
+	MOV	(R5),R5		;Get link to next WDB			;007
+	BR	90$		;And go search it			;007
+
+; At this point, all WDBs have been searched.
+;
+;	R0 = Highest region ID in use
+;	R1 -> Open slot (if one has been found)
+;	R2 = Region ID of open slot
+;	R3 -> LIB block
+;	R4 = Undefined
+;	R5 -> W.LINK of last WDB in chain
+
+95$:	TST	R1		;Did we find an open slot?		;007
+	BEQ	96$		;No, not this time			;007
+	MOV	R1,R5		;Yes, so point to it			;007
+	MOV	R2,R0		;And get the region ID			;007
+	BR	100$		;And join up				;007
+
+96$:	CALLX	GETFIP		;Try to get a buffer for another WDB 	;012
+	BCS	120$		;No buffers, can't do this		;007
+	ADD	#W.WIN1,R4	;Point to W.WIN1			;007
+	MOV	R4,(R5)		;And link it to old WDB			;007
+	MOV	R4,R5		;Now move WDB pointer over		;007
+	INC	R0		;Fix the region ID to real		;007
+	TST	-(R5)		;And point to the open slot		;007
+
+100$:	BIT	#PF.1US,R.FLAG(R3) ;IS THE LIBRARY ADDED 1USER?
+	BEQ	80$		;NOPE
+	TSTB	R.CNT(R3)	;ANY USERS NOW?
+	BNE	40$		;CAN'T ATTACH NOW, SORRY
+80$:	MAP	@UDPAR0,APR=6,DATA ;Re-map user's first 4K		;012
+	MOV	@#140000+FIRQB+FQPPN+R.GSTS,R4 ;Get access request	;015
+	BIT	#RS.DEL!RS.EXT!RS.WRT!RS.RED,R4 ;Any access desired? 	;015
+	BNE	105$		;yes-proceed only if access requested	;024
+	ERROR	NOTOPN		;not attached so error if no access req	;024
+
+105$:	MAP	FIPPOL		;Yes, restore FIP pool mapping		;024
+	INCB	R.CNT(R3)	;Set one more attach to the library
+	MOV	R3,(R5)		;Save the pointer to the library
+	BIT	#RS.WRT,R4	;Desire R/W access?			;015
+	BEQ	110$		;No, not this time			;015
+	BIS	#WA$WRT,(R5)	;Yes, set that in the WDB		;015
+110$:	MAP	@UDPAR0,APR=6,DATA ;Re-map user's first 4K		;012
+	DEC	R0		;make region ID=0 legal outside		;023
+	MOV	R0,@#140000+FIRQB+FQPPN+R.GID ;RETURN REGION ID		;007
+	CLR	R0		;Get region size in 1K words		;014
+	BISB	R.KSIZ(R3),R0	; ...					;014
+	ASH	#5,R0		;CONVERT TO 32-WORD BLOCKS
+	MOV	R0,@#140000+FIRQB+FQPPN+R.GSIZ ;RETURN REGION SIZE	;007
+	RETURN			;THAT'S ALL
+
+120$:	ERROR	NOBUFS		;No small buffers for WDB		;007
+
+GLOBAL <LIBLST,$CHKACC>							;007
+
+.SBTTL	DETACH REGION (DTRG$)
+
+DTRG$:	MOV	JOBWDB,R5	;GET POINTER TO JOB'S WDB @ W.WIN1	;012
+	BEQ	NOS		;NO WDB, CAN'T BE ATTACHED, ERROR
+	MOV	R.GID(R4),R3	;GET REGION ID PASSED
+	INC	R3		;region 0 legal outside only		;023
+	BEQ	BAD		;ZERO IS INVALID REGION ID, ERROR
+	CALL	CHKRID		;IS THE REGION ID IN THE WDB?
+	BCS	NOS		;CAN'T FIND REGION ID, ERROR
+	MOV	R3,-(SP)	;Save pointer to LIB block
+	MOV	R5,R3		;SAVE POINTER TO ATTACHED LIB
+	MOV	JOBWDB,R5	;NOW CHECK FOR CREATED WINDOWS		;012
+10$:	TST	(R5)		;ANY WINDOW IN THIS SLOT?
+	BPL	20$		;NO, OR CREATED BUT NOT MAPPED, SKIP
+.ASSUME WS$MAP	EQ	100000
+	CMP	W$NLIB(R5),R3	;IS THIS SLOT POINTING TO LIB POINTER?
+	BNE	20$		;NO, SKIP IT
+	CALL	ELAW$$		;ELIMINATE THIS WINDOW
+20$:	ADD	#W.SIZE,R5	;INCREMENT TO NEXT SLOT
+	BIT	R5,#40-1	;END OF THIS BLOCK?
+	BNE	10$		;NO, LOOP
+	MOV	-40(R5),R5	;GET LINK TO NEXT WDB
+	BNE	10$		;LOOP, UNLESS NO LINK
+	CLR	(R3)		;MARKED AS NO LONGER ATTACHED
+	MOV	(SP)+,R2	;Get back pointer to LIB block	   
+	DEC	R.CNT(R2)	;DECREMENT ATTACHED COUNT IN LIB BLOCK
+	BNE	30$		;WE STILL HAVE A FEW HANGERS ON
+	BIT	#PF.REM,R.FLAG(R2) ;IS THE LIBRARY ADDED REMOVE?
+	BEQ	30$		;NOPE
+	CALLX	REMRTS		;REMOVE LIBRARY FROM MEMORY LIST
+30$:	RETURN			;THAT'S ALL
+
+;+
+; GETWDB - Get job's WDB pointer
+;
+;	CALL	GETWDB
+;
+;	R5 -> WDB (one will be created if necessary)
+;
+;	FIP pool is mapped
+;-
+
+GETWDB:	MAP	FIPPOL		;Map FIP pool for WDBs			;012
+	MOV	JOBWDB,R5	;GET JOB'S WINDOW DESCRIPTOR BLOCK	;012
+	BNE	10$		;ONE EXISTS SO EXIT
+	MOV	R4,-(SP)	;SAVE POINTER TO FIRQB
+	CALLX	GETFIP		;Try to get a LIB block from FIP pool	;012
+	BVS	NOB		; ELSE ERROR
+	MOV	R4,R5		;SAVE BLOCK ADDRESS
+	ADD	#W.WIN1,R5	;POINTING TO FIRST WINDOW BLOCK
+	MOV	R5,JOBWDB	;UPDATE "JOB" POINTER
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;012
+	MOV	JOBJCR,R4	;And point to it			;012
+	MOV	R5,JCWPTR(R4)	;Stash WDB pointer for job		;012
+	MAP	FIPPOL		;Restore FIP pool mapping		;012
+	MOV	(SP)+,R4	;Restore FIRQB pointer
+10$:	RETURN			;And exit
+
+;+
+; CHKRID - Look up a region ID in WDB
+;
+;	R3 = Region ID
+;	R5 -> First WDB for job @ W.WIN1
+;
+;	CALL	CHKRID
+;
+;	If C = 0, caller is attached to library
+;
+;	R3 -> Library block
+;	R5 -> -> Library block in WDB
+;
+;	If C = 1, caller is not attached to library
+;
+;	R3 = Undefined
+;	R5 = Undefined
+;
+;	In all cases, FIP pool will be mapped on exit
+;-
+
+CHKRID:	MAP	FIPPOL		;Map FIP pool				;012
+	ASL	R3		;Get region ID * 2			;007
+10$:	CMP	R3,#5*2		;Are we pointing at the correct WDB yet? ;007
+	BLOS	20$		;Yes, we sure are			;007
+	SUB	#5*2,R3		;No, so update WDB offset from W.WIN1	;007
+	MOV	-W.WIN1(R5),R5	;Pick up link to next WDB		;007
+	BNE	10$		;We got one, good			;007
+	BR	30$		;Invalid region ID			;007
+
+20$:	SUB	R3,R5		;Point to library pointer in WDB	;007
+	MOV	(R5),R3		;And get pointer to LIB block		;007
+	BIC	#^C<WA$LIB>,R3	;Save only LIB pointer 			;015
+	BEQ	30$		;Not attached to library, error		;007
+	TST	(PC)+		;Indicate success			;007
+30$:	SEC			;Indicate failure			;007
+	RETURN			;And get out				;007
+
+.SBTTL	ELIMINATE ADDRESS WINDOW (ELAW$)
+
+ELAW$:	CALL	CHKWID		;CHECK FOR VALID WINDOW ID
+ELAW$$:	CALL	UMAP$$		;UNMAP WINDOW (IF NECESSARY)
+	MOV	R0,-(SP)	;preserve R0				;026
+	MOVB	(R5),R0		;get base apr to eliminate		;025
+	CLR	(R5)		;MARK SLOT AS EMPTY
+	MAP	@UDPAR0,APR=6,DATA ;Restore mapping to first 4K		;012
+3$:	BITB	BITBYT(R0),APRMSK  ;does APR have seperate I&D status?	;025
+	BNE	5$		;Yes-recompute mapping for him		;025
+	INC	R0		;no, bump to next APR # & look again	;025
+	CMP	#10,R0		;did it reach maximum?			;025
+	BGT	3$		;no- then see if this one split		;025
+	BR	7$		;yes- no more, nothing special to do	;025
+
+5$:	MOVB	@#<140000+FIRQB+FQJOB>,R0 ;yes- recompute, get job#*2	;025
+	CALLMI	SETMDE,GENAP5	;now re-compute APR usage		;025
+7$:	BIS	#WS.ELW,W.NSTS(R4);RETURN WINDOW ELIMINATED STATUS	;025
+	MAP	FIPPOL		;Restore FIP pool mapping
+	MOV	(SP)+,R0	;restore R0				;026
+	RETURN			;THAT'S ALL
+
+GLOBAL	<SETMDE,BITBYT,APRMSK>
+;+ 
+;	ERROR RETURNS
+;-
+
+PRV:	ERROR	PRVIOL		;?Protection violation
+NOB:	ERROR	NOBUFS		;?No buffer space available
+NOR:	ERROR	NOROOM		;?No room for user on device
+NOS:	ERROR	NOSUCH		;?Can't find file or account
+BAD:	ERROR	BADFUO		;?Illegal SYS() usage
+ERR:	ERROR	ERRERR		;?Missing special feature
+
+;+
+; CHKWID - Check a window ID
+;
+;	R4 -> FIRQB @ FQPPN
+;
+;	CALL	CHKWID
+;
+; If window ID is invalid, NOSUCH is returned to our caller
+;
+; If window ID is valid:
+;
+;	R0 = Undefined
+;	R5 -> Window slot
+;
+;	FIP pool will be mapped
+;
+;-
+
+CHKWID:	MOV	JOBWDB,R5	;IS THERE A WINDOW DESCRIPTOR BLOCK?	;012
+	BEQ	NOS		;NOPE, ERROR
+	MOVB	W.NID(R4),R0	;GET WINDOW ID
+	MAP	FIPPOL		;Set up FIP pool mapping		;012
+	BR	20$		;And join loop				;007
+
+10$:	ADD	#W.SIZE,R5	;INCREMENT TO NEXT SLOT
+	BIT	R5,#40-1	;END OF THIS BLOCK?
+	BNE	20$		;NO, LOOP
+	MOV	-40(R5),R5	;GET LINK TO NEXT WDB
+	BEQ	NOS		;IF DONE TOO SOON, ERROR
+20$:	SOB	R0,10$		;LOOP
+	TST	(R5)		;WINDOW CREATED?
+	BEQ	NOS		;NO, ERROR
+	RETURN
+
+.SBTTL	UNMAP ADDRESS WINDOW (UMAP$)
+
+
+UMAP$:	CALL	CHKWID		;CHECK FOR VALID WINDOW ID
+	BPL	NOS		;NOT MAPPED IS AN ERROR HERE
+UMAP$$:	TST	(R5)		;IS WINDOW MAPPED?
+.ASSUME	WS$MAP	EQ	100000
+	BPL	20$		;NO
+	CALL	UMPWIN		;UNMAP ADDRESS WINDOW
+	CMP	W$NLIB(R5),#RIDMIN ;One of the "specials"?		;015
+	BHIS	10$		;Yes, no real region to mess with 
+	DECB	@W$NLIB(R5)	;Decrement local map count on this library
+	BIT	#WA$MAP,@W$NLIB(R5) ;Local map count at zero?		;015
+	BNE	10$		;No
+	MOV	R4,-(SP)	;Get a work register			;007
+	MOV	@W$NLIB(R5),R4	;R4 = LIB block address and flags	;007
+	BIC	#^C<WA$LIB>,R4	;Now get just LIB block pointer		;015
+	DECB	R.CNT+1(R4)	;And say one less mapped		;007
+	BIT	#PF.SLA,R.FLAG(R4) ;Is this an SLA library?		;007
+	BNE	5$		;Yes, sure is				;007
+	MOV	JOBDA,R4	;No, so get JDB pointer			;012
+	BIC	#J2SLAP,JDFLG4(R4) ;And clear non-SLA library pointer 	;012
+5$:	MOV	(SP)+,R4	;Restore FIRQB pointer			;007
+10$:	CLR	W$NLIB(R5)	;WINDOW NO LONGER MAPPED TO LIB
+	MAP	@UDPAR0,APR=6,DATA ;Restore APR6 mapping		;012
+	BIS	#WS.UNM,W.NSTS(R4) ;RETURN WINDOW UNMAPPED STATUS
+	MAP	FIPPOL		;Restore FIP pool mapping		;012
+20$:	RETURN
+
+BAD.JM:	BR	BAD		;A HOP, SKIP AND A JUMP
+
+GLOBAL	<UDPAR0>							;012
+
+.SBTTL	CREATE ADDRESS WINDOW (CRAW$)
+
+CRAW$:	MOVB	W.NAPR(R4),R0	;Get APR to use for window		;017
+	CMPB	R0,#7		;Legal value?				;017
+	BHI	BAD.JM		;No, forget it				;017
+	BIT	#WS.SIS,W.NSTS(R4) ;Creating supervisor mode window?	;021
+	BEQ	3$		;No, not this time			;017
+	BIT	#XC$IDS,X.CON	;Yes, do we have the hardware?		;017
+	BEQ	2$		;No, forget this			;017
+	MOV	#WS$SIS,R2	;Yes, set to check supervisor mode	;017
+	ASH	#7,R0		;Convert APR number to slivers		;017
+	BR	9$		;And join up				;017
+
+2$:	ERROR	ERRERR		;Processor doesn't have supervisor mode ;017
+
+3$:	MOV	W.NSIZ(R4),R3	;RETRIEVE THE SIZE OF THE WINDOW
+	BEQ	5$		;IF THE SIZE IS NON-ZERO
+	DEC	R3		; CALCULATE THE NUMBER OF ADDITIONAL
+	ASH	#-7,R3		;  APRS NECESSARY FOR THE WINDOW
+5$:	ADD	R0,R3		;CALCULATE THE HIGHEST APR USED FOR THE WINDOW
+	MOVB	R.KSIZ(R5),R5	;RETRIEVE THE SIZE OF THIS JOB'S RTS
+	ADD	#3,R5		;ROUND THE SIZE UP IN 4KW INCREMENTS
+	ASR	R5		; TO CALCULATE THE NUMBER OF APRS
+	ASR	R5		;  BEING USED TO MAP THE JOB'S RTS
+	SUB	#8.,R5		;FIND THE LOWEST APR USED TO MAP THE
+	NEG	R5		; RTS
+	CMP	R3,R5		;WAS THERE AN OVERLAP?
+	BHIS	BAD.JM		;YES, SO FLAG THAT AS AN ERROR.
+	MOV	W.NSTS(R4),R3	;Copy UDS/UIS flag			;022
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;012
+	MOV	JOBJCR,R2	;And point to it			;012
+	MOVB	JCISIZ(R2),R1	;Get current I-size			;012
+	CMPB	R1,JCDSIZ(R2)	;Is D-size larger?			;012
+	BHIS	600$		;No					;020	
+	MOVB	JCDSIZ(R2),R1	;Yes, use it to check with		;012
+600$:	NOP			;put BR 7$ here for old method**PATCH**	;020
+	MOVB	JCISIZ(R2),R1	;Get current I size			;020
+	BIT	#WS.UDS,R3	;is this a D request			;022
+	BEQ	7$		;no, I space request			;020
+	BIT	#XC$IDS,X.CON	;yes, but does he need a newer cpu	;020
+	BEQ	7$		;yes, force him back to I space		;020
+	TSTB	JCDSIZ(R2)	;no,he's ok,  see if Dspace in use	;020
+	BEQ	6$		;no use I space size			;020
+	MOVB	JCDSIZ(R2),R1	;yes, use it to size check with		;020
+6$:	MOV	#WS$UDS,R2	;set to check D space only		;020
+	BR	8$		;leave D only checking			;020
+
+7$:	MOV	#WS$UIS,R2	;Guess at no I&D space			;020
+	BIT	#XC$IDS,X.CON	;Good guess?				;020
+	BEQ	8$		;Yes, we're set				;020
+	MOV	#WS$UIS!WS$UDS,R2 ;set to check I&D interference	;020
+8$:	MAP	@UDPAR0,APR=6,DATA ;Re-map caller's first 4K		;012
+	ASH	#5,R1		;CONVERT TO 32-WORD BLOCKS
+	ASH	#7,R0		;CONVERT APR TO 32-WORD BLOCKS
+	CMP	R0,R1		;DOES THE WINDOW APR OVERLAP JOB?
+	BLO	BAD.JM		;YES, ERROR
+9$:	MOV	JOBWDB,R5	;GET JOB'S WINDOW DESCRIPTION BLOCK	;017
+	BEQ	70$		;NO WDB, THEREFORE NO OVERLAPS!
+	MOV	W.NSIZ(R4),R1	;GET PASSED WINDOW SIZE (32-WORDS)
+	ADD	R0,R1		;CALCULATE OFFSET+SIZE
+	BCS	BAD.JM		;Invalid, forget it			;017
+	CMP	R1,#2000	;Really in range?			;017
+	BHI	BAD.JM		;No, forget it				;017
+	MAP	FIPPOL		;Map FIP pool for WDBs			;012
+10$:	BIT	R2,(R5)		;Window in the right space?		;017
+	BEQ	60$		;NO
+	MOVB	(R5),R3		;GET WINDOW'S APR
+	ASH	#7,R3		;CONVERT APR TO 32-WORD BLOCKS
+	MOV	R3,-(SP)	;SAVE WINDOW BASE ADDRESS
+	ADD	W$NSIZ(R5),(SP)	;CALCULATE OFFSET+SIZE
+	CMP	R0,R3		;NEW WINDOW BASE TO CURRENT WINDOW BASE
+	BEQ	40$		;EXACT MATCH => OVERLAP
+	BHI	20$		;NEW WINDOW > CURRENT WINDOW
+	CMP	R1,R3		;NEW WINDOW END TO CURRENT WINDOW BASE
+	BR	30$		;GO CHECK FOR OVERLAP
+
+20$:	CMP	(SP),R0		;CURRENT WINDOW END TO NEW WINDOW BASE
+30$:	BLOS	50$		;NO OVERLAP
+40$:	BIT	#WS$SIS,R2	;is it supervisor mode?			;020
+	BNE	48$		;yes, must eliminate window		;020
+	BIT	#WS$UIS,R2	;IS IT I&D REQUEST?			;020
+	BNE	45$		;YES,					;020
+	BIT	#WS$UIS,(R5)	;DID WE FIND A D ONLY LIB?		;020
+	BEQ	48$		;YES, BOTH D'S MUST ELIMINATE		;020
+43$:	BR	50$		;NO, IT'S OK **PATCH**(NOP FOR CURRENT)	;020
+	BR	48$		;ELIMINATE CURRENT WINDOW-CURRENT MODE	;020
+
+45$:	BIT	#WS$UIS,(R5)	;DID WE FIND AN I&D LIB?		;020
+	BEQ	43$		;NO,NEW MODE PERMITS			;020
+				;YES, BOTH MODES REQUIRE ELIMINATE	;020
+48$:	CALL	ELAW$$		;ELIMINATE (AND UNMAP WINDOW)		;020
+50$:	TST	(SP)+		;POP STACK
+60$:	ADD	#W.SIZE,R5	;SKIP TO NEXT SLOT
+	BIT	R5,#40-1	;END OF BLOCK?
+	BNE	10$		;NO, LOOP
+	MOV	-40(R5),R5	;GET LINK TO NEXT WDB
+	BNE	10$		;LOOP
+
+	;Note:	This mechanism works because the SETMDE routine assures
+	; that all I apr assignments are done before any D apr assignments
+
+GLOBAL	<X.CON,SWTBLK>							;020
+
+70$:	CALL	GETWDB		;GET JOB'S WINDOW DESCRIPTION BLOCK
+	MOV	#1,R0		;START WINDOW ID'S AT 1
+80$:	TST	(R5)		;FIND AN OPEN SLOT
+	BEQ	90$		;FOUND ONE
+	INC	R0		;CHECK FOR NEXT WINDOW
+	ADD	#W.SIZE,R5	;SKIP TO NEXT SLOT
+	BIT	R5,#40-1	;END OF THIS BLOCK?
+	BNE	80$		;NO, CONTINUE
+	MOV	R5,R3		;SAVE CURRENT BLOCK POINTER IN CASE
+	MOV	-40(R5),R5	;IS THERE ANOTHER BLOCK?
+	BNE	80$		;YES, CONTINUE
+	MOV	R4,-(SP)	;SAVE FIRQB POINTER
+	CALLX	GETFIP		;Get a FIP pool buffer			;012
+	BCC	85$		;Got one, good				;012
+	ERROR	NOBUFS		;No buffers, report that		;007
+
+85$:	ADD	#W.WIN1,R4	;Point to first window in new WDB 	;007
+	MOV	R4,-40(R3)	;LINK PREVIOUS BLOCK TO THIS BLOCK
+	MOV	R4,R5		;SET POINTER TO FIRST WINDOW
+	MOV	(SP)+,R4	;RESTORE FIRQB POINTER
+90$:	MAP	@UDPAR0,APR=6,DATA ;Map caller's first 4K		;012
+	MOVB	W.NSTS(R4),-(SP) ;Save mapping request flag		;012
+	MOV	W.NSIZ(R4),-(SP) ;Save window size away also		;012
+	MOVB	W.NAPR(R4),R3	;Get base APR number			;008
+	MOVB	R3,-(SP)	;And save it away for a bit		;012
+	ASH	#15,R3		;Now get virtual address		;008
+	MOV	R3,W.NBAS(R4)	;And give it to caller			;008
+	MOVB	R0,W.NID(R4)	;Return window ID			;012
+	BIS	#WS.CRW,W.NSTS(R4) ;And indicate mapping is done	;008
+	MAP	FIPPOL		;Restore FIP mapping			;012
+	MOVB	(SP)+,(R5)	;Store base APR number			;012
+	BIS	R2,(R5)		;Set up the window's mode		;017
+	MOV	(SP)+,W$NSIZ(R5) ;Store window size			;012
+	TSTB	(SP)+		;Should we do mapping also?		;012
+	BMI	MAP$$		;YUP, GO MAP IT FOR HIM
+.ASSUME	WS.MAP	EQ	200
+	RETURN			;THAT'S ALL
+
+GLOBAL	<UDPAR0,X.CON>							;012
+
+.SBTTL	MAP ADDRESS WINDOW (MAP$)
+
+.ENABL	LSB								
+
+MAP$:	CALL	CHKWID		;CHECK FOR VALID WINDOW ID
+MAP$$:	CALL	UMAP$$		;UNMAP WINDOW (IF NECESSARY)
+	MAP	@UDPAR0,APR=6,DATA ;Map user's first 4K			;012
+	MOV	W.NRID(R4),R3	;GET REGION ID PASSED
+	MOV	W.NSTS(R4),R1	;Pick up mapping request		;013
+	MAP	FIPPOL		;Map FIP pool				;012
+	BIC	#WS$WRT,(R5)	;MAKE SURE R/W IS RESET		
+	CMP	R3,#RIDMIN	;One of the special RIDs?		;015
+	BLO	10$		;No				
+	BIT	#1,R3		;Odd RID?			
+	BNE	25$		;Yes, that's an error		
+	MOV	R3,R2		;No, set to put that into W$NLIB 
+	MAP	@#KISAR5,APR=5,DATA ;Map our data			;012
+	CALL	@WINTBL(R3)	;Do whatever needs doing	
+	BR	50$		; and continue			
+
+10$:	INC	R3		;0 legal to user but not inside		;023
+				; no zero check needed, in special RIDs	;023
+	MOV	R5,-(SP)	;SAVE POINTER TO WINDOW SLOT	
+	MOV	JOBWDB,R5	;GET POINTER TO W.WIN1			;012
+	CALL	CHKRID		;ATTACHED TO REGION PASSED?
+	BCS	25$		;NO, ERROR
+	MOV	R5,R2		;SAVE POINTER TO LIB POINTER
+	MOV	(SP)+,R5	;RESTORE POINTER TO WINDOW SLOT
+	BIT	#WS.WRT,R1	;Desire read/write access?		;012
+	BEQ	40$		;NO, GOOD
+	BIT	#WA$WRT,(R2)	;Yes, is region attached R/W		;015
+	BNE	30$		;Yes, so set access
+20$:	ERROR	PRVIOL		;No, flag as an error		
+
+25$:	ERROR	NOSUCH		;Not attached to specified region
+
+30$:	BIS	#WS$WRT,(R5)	;SET R/W ACCESS
+40$:	CLR	R0		;Get library size in k-words		;014
+	BISB	R.KSIZ(R3),R0	; ...					;014
+	BIT	#PF.SLA,R.FLAG(R3) ;Is this an SLA library?		;006
+	BNE	45$		;Yes, everything goes			;006
+	BIT	#WA$MAP,(R2)	;Non-SLA, is it already mapped?		;015
+	BNE	42$		;Yes, don't check JDB then		;007
+	MOV	JOBDA,R1	;First map, get JDB pointer		;012
+	BIT	#J2SLAP,JDFLG4(R1) ;Already mapped a non-sla library? 	;012
+	BNE	20$		;Yes, so forget this			;007
+	CMP	JOBRTS,#NULRTS	;Running under the null RTS?		;007
+	BNE	20$		;No, so can't use SLA library		;007
+42$:	BIT	#LS.UFL,L.STAT(R3) ;Is this a Restricted library?	;018
+	BNE	45$		;No- skip SPD min memory test		;018
+	ADD	#4-1,R0		;Round up library size			;007
+	ASR	R0		;Now divide by four...			;007
+	ASR	R0		;To get APRs used by library		;007
+	NEG	R0		;Now get -(# of APRs to use)		;007
+	ADD	#10,R0		;And add in # of APRs to get		;007
+				;the base APR which must be mapped 	;007
+	CMPB	(R5),R0		;Does this window map a high enough APR? ;007
+	BHI	20$		;No, forget it				;010
+	CLR	R0		;Get back library size in K-words 	;014
+	BISB	R.KSIZ(R3),R0	; ...					;014
+45$:	ASH	#5,R0		;Get library size in slivers		;006
+	BEQ	20$		;Just in case
+50$:	MAP	@UDPAR0,APR=6,DATA ;Map caller's first 4K		;012
+	MOV	W.NOFF(R4),R1	;Get offset into region
+	TST	R0		;Is this the I/O page special?
+	BNE	55$		;No
+	SUB	R1,R0		;Yes, compute remaining length
+	BR	60$		; and it always fits
+
+55$:	SUB	R1,R0		;Is offset < region size?
+	BHI	60$		;Yes, so continue
+	ERROR	BADFUO		;No, error
+
+60$:	MOV	W.NLEN(R4),-(SP) ;Get length to map in slivers		;012
+	MAP	FIPPOL		;Set up FIP pool mapping		;012
+	MOV	R1,W$NOFF(R5)	;Store away region offset		;012
+	MOV	(SP)+,R1	;Pick up mapping length now		;012
+	BEQ	70$		;ZERO LENGTH PASSED, CALCULATE LENGTH
+	CMP	R0,R1		;REST OF REGION >= LENGTH TO MAP?
+	BHIS	80$		;OK, CONTINUE
+	ERROR	BADFUO		;NO, ERROR
+
+70$:	MOV	W$NSIZ(R5),R1	;SET LENGTH MAPPED TO WINDOW SIZE
+	CMP	R0,R1		;REST OF REGION >= WINDOW SIZE?
+	BHIS	80$		;YES, GOOD GUESS
+	MOV	R0,R1		;NO, REGION IS SMALLER THAN WINDOW
+80$:	MAP	@UDPAR0,APR=6,DATA ;Map caller's first 4K		;012
+	MOV	R1,W.NLEN(R4)	;RETURN LENGTH TO BE MAPPED
+	MAP	FIPPOL		;Restore FIP pool mapping		;012
+	ASH	#6,R1		;MAKE LENGTH A BYTE LENGTH
+	MOV	R1,W$NBYT(R5)	;STORE AWAY LENGTH TO BE MAPPED IN BYTES
+90$:	MOV	R2,W$NLIB(R5)	;SET POINTER TO REGION ID IN LIB BLOCK
+	BIS	#WS$MAP,(R5)	;Mark the window as mapped		;017
+	MOV	R2,-(SP)	;Save attachment pointer		;017
+	MOV	R3,-(SP)	;And LIB block pointer			;017
+	MOV	R5,R0		;Set up pointer to window for MAPWIN	;017
+	MOV	JOBJCR,R1	;Get job's JCR pointer			;017
+	MOV	JOBJC6,R2	;And mapping value			;017
+	MOV	JOBDA,R3	;Get pointer to caller's JDB entry	;017
+	ADD	#JDMCTL+M.PHYA,R3 ;And point to physical address	;017
+	CALLM	MAPWIN,GENAP5	;Set up MDEs for this new window	;017
+	MOV	(SP)+,R3	;Restore LIB block pointer		;017
+	MOV	(SP)+,R2	;And attachment pointer			;017
+	MAP	FIPPOL		;And FIP pool mapping			;017
+95$:	CMP	R3,#RIDMIN	;Special type mapping?			;015
+	BHIS	RET		;Yes, no map count to deal with	
+	BIT	#WA$MAP,(R2)	;Region already mapped?			;015
+	BNE	100$		;Yes, don't touch count
+	INCB	R.CNT+1(R3)	;Say one more user mapped to library	;007
+	BIT	#PF.SLA,R.FLAG(R3) ;Is this a SLA library?		;007
+	BNE	100$		;Yes, so don't set the flag		;007
+	MOV	JOBDA,R0	;Get JDB pointer			;012
+	BIS	R3,JDFLG4(R0)	;And say we mapped a SLA library 	;012
+100$:	INCB	(R2)		;INCREMENT LOCAL MAP COUNT		;007
+	CMPB	#MC.LCK,R.MCTL+M.CTRL(R3) ;LIBRARY RESIDENT?		;001
+;									;001
+;	Note: this assumes that the LIB's memory lock count will	;001
+;	never be greater than one (current implementation.)		;001
+;									;001
+	BEQ	RET		;YES, JUST RETURN
+	CALLRX	DMPJOB		;NO, RESCHEDULE TO BRING IT IN
+
+.SBTTL	Set up table of special RID values
+
+.DSECT	177774,NOCREF		;Verify ordering of special RIDs	;015
+RIDMIN:				;Lowest legal special RID		;015
+RIDMEM:	.BLKW			;Physical memory RID			;015
+RIDHDR:	.BLKW			;Job header RID				;015
+
+	UNORG
+
+	.WORD	WINMEM		; -4 = physical memory		
+	.WORD	WINHDR		; -2 = job header		
+WINTBL:									
+
+GLOBAL	<NULRTS,UDPAR0>							;012
+
+WINHDR:	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;012
+	MOV	JOBJCR,R0	;Get JCR pointer			;012
+	MOVB	JCHDRS(R0),R0	;Get job header size			;012
+	BEQ	112$		;None, error			
+	MAP	FIPPOL		;Now map FIP pool			;012
+	BIT	#WS.WRT,R1	;Want R/W access?			;012
+	BEQ	110$		;No				
+	BIS	#WS$WRT,(R5)	;Yes, set it			
+110$:	ASH	#11.-6,R0	;Compute size in slivers	
+RET:	RETURN			;That's it for now			;007
+
+112$:	ERROR	NOSUCH		;Job does not have a header		;017
+
+115$:	ERROR	PRVIOL		;General protection violation		;007
+
+WINMEM:	MOV	R5,-(SP)	;Save a register		
+	MOVB	JOB,R0		;Get job number			
+	CALLX	CHKPRV,R4	;Check privileges		
+	 .BPRIV	RDMEM		;Allowed to read memory?	
+	BCS	115$		;No, so give an error			;007
+	BIT	#WS.WRT,R1	;Asking for R/W access?			;013
+	BEQ	120$		;No, continue			
+	CALLX	CHKPRV,R4	;Yes, so check if that's legal	
+	 .BPRIV	SYSMOD		;System-change privilege required 	;003
+	BCS	115$		;Sorry					;007
+	MOV	(SP),R5		;Restore R5			
+	MAP	FIPPOL		;Set up FIP pool mapping		;012
+	BIS	#WS$WRT,(R5)	;Enable write access
+	MAP	@#KISAR5,APR=5,DATA ;Map our data			;013
+120$:	MAP	@UDPAR0,APR=6,DATA ;Set up user mapping			;013
+	MOV	(SP)+,R5	;Make sure R5 is restored	
+	REGSAV			;Save all registers		
+	MOV	W.NOFF(R4),R5	;Get starting sliver number	
+	MOV	W.NLEN(R4),R3	;Get mapping length		
+	DEC	R3		;Back up 1 sliver		
+	ADD	R5,R3		;Get last sliver number		
+	BCS	115$		;Off the deep end			;006
+	CMP	R5,#177600	;Working on the I/O page?	
+	BLO	123$		;No				
+	CALLX	CHKPRV,R4	;Yes, so require more privs	
+	 .BPRIV	SYSMOD		; namely change-system			;003
+	BCS	115$		;Sorry					;006
+	CLR	(SP)		;Special case for I/O page end	
+.ASSUME	TOS.R0 EQ 0							
+	BR	126$		;Skip CHKMEM call		
+
+123$:	CALL	CHKMEM		;Check this memory reference		;002
+	MOV	R0,(SP)		;And return the length			;015
+.ASSUME	TOS.R0	EQ	0
+	BEQ	115$		;Zero, forget the request		;015
+	ADD	R5,(SP)		;Good request, return last legal sliver	;016
+126$:	REGRES			;Restore registers
+	RETURN			;Done				
+
+.DSABL	LSB								
+
+GLOBAL	<MEMSIZ,UDPAR0>							
+
+.SBTTL	Handle .CMDLN directive
+
+;+
+;	R0 =  THE EMT CODE
+;	R1 -> JOB DATA BLOCK OF CALLER @ JDFLG
+;	R2 -> SECOND JOB DATA BLOCK OF CALLER
+;	R3 -> (MAPPED) XRB OF CALLER
+;	R4 -> (MAPPED) FIRQB OF CALLER
+;	R5 -> RTS BLOCK BEING USED BY CALLER
+;	SP -> "RTI3", R0, R1, R2, R3, R4, R5, PC, PS, ...
+;
+; THE JOB'S 1ST 4K IS MAPPED THROUGH @DPAR6.
+;
+; NO ERROR IS INDICATED (JDIOST = 0).
+;
+; THE POSTING PATTERN IS XRB POSTING (<0 IN JDPOST).
+;
+; I/O STATUS POST IS INDICATED (JFIOKY).
+; KEYWORD POSTING IS INDICATED (JFIOKY).
+;
+;-
+
+	EMTENT	.CMDLN,,EM2	;.CMDLN comes here
+
+CMDLIN::MOV	XRBC(R3),R1	;Get the transfer count			;003
+	CLC			;Guess that this is a write		;004
+	;TST	R1		;Is this read or write?
+	BNE	10$		;Write, go handle it (C = 0 from CLC above)
+	SEC			;Set carry for read XRB checking
+10$:	CALLX	CHKXRB		;Go and validate the XRB
+	CMP	R1,#4000	;Is the transfer count too large?
+..MXCL	==	.-2	; **PATCH** Maximum command line length
+	BLOS	20$		;No, it will do fine
+	ERROR	BADCNT		;Too long, report an error
+
+20$:	TST	R1		;Is this read?
+	BEQ	70$		;Yes, so go for it
+	CALLX	SCRUMX		;Map user's buffer
+	MOV	@DPAR6,R0	;And pick up the mapping		;012
+	MAP	JOBJC6,APR=6,DATA ;Map caller's JCR entry		;012
+	MOV	JOBJCR,R2	;And point to it			;012
+	MOV	JCCMDL(R2),R4	;Pick up "address" to return		;012
+	BEQ	30$		;Nothing to return
+	BUFFER	RETURN		;Go and return the old buffer
+30$:	CLR	JCCMDL(R2)	;Indicate no command line
+	SUB	#20000,R5	;Now R5 points to user's buffer in APR5
+	CMP	R1,#127.	;Would this fit in core common?
+	BHI	40$		;No, not this time
+	MAP	@UDPAR0,APR=6,DATA ;Yes, so map user's core common
+	MOV	#140000+CORCMN,R3 ;R3 -> Core common
+	MOVB	R1,(R3)+	;Write the length into core common
+	BR	60$		;And join up
+
+40$:	MOV	R1,-(SP)	;Save byte count requested
+	ADD	#BUFHDR,R1	;And add in size of header
+	MOV	#-1,R2		;Don't ever use the monitor's pool
+	CALLX	BUFFER,R5,LRGPOL ;Now allocate a buffer
+	BCC	50$		;We got one, good
+	ERROR	NOBUFS		;Tell the user we failed
+
+50$:	MOV	JOBJCR,R2	;Point to caller's JCR entry		;012
+	MOV	R4,JCCMDL(R2)	;And save the buffer mapping		;012
+	CALLX	MAPBUF		;Now map this buffer
+	ADD	#BF.CNT,R3	;Now point to the count
+	MOV	(SP)+,R1	;Get back user's count
+	MOV	R1,(R3)+	;Save the user's count
+.ASSUME	BF.CNT+2	EQ	BUFHDR
+
+60$:	MOV	R1,R2		;Set up byte count for MOVMEM
+	MOV	R5,R1		;Get APR5 address for user's buffer
+	CALLRX	MOVMEM		;Now copy the data, we're done
+
+GLOBAL	<LRGPOL,DPAR6,UDPAR0,JOBJD2>
+
+.SBTTL	Read command line
+
+; At this point:
+;
+; User's first 4K mapped through DPAR6
+;
+; R3 -> XRB
+
+70$:	MOV	@UDPAR0,R0	;Pick up MMU address for user's first 4K ;012
+	MAP	JOBJC6,APR=6,DATA ;And map the JCR entry		;012
+	MOV	JOBJCR,R2	;Point to JCR entry			;012
+	MOV	JCCMDL(R2),R4	;Pick up pointer to command line
+	BNE	100$		;We have one, that's good		;005
+	MAP	R0,APR=6,DATA	;No command line, so re-map user's first 4K ;012
+	MOV	#120000+CORCMN+1,R1 ;And point to it via APR 5
+	MOVB	@#140000+CORCMN,R2 ;Pick up the length
+	BGT	110$		;Valid length, that's good
+	ERROR	NOSUCH		;Invalid or zero length, say no command line ;005
+
+100$:	CLR	JCCMDL(R2)	;Forget the command line pointer	;012
+	MOV	R3,-(SP)	;Save XRB pointer
+	CALLX	MAPBUF		;Map the XBUF buffer through APR6
+	MOV	(SP)+,R3	;Now restore XRB pointer
+	MOV	@DPAR6,R0	;And pick up the MMU address
+	MOV	#120000+BUFHDR,R1 ;And point to it via APR 5
+	MOV	@#140000+BF.CNT,R2 ;Pick up the length
+
+; At this point
+;
+; R0 = MMU address of command line (either CORCMN or XBUF)
+; R1 -> command line through APR 5
+; R2 = Length of command line
+; R3 -> XRB
+; R4 = Contorted buffer address (or zero if in core common)
+
+110$:	MAP	@UDPAR0,APR=6,DATA ;Now map the user's low core again
+	CLRB	@#140000+CORCMN	;Clear out the core common flag		;012
+	CMP	R2,(R3)		;Will this fit in the user's buffer?
+.ASSUME	XRLEN	EQ	0
+	BLOS	120$		;Yes, so go for it
+	CALL	130$		;No, so dump the buffer
+	ERROR	LINERR		;And tell them line too long
+
+120$:	MOV	R2,XRBC(R3)	;Return the count to the user
+	CALLX	SCRUMX		;Map the user's buffer
+	MOV	R5,R3		;Now point to it for MOVMEM
+	CALLX	MOVMEM		;Move the data
+130$:	TST	R4		;Do we have a buffer to return?		;012
+	BEQ	140$		;No, must have been from core common
+	BUFFER	RETURN		;Yes, return it to the pool
+140$:	RETURN			;And now we're done
+
+GLOBAL	<DPAR6,UDPAR0>							;012
+
+.SBTTL	HANDLE .XPEEK MONITOR CALL
+
+;+
+;	R0 =  EMT CODE
+;	R1 -> JOBDA @JOBF
+;	R2 -> JDB2
+;	R3 -> MAPPED XRB
+;	R4 -> MAPPED FIRQB
+;	R5 -> RTS BLOCK
+;-
+
+	EMTENT	.XPEEK,,EM2						;002
+
+	MOVB	JOB,R0		;Get job number				
+	CALLX	CHKPRV,R4	;Check privilege			
+	 .BPRIV	RDMEM		;Allowed to look at memory?		
+	BCS	20$		;No, punt				
+	MOV	(R3),R0		;GET LENGTH
+.ASSUME	XRLEN EQ 0
+	CMP	R0,#20000-<64.*2>+1 ;FITS IN APR6 (MAPS ONLY 4K-32 WORDS)?
+	BHIS	10$		;ERROR IF NOT
+	;SEC			;C=1 FROM "CMP" ABOVE
+	CALLX	CHKXRB		;CHECK XRB FOR "READ"
+	MOV	R0,XRBC(R3)	;STORE LENGTH BACK IN "BYTES READ" FIELD
+	MOV	XRBLK(R3),R5	;GET LOW ORDER PHYSICAL ADDRESS
+	MOVB	XRBLKM(R3),R4	;AND HIGH ORDER ADDRESS
+	BMI	20$		;ERROR IF NEGATIVE
+	MOV	R4,R2		;COPY ADDRESS (HIGH ORDER)
+	MOV	R5,R3		; (AND LOW ORDER)
+	MOV	R5,R1		;LOW ORDER ONCE AGAIN
+	BIC	#^C<77>,R1	;GET BIAS WITHIN APR
+	ADD	#120000,R1	;ADD IN APR5 BASE, LEAVE IN R1 UNTIL MOVMEM
+	ASHC	#-6,R4		;CONVERT START ADDRESS TO MMU SLIVERS (IN R5)
+	DEC	R0		;GET LENGTH-1
+	ADD	R0,R3		;FORM ADDRESS OF LAST BYTE
+	ADC	R2		; (DOUBLE PRECISION)
+	INC	R0		;FIX R0
+	ASHC	#-6,R2		;LAST SLIVER ACCESSED (IN R3)
+	MOV	R0,-(SP)	;Save count in bytes			;015
+	CALL	CHKMEM		;Validate this memory reference		
+	BCS	20$		;Error, forget it			;015
+	MOV	(SP)+,R2	;Success, get count for MOVMEM		;015
+	MOV	R5,R0		;R0 = DATA MMU ADDRESS
+	MOV	@#140000+XRB+XRLOC,R5 ;GET USER VIRTUAL BUFFER ADDRESS
+	CALLX	SCRUMP		;MAP USER BUFFER
+	MOV	R5,R3		;R3 = BUFFER ADDRESS
+	CALLRX	MOVMEM		;MOVE THE DATA AND RETURN
+
+10$:	ERROR	BADCNT		;COUNT TOO LARGE (MORE THAN 8K-128)
+
+20$:	ERROR	PRVIOL		;No privileges or illegal address range	;015
+
+;+									
+; CHKMEM - Validate a physical memory reference request				
+;									
+;	R3 =	Last sliver to access					
+;	R5 =	First sliver to access					
+;
+;	CALL	CHKMEM
+;
+;	If C = 0, request is totally valid
+;	If C = 1, request is not valid
+;
+;	R0 =	Actual valid length in slivers
+;	R2 =	Undefined
+;	R4 =	Undefined
+;
+;-									
+
+CHKMEM:	MOV	#MEMLST,R4	;POINT TO MEMORY LIST			;002
+	CLR	R0		;Initialize valid length counter	;015
+20$:	MOV	M.PHYA(R4),R2	;GET START ADDRESS OF THIS MEMORY BLOCK
+	CMP	R2,R3		;DOES IT START ABOVE END OF TRANSFER?
+	BHI	50$		;YES, ALL CHECKED OUT AND KOSHER
+	TST	M.PNXT(R4)	;TAIL OF MEMLST?
+	BEQ	60$		;YES, ERROR
+	CLR	-(SP)		;Guess at no offset			;015
+	SUB	R5,R2		;GET -(BIAS OF TRANSFER START WITHIN BLOCK)
+	BCC	30$		;BRANCH IF START IS BELOW THIS BLOCK
+	NEG	R2		;FIX THE SIGN
+	MOV	R2,(SP)		;And save the offset			;015
+	ASH	#-5,R2		;NOW BIAS IN K
+	CMP	R2,M.TSIZ(R4)	;START WITHIN THIS MEMORY BLOCK?
+	BHIS	40$		;NO
+	CMPB	R2,M.SIZE(R4)	;Is start within used part?
+	BHIS	35$		;No, don't check the type then		;015
+30$:	MOV	R4,R2		;COPY MCSB ADDRESS
+	BIC	#^C<37>,R2	;GET BLOCK TYPE
+	BIT	BITWRD(R2),#^B000001100 ;LOCKED OR NXM?
+.ASSUME	ML.LCK EQ 4
+.ASSUME	ML.NXM EQ 6
+	BNE	55$		;YES, ERROR
+35$:	MOV	R0,-(SP)	;Save length so far			;015
+	MOV	M.TSIZ(R4),R0	;Pick up length of this entry		;015
+	ASH	#5,R0		;Convert to slivers			;015
+	ADD	(SP)+,R0	;Now get updated length without offset	;015
+	SUB	(SP),R0		;Now get actual length			;015
+40$:	TST	(SP)+		;Dump offset				;015
+	MOV	M.PNXT(R4),R4	;LINK TO NEXT MEMORY BLOCK
+	BR	20$		;KEEP ON CHECKING
+
+50$:	SUB	R3,R2		;Get unused slivers + 1			;015
+	DEC	R2		;Now get slivers unused			;015
+	SUB	R2,R0		;Now we have total available		;015
+	;CLC			;Indicate success (from SUB above)	;015
+	BR	70$		;And exit				;015
+
+55$:	TST	(SP)+		;Dump bias into this memory segment	;015
+60$:	SEC			;Indicate failure			;015
+70$:	RETURN			;And get out				;015
+
+GLOBAL	<MEMLST,BITWRD>
+
+.END

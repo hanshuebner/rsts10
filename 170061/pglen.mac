@@ -1,0 +1,136 @@
+	.TITLE	PGLEN
+	.IDENT	/V1.0/
+;
+;****************************************************************************
+;*									    *
+;*  COPYRIGHT (c) 1983                                                      *
+;*  BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.			    *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+;++
+;
+; Routine Description:
+;
+; The $PGLEN routine computes the default number of  lines  on  a  printer
+; page.   This routine can be used by any task that produces listing files
+; and does pagination.  The algorithm which will be used by $PGLEN is:
+;
+;     1.  If logical name support is not present  in  the  caller's  host
+;         system, then return immediately with an output value of zero.
+;
+;     2.  Determine what the system-wide page length value is.
+;
+;          -  Translate the logical name SYS$LP_LINES.
+;
+;          -  Convert the ASCII value obtained to a binary integer.
+;
+;          -  Verify that the resulting value is in the range [30,99].
+;
+;          -  If any of the prior steps fail,  return  the  default  U.S.
+;             paper size of 66(10) lines.
+;
+;
+; There is a design problem that necessitates an  interim  implementation.
+; The  problem is that the final design of the logical name directives for
+; Micro/RSX is not yet complete.  However, VAX-11  RSX  needs  to  include
+; this  functionality soon (in time for VMS Field Test 1).  Therefore, the
+; initial implementation for $PGLEN on VAX-11 RSX will be:
+;
+;     1.  Code  will  be  included  for  the  GIN  directive  which  will
+;         interpret  a GI.DEV subfunction with a DPB length of 4 words as
+;         a request for  the  page  length.   The  page  length  will  be
+;         returned  in  the  one  word buffer as an ASCII string, thereby
+;         simulating the expected return from a  Translate  Logical  Name
+;         directive.
+;
+;         An existing GIN subfunction is being used in order to  be  sure
+;         that  any  subfunction  code chosen for this functionality will
+;         not be reused in the future.  GI.DEV  was  chosen  because  the
+;         minimum  buffer length and the processing flags are appropriate
+;         for this new function.
+;
+;     2.  Once the logical name  directives  are  implemented,  this  GIN
+;         functionality  will go away and the RSX logical name directives
+;         will be used instead.  The  program  interface,  however,  will
+;         remain identical, and the changeover will be transparent to the
+;         calling tasks.  Since this routine will be provided as a SYSLIB
+;         routine,  all that is necessary to changeover will be to relink
+;         the images.
+;
+;
+; Inputs:
+;
+;	None
+;
+; Output:
+;
+;        R0 = the number of lines on a printer page, or zero on systems
+;             that do not support logical names        
+;
+; The $PGLEN routine preserves  the  contents  of  registers  1-5  of  the
+; calling task.
+;
+; Author:	Tony Lekas, 20-March-1983
+;
+; Modified By:
+;
+
+
+	.mcall	.pcode
+	.pcode			;Pure code
+
+usdflt	=	66.		;Default U.S. paper size (lines/page)
+
+$pglen::
+	mov	r1,-(sp)	;Save r1
+	mov	r2,-(sp)	;Save r2
+
+	mov	#"**,-(sp)	;Mark end of buffer for conversion
+	tst	-(sp)		;Allocate a word for the buffer
+;
+; Build the DPB on the stack
+;
+	mov	#1,-(sp)	;Buffer length
+	mov	#4,-(sp)	;Put the buffer address on the stack
+	add	sp,(sp)		;...
+	mov	#6,-(sp)	;GI.DEV subfunction
+	mov	(pc)+,-(sp)	;DIC and DPB
+	.byte	169.,4.		;DIC and DPB for get page length
+	emt	377		;Get the Page length
+	bcc	20$		;If CC then we have a two char string
+	cmpb	#ie.sdp,$dsw	;No "logical name" support?
+	beq	30$		;If EQ yes - return a zero
+10$:	mov	#usdflt,r0	;Else return the default U.S. paper size
+	br	40$		;and exit
+20$:	mov	sp,r0		;Get the address of the number string
+	call	$cdtb		;Convert the string to binary
+	cmpb	#'*,r2		;Any errors?
+	bne	10$		;If NE yes - return the default
+	cmp	r1,#30.		;Less than 30. lines per page?
+	blo	10$		;If LO yes - return the default
+	cmp	r1,#99.		;More than 99. lines per page?
+	bhi	10$		;If LO yes - return the default
+	mov	r1,r0		;Put lines per page in r0
+	br	40$		;And return it
+30$:	clr	r0		;Indicate that there is no default
+40$:	cmp	(sp)+,(sp)+	;Remove the buffer from the stack
+	mov	(sp)+,r2	;Restore r2
+	mov	(sp)+,r1	;Restore r1
+	return			;and exit
+
+	.end

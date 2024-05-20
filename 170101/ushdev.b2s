@@ -1,0 +1,754 @@
+1	SUB USHDEV							      &
+\	ON ERROR GOTO 19000						      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   t i t l e				      &
+	!								      &
+	!	  subprogram : USHDEV					      &
+	!	     version : V10.1					      &
+	!	        edit : K					      &
+	!	   edit date : 14-MAY-92				      &
+	!	   author(s) : BGN,JJT,SEL				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!		  C O P Y R I G H T				      &
+	!								      &
+	!								      &
+	!		      Copyright (C) 1990, 1992 by		      &
+	!	Digital Equipment Corporation, Maynard, Mass.		      &
+	!								      &
+	!								      &
+	! This software is furnished under a license and may be used and      &
+	! copied  only  in accordance with the terms of such license and      &
+	! with the  inclusion  of  the  above  copyright  notice.   This      &
+	! software  or  any  other copies thereof may not be provided or      &
+	! otherwise made available to any other person.  No title to and      &
+	! ownership of the software is hereby transferred.		      &
+	!								      &
+	! The information in this software is subject to change  without      &
+	! notice  and should not be construed as a commitment by Digital      &
+	! Equipment Corporation.					      &
+	!								      &
+	! DIGITAL assumes no responsibility for the use  or  reliability      &
+	! of its software on equipment that is not supplied by DIGITAL.	      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   c a l l   f o r m a t		      &
+	!								      &
+	!	CALL USHDEV						      &
+	!								      &
+	!	Argument	I/O	Usage				      &
+	!	========	===	=====				      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	m o d i f i c a t i o n   h i s t o r y   l o g		      &
+	!								      &
+	!								      &
+	! VER/ED	EDIT DATE	REASON				      &
+	!								      &
+	! V9.1-05	27-Aug-85	(JJT) Check for disk disabled by INIT &
+	! V9.3-09	16-May-86	(JJT) Handle dynamic devices (like XE) &
+	! V9.3		16-Jul-86	(BGN) Increase performance when a     &
+	!				      device parameter is specified.  &
+	!				      Add controller types for MS.    &
+	!				      Add MU device and controller    &
+	!				      types.			      &
+	!				      Change error trap message	      &
+	! V9.3-16	18-Sep-86	(JJT) Fix SHOW DEVICE for XE devices  &
+	! V9.3-18	11-Nov-86	(JJT) Look up the name of UNA/QNA     &
+	!				      and the default physical address &
+	! V9.6-06	27-Jan-88	(JJT) Fix for V9.6's dynamic PKs      &
+	! V9.6-11	13-May-88	(JJT) Special case KB0 as TT0	      &
+	! V10.0-01	12-Jul-88	(JJT) Open disks in block mode to     &
+	!				      handle large clustersize disks  &
+	! V9.7-04	25-Jan-89	(JJT) Get correct CSRs for DU disks   &
+	! V9.7-06	16-Mar-89	(JJT) Fix controller # for DU disks   &
+	! V10.0-01	13-Jul-89	(SEL) Print to OUT.CHN% (/OUTPUT)     &
+	! V10.0-01	12-Jul-89	(SEL) Fix "Disabled by INIT" status   &
+	! V10.0-F	09-Nov-89	(JRM) Fix DL11C/D = KBAn: to = KBBn:  &
+	! V10.0-J	29-Mar-90	(SEL) Return info on SHOW DEV SY:     &
+	! V10.1-B	13-Jun-91	(FEK) New get CSR call add disk names &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	s u b p r o g r a m   d e s c r i p t i o n		      &
+	!								      &
+	!								      &
+	!******************************************************************** &
+	!								      &
+	!	v a r i a b l e s  /  a r r a y s   u s e d		      &
+	!								      &
+	!	name		description				      &
+	!	====		===========				      &
+	!								      &
+	!******************************************************************** &
+
+
+700	!	i n c l u d e   r e q u i r e d   M A P s , C O M M O N s     &
+	!								      &
+	!								      &
+	%INCLUDE "CUI:CUICMN.B2S"		!include CUI data section     &
+	%INCLUDE "SYSTEM:UTYKEY.B2S"		!include CUI common data      &
+
+750	COMMON	(DSPCMN)	INDENT.COLUMN%				      &
+									      &
+
+
+910	DIM	FIRQB%(30%),			!SYScall array		      &
+		HEX%(6%)			!Hex conversion array	      &
+\	TRUE% = -1%				!DEFINE BOOLEAN TRUE	      &
+\	FALSE% = 0%				!DEFINE BOOLEAN FALSE	      &
+\	VALID_MUX$ = "DJ,DH,DZ,VH"		!VALID MULTIPLEXOR TYPES      &
+\	LINE_TYPE$ = "KL"+"**"+"DC"+"DE"+"PK"+	!LINE TYPES (IN ORDER)	      &
+		     "DJ"+"DH"+"DZ"+"VH"+"??"				      &
+\	CONT_TYPE$ = "KL"+"DC"+"DE"+"PK"+	!LINE TYPES (IN ORDER)	      &
+		     "DJ"+"DH"+"DZ"+"VH"				      &
+\	ETH_OFFSET% = 64%			!Offset in Ethernet's DDB     &
+						! to find the name + address  &
+
+									      &
+
+1000	!	m a i n   s u b p r o g r a m   l o g i c		      &
+	!								      &
+	!								      &
+									      &
+
+3999	!	p r o c e s s    c o m m a n d				      &
+									      &
+
+
+7000	! SHOW DEVICES							      &
+\	V$ = SYS(CHR$(6%)+CHR$(-21%)+CHR$(0%))  !TURN ON PRIVS		      &
+\	PREVIOUSLY_CALLED%=FALSE%		!INITIALIZE FOR LATER USE     &
+\	DM_P_V_FOUND%=FALSE%			!INITIALIZE FOR LATER USE     &
+\	DM_R_C_FOUND%=FALSE%			!INITIALIZE FOR LATER USE     &
+\	KB_FOUND%=FALSE%			!INITIALIZE FOR LATER USE     &
+\	CALL FET$P BY REF (DEV.T%)		!FETCH PARAMETER	      &
+\	IF U.PRES% THEN				!SPECIFIED?		      &
+		Z$=EDIT$(LEFT$(U.STR$,U.LEN%),32%)+":" !ADD : (CUI TAKES IT)  &
+\		IF Z$ = "SY:" THEN		!PARAMETER IS THE SYSTEM DISK &
+		   OPEN "SY:[0,1]BADB.SYS" FOR INPUT AS FILE #1%	      &
+\		   CHANGE SYS(CHR$(12%)) TO FIRQB%	!GET LAST OPENED INFO &
+\		   CLOSE #1%						      &
+\		   FIRQB%(26%) = 255% 		! SET UNIT REAL FLAG	      &
+\		   Z$=CHR$(FIRQB%(23%))+ CHR$(FIRQB%(24%))+ NUM1$(FIRQB%(25%)) &
+\		ELSE							      &
+		   CHANGE FSS$(Z$,1%) TO FIRQB%	!FSS THE DEVICE		      &
+\		END IF							      &
+\		LOOKUP_DEV$=CHR$(FIRQB%(23%))+CHR$(FIRQB%(24%)) !DEVICE TYPE  &
+\		LOOKUP_DEV$ = "KB" IF LOOKUP_DEV$ = "TT" !HANDLE KB SYNONYM   &
+\		LOOKUP_DEV_LEN%=TRUE%		!WE ONLY CARE IF IT IS SET    &
+\		IF FIRQB%(26%)=255% THEN	!DEVICE UNIT # SPECIFIED      &
+\			LOOKUP_DEV%=FIRQB%(25%) !GET UNIT #		      &
+\		ELSE							      &
+\			LOOKUP_DEV%=-1%		!NO UNIT #, ASSUME ALL	      &
+\		END IF							      &
+\	ELSE								      &
+\		LOOKUP_DEV$=""			!NO - CLEAR STRING	      &
+\		LOOKUP_DEV_LEN%=FALSE%		!NO LENGTH - FALSE	      &
+\	END IF					!			      &
+
+7001	! MONITOR TABLES - PART 1					      &
+\	FIRQB$ = SYS(CHR$(6%)+CHR$(-3%))	!GET THE TABLE		      &
+\	DEVCNT% = SWAP%(CVT$%(MID(FIRQB$,5%,2%)))!TABLE OF MAX UNIT #'S	      &
+\	DEVPTR% = SWAP%(CVT$%(MID(FIRQB$,7%,2%)))!TABLE OF POINTERS TO DDBs   &
+									      &
+	! MONITOR TABLES - PART 2					      &
+\	FIRQB$ = SYS(CHR$(6%)+CHR$(-12%))	!GET THE TABLE		      &
+\	DEVNAM% = SWAP%(CVT$%(MID(FIRQB$,5%,2%)))!TABLE OF DEVICE NAMES	      &
+\	CSRTBL% = SWAP%(CVT$%(MID(FIRQB$,7%,2%)))!TABLE OF DEVICE CSRs	      &
+\	DEVOKB% = SWAP%(CVT$%(MID(FIRQB$,9%,2%)))!# OF DISKS*2 IN DEVNAM      &
+									      &
+\	DEVTBL% = PEEK(DEVPTR%+DEVOKB%)		!START OF DEVTBL	      &
+\									      &
+
+									      &
+	LAST_CONT$ = ""				!INIT LAST KB CONTROLLER NAME &
+\ 	OUTPUT_COMPLETE% = FALSE%		!SET IF ANY OUTPUT IS DONE    &
+\ DEVICE_LOOP:					!DEVICE TABLE LOOP	      &
+\	CONT_NAME$ = ""				!INIT KB CONTROLLER NAME      &
+\	DEVICE_TYPE% = PEEK(DEVNAM%)		!GET A DEVICE		      &
+\	MAXIMUM_UNIT% = PEEK(DEVCNT%)		!AND THE MAXIMIM # OF UNITS   &
+\	UNTCNT_POINTER% = PEEK(DEVPTR%)		!POINTER INTO UNTCNT TABLE    &
+\	DEVNAM% = DEVNAM%+2%			!POINT AT NEXT ENTRY	      &
+\	DEVCNT% = DEVCNT%+2%			!POINT AT NEXT ENTRY	      &
+\	DEVPTR% = DEVPTR%+2%			!POINT AT NEXT ENTRY	      &
+									      &
+\	GOTO SUBPROGRAM_EXIT IF DEVICE_TYPE% = -1% !END OF THE TABLE	      &
+\	GOTO DEVICE_LOOP IF MAXIMUM_UNIT% = -1% !NO UNITS POSSIBLE - NEXT     &
+		OR MAXIMUM_UNIT%>255%		!NOT A UNIT, BUT A SYNONYM    &
+\									      &
+	DEVICEUNT_LOOP:				!DEVICE UNIT LOOP	      &
+\	DEVNAM$ = CHR$(DEVICE_TYPE%)+CHR$(SWAP%(DEVICE_TYPE%)) ! DEVICE NAME  &
+\	IF NOT(KB_FOUND%) THEN			!FOUND THE DEVs WITH DDBs?    &
+\		KB_FOUND% = TRUE% IF DEVNAM$="KB"!NOW -> 1 CSR/DEVICE	      &
+\	END IF					!			      &
+									      &
+\	FOR UNIT_LOOP% = 0% TO MAXIMUM_UNIT%	!1 PASS/UNIT		      &
+\		CONTROL$=""			! CLEAR OUT CONTROLLER INFO   &
+\		DEF_ADDR$=""			! CLEAR OUT ANY DEFAULT ADDR  &
+\		GOSUB CSR			! GET A CSR		      &
+\		IF DEVNAM$="KB" THEN		!CURRENT DEV A KB?	      &
+			GOSUB TERM_INFO		!YES - GET KB CONTROL INFO    &
+				IF (LOOKUP_DEV_LEN%=FALSE%) OR		      &
+				   (LOOKUP_DEV$="KB")			      &
+		ELSE							      &
+			GOSUB CONTROLLER_INFO	!HANDLE OTHER CASES	      &
+				IF (LOOKUP_DEV_LEN%=FALSE%) OR		      &
+				   (DEVNAM$=LOOKUP_DEV$)		      &
+\		END IF				!			      &
+\		IF ((NOT(LOOKUP_DEV_LEN%)) OR	! NO PARAMETER SPECIFIED OR   &
+		   (((LOOKUP_DEV%=UNIT_LOOP%) OR! PARAMETER MATCHES	      &
+		     (LOOKUP_DEV%=-1%)) AND     ! DEVICE		      &
+		   (DEVNAM$=LOOKUP_DEV$))) THEN ! SPEC.			      &
+			GOSUB DEVICE_VALIDATE	! IS IT A VALID DEVICE?	      &
+\			IF VALID_DEVICE% THEN				      &
+\				GOSUB DEVICE_STATUS	!GET STATUS	      &
+\				GOSUB CSROCTAL		!CONVERT CSR TO OCTAL &
+\				PRINT #OUT.CHN%, "Device _";		      &
+				      DEVNAM$;				      &
+				      NUM1$(UNIT_LOOP%);":";		      &
+\				PRINT #OUT.CHN%, TAB(15%); CONT_NAME$; IF LEN(CONT_NAME$) &
+\				PRINT #OUT.CHN%, TAB(25%);"Control ";CONTROL$; &
+					IF LEN(CONTROL$)		      &
+\				PRINT #OUT.CHN%, TAB(41%);CSR$; IF LEN(CSR$)  &
+\				PRINT #OUT.CHN%, TAB(53%);"Status: ";STATUS$; &
+					IF LEN(STATUS$)			      &
+\				PRINT #OUT.CHN%, TAB(53%);"Def Addr: ";DEF_ADDR$; &
+					IF LEN(DEF_ADDR$)		      &
+\				PRINT #OUT.CHN%				      &
+\				OUTPUT_COMPLETE%=TRUE%			      &
+\			END IF						      &
+\		END IF							      &
+\		UNTCNT_POINTER%=UNTCNT_POINTER%+2% IF KB_FOUND%		      &
+						!POINT AT NEXT DDB	      &
+\	NEXT UNIT_LOOP%				!NEXT DEVICE UNIT	      &
+\	GOTO DEVICE_LOOP			!NEXT DEVICE TYPE	      &
+		UNLESS (LOOKUP_DEV_LEN% = TRUE%) AND OUTPUT_COMPLETE%	      &
+\	GOTO SUBPROGRAM_EXIT						      &
+\									      &
+
+									      &
+TERM_INFO:					!CODE TO COPE WITH TERMINALS  &
+\	DYN.PK% = (PEEK(PEEK(UNTCNT_POINTER%)) AND 16384%) = 16384%	      &
+						!IS THIS A DYNAMIC PK?	      &
+\	TTINTF% = PEEK(PEEK(UNTCNT_POINTER%)+30%)!TTINTF FROM DDB	      &
+\	SUBLINE% = SWAP%(TTINTF% AND 3840%)	!SUBLINE NUMBER FROM DDB      &
+\	TT_TYPE% = (TTINTF% AND 255%)		!INTERFACE TYPE*2%	      &
+\	TT_TYPE$ = MID(LINE_TYPE$,TT_TYPE%+1%,2%)!STRING EQV		      &
+\	IF DYN.PK% THEN				!IF IT'S A DYNAMIC PK	      &
+		IF TT_TYPE$ <> "PK" THEN	!  IF IT'S NOT USED AS A PK   &
+			TT_TYPE$ = "LAT"	!    IT MUST BE LAT	      &
+\		END IF							      &
+\		CONT_NAME$ = ""			!  NO ALTERNATE CONT NAME     &
+\		CONTROL$ = TT_TYPE$ + ":"	!  NO UNIT # IN CONTROLLER    &
+\		CSR% = 0%			!  NO CONTROLLER ADDRESS      &
+\		RETURN				!  THAT'S IT, SO GO BACK      &
+\	END IF								      &
+									      &
+\	TEST% = INSTR(1%,VALID_MUX$,TT_TYPE$)	!IS IT A MUX?		      &
+									      &
+\	IF NOT (PREVIOUSLY_CALLED%) THEN	!GET CONTROLLER NUMBER	      &
+		PREVIOUSLY_CALLED% = TRUE%	!ONE SHOT MUX CODE	      &
+\		LAST_SUBLINE%=0%		!FIRST SUBLINE		      &
+\		INTF_UNIT%=0%			!FIRST INTERFACE	      &
+\		LAST_TYPE$=TT_TYPE$		!CURRENT TYPE IS SAVED TYPE   &
+	ELSE					!WE HAVE BEEN CALLED BEFORE   &
+		IF SUBLINE%<=LAST_SUBLINE% THEN	!DID WE CHANGE INTERFACE?     &
+			IF LAST_TYPE$=TT_TYPE$ THEN      !SAME INTERFACE TYPE &
+				LINE_UNIT%=LINE_UNIT%+1% !INCREMENT LINE_UNIT &
+			ELSE						      &
+				LINE_UNIT%=0%		 !NEW INTERFACE TYPE  &
+\				LAST_TYPE$=TT_TYPE$	 !SAVE CURRENT KB TYP &
+\			END IF						      &
+\		END IF							      &
+\		LAST_SUBLINE%=SUBLINE%	 	!SAVE SUBLINE		      &
+\	END IF					!DONE MUX CODE		      &
+\									      &
+	TERM_INFO_2:							      &
+\	CONT_TYPE% = INSTR(1%,CONT_TYPE$,TT_TYPE$)/2% !GET THE CONTROLLER     &
+						!  TYPE VALUE		      &
+\	CONT_CHAR$ = CHR$(65%+CONT_TYPE%)	!  GET THE CHAR (A - H)	      &
+\	IF LAST_CONT$ <> CONT_CHAR$ THEN	!  IF THE CONTROLLER CHANGED  &
+		LAST_CONT$ = CONT_CHAR$		!    NEW CONTROLLER TYPE      &
+\		THIS_SUBLINE% = 0%		!    START AT ZERO	      &
+	ELSE					!  SAME CONTROLLER AS BEFORE  &
+		THIS_SUBLINE% = THIS_SUBLINE% + 1% !INCREMENT TO NEXT SUBLINE &
+\	END IF								      &
+\	CONTROL$ =				!APPEND DATA ABOUT THIS DEV   &
+		TT_TYPE$+			!INTERFACE TYPE		      &
+		NUM1$(LINE_UNIT%)+":"		!INTERFACE NUMBER	      &
+\	IF TEST% THEN				!VALID MUX?		      &
+		CONTROL$ = CONTROL$ +		!YES - ADD		      &
+		NUM1$(SUBLINE%)			!SUBLINE #		      &
+\	END IF					!			      &
+\	CONT_NAME$ = "(KB" + CONT_CHAR$ +	!FORM THE CONTROLLER NAME     &
+		NUM1$(THIS_SUBLINE%) + ":)"				      &
+\	IF CONT_NAME$ = "(KBA0:)" THEN		!SPECIAL CASE KB0	      &
+		CONTROL$ = "TT0:"		! SET CONTROLLER TO TT0:      &
+\		LINE_UNIT% = LINE_UNIT% - 1%	! SET UP FOR NEXT DL11 CONT   &
+\	END IF								      &
+\	RETURN					!BACK TO CALLER		      &
+\									      &
+
+									      &
+CONTROLLER_INFO:							      &
+\	SELECT DEVNAM$				!SELECT DEVICE NAME	      &
+						!NO SPECIFIC ORDER ON DEVs    &
+									      &
+						!***** DISKS *****	      &
+\	CASE = "DK"	\ CONTROL$="RK:"	!RK05, CONTROLLER TYPE RK     &
+\	CASE = "DL"	\ CONTROL$="RL:"	!RL01-2, CONTROLLER TYPE RL   &
+\	CASE = "DP"	\ CONTROL$="RP:"	!RP02/3, CONTROLLER TYPE RP   &
+\	CASE = "DB"	\ CONTROL$="RB:"	!RP04-7, CONTROLLER TYPE RB   &
+\	CASE = "DM"	\ CONTROL$="RM:"	!RK06-7, CONTROLLER TYPE RM   &
+\	CASE = "DR"	\ CONTROL$="RR:"	!RM02-5, CONTROLLER TYPE RR   &
+\	CASE = "DU"	\ CONTROL$="RU:"	!RA/RC25, CONTROLLER TYPE RU  &
+									      &
+\	CASE = "LP"				!PRINTER		      &
+\		CONTROL$="LP"+NUM1$(UNIT_LOOP%)+!CONTROL SAME AS PRINTER      &
+		   ":"				!NAME			      &
+\	CASE = "MM"				!TU77,78, TE16, TU16, TU45    &
+\		CONTROL$="TU:"			!CONTROLLER TYPE TU	      &
+\	CASE = "MS"				!MS TAPE		      &
+\		CONTROL$="TS:"			!CONTROLLER TYPE TS	      &
+\		MTTM02%=SWAP%(PEEK(PEEK(UNTCNT_POINTER%)+8%)) AND 255%	      &
+\		CONTROL$="TS11" IF MTTM02%=0%	!OH NO, A TS11		      &
+\		CONTROL$="TU80" IF MTTM02%=2%	! TU80			      &
+\		CONTROL$="TK25" IF MTTM02%=4%	! TK25			      &
+\		CONTROL$="TS05" IF MTTM02%=6%	! TS05			      &
+\	CASE = "MU"				! TMSCP			      &
+\		CONTROL$=""						      &
+\		MTTM02%=SWAP%(PEEK(PEEK(UNTCNT_POINTER%)+8%)) AND 255%	      &
+\		CONTROL$="TU81" IF MTTM02%=2%	! TU81			      &
+\		CONTROL$="TK50" IF MTTM02%=3%	! TK50			      &
+\		CONTROL$="RV60" IF MTTM02%=8%	! RV60			      &
+\		CONTROL$="TF85" IF MTTM02%=10%	! TF85			      &
+\		CONTROL$="TF70" IF MTTM02%=11%	! TF70			      &
+\		CONTROL$="TK70" IF MTTM02%=14%	! TK70			      &
+\		CONTROL$="RV20" IF MTTM02%=15%	! RV20			      &
+\		CONTROL$="TZ30" IF MTTM02%=128%	! TZ30 (RQZX1)		      &
+\		CONTROL$="TZ50" IF MTTM02%=129%	! TK50Z (RQZX1)		      &
+\		CONTROL$="TZ70" IF MTTM02%=130%	! TZ70 (RQZX1)		      &
+\		CONTROL$="TZ85" IF MTTM02%=131%	! TZ85 (RQZX1)		      &
+\		CONTROL$="TZ86" IF MTTM02%=132%	! TZ86 (RQZX1)		      &
+\		CONTROL$="TLZ04" IF MTTM02%=138% ! TLZ04 (RQZX1)	      &
+\		CONTROL$="TLZ06" IF MTTM02%=139% ! TLZ06 (RQZX1)	      &
+\		CONTROL$="TKZ08" IF MTTM02%=140% ! TKZ08 (RQZX1)	      &
+\		CONTROL$="TZK10" IF MTTM02%=141% ! TZK10 (RQZX1)	      &
+\		CONTROL$="TZK11" IF MTTM02%=142% ! TZK11 (RQZX1)	      &
+\	CASE = "MT"				!TE10,			      &
+\		CONTROL$="TM:"			!CONTROLLER TYPE TM?	      &
+\	CASE = "DX"				!RX01, RX02		      &
+\		RX_UNIT=UNIT_LOOP%/2.0		!REAL DIVIDE		      &
+\		RX_UNIT%=UNIT_LOOP%/2%		!INTEGER DIVIDE		      &
+\		CONTROL$="RX"+NUM1$(RX_UNIT%)+	!CONTROLLER TYPE RX+UNIT+     &
+		":"+NUM1$((RX_UNIT-RX_UNIT%)*2%)!":"+ 0 =LEFT DRIVE,1=RIGHT   &
+									      &
+						!***** COM DEVICES *****      &
+\	CASE = "XM"				!DMC, DMR		      &
+\		DDFLAG%=PEEK(PEEK(UNTCNT_POINTER%)+8%)!DDFLAG FROM DDB	      &
+\		IF NOT(DM_R_C_FOUND%) THEN	!CALLED BEFORE?		      &
+			DM_R_C_FOUND%=TRUE%	!NO - BUT NOW WE HAVE	      &
+\			DM_R_C_UNIT%=0%		!FIRST UNIT SHOULD BE ZERO    &
+		ELSE				!			      &
+			DM_R_C_UNIT%=DM_R_C_UNIT%+1% !INCREMENT UNIT #	      &
+		END IF				!			      &
+\		IF DDFLAG% AND 128% THEN	!DMR BIT SET?		      &
+			XM_TYPE$="DMR"		!YUP			      &
+		ELSE				!			      &
+			XM_TYPE$="DMC"		!NO, MUST BE A DMC	      &
+		END IF				!			      &
+\		CONTROL$=XM_TYPE$+"-"+NUM1$(DM_R_C_UNIT%) !SET CONTROL	      &
+\	CASE = "XD"				!DMP/DMV (A BIT TRICKY)	      &
+\		DDFLAG%=PEEK(PEEK(UNTCNT_POINTER%)+8%)!DDFLAG FROM DDB	      &
+\		IF NOT(DM_P_V_FOUND%) THEN	!PREVIOUSLY CALLED?	      &
+			DM_P_V_FOUND%=TRUE%	!NO - BUT NOW WE HAVE BEEN    &
+\			XD_NUM%,XD_TRIB%=0%	!MUST BE FIRST LINE/TRIBUTARY &
+\			XD_CSR%=CSR%		!SAVE THE CSR OF THIS DEVICE  &
+		ELSE							      &
+			IF XD_CSR%=CSR% THEN	!SAME CSR AS LAST DMP/DMV?    &
+\				XD_TRIB%=XD_TRIB%+1% !YES,INCREMENT TRIBUTARY &
+			ELSE			!			      &
+				XD_TRIB%=0%	!NOPE, RESET TRIBUTARY	      &
+\				XD_CSR%=CSR%	!SAVE NEW CSR		      &
+\				XD_NUM%=XD_NUM%+1% !INCREMENT LINE #	      &
+			END IF			!			      &
+\		END IF				!			      &
+\		IF DDFLAG% AND 128% THEN	!DMV BIT SET?		      &
+			XD_TYPE$="DMV"		!YES			      &
+		ELSE				!			      &
+			XD_TYPE$="DMP"		!NO - MUST BE A DMP	      &
+\		END IF				!			      &
+\		CONTROL$=XD_TYPE$+"-"+		!CONTROLLER TYPE XD+	      &
+		   NUM1$(XD_NUM%)+"."+		!NUMBER OF CONTROLLER	      &
+		   NUM1$(XD_TRIB%)		!TRIBUTARY		      &
+									      &
+\	CASE = "XE"				!UNA DEVICE		      &
+\		XENAME%=PEEK(PEEK(UNTCNT_POINTER%)+ETH_OFFSET%)		      &
+						!NAME FROM DDB		      &
+\		CONT_NAME$ = "(DE"+RAD$(XENAME%)+")"!CONVERT THE NAME TO ASCII &
+\		IF NOT(XE_FOUND%) THEN		!CALLED BEFORE?		      &
+			XE_FOUND%=TRUE%		!NO - BUT NOW WE HAVE	      &
+\			XE_UNIT%=0%		!FIRST UNIT SHOULD BE ZERO    &
+		ELSE				!			      &
+			XE_UNIT%=XE_UNIT%+1%	!INCREMENT UNIT #	      &
+		END IF				!			      &
+\		CONTROL$ = "UNA-" + NUM1$(XE_UNIT%) !ADD UNIT #		      &
+\		DEF_ADDR$ = FNHEX$(PEEK(UNTCNT_POINTER%)) !GET ADDRESS	      &
+									      &
+\	CASE = "XH"				!QNA DEVICE		      &
+\		XHNAME%=PEEK(PEEK(UNTCNT_POINTER%)+ETH_OFFSET%)		      &
+						!NAME FROM DDB		      &
+\		CONT_NAME$ = "(DE"+RAD$(XHNAME%)+")"!CONVERT THE NAME TO ASCII &
+\		IF NOT(XH_FOUND%) THEN		!CALLED BEFORE?		      &
+			XH_FOUND%=TRUE%		!NO - BUT NOW WE HAVE	      &
+\			XH_UNIT%=0%		!FIRST UNIT SHOULD BE ZERO    &
+		ELSE				!			      &
+			XH_UNIT%=XH_UNIT%+1%	!INCREMENT UNIT #	      &
+		END IF				!			      &
+\		CONTROL$ = "QNA-" + NUM1$(XH_UNIT%) !ADD UNIT #		      &
+\		DEF_ADDR$ = FNHEX$(PEEK(UNTCNT_POINTER%)) !GET ADDRESS	      &
+									      &
+\	END SELECT				!END OF CASE		      &
+\	RETURN					!BACK TO CALLER		      &
+\									      &
+
+									      &
+CSR:						!GET CSR OF DEVICE (IF REAL)  &
+	RETURN IF (DEVNAM$="PK")		!SKIP PK DEVICES	      &
+\	IF (UNIT_LOOP%=0%) OR (KB_FOUND%) THEN  !NEW CSR?		      &
+\		CSR% = PEEK(CSRTBL%+CSR_CNT%)	!GET CSR FROM CSRTBL	      &
+\	        CSR_CNT% = CSR_CNT% + 2%	!POINT AT NEXT ENTRY IN TABLE &
+\	END IF					!			      &
+									      &
+\	RETURN					!BACK TO CALLER		      &
+\									      &
+
+									      &
+CSROCTAL:								      &
+									      &
+\	IF (TT_TYPE%=8%) OR (CSR%=0%) OR	!SKIP DEVS WITHOUT REAL CSRs  &
+	   (INSTR(1%,"DV,NL,PK",DEVNAM$)<>0%) THEN			      &
+		CSR$=""				!INVALIDATE CSR STRING	      &
+	ELSE								      &
+		CSR% = CSR% AND 32767%		!NEEDED FOR OCTAL CONVERSION  &
+\		CSR$ = "CSR 7"			!FIRST DIGIT ALWAYS 7	      &
+\		CSR$ = CSR$+			!BUILD THE STRING	      &
+			CHR$(48%+((CSR%/8%^Q%) AND 7%))			      &
+			FOR Q% = 4% TO 0% STEP -1%			      &
+\	END IF					!			      &
+									      &
+\	RETURN					!BACK TO CALLER		      &
+\									      &
+
+									      &
+DEVICE_VALIDATE:							      &
+	VALID_DEVICE% = 0%						      &
+\	IF MID(DEVNAM$,1%,1%)="D" AND KB_FOUND%=FALSE% THEN		      &
+		DISK% = TRUE%						      &
+\		VALID_DEVICE% = -1%		!SET FLAG TO VALID	      &
+\		GOTO DEVICE_VALIDATE_EXIT				      &
+	ELSE								      &
+		DISK% = FALSE%			!NOT A DISK		      &
+\	END IF								      &
+									      &
+\	FIRQB%(0%)=26%				!30 BYTES		      &
+\	FIRQB%(1%)=6%				!FIP			      &
+\	FIRQB%(2%)=34%				!CFG			      &
+\	FIRQB%(I%)=0% FOR I%=3% TO 22%		!SET/SHOW DEVICE	      &
+\	FIRQB%(23%)=ASCII(MID(DEVNAM$,1%,1%))	!FIRST CHARACTER	      &
+\	FIRQB%(24%)=ASCII(MID(DEVNAM$,2%,1%))	!SECOND CHARACTER	      &
+\	FIRQB%(25%)=UNIT_LOOP%			!DEVICE NUMBER		      &
+\	FIRQB%(26%)=255%			!YES, UNIT NUMBER IS REAL     &
+\	CHANGE FIRQB% TO FIRQB$			!CHANGE TO A STRING
+7010	CHANGE SYS(FIRQB$) TO FIRQB%		!BACK TO AN ARRAY	      &
+\	VALID_DEVICE% = -1%			!SET FLAG TO VALID	      &
+
+7020	DEVICE_VALIDATE_EXIT:						      &
+\	RETURN								      &
+\									      &
+
+									      &
+DEVICE_STATUS:								      &
+	STATUS$=""				!CLEAR THE STATUS	      &
+\	GOSUB DEVICE_STATUS_DISK IF DISK%	!GET DISK STATUS	      &
+\	GOTO DEVICE_STATUS_EXIT UNLESS KB_FOUND%!DISKS ARE DONE - EXIT	      &
+\	FIRQB%(7%)=0% IF TT_TYPE$="PK" AND DEVNAM$="KB"!NOT REALLY DISABLED   &
+\	SELECT FIRQB%(7%)			!SELECT DDJBNO		      &
+\	   CASE = 1%				!OWNED BY INIT?		      &
+\		STATUS$="Disabled by INIT"	!			      &
+\	   CASE = 3%				!OWNED BY CFG?		      &
+\		STATUS$="Disabled"		!			      &
+\	   CASE = 5%				!OWNED BY DECNET	      &
+\		STATUS$=""			!			      &
+\	   CASE ELSE				!			      &
+\		STATUS$=""			!			      &
+\	END SELECT				!END OF SELECT		      &
+\	DEF_ADDR$ = "" IF LEN(STATUS$)		!Disabled Ethernet device     &
+						! overrides Default Address   &
+\	GOTO DEVICE_STATUS_EXIT IF LEN(STATUS$) !SKIP THE REST IF DISABLED or &
+		OR LEN(DEF_ADDR$)		! if there is a Def Address   &
+\	IF FIRQB%(6%) AND 2% THEN		!RESTRICTED LINE?	      &
+		STATUS$=STATUS$+", " 		!YES			      &
+			IF LEN(STATUS$) 	!APPEND ", " IF NEEDED	      &
+\		STATUS$=STATUS$+"Restricted"	!SET STATUS$		      &
+\	END IF					!			      &
+\	IF (FIRQB%(6%) AND 4%) AND (DEVNAM$="KB") THEN !DIALUP?		      &
+		STATUS$=STATUS$+", "		!YES			      &
+			IF LEN(STATUS$)		!APPEND ", " IF NEEDED	      &
+\		STATUS$=STATUS$+"Dialup"	!SET STATUS$		      &
+\	END IF					!			      &
+\									      &
+									      &
+	DEVICE_STATUS_EXIT:						      &
+\	RETURN					!BACK TO CALLER		      &
+\									      &
+
+									      &
+DEVICE_STATUS_DISK:							      &
+\	STATUS$= "Disabled by INIT"	!SET DEFAULT TO DISABLED	      &
+\	DSTAT% = 32767%+1%		! AND DEFAULT TO DISMOUNTED	      &
+\	ON ERROR GOTO 7100		!SET LOCAL ERROR TRAP		      &
+\	V$ = SYS(CHR$(6%)+CHR$(-30%)+CHR$(14%)+ !GET INFO ON THE DISK	      &
+		 STRING$(19%,0%)+DEVNAM$+				      &
+		 CHR$(UNIT_LOOP%)+CHR$(-1%))				      &
+\	DSTAT% = SWAP%(CVT$%(MID(V$,3%,2%))) !GET STATUS WORD FROM UNTCNT     &
+\	CSR% = SWAP%(CVT$%(MID(V$,5%,2%)))   !GET THE CSR		      &
+\	CNTRL% = SWAP%(CVT$%(MID(V$,11%,2%)))	! Get Drive type	      &
+\	CONT_NAME$ = ""		! No name to start			      &
+\	CONT_NAME$ = FNTYPE$(DEVNAM$,CNTRL%) IF CSR%			      &
+\	CONT_NAME$ = ""		! Name didn't get approved		      &
+\	IF DEVNAM$ = "DU" THEN		!IF IT'S A DU DISK		      &
+		IF CSR% <> 0% THEN	!  IF THE CSR IS REAL		      &
+			CNTRL% = SWAP%(CVT$%(MID(V$,7%,2%))) !GET CONTROLLER  &
+\			CONTROL$ = "RU"+NUM1$(CNTRL%)+":" !STORE IT	      &
+\		ELSE			!  IF NO CSR			      &
+			STATUS$= "Non-existent"	!  SET TO NON-EXISTENT	      &
+\		END IF							      &
+\	END IF								      &
+
+7040	IF (DSTAT% AND 2%^13%) THEN	!IF THE DISK IS RESTRICTED	      &
+\	  IF (DSTAT% AND 2%^15%) THEN	! THEN IF THE DISK ISN'T MOUNTED      &
+		STATUS$= "Disabled by INIT" !  SET STATUS TO DISABLED	      &
+	  ELSE								      &
+		STATUS$= "Restricted"	! ELSE SET STATUS TO RESTRICTED	      &
+\	  END IF							      &
+	ELSE				!IF A NON-RESTRICTED DISK	      &
+	  STATUS$= ""			!SET NO STATUS			      &
+		IF STATUS$ <> "Non-existent"	!  IF NOT SET TO NON-EXISTENT &
+\	END IF								      &
+
+7050	ON ERROR GOTO 19000			!RESET STANDARD ERROR TRAP    &
+\	IF DSTAT%=>0% THEN			!DISK MOUNTED?		      &
+		STATUS$=", "+STATUS$		!YES			      &
+			IF LEN(STATUS$)		!APPEND ", " IF NEEDED	      &
+\		STATUS$="Mounted"+STATUS$	!Add Mounted to status	      &
+\	END IF								      &
+\	RETURN								      &
+
+7100	RESUME 7050 IF (ERR = 8%) OR (ERR=6%)	!DISK NOT THERE, CONTINUE     &
+\	RESUME 7040				!THE DISK IS THERE	      &
+
+
+7150									      &
+SUBPROGRAM_EXIT:				!DONE WITH SHOW DEVICES	      &
+\	SUBEXIT					!EXIT			      &
+
+
+15000	!								      &
+	!	F u n c t i o n s					      &
+	!								      &
+	DEF FNHEX$(ETH_DDB%)			!Function to return the	      &
+						!Default physical address     &
+\	ADDR_HEX$ = ""				!Init the storage variable    &
+\	HEX%(I%) = PEEK(ETH_DDB%+ETH_OFFSET%+I%+1%) AND 255%!Get a byte	      &
+						!	of hex numbers	      &
+		FOR I% = 1% TO 5% STEP 2%	! from low byte of each word  &
+\	HEX%(I%) = SWAP%(PEEK(ETH_DDB%+ETH_OFFSET%+I%)) AND 255% !Get another &
+		FOR I% = 2% TO 6% STEP 2%	! from high byte of each word &
+\	FOR I% = 1% TO 6%			!For each of the six bytes    &
+\		HEX% = (HEX%(I%) AND 240%)/16%	! Get the first hex number    &
+\		HEX$ = NUM1$(HEX%)		! Make a string out of it     &
+\		GOTO 15010 IF HEX% < 10%	! Hex = Decimal if it's < 10  &
+\		HEX$ = CHR$(HEX%-10%+65%)	! Convert 11-15 to A-F	      &
+
+15010		ADDR_HEX$ = ADDR_HEX$ + HEX$	! Add it to the others	      &
+\		HEX% = HEX%(I%) AND 15%		! Get the last hex number     &
+\		HEX$ = NUM1$(HEX%)		! Make a string out of it     &
+\		GOTO 15020 IF HEX% < 10%	! Hex = Decimal if it's < 10  &
+\		HEX$ = CHR$(HEX%-10%+65%)	! Convert 11-15 to A-F	      &
+
+15020		ADDR_HEX$ = ADDR_HEX$ + HEX$	! Add it to the others	      &
+\		ADDR_HEX$ = ADDR_HEX$ + "-" IF I% < 6%!Add dash if not at end &
+\	NEXT I%					!Next byte		      &
+\	FNHEX$ = ADDR_HEX$			!Store the address	      &
+\	FNEND					!End of function	      &
+
+
+15100	DEF FNTYPE$(DEV.NAM$,UNIT%)					      &
+\	FNTYPE$,A$=""							      &
+\	DEV.NAM$=CVT$$(DEV.NAM$,-2%)					      &
+\	SELECT DEV.NAM$				!SELECT DEVICE NAME	      &
+\	CASE = "DK"				!RK05s			      &
+\		A$="RK05"						      &
+\		A$=A$+"F" IF UNIT%=2%					      &
+\	CASE = "DP"				!RP02/3s		      &
+\		A$="RP02"						      &
+\		A$="RP03" IF UNIT%=8192%				      &
+\	CASE = "DL"				!RL01/2s		      &
+\		A$="RL01" IF UNIT%=0%					      &
+\		A$="RL02" IF UNIT%=128%					      &
+\	CASE = "DM"				!RK06/7s		      &
+\		A$="RK06" IF UNIT%=0%					      &
+\		A$="RK07" IF UNIT%=1024%				      &
+\	CASE = "DS"				!RS03/4/6s		      &
+\		A$="RS03" IF (UNIT% AND 2%)=0%				      &
+\		A$="RS04" IF (UNIT% AND 2%)=2%				      &
+\		IF UNIT% AND 1% THEN A$=A$+" IL" IF LEN(A$)		      &
+\		END IF							      &
+\	CASE = "DB", "DR"			!RP/RM Family		      &
+!		(UNIT% AND 8247%) = DRIVE.TYPE%		  20067		      &
+\		A$="RP04" IF (UNIT% AND 8247%)=8208%	! 20020		      &
+\		A$="RP05" IF (UNIT% AND 8247%)=8209%	! 20021		      &
+\		A$="RP06" IF (UNIT% AND 8247%)=8210%	! 20022		      &
+\		A$="RM03" IF (UNIT% AND 8247%)=8212%	! 20024		      &
+\		A$="RM02" IF (UNIT% AND 8247%)=8213%	! 20025		      &
+\		A$="RM80" IF (UNIT% AND 8247%)=8214%	! 20026		      &
+\		A$="RM05" IF (UNIT% AND 8247%)=8215%	! 20027		      &
+\		A$="RP07" IF (UNIT% AND 8247%)=8226%	! 20042		      &
+\		A$="RP07 FH" IF (UNIT% AND 8247%)=8227%	! 20043		      &
+\		IF UNIT% AND 2048% THEN			!  4000		      &
+			A$=A$+" DP" IF LEN(A$)				      &
+\		END IF							      &
+\	CASE = "DU"				!MSCP Family		      &
+\		RESTORE			! Get original data back	      &
+\		UNIT%=0% IF UNIT%=-1%	! Can't know this one		      &
+\		IF (SWAP%(UNIT%) AND 255%) = 30% THEN	! RQZX1?	      &
+			READ A$,TMP%	! Read the non-SCSI IDs		      &
+\			READ A$,TMP% UNTIL TMP%=-1%	! (all of them)	      &
+\		END IF							      &
+\		WHILE (UNIT% AND 255%)	! Continue if we have a unit type     &
+\			READ A$,TMP%	! Get the next item in the list	      &
+\			UNIT% = 0% IF (TMP%=-1%) OR	! don't know it or    &
+				(TMP%=(UNIT% AND 255%))	! we found it	      &
+\		NEXT					! all done	      &
+\	END SELECT				!END OF CASE		      &
+\	FNTYPE$ = "("+A$+")" IF LEN(A$)		! so return it		      &
+
+15200	FNEND								      &
+
+15300	DATA	"RA80",		1,					      &
+		"RC25",		2,					      &
+		"RCF25",	3,					      &
+		"RA60",		4,					      &
+		"RA81",		5,					      &
+		"RD51",		6,					      &
+		"RX50",		7,					      &
+		"RD52",		8,					      &
+		"RD53",		9,					      &
+		"RX33",		10,					      &
+		"RA82",		11,					      &
+		"RD31",		12,					      &
+		"RD54",		13,					      &
+		"RRD50",	14,					      &
+		"RD32",		15,					      &
+		"RA70",		18,					      &
+		"RA90",		19,					      &
+		"RF30",		21,					      &
+		"RF71",		22,					      &
+		"RD33",		24,					      &
+		"ESE20",	25,					      &
+		"RRD40",	26,					      &
+		"RF31",		27,					      &
+		"RF72",		28,					      &
+		"RA92",		29,					      &
+		"ESE25",	30,					      &
+		"RFH31",	33,					      &
+		"RFH72",	34,					      &
+		"RF73",		35,					      &
+		"RFH73",	36,					      &
+		"RA72",		37,					      &
+		"RA71",		40,					      &
+		"RFF31",	41,					      &
+		"RF35",		42,					      &
+		"RFH35",	43,					      &
+		"RA73",		47,					      &
+		"ESE56",	48,					      &
+		"ESE58",	49,					      &
+		"EF5x",		51,					      &
+		"RF36",		52,					      &
+		"RFH36",	53,					      &
+		"RF74",		54,					      &
+		"RFH74",	55,					      &
+		"RF75",		56,					      &
+		"RFH75",	57,					      &
+		"xxxxx",	-2,					      &
+		"xxxxx",	-2,					      &
+		"xxxxx",	-2,					      &
+		"",		-1					      &
+
+15310		"RX23",		1,					      &
+		"RX26",		2,					      &
+		"RX33",		3,					      &
+		"RZ22",		4,					      &
+		"RZ23",		5,					      &
+		"RZ23L",	6,					      &
+		"RZ24",		7,					      &
+		"RZ25",		8,					      &
+		"RZ24L",	9,					      &
+		"RZ35",		11,					      &
+		"RZ55",		14,					      &
+		"RZ56",		15,					      &
+		"RZ57",		16,					      &
+		"RZ58",		17,					      &
+		"RZ72",		21,					      &
+		"RZ73",		22,					      &
+		"RRD40",	192,					      &
+		"RRD42",	193,					      &
+		"xxxxx",	-2,					      &
+		"xxxxx",	-2,					      &
+		"xxxxx",	-2,					      &
+		"",		-1					      &
+
+15320	DATA	"UDA50",	2,					      &
+		"RC25",		3,					      &
+		"UDA50-A",	6,					      &
+		"RQDXn",	7,					      &
+		"RUX50",	10,					      &
+		"KDA50",	13,					      &
+		"RQDX3",	19,					      &
+		"KFQSA-disk",	21,					      &
+		"KFQSA-both",	23,					      &
+		"KFQSA-other",	24,					      &
+		"RQZX1",	30,					      &
+		"RF30",		96,					      &
+		"RF71",		97,					      &
+		"RF31",		100,					      &
+		"RF72",		101,					      &
+		"RF73",		102,					      &
+		"RF35",		104,					      &
+		"EF51",		105,					      &
+		"RF36",		108,					      &
+		"RF74",		109,					      &
+		"RF75",		112,					      &
+		"",		-1					      &
+
+
+19000	!	s t a n d a r d   e r r o r   h a n d l i n g		      &
+	!								      &
+	!								      &
+	RESUME 7020 IF ERR = 6% AND ERL = 7010	!Handle dynamic devices	      &
+\	PRINT "USHDEV error looking at device ";DEVNAM$,"STATUS=";STATUS$     &
+\	ON ERROR GO BACK			!Let the Root error	      &
+						! handler handle it	      &
+
+
+32767	!	e n d   o f   s u b p r o g r a m			      &
+	!								      &
+	!								      &
+	SUBEND

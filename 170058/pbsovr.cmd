@@ -1,0 +1,15 @@
+;
+;	PBSOVR.CMD - TKB command file to build PBSOVR.TSK
+;
+;	COPYRIGHT (C) 1983
+;	DIGITAL EQUIPMENT CORP., MAYNARD, MASS.
+;
+;	Task-build using RMS disk library
+;
+SYSTEM:PBSOVR/FU,LST:PBSOVR/MA/CR/-SP=SYSTEM:PBSOVR/MP
+TASK=PBSOVR
+UNITS=14
+EXTSCT=PATCH:1000
+;include global symbols
+;@SYSTEM:SYMBOL
+//

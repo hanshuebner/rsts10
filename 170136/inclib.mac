@@ -1,0 +1,446 @@
+;  DEC/CMS REPLACEMENT HISTORY, Element INCLIB.MAC
+;  *4    25-JUN-1987 17:42:13 STEVENS "Fixed multiple includes in macros - preserve source pointer"
+;  *3    18-AUG-1986 11:21:51 WORRALL "Complete HEX listing support for version 5.5 fieldtest"
+;  *2    14-APR-1986 23:24:00 SYSTEM "Update 5.4 of MACRO-11"
+;  *1    28-MAR-1986 02:37:55 SYSTEM "Load MACRO-11 sources from V5.3"
+;  DEC/CMS REPLACEMENT HISTORY, Element INCLIB.MAC
+	.NLIST							;Edit Level 03
+	.ENABL	LC,GBL
+	.LIST
+	.TITLE	INCLIB  - .INCLUDE/.LIBRARY directive routines for MACRO-11
+	.SBTTL	INCLIB  - .INCLUDE/.LIBRARY directive routines for MACRO-11
+	.SBTTL
+	.SBTTL		.IDENT	/V05.05/
+	.SBTTL
+	.IDENT	/V05.05/
+;****************************************************************************
+;*									    *
+;*                   COPYRIGHT (c)  1983, 1986                              *
+;*          BY DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.                *
+;*                   ALL RIGHTS RESERVED.                                   *
+;* 									    *
+;*  THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED  *
+;*  ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE  *
+;*  INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER  *
+;*  COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY  *
+;*  OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY  *
+;*  TRANSFERRED.							    *
+;* 									    *
+;*  THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE  *
+;*  AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT  *
+;*  CORPORATION.							    *
+;* 									    *
+;*  DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE OR  RELIABILITY  OF  ITS  *
+;*  SOFTWARE ON EQUIPMENT THAT IS NOT SUPPLIED BY DIGITAL.		    *
+;*									    *
+;****************************************************************************
+
+
+;++
+;  Facility:	MACRO-11  The PDP-11 macro assembler for RT/RSX/VMS and RSTS/E
+;
+;    Author:	Too many people to list here
+;
+;   Created:	From the dust and dirt
+;
+;  Abstract:	INCLIB  - .INCLUDE/.LIBRARY directive routines for MACRO-11
+;
+;     Externals	 Description
+;     ---------	 -----------
+;
+;      Edit	Who	Date		Description of modification
+;      ----	---	----		---------------------------
+;	001	Jrw	11-Nov-84	Update for CSI$4
+;	002	Jrw	14-Nov-84	Add BISB of FL.AEX in F.FLG in FDB
+;	003	Jrw	03-Feb-85	Change location of RT-11 csi block.
+;--
+
+
+;	System Library "MCALLS"
+
+.IF	NDF,RT11		;If not RT-11
+
+	.MCALL	CLOSE$,	CSI$,	CSI$1,	CSI$4,	NMBLK$
+	.MCALL	FDAT$A,	FDBDF$,	FDOP$A,	FDRC$A
+	.MCALL	OFNB$R
+	CSI$
+
+	.PSECT	IMPURE,RW,D
+
+CSIBLK:	.BLKB	C.SIZE		;A CSI block for use by .INCLUDE/.LIBRARY
+.EVEN
+	.PSECT	MIXED,RW,D
+
+TMPFDB:	 FDBDF$				;FDB to verify file access
+	 FDAT$A	R.FIX,,512.		;Fixed length, 512 byte
+	 FDRC$A	FD.RWM			;Block I/O operations
+	 FDOP$A	TM$LUN,CSIBLK+C.DSDS,DEFNMB,FO.RD!FA.SHR ;Set defaults
+
+DEFNMB:	NMBLK$	,MAC,,SY,0	;Default to SY:.MAC
+
+	PURE	TXTBYT,D
+
+;+
+; .ASCID
+; Generate a ASCII descriptor string.
+;-
+
+.MACRO	.ASCID	STRING
+	.NCHR	......,<STRING>
+	.BYTE	......
+	.ASCII	~STRING~
+.ENDM	.ASCID
+
+INCERR:	.ASCID	< -- .INCLUDE directive file error>
+LIBERR:	.ASCID	< -- .LIBRARY directive file error>
+
+	PURE	PUREI,I
+
+.IFF;	NDF,RT11		;If not RT-11
+
+	.MCALL	.CLOSE,.CSISPC,.LOCK,.LOOKUP,.WAIT,.PRINT,.UNLOCK
+	.MCALL	.HERR,.SERR,.SAVEST,.REOPEN
+
+	PURE	TXTBYT,D
+
+CSTMAP:	.BYTE	0,12,24,36,46,56,66,76,106,116,126,136,146
+INCERR:	.ASCIZ	/?MACRO-F-.INCLUDE directive file error/
+LIBERR:	.ASCIZ	/?MACRO-F-.LIBRARY directive file error/
+
+	.PSECT			;Blank PSECT for low memory USR stuff.
+
+DEFEXT:	.RAD50	/XXX/		;Default input file extension.
+DBLKS:	.BLKW	39.		;Area for .CSIGEN DBLKS
+
+
+INCLU::	CALL	FILGET		;Get a filespec into LINSAV
+				; don't return on errors.
+	MOV	#12.,R3		;R3 = Channel to use for .LOOKUP.
+	MOV	#<^RMAC>,R4	;Load up default extension
+	CALL	OPNFIL		;Open .INCLUDE/.LIBRARY input file
+	BCS	20$		;Branch on open error.
+	MOV	INCSP,R5	;Get .INCLUDE stack pointer
+	BNE	10$		;Branch if initialized
+	MOV	#INCSTK,R5	;Else initialize it.
+10$:	CMP	R5,#INCSTT-<INCSIZ*2> ;Are we at maximum depth?
+	BLE	30$		;Branch if not, OK.
+20$:	MOV	#INCERR,R3	;R3 -> Error message to give.
+21$:	MOV	#RESTRT,@SP	;Stuff new return address (ERROR)
+	INCB	$PRTLN		;Print the source line too!
+22$:	.CLOSE	#12		;Make sure temp file channel is closed!
+	MOV	R3,R0		;R0 -> Possible message to print.
+	CLR	R5		;Flag no "Q" errors
+	RETURN			;Return.
+
+30$:	MOV	PTRTBL+<SRCCHN*4>,(R5)+ ;Stuff position in block we are at
+	MOV	RECNUM+SRCCHN,@R5 ;Stuff next block number
+;	DEC	(R5)+		;Correct for current block number from $INPUT	[-GTS]
+	TSTB	INCFLG		;Was last file restore switch completed?	[+GTS]
+				;-1 indicate reread.				[+GTS]
+	BLT	31$		;YES, Don't decrement block number		[+GTS]
+	DEC	@R5		;Correct the current block number from $INPUT	[+GTS]
+31$:	TST	(R5)+		;Skip to next word				[+GTS]
+	.SAVEST	#EMAREA,CHAN+SRCCHN,R5  ;Fill in savestatus info
+	BCS	20$		;Branch on error.
+	ADD	#<2*5>,R5	;R5 -> Next free word in stack.
+	MOV	MACLVL,(R5)+	;and finally, save MACRO nesting depth.
+	MOV	R5,INCSP	;Save new .INCLUDE stack pointer.
+;	INCB	INCFLG		;Flag that files switch has been done.		[-GTS]
+	MOVB	#1,INCFLG	;Flag that switch to new file has been done.	[+GTS]
+
+;	Now save/reopen the .INCLUDE file on the current
+;	source file LUN.
+
+	CLR	RECNUM+SRCCHN	;Force block zero.
+	MOV	BLKTBL+<SRCCHN*4>,PTRTBL+<SRCCHN*4> ;Force beginning of file.
+	.SAVEST	#EMAREA,#12.,#DBLKS
+	BCS	20$		;Branch if save failed - error.
+	.REOPEN	#EMAREA,CHAN+SRCCHN,#DBLKS
+	BCS	20$		;Branch if Restore failed - error.
+	BR	22$		;Done, return to caller.
+
+
+LIBRA::	CALL	FILGET		;Get a filespec into LINSAV
+				; don't return on errors.
+	TST	PASS		;Pass one?
+	BNE	100$		;Branch if not, just ignore this.
+
+; Find a .MLB LUN to use.
+
+	.LOCK			;Lock the USR in core
+	MOV	#3,R3		;Start at channel 3
+10$:	.WAIT	R3		;Channel in use?
+	BCS	25$		;Branch if not, grab it.
+	INC	R3		;Next
+	CMP	R3,#11.		;Over the edge?
+	BLE	10$		;Branch if not, next.
+20$:	.UNLOCK			;Unlock the USR
+	MOV	#LIBERR,R0	;R0 -> Message to print.
+	INCB	$PRTLN		;Print the source line too!
+	CALLR	RESTRT		; and restart us.
+
+; Stuff new .MLB lun into .MLB table.
+
+25$:	.UNLOCK			;Unlock the USR
+	MOV	#MLCHN,R0	;R0 -> Channel saved area
+30$:	TSTB	@R0		;Free slot?
+	BEQ	40$		;Branch if so, got ya.
+	INC	R0		;Next slot please
+	CMP	R0,#MLCEN	;End of ML CHN table?
+	BLO	30$		;Branch if not, keep looking.
+	BR	20$		;Error, no slots left.
+
+40$:	MOVB	R3,@R0		;Stuff new .MLB lun number
+	INCB	LIBCNT		;Increment .MLB count.
+
+;	R3 = Channel to use
+;	R4 = Default extension.
+
+	MOV	#<^RMLB>,R4	;Load up default extension
+	CALL	OPNFIL		;Open .INCLUDE/.LIBRARY input file
+	BCS	20$		;Branch if open error.
+	CLR	R5		;Flag no "Q" errors
+100$:	RETURN			;Return, done.
+
+
+;+
+; OPNFIL
+;	R3	= Channel to open file under
+;	R4	= Default RAD50 extension to use
+;-
+
+OPNFIL:	MOV	R4,DEFEXT	;Setup default extension of input file.
+	MOV	SP,R4		;Save the stack pointer
+	MOV	#DBLKS,R1	;R1 -> Block area for returned filespec
+	.SERR			;Allow errors.
+	.CSISPC	R1,#DEFEXT,#LINSAV ;Parse the filespec.
+	BCS	999$		;Branch on error.
+	TST	(SP)+		;Any switches present?
+	BNE	999$		;Branch if so, error.
+	ADD	#36,R1		;R5 -> Fileblock word 1 of input file #1
+	TST	@R1		;Filename here?
+	BEQ	999$		;Branch if not, error.
+	MOVB	CSTMAP(R3),R2	;R2 -> Offset into $CSIBL for fileblock
+	ADD	#$CSIBL,R2	;R2 -> Area for fileblock.
+	MOV	R1,R5		;Copy pointer to fileblock.
+	CALL	XMIT4		;Transmit the fileblock.
+	.LOOKUP	#EMAREA,R3,R5	;Attempt to find the file given.
+	BCS	999$		;Branch on error, done.
+	TST	(PC)+		;Clear carry
+999$:	SEC			;  Set carry - error.
+	MOV	R4,SP		;Restore the stack pointer.
+	ROR	-(SP)		;Save the carry bit.
+	.HERR			;Reset error trapping.
+	ROL	(SP)+		;Restore the carry bit.
+	RETURN			;Return to caller.
+
+
+.SBTTL	UNSINC - Unstack next .INCLUDE file or source
+
+;+
+; UNSINC
+; This routine is called by GETLN.MAC to unstack the last .INCLUDE
+; or source file that was inserted onto the .INCLUDE stack because
+; of an .INCLUDE statement.
+;
+;	R5	->	.INCLUDE stack frame @MACLVL
+;
+;	CALL	UNSINC
+;
+;	Stack poped,  file open.
+;-
+
+UNSINC::
+;;;	TST	-(R5)		;Skip MACLVL
+
+	CMP	-(R5),MACLVL	;Same macro nesting depth?	***DEBUG***
+	BEQ	10$		;branch if so, OK.		***DEBUG***
+	HALT			;				***DEBUG***
+10$:				;				***DEBUG***
+
+	.CLOSE	CHAN+SRCCHN	;Close current .INCLUDE file
+	SUB	#<2*5>,R5	;R5 -> Five word area for .REOPEN
+	.REOPEN	#EMAREA,CHAN+SRCCHN,R5 ;Re-open last file stacked
+	BCC	20$		;Branch if ok.
+	HALT			;				***DEBUG***
+
+20$:	MOV	-(R5),RECNUM+SRCCHN ;Setup record number
+	MOV	-(R5),PTRTBL+<SRCCHN*4> ;Setup last block number.
+	MOV	R5,INCSP	;Save new .INCLUDE stack pointer.
+	DECB	INCFLG		;Flag that next $READ will be require
+				; that current block be re-read.
+	CMP	R5,#INCSTK	;Is this the last file in the stack?
+	BNE	30$		;Branch if not, return to caller.
+	CLR	INCSP		;Else clear it, no more .INCLUDE file.
+30$:	RETURN			;..
+
+.IFT;	NDF,RT11		;If not RT-11
+
+.ENABL LSB
+INCLU::	CALL	FILGET		;Get a filespec into LINSAV
+				; don't return on errors.
+	MOV	#<^RMAC>,DEFNMB+N.FTYP ;Setup default extension.
+	CALL	OPNFIL		;Attempt to open the file.
+	BCS	20$		;Branch on open error.
+	MOV	INCSP,R5	;Get .INCLUDE stack pointer
+	BNE	10$		;Branch if initialized
+	MOV	#INCSTK,R5	;Else initialize it.
+10$:	CMP	R5,#INCSTT-<INCSIZ*2> ;Are we at maximum depth?
+	BLO	30$		;Branch if not, OK.
+20$:	MOV	#INCERR,R3	;R3 -> Error message to give.
+21$:	MOV	#RESTRT,@SP	;Stuff new return address (ERROR)
+	INCB	$PRTLN		;Print the source line too!
+22$:	CLOSE$	#TMPFDB		;Make SURE our temp file is closed.
+	CLR	R5		;Flag no "Q" errors
+	RETURN			;Return.
+
+30$:	MOV	FDBTBL+SRCCHN,R0 ;R0 -> Source file FDB
+	CALL	99$		;Stuff MARK/FID and maclvl for SRCFIL
+	CALL	CLOSRC		;Close out the current source file.
+	MOV	#TMPFDB,R0	;R0 -> .INCLUDE file FDB
+	CLR	(R5)+		;Pretend to do a .MARK on first record.
+	MOV	#1,(R5)+	;...
+	CLR	(R5)+
+	CALL	991$		;Stuff FID and MACLVL for .INCLUDE file.
+	MOV	R5,INCSP	;Save new .INCLUDE stack pointer.
+	BR	22$		;Close out TEMP file and return.
+
+99$:	CALL	.MARK		;Get current position in source file.
+	MOV	R3,(R5)+	;Save position in source file.
+	MOV	R2,(R5)+	;...
+	MOV	R1,(R5)+	; ...
+991$:	MOV	R0,R1		;Copy FDB address
+	ADD	#F.FNB+N.FID,R1	;R1 -> File ID save block
+	MOV	(R1)+,(R5)+	;Save ...
+	MOV	(R1)+,(R5)+	;... the ...
+	MOV	(R1)+,(R5)+	; ... File ID
+	MOV	N.DVNM-<N.FID+6>(R1),(R5)+  ;Save device name
+	MOV	N.UNIT-<N.FID+6>(R1),(R5)+  ;Save unit number
+	MOV	MACLVL,(R5)+	;and finally, save MACRO nesting depth.
+100$:	RETURN			;Return to caller
+
+
+LIBRA::	CALL	FILGET		;Get a filespec into LINSAV
+				; don't return on errors.
+	TST	PASS		;Pass one?
+	BNE	100$		;Branch if not, just ignore this.
+				; printed from RESTRT on fatal errors.
+	MOV	#<^RMLB>,DEFNMB+N.FTYP ;Setup default extension.
+	CALL	OPNFIL		;Attemp to open the file.
+	BCC	88$		;Branch if OK.
+87$:	MOV	#LIBERR,R3	;R3 -> Error message to give.
+	BR	21$		;Give error!
+
+88$:	BITB	#<FD.REC!FD.CCL!FD.TTY>,F.RCTL(R0) ;Is this a disk file?
+	BNE	87$		;Branch if not, error!
+	MOV	#SYMBOL,R2	;Put addr of symbol area in R2
+	ADD	#F.FNB+N.FID,R0	;Put addr of source file id in R3
+	MOV	(R0)+,(R2)+	;Save ...
+	MOV	(R0)+,(R2)+	;... the ...
+	MOV	(R0)+,(R2)+	;... file id
+	MOV	N.DVNM-<N.FID+6>(R0),(R2)+  ;Save device name
+	MOV	N.UNIT-<N.FID+6>(R0),(R2)+  ;Save unit number
+	MOV	#LIBLST,R0	;Setup to use library file list
+	CALL	APPEND		;Save file info in proper roll
+	BR	22$		;Close the temp file, return to caller.
+.DSABL LSB
+
+
+;+
+; OPNFIL
+;	R3	= Channel to open file under
+;
+;	CALL	OPNFIL
+;
+;	R0	-> FDB of open file	(C=0)
+;	C=1	Some CSI/OPEN error occured.
+;-
+
+OPNFIL:
+
+; Parse the filespec using CSI$
+
+	CSI$1	#CSIBLK		;Attempt preparse
+	BCS	999$		;Branch on CSI error
+	CSI$4	R0,OUTPUT	;Get the file
+	BCS	999$		;Branch on error.
+	BITB	#<CS.MOR!CS.WLD!CS.EQU>,C.STAT(R0) ;Wildcard or equals sign?
+	BNE	999$		;Branch if so, BIG error.
+	BITB	#<CS.DVF!CS.NMF>,C.STAT(R0) ;Was a filespec and/or dev given?
+	BEQ	999$		;Branch if not, also an error!
+	MOV	#TMPFDB,R0	;R0 -> TEMP FDB for .PARSE
+	MOV	R0,R1		;Copy -> to FDB
+	ADD	#F.FNB,R1	;R1 -> Filename block in FDB
+	MOV	F.DSPT(R0),R2	;R2 -> Dataset descriptor in CSIBLK
+	MOV	F.DFNB(R0),R3	;R3 -> Default filename block
+	BISB	#FL.AEX,F.FLG(R0) ;Flag that logical name expansion is not
+				;needed again.
+	CALL	.PARSE		;Fill in the filename block
+	BCS	999$		;Branch on error.
+	OFNB$R	R0		;Open the file.
+	BCS	999$		;Branch if open failed.
+;;;	BITB	#<FD.REC!FD.CCL!FD.TTY>,F.RCTL(R0) ;Is this a disk file?
+;;;	BNE	999$		;Branch if not, error!
+	TST	(PC)+		;Clear carry
+999$:	SEC			;  Set carry - error.
+	RETURN			;Return to caller.
+
+.ENDC;	NDF,RT11		;If not RT-11
+
+
+;+
+; FILGET
+;
+;	R1 = # characters in filespec (RSX-11 ONLY)
+;
+;	Any errors return to CALLERS CALLER!
+;-
+
+FILGET::MOV	#LINSAV,R1	;R1 -> Buffer for filespec.
+
+.IF	NDF,RT11		;If not RT-11
+
+	MOV	R1,CSIBLK+C.CMLD+2 ;Setup filename address
+
+.IFTF;	NDF,RT11		;If not RT-11
+
+10$:	MOV	R5,R2		;Set terminator
+	BNE	20$		;Branch if line ok so far.
+15$:	ERROR	A		;Return "A" error on line.
+	TST	(SP)+		;Clean stack - return to callers caller.
+	RETURN			; ...
+
+20$:	CMP	R5,#CH.LAB	;Expression beginning with "<"?
+	BNE	30$		;Branch if not, handle normally.
+	MOV	@R4,-(SP)	;Else, "<EXPRESSION>", save partial
+	CALL	ABSTRM		;Absolute term, setting R0
+	MOV	(SP)+,@R4	;Restore partial
+	MOVB	R0,(R1)+	;Save the byte.
+	BR	70$		;Try for another.
+
+30$:	CALL	GETCHR		;Get next character
+	MOV	R5,R0		;Copy character
+	BEQ	15$		;Branch if premature EOF
+	CMP	R5,R2		;Is this the terminator?
+	BEQ	60$		;Branch if so, done.
+	MOVB	R0,(R1)+	;Save the byte.
+	BR	30$		;Go for another
+
+60$:	CALL	GETNB		;Bypass terminator
+70$:	TSTB	CTTBL(R5)	;[EOL] or comment?
+	BGT	10$		;Branch if not, get next.
+	CLRB	@R1		;Zap for .ASCIZ filespec
+
+.IFT;	NDF,RT11		;If not RT-11
+
+	SUB	#LINSAV,R1	;R1 = # characters in filespec
+	MOV	R1,CSIBLK+C.CMLD ;Setup filename length.
+
+.IFTF;	NDF,RT11		;If not RT-11
+
+	RETURN			;Else return to caller, done.
+
+.ENDC;	NDF,RT11		;If not RT-11
+
+
+	.END

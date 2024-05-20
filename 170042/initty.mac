@@ -1,0 +1,656 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /INIT:INIPFX/
+TITLE	INITTY,<TELETYPE ROOT RESIDENT ROUTINES>,0B,21-JUN-91,ABC/WBN/MHB/SJK/GPK/FRL/DBM/MND
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+
+.SBTTL	EDIT HISTORY FOR INITTY
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	MND  01-APR-81	Changed hard-coded hertz to symbol
+;
+;				[RSTS V8.0]
+;  000	GPK  18-Jun-82	Don't count minutes if time hasn't been set yet
+;
+;				[RSTS V9.0]
+;  001  FRL  12-Dec-83  Made L3Q work in INIT as it does in monitor
+;  002	DBM  18-Jan-84	Add VT200 support (No <LF> key)
+;  003	MND  06-Aug-84	Add ^T support for debugging and therapy
+;  004  FRL  22-Oct-84  Add ^ as backup character to ASKER
+;
+;				[RSTS V9.1]
+;  005	DBM  13-May-85	Ignore ^O state while processing a ^T
+;
+;				[RSTS V9.3]
+;  006	DBM  24-Mar-85	Hexadecimal output routine for ethernet support
+;
+;				[RSTS V9.4]
+;  007	GPK  18-Sep-86	GPK clock support
+;  008	GPK  22-Sep-86	GPK display support
+;  009	GPK  25-Sep-86	Split into INITTY (root code) and INITTM (mapped)
+;  010	PJH  10-Apr-87	Put GETCLK routine back here from INITTM
+;
+;				[RSTS V10.0]
+;  011	FEK  06-Jul-90	Allow 800Hz J11 clock
+;
+;				[RSTS V10.1]
+;  012	FEK  13-Jun-91	Fix ^T to work with edit 009
+;
+;-
+
+
+.SBTTL	DEFINITIONS AND MACROS
+
+; COMMON ASCII DEFINITIONS
+
+.EQUATE	BELL	, 7
+.EQUATE	TAB	, 11
+.EQUATE	LF	, 12
+.EQUATE	VT	, 13
+.EQUATE	FF	, 14
+.EQUATE	CR	, 15
+.EQUATE	ESCAPE	, 33
+.EQUATE	SPACE	, 40
+.EQUATE	BS	, 10
+
+DEFORG	TTYTXT
+
+.MACRO	I.MESS
+	 TMPORG	TTYTXT
+.NLIST	BEX
+.ENDM	I.MESS
+
+
+	DEFORG	TTYSUB
+
+.SBTTL	TYPE A MESSAGE ON THE TERMINAL (MESSAG)
+
+;+
+; MESSAG - TYPE A MESSAGE ON THE TERMINAL
+;
+;	CALL	MESSAG,R5,<ADDR OF ASCIZ STRING>
+;
+; MESSAGE HAS BEEN TYPED (TTY NOT NECESSARILY STOPPED)
+;-
+
+MESSAG::MOV	R0,-(SP)	;SAVE R0
+	MOV	(R5)+,R0	;GET ADDRESS OF MESSAGE
+	CALLX	ASCIZ0		;SEND IT				;009
+	MOV	(SP)+,R0	;RESTORE R0
+	RETURN	R5
+
+;+
+; ASCIZ0 - TYPE AN ASCIZ STRING ON THE TERMINAL
+;
+;	R0 -> MESSAGE
+;
+;	CALL	ASCIZ0
+;-
+
+ASCIZ0::MOV	R2,-(SP)	;SAVE R2
+10$:	MOVB	(R0)+,R2	;GET A CHARACTER TO PRINT
+	BEQ	20$		;IF END, GO EXIT
+	CALL	TYPE		;ELSE TYPE THE CHARACTER
+	BR	10$		;AND CONTINUE
+
+20$:	MOV	(SP)+,R2	;RESTORE R2
+	CLC			;INDICATE GOODNESS
+	RETURN
+
+HDRIDX::.WORD	-1
+HDRUNT::.WORD	-1
+LKSCSR::.WORD	JUNK		;POINTER TO KW11-L CLOCK CSR
+
+HERTZ::	.WORD	60.		;DEFAULT HERTZ FOR LINE FREQ.		;001
+..DFHZ	==	.-2.		;GLOBAL TO CHANGE DEFAULT HERTZ
+KPINCR::.WORD	5000.		;KW11P 10000'THS SINCE LAST SECOND	;009
+PVALUE::.WORD	30.		;P - PREV VALUE, L - TICK TO NEXT SEC	;009
+SECNDS::.WORD	30.		;SECONDS UNTIL NEXT MINUTE
+J800HZ:	.WORD	800./50.	;J-11 800Hz ticks left till real tick	;011
+GLOBAL	<JUNK>								;009
+
+
+;+
+; DECSTR - CONVERT TO DECIMAL AND STORE STRING IN MESSAGE
+;
+;	R0 =  NUMBER TO PRINT
+;	R1 -> 6-BYTE AREA TO STORE STRING, PADDED WITH 176'S
+;
+;	CALL	DECSTR
+;-
+
+DECSTR::REGSCR			;SAVE REGISTERS
+	MOV	R1,110$		;SAVE STARTING ADDRESS FOR OUTPUT
+	MOV	#6,R5		;COUNT SIX BYTES TO FILL
+90$:	MOVB	#176,(R1)+	;PRE-FILL WITH IGNORE CHARACTERS
+	SOB	R5,90$		; AND DON'T DO FILLS
+	;CLR	R5		;NO LEFT-BLANKS
+	CLR	R3		;MSB ARGUMENT IS ZERO
+	MOV	R0,R1		;MOVE LSB TO WHERE WE CAN WORK ON IT
+	CLR	R4		;NO DIGITS PUSHED YET
+	CLR	R2		;HIGH-HIGH ORDER = 0
+	ASL	R1		;KEEP ONLY 15 BITS IN LOW WORD
+	ROL	R3		;OVERFLOW INTO HIGH WORDS
+	ROL	R2
+	ROR	R1		;LOW WORD IS KEPT RIGHT-JUSTIFIED
+50$:	DIV	#10.,R2		;DIVIDE MSB IN R3, BY 10.  Q -> R2, R -> R3
+	MOV	R3,R0		;REMAINDER < 10 IS HIGH WORD FOR NEXT DIV
+	MOV	R2,R3		;QUOTIENT IS USED NEXT TIME THRU LOOP
+	CLR	R2		;HIGH-HIGH IS ZERO NEXT TIME
+	ASL	R1		;LEFT-ADJUST 15-BIT LSB
+	ASHC	#-1,R0		;TO PACK SO QUOTIENT FITS IN 15 BITS
+	DIV	#10.,R0		;DIVIDE LSB BY 10. Q -> R0, R -> R1
+	MOV	R1,-(SP)	;PUSH THE REMAINDER (IT'S A DIGIT)
+	INC	R4		;COUNT DIGITS PUSHED
+	MOV	R0,R1		;QUOTIENT IS USED NEXT TIME THRU LOOP
+	BIS	R3,R0		;IS ENTIRE NUMBER NOW ZERO?
+	BNE	50$		;REPEAT UNTIL IT IS ZERO
+	SUB	R4,R5		;WIDTH - DIGITS => NUMBER OF LEADING BLANKS
+	BLOS	70$		;NO SPACES IF DIGITS >= COLUMN SIZE
+	MOV	#SPACE,R2
+60$:	CALL	TYPE		;TYPE SPACES
+    	SOB	R5,60$		;REPEATEDLY
+
+; UNSTACK AND PRINT THE DIGITS (WE KNOW THERE'S AT LEAST ONE)
+
+70$:	MOV	(SP)+,R2	;UNSTACK A DIGIT
+	ADD	#'0,R2		;MAKE ASCII
+	MOVB	R2,@(PC)+	;OUTPUT A BYTE
+110$:	 .WORD	0		; TO THE CALLER'S STRING
+	INC	110$		;NEXT BYTE
+	SOB	R4,70$		;REPEAT
+	RETURN
+
+	RETURN
+
+
+.SBTTL	QUESTION ASKER
+ 
+;+
+; ASKER - ASK A QUESTION AND GET AN ANSWER
+;
+;	CALL	ASKER,R5,<PTR TO SHORT TEXT, PTR TO LONG TEXT>
+;
+;	R1 -> ANSWER TEXT (ON WORD BOUNDARY)
+;
+;	Z=1, C=1 IFF ^Z TYPED
+;	Z=1, C=0 IFF LINE FEED TYPED
+;	N=1      IFF ^ TYPED						;004
+;	Z=0, C=0 OTHERWISE
+;
+; NOTE:	TYPES SHORT TEXT, GETS ANSWER IN KBUFF.
+;	IF ANSWER IS ?, TYPES LONG TEXT AND REPEATS
+;-
+
+ASKER::	MOV	(R5)+,20$	;GET SHORT QUESTION FORM
+10$:	CALLX	RCTRLO		;FORCE RESET OF ^O			;009
+	CALL	MESSAG,R5	;TYPE A MESSAGE
+20$:	 .WORD	0		;MESSAGE TEXT POINTER
+	MOV	(R5),20$	;PRESET LONG FORM IN CASE HELP NEEDED
+	CALLX	GETIN		;AND GET AN ANSWER			;009
+	BEQ	10$		;HE NEEDS HELP
+	TST	(R5)+		;POP OVER LONG FORM
+	CMPB	(R1),#12	;LINE FEED?
+	BEQ	40$		;YES -- RETURN Z=1, C=0, N=0		;004
+	CMPB	(R1),#'^	;BACKUP CHARACTER? (^)			;004
+	BEQ	41$		;YES -- RETURN N=1			;004
+	CMPB	(R1),#'Z-100	;^Z?
+	BEQ	30$		;YES -- RETURN Z=1, C=1, N=0		;004
+	TST	(PC)+		;NOTHING SPECIAL -- SET Z=0, C=0, N=0	;004
+30$:	SEC			;SET CARRY FOR ^Z
+40$:	RETURN	R5		;EXIT
+
+41$:	SEN			;SET N-BIT FOR ^			;004
+	RETURN R5		;EXIT					;004
+
+
+
+.SBTTL	ANSWER CHECKER
+
+;+
+; ANSWER - CHECK AN ANSWER FOR Y, N, <LF>, O, OR OTHER
+;
+;	R1 -> ANSWER TO CHECK
+;
+;	CALL	ANSWER,R5
+;
+;	 RETURN+0 - 'Y' RETURN
+;	 RETURN+2 - 'N' RETURN
+;	 RETURN+4 - LF  RETURN
+;	 RETURN+6 - 'O' RETURN
+;	 RETURN+10- OTHER
+;-
+
+ANSWER::MOV	R0,-(SP)	;SAVE R0
+	CALLX	GETUNQ,R5	;PARSE THE ANSWER
+	 GENTXT
+	 UNQTXT	<Y\ES>		;0 YES
+	 UNQTXT	<N\O>		;2 NO
+	 .BYTE	12,377		;4 <LF>
+	 UNQTXT	<O\LD>		;6 OLD
+	 .BYTE	0		;10 OTHER
+	 UNORG
+	ADD	R0,R5		;BUMP RETURN ADDRESS PROPERLY
+	MOV	(SP)+,R0	;RESTORE R0
+	;CLC			;C=0 FROM 'ADD' ABOVE
+	RETURN	R5
+
+
+.SBTTL	YES/NO CHECKER
+
+;+
+; YESNO - CHECK REPLY FOR YES OR NO
+;
+;	R1 -> STRING TO CHECK
+;
+;	CALL	YESNO,R5,<PTR TO SHORT TEXT, PTR TO LONG TEXT>
+;
+;	 RETURN+0 - ^Z  FOUND
+;	 RETURN+2 - LF  FOUND
+;	 RETURN+4 - 'N' FOUND
+;	 RETURN+6 - 'Y' FOUND
+;-
+
+.ENABL	LSB
+
+YESNO::	MOV	(R5)+,20$	;GET TEXT POINTERS
+	MOV	(R5)+,30$
+10$:	CALL	ASKER,R5	;ASK THE QUESTION
+20$:	 .WORD	0
+30$:	 .WORD	0
+	BCS	50$		;^Z -- RETURN +0
+	CALL	ANSWER,R5	;CHECK THE ANSWER
+	 TST	(R5)+		;YES -- RETURN +6
+	 TST	(R5)+		;NO -- RETURN +4
+	 BR	40$		;LF -- RETURN +2
+	 NOP			;OLD  ??
+	MESSAG	<"Please answer 'YES' or 'NO'."<200>>
+	BR	10$
+
+40$:	TST	(R5)+
+50$:	RETURN	R5
+
+.DSABL	LSB
+
+.SBTTL	KEEP THE CLOCK GOING
+
+;+									;010
+; GETCLK - KEEP THE CLOCK RUNNING
+;
+;	CALL	GETCLK
+;
+;	R0 =  RANDOM
+;
+; NOTES:DATE AND TIME ARE MAINTAINED
+;	DISK TIMEOUT BYTE IS INCREMENTED
+;-
+
+.ENABL	LSB
+
+GETCLK::MOV	R1,-(SP)
+	TSTB	KW11P		;DO WE HAVE A P CLOCK?
+	BMI	20$		;NO, GO USE THE L CLOCK
+	ASR	#1		;YES, HAVE WE STARTED IT YET?
+	BCC	10$		;YUP, SECONDS HAVE BEEN SET
+	MOV	#PKS,R1		;NO, POINT TO CLOCK STATUS
+	CLR	(R1)+		;STOP IT IF IT'S GOING
+	MOV	#^C0,(R1)	;SET COUNTER VALUE TO 177777
+	MOV	#13,-(R1)	;GO, 10000. HZ, DOWN, REPEAT
+	CLR	PVALUE		;NO UPDATING FIRST TIME
+10$:	MOV	@#PKS+4,R1	;R1 = GET VALUE OF CLOCK
+	COM	R1		;CONVERT IT INTO A COUNT UP VALUE
+	SUB	PVALUE,R1	;COMPUTE CRYSTAL CYCLES SINCE LAST LOOK
+	BEQ	180$		;ZERO EXITS QUICKLY
+	ADD	R1,PVALUE	;SAVE CURRENT CLOCK VALUE FOR NEXT TIME
+	CLR	R0		;CLEAR FOR DIVIDE
+	ADD	KPINCR,R1	;ADD CYCLES INTO WORKING SECOND
+	ADC	R0		;POSSIBLE CARRY
+	DIV	#10000.,R0	;COMPUTE SECONDS SINCE LAST UPDATE
+	MOV	R1,KPINCR	;REMAINDER IS CYCLES INTO CURRENT SECOND
+	BR	110$		;R0 = SECONDS SINCE LAST UPDATE
+
+GLOBAL	<KW11P>
+
+
+20$:	TSTB	FLGGPK		;Is this a GPK?
+	BPL	30$		;No, check for L clock
+	BIT	#PF,@#CLKCS2	;Periodic flag set?
+	BEQ	180$		;No, exit
+	CALLX	CURSOR		;Yes, check for cursor update
+	BR	90$		; and process clock tick
+
+30$:	TSTB	KW11L		;DO WE HAVE AN L CLOCK?
+	BMI	180$		;NO, SOMETHING'S FUNNY
+	BEQ	80$		;YES, A REAL L CLOCK
+	CMP	@#100,#QCLOKI	;YES, Q-BUS L CLOCK, ARE WE SET UP FOR IT?
+	BEQ	40$		;ALL SET, GO TRY FOR AN INTERRUPT
+	CLR	@LKSCSR		;VECTOR(S) GONE, TURN OFF THAT CLOCK!
+	BR	180$		; AND JUST IGNORE THIS CALL...
+
+40$:	MOV	@#PS,-(SP)	;SAVE CALLING PRIORITY
+	MOV	#20.,60$	;SET A SHORT DELAY
+	MOVB	#PR5,@#PS	;NOW ALLOW CLOCK TO INTERRUPT IF IT WANTS TO
+50$:	DEC	(PC)+		;DELAY
+60$:	 .WORD	0		; FOR
+	BGT	50$		;  A WHILE...
+	MOV	(SP)+,@#PS	;RESTORE CALLING PRIORITY, ETC.
+	BR	180$		; AND GO EXIT
+
+QCLOKI::MOV	R0,-(SP)	;SAVE R0
+	CALL	70$		;CALL A SUBROUTINE
+	MOV	(SP)+,R0	;RESTORE R0
+	RTI			; AND EXIT FROM Q-BUS CLOCK INTERRUPT
+
+70$:	MOV	R1,-(SP)	;SAVE R1
+	BR	90$		;GO KEEP TIMING INFORMATION
+
+80$:	TSTB	@#LKS		;HAS THE LINE FREQUENCY PEAKED?
+	BPL	180$		;NO
+	CLR	@#LKS		;YES, TURN OFF READY BIT IN CLOCK
+90$:	MOV	#PVALUE,R1	;POINT TO TICK COUNTER
+	DEC	(R1)		;COUNT DOWN TICKS UNTIL NEXT SECOND
+	BLE	95$		; Next is here, so count this second	;011
+	CMP	LINFRQ,#800.	;Not next yet, but is it a strange tick	;011
+	BNE	160$		; NO!					;011
+	DEC	J800HZ		;Reduce our count of ticks to ignore	;011
+	BGT	180$		; Still ignoring this one		;011
+	MOV	#800./50.,J800HZ ; Count it and reset ignore counter	;011
+	BR	160$		; but don't ignore this one		;011
+
+95$:	MOV	#800./50.,J800HZ ; Count it and reset ignore counter	;011
+	MOV	LINFRQ,(R1)	;RESTORE TICK COUNTER TO HERTZ VALUE
+	BNE	100$		;IF NON-0, USE INSTALLED SIL VALUE
+	MOV	HERTZ,(R1)	;ELSE DEFAULT TO DEFAULT HERTZ		;001
+100$:	MOV	#1,R0		;ONE SECOND HAS GONE BY
+110$:	MOV	#TIMSEC,R1	;POINT TO RSTS SYSTEM TIME WORD
+	SUB	R0,(R1)		;COUNT DOWN BY NUMBER OF ELAPSED SECONDS
+	BGT	140$		;NOT UP TO A MINUTE YET
+120$:	TST	-(R1)		;Time set yet?
+	BEQ	130$		;No, then don't touch it
+	DEC	(R1)		;A MINUTE HAS GONE BY, COUNT IT IN TIME
+	BGT	130$		;BUT IT ISN'T MIDNIGHT YET
+	MOV	#1440.,(R1)	;RESET TO MIDNIGHT
+	INC	-(R1)		;BUMP THE DATE
+.IIF	NE	DATE+2-TIME	;THE ABOVE WON'T WORK
+	MOV	(R1)+,I.DATE	;SAVE THE DATE IN INSBUF, TOO
+130$:	MOV	(R1)+,I.TIME	;SAVE THE TIME IN INSBUF, TOO
+	ADD	#60.,(R1)	;SIXTY FEWER SECONDS ELAPSED
+	BLE	120$		;ZOUNDS! WE CROSSED 2 MINUTES OUT THERE
+140$:	TST	DSS$DF		;ARE WE RUNNING A TIMEOUT?
+	BPL	160$		;NO
+	SWAB	R0		;YES, GET SECONDS INTO HIGH BYTE
+	BNE	150$		;MORE THAN 255 SECONDS CERTAINLY TIMES OUT
+	ADD	R0,DSS$DF	;NO, ADD IN SECONDS TO HIGH BYTE
+	BCC	160$		;NO OVERFLOW, SO TIMER STILL RUNNING
+150$:	CLRB	DSS$DF+1	;CLEAR OUT TIMEOUT
+160$:	MOV	R0,-(SP)	;Save R0
+	MOV	#WAIT2T,R0	; to use as an offset
+170$:	BIS	WAIT1T-WAIT2T(R0),L3QUE-WAIT2T(R0) ; OR 1 tick later into L3Q
+	MOV	(R0),WAIT1T-WAIT2T(R0) ; Move 2 ticks later into 1 tick
+	CLR	(R0)+		;And no more 2 ticks
+	CMP	R0,#WAIT2E	;Next word in L3Q
+	BLO	170$		;
+	MOV	(SP)+,R0	;DONE WITH DELAYED L3Q
+180$:	MOV	(SP)+,R1	;RESTORE REGISTERS
+	RETURN			;DONE WITH CLOCK STUFF
+
+.DSABL	LSB
+
+GLOBAL	<LKSCSR,HERTZ,KPINCR,PVALUE,SECNDS>
+GLOBAL	<KW11L,LINFRQ,I.DATE,I.TIME,DSS$DF,JUNK,FLGGPK>
+GLOBAL	<WAIT1T,WAIT1E,WAIT2T,WAIT2E,L3QUE,L3QEND>
+;-									;010
+
+
+.SBTTL	Process ^T
+
+;
+;	R0=PC that called GETTTY
+;	TSTATS -> ASCII message describing current process
+;
+;	(Any overlay using TSTATS for ^T processing must ensure 
+;	 that the message is located below virtual 120000 or that
+;	 the overlay is mapped at the time of the call to GETTTY.
+;	 If TSTATS address is above 120000 and the overlay region
+;	 is not mapped, then only general information will be printed.)
+;
+
+.ENABL	LSB
+
+CNTRLT::NOP			;Patch to NOP to enable ^T processing
+	MOV	R0,CTLTFG	;Signal ^T being processed
+	PUSH	<R3,R2,R1,R0>	;We'll need only 4 regs
+	CALLX	TTYSTP		;Wait for console terminal to stop.	;009
+	MESSAGE	<"INIT.SYS(">
+	PUSH	<@#KISAR6>	;Save APR6
+	MOV	#OVLY2,@#KISAR6	;Map the relocated BOOT code
+	MOV	B.NAME,R2	;Get booted device index
+	MOVB	B.UNIT,R0	;Get booted device unit
+	POP	<@#KISAR6>	;Restore APR6
+	CALLX	TYPE2		;Type device name			;009
+	CALLX	DECZER		;Type unit				;009
+	MESSAG	<") - ">
+	CALL	OVLY		;Print the overlay that's resident
+	POP	<R0>		;Restore R0 (PC that called GETTTY)
+	CALL	TMSSG		;Print any special message INIT has
+	TSTB	GOSWIT		;Is Booting still in progress?
+	BNE	20$		;No, we're fully operational
+	MESSAG <" Booting">
+	BR	90$		;Continue
+
+20$:	MOV	@#KISAR5,R2	;Get the APR5 mapping			;012
+	CMP	R0,#OVRRTN	; From the overlay caller?		;012
+	BNE	30$		; NO					;012
+	MOV	3*2+12(SP),R2	;get our real callers APR5		;012
+	MOV	3*2+16(SP),R0	;Fixup the real callers address		;012
+30$:	.BR	40$
+
+GLOBAL	<OVRRTN>							;012
+
+
+40$:	CALLX	TYPTAB		;Type a TAB				;009
+	MOV	#MAPPED,R1	;Table of lowcore and phase names
+	CMP	R0,$OVTAB+6	;Is it within the ROOT?
+	BLO	50$		;Maybe.
+	TST	(R1)+		;Index to phase names			;012
+	CMP	R2,#MSC$P1	;Are we misc				;012
+	BNE	70$		; NO!					;012
+	MOV	#BOOTXT,R3	;Address of overlay vector		;012
+	CMP	R0,6(R3)	; Address of entry point to BOOTXT	;012
+	BHIS	90$		;Booting, GPK, or ODT			;012
+	MOV	#TTMTXT,R3	;Address of overlay vector		;012
+	CMP	R0,6(R3)	; Address of entry point to TTMTXT	;012
+	BHIS	60$		; TTY, so go tell them			;012
+	TST	(R1)+		; skip to the next words		;012
+	MOV	#FIM,R3		;Address of overlay vector		;012
+	CMP	R0,6(R3)	; Address of entry point to FIM		;012
+	BHIS	60$		; YES - we came from mapped FIP		;012
+	BR	90$		;  Well?  I wonder what it is?		;012
+	;
+	;The overlay vector is structured in the following format:
+	;
+	;	JSR	R5,$OVRH
+	;	.WORD	overlay number *6, entry address
+
+50$:	CMP	R0,#SRROO	;Really in ROOT
+	BHIS	60$		;Yes, print it				;012
+	TST	(R1)+		;Next lowcore name entry
+	CMP	R0,#TTYTXT	;Is it in INITTY?
+	BHIS	60$		;Yes, print it				;012
+	TST	(R1)+		;Advance to next lowcore name		;012
+	CMP	R0,#FIP		;Is it in FIP?				;012
+	BLO	90$		;No, Unknown.
+60$:	MOV	(R1),R0		;Get the RAD50 word to print
+	CALLX	RADPRT		;  and print something.			;009
+	BR	90$		;Skip the DSQ stuff
+
+GLOBAL	<BOOTXT,TTMTXT,FIM,SRROO,FIP>					;012
+
+70$:	CMP	(R1)+,(R1)+	;  NO, so bump the pointer		;012
+	CMP	R2,#DSK$P1	;Are we in a phase or overlay?
+	BLO	90$		;  OVERLAY, so no disk I/O in progress
+	MOV	(R1),R0		;Get the RAD50 word to print
+	CALLX	RADPRT		;  and print something.			;009
+	MESSAG	<"(">
+	MOV	SYSUNT,R0	;Get current device unit
+	MOV	SYSNDX,R2	;Get current device index
+	MOV	DSKNAM(R2),R2	;Get device name
+	CALLX	TYPE2		;Type device				;009
+	CALLX	DECZER		;Type unit				;009
+	TST	SYSNDX		;Is current device a tape
+	BMI	80$		;  yes, don't print the FBN
+	MOV	#I.DSQ,R1	;Get INIT'S DSQ pointer
+	CALL	DSQDMP		;  and print current block
+80$:	MESSAG	<")">
+90$:	MOV	I.TIME,R1	;Get the time
+	CALLX	TIMCHK		;Do we have a valid time?
+	BCS	100$		;Whooo! We must be in hard boot city!
+	MESSAG	<" ">
+	CALLX	PRTTIM		;Do a time stamp.
+100$:	MESSAG	<" PR">
+	MOV	@#PS,R2		;Get processor status,
+	BIC	#^C<340>,R2	;  mask out all but priority
+	ASH	#-5,R2		;  and shift to form digit
+	BIS	#60,R2		;  in ascii 
+	CALLX	TYPE		;					;009
+	POP	<R1,R2,R3>	;Restore the other 3 regs
+	CALLX	TYPECR							;009
+	CLR	CTLTFG		;Signal ^T is done
+	RETURN
+
+
+OVLY:	MOV	@$OVTAB+6,R1	;Get the current overlay # *6 (APR4 mapped)
+	CLR	R0		;Prepare for a divide
+	DIV	#6,R0		;Divide by 6 TO GET OVERLAY NUMBER
+	MESSAG	<"Ov:">
+	CALLRX	DECZER							;009
+
+TMSSG:	MOV	TSTATS,R2	;Any special message to print?
+	BEQ	120$		;No, continue with the rest
+	CMP	#120000,R2	;Is the text permanantly mapped?
+	BHI	110$		;Yes.
+	CMP	@#KISAR5,#OVLY2	;Is the overlay region mapped
+	BGE	120$		;No, and phases don't count.
+110$:	MESSAG	<" ">
+	CALL	MESSAG,R5	;Print the text 
+TSTATS::.WORD	0		;  that was filled in by overlay or ROOT.
+120$:	RETURN			;
+
+DSQDMP:	MESSAG	<":[">
+	MOVB	DSQSAV(R1),R2	;Get the function in the DSQ (Read,Write,ect)
+	CMP	SYSNDX,#IDX$DU	;Is this an MSCP DSQ?
+	BNE	130$		;No.
+	MOVB	DSQFUN(R1),R2	;Yes, DSQFUN=(Read/Write,ect)
+130$:	CMP	R2,#IFUN	;Is it absolutely obnoxious?
+	BHI	120$		;Yes
+	MOV	DSQF(R2),R2	;Get function in R2
+	CALLX	TYPE2		;Print W,WC,R,RC (0,2,4,6)		;009
+	MESSAG	<"/">
+	MOVB	DSQFBM(R1),R3	;Get Fip Block Number
+	MOV	DSQFBL(R1),R2
+	CALLX	DBLZER		;Print the FBN				;009
+	MESSAG	<"]">
+	RETURN
+
+	TMPORG	TTYTXT
+	.EVEN
+MAPPED:	.RAD50	"ROO"	;Random process
+	.RAD50	"TTY"	;Terminal I/O state
+	.RAD50	"FIP"	;FIP code executing				;012
+	.RAD50	"DSK"	;Disk phase
+
+DSQF:	.ASCII	"WC"	;Write check
+	.ASCII	" W"	;Write
+	.ASCII	" R"	;Read
+	.ASCII	"RC"	;Read check
+	.ASCII	" I"	;Initialize
+	UNORG
+
+
+.MACRO	$	OTXT
+.NLIST
+;		TMPORG	TTYTXT
+;		$A	=	.
+;		.ASCII	"OTXT"
+;		.BYTE	0
+;		UNORG
+.LIST
+;		.WORD	$A
+.ENDM
+
+;+
+;	Each overlay entry contains;
+;		 Overlay description text 2B printed
+;		
+OVLTAB:	$	Unknown		;0					;012+
+	$	Booting		;1=ODT
+	$	Boot.		;2=MCP
+	$	Boot..		;3=BBR
+	$	Boot...		;4=DSK
+	$	Boot....	;5=QNA
+	$	Autosizing	;6=ONE
+	$	DiskINIT	;7=DSI
+	$	Copy		;8=COP
+	$	Image		;9=IMG
+	$			;10=DIA
+	$	Save		;11=SAV
+	$	Restore		;12=RES
+	$	Patch		;13=PAT
+	$	Install		;14=INS
+	$			;15=BLD
+	$	Start		;16=STA
+	$			;17=LDI
+	$			;18=LDR
+	$	Default		;19=DEF
+	$	Hardware	;20=HAR
+	$	Refresh		;21=REF
+	$	Jamming		;22=DST
+	$	Rebuilding	;23=CLN					;012-
+
+.DSABL	LSB
+
+GLOBAL	<$OVTAB,SYSUNT,SYSNDX,DSKNAM,DSS$DV,I.DSQ,FILDSQ>
+GLOBAL	<DCNLST,BOO,GOSWIT,DSIFLG,BACKUP,I.TIME>
+
+
+
+
+.SBTTL	DIRTY AREA
+
+STALL::	.WORD	0		;<> 0 IF ^S ACTIVE			;008
+CTLOFG::.WORD	0		;<> 0 IF ^O ACTIVE
+CTLTFG::.WORD	0		;<> 0 IF ^T BEING PROCESSED		;009
+TYPEHT::.WORD	0		;HORIZONTAL POSITION FOR TABBING
+LCFLAG::.WORD	40		;LOWER CASE CONVERSION FLAG		;009
+
+KBUFF::	.BLKB	79.		;TERMINAL INPUT BUFFER
+RUBS::	.BYTE	0		;RUBOUT-IN-PROGRESS FLAG		;009
+
+RINGS::	.WORD	STRRNG		;RING BUFFER EMPTY POINTER
+RINGE::	.WORD	STRRNG		;RING BUFFER FILL  POINTER		;009
+
+STRRNG::.BLKB	80.		;THE RING BUFFER			;009
+ENDRNG::								;009
+
+.END

@@ -1,0 +1,1337 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	IMGFIL,<Image file and directory processing>,0J,27-MAR-92,BGN
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for IMGFIL
+
+;+
+;
+;  000	BGN  18-MAR-88	Creation
+;  001  BGN  10-NOV-89	Major revisions
+;  002	REG  07-Dec-89	Add /COPY option
+;  003	REG  18-Dec-89	Make PPN clustersize >= pack clustersize
+;  004	REG  19-Dec-89	Check for [0,1]INIT.SYS transfer for HOOK flag
+;  005	REG  27-Dec-89	Change DO.COP to IM$COP
+;  006	REG  30-Dec-89	Cleanup
+;  007	REG  03-Jan-90	/copy/query bug
+;  008	REG  24-Jan-90	Add /[NO]ACCOUNTING and /[NO]FILE qualifiers
+;  009	REG  24-Jan-90	Verify account data
+;  010	REG  21-Mar-90	Allow [0,1] account data to be written
+;  011	REG  27-Mar-90  Fix 007 right
+;  012  REG  03-APR-90	Add big blocks
+;  013  REG  03-Apr-90	Make verify detect missing accounts
+;  014  REG  14-Apr-90	Use ASYSAV coroutine for AST's
+;  015  REG  14-Apr-90	Don't print "...written to..." message if not true
+;  016  REG  15-Apr-90  Don't copy account attributes except to same PPN
+;  017	REG  13-Jun-90	Fix Odd address trap (POP stack) after verify errors
+;  018  REG  21-JUN-90  Add "write failure" error message
+;  019  REG  21-Jun-90	HOOK only if [0,1]INIT.SYS was actually written
+;  020  REG  07-Aug-90	Fix sleep/run loop bug and .reada/.writa error bug
+;  021  REG  07-Aug-90  Fix missing Placed files message after /noac
+;  022  REG  27-AUG-90	Add new messages for lack of WACNT/GACNT
+;  023  REG  29-AUG-90	Suppress file messages for /NOFILE_DATA
+;
+;			[RSTS V10.1]
+;  024  REG  07-Jan-91	Free up one APR
+;  025	REG  26-Jun-91	Improve per-file messages
+;  026	DRP  15-Feb-92	Fix bugs in WRTDIR routine. Create accounts with
+;			unlimited disk quotas and call CLRFQB to initialize
+;			the FIRQB.
+;-
+
+.SBTTL	Call any required MACROs
+
+.MCALL	CALBX,.ASCIC,$CUI,ENAR$S,DSAR$S,WSIG$S
+
+$CUI	MSG
+
+.SBTTL	Define our private Data Section
+
+	.PSECT	RWDATA,RW,D,LCL,REL,CON
+
+INDX:	.WORD	0		;Holds acct attr lookup index#		;009
+IFLAGS::.WORD	0		; Flag word for file operations
+VIRBLK:	.BLKW	2		;Block number being read from file
+BLKCNT:	.BLKW	2		;Count of blocks left to transfer
+PPNIDX:	.BLKW			;PPN index for UU.PPN
+PPNSAV:	.BLKW			;Copy of $CURFI+C$PPN before RENPPN	;006
+PCLSIZ:	.BLKW			;Output pack clustersize		;003
+BYTES:	.BLKW			;Number of bytes in current buffer
+BLOCKS:	.BLKW			;Number of blocks in current buffer
+	.EVEN
+
+SYNC	= -1			;Never change these values
+ASYNC	= 0			;This one also
+MODE:	.BLKW			;Operating mode, sync or async
+
+MODNAM:	.ASCIC	<"IMGFIL">
+	.EVEN
+
+
+; ------------------------------------------------------------------------
+; buffer control area
+; ------------------------------------------------------------------------
+
+	MAXBUF = 30		;Number of buffers to carve out
+BUFCNT:	.BLKW			;Number of buffers that have been carved out
+BUFREE:	.BLKW			;Number of buffers that are free for use
+BUFSER:	.BLKW			;Count of buffers that need service
+
+BUFTBL::			;Start of the buffer control area
+BT1CHN:	.BLKB			;Channel number to write on
+BT1FLG:	.BLKB			;Flags	
+BT1IOC:	.BLKW			;Bytes read/written	     
+BT1ERR:	.BLKB			;Error status		     
+	.BLKB			;Reserved		     
+BT1LSW:	.BLKW			;LSW of file data            
+BT1MSB:	.BLKB			;MSB of file data            
+	.BLKB			;Reserved                    
+BT1PHY:	.BLKW			;Physical address of buffer  
+
+BUFTBS = .-BUFTBL		;Size of a buffer entry
+BT.CHN = BT1CHN - BUFTBL	;Offsets into a buffer control record
+BT.FLG = BT1FLG - BUFTBL
+BT.IOC = BT1IOC - BUFTBL
+BT.ERR = BT1ERR - BUFTBL
+BT.MSB = BT1MSB - BUFTBL
+BT.LSW = BT1LSW - BUFTBL
+BT.PHY = BT1PHY - BUFTBL
+
+	.REPT	MAXBUF-1	;Carve out the rest of the control area
+	.BLKB	BUFTBS
+	.ENDR
+	.EVEN
+
+;Flags for the buffer control table
+BF$IN = 1			;Buffer flag for inuse
+BF$RD = 2			;Buffer read complete
+BF$WR = 4			;Buffer write complete
+
+
+; ------------------------------------------------------------------------
+; channel control area
+; ------------------------------------------------------------------------
+
+CHNDEF = 174007			;Free channel mask (must be at lease 2)
+MAXCHN = 16.
+
+CHNTBL::
+CT1IOC:	.BLKB			;Outstanding I/O count
+CT1FLG:	.BLKB			;Flags
+CT1PPN:	.BLKW			;PPN
+CT1DAT:	.BLKW	4		;File date/time information  (used on close)
+CT1NAM:	.BLKB	10.		;File name in ascii
+	.EVEN			;Just to make sure
+	.WORD	123456		;Reserved
+
+CHNTBS	= .-CHNTBL		;Size of a channel entry
+CT.IOC	= CT1IOC - CHNTBL	;Offsets into a channel control record
+CT.FLG	= CT1FLG - CHNTBL
+CT.PPN	= CT1PPN - CHNTBL
+CT.DAT	= CT1DAT - CHNTBL
+CT.NAM	= CT1NAM - CHNTBL
+
+	.REPT	MAXCHN-1	;Carve out the rest of the control area
+	.BLKB	CHNTBS
+	.ENDR
+	.EVEN
+
+;Flags for the channel control table
+CH$AQ = 1			;All I/O has been queued for channel
+CF$ER = 2			;An error has occured on this channel
+CF$CL = 4			;The channel has been closed
+
+CUREND:
+	.EVEN
+
+
+;RO DATA
+POWERS: .WORD   100.,10.,1.,0   ;Powers of 10
+
+
+	.BSECT	; Bits in IFLAGS
+
+FL$END:	.BLKB	; Finished with this file
+FL$PLA:	.BLKB	; Placed files have been done
+
+
+	.PSECT	ROCODE,RO,I,LCL,CON
+
+
+.SBTTL	Main line of execution for IMAGE mode
+
+.ENABL	LSB
+IMGFIL::MOV	#ASYNC,MODE	;Pick a mode
+	CALL	SETBUF		;Get the buffers we will need for async I/O
+	BIT	#RS$VFY,RESSUB	;Is this a verify pass?			;009
+	BNE	4$		;Yes, go check out the accounts		;009
+	BIT	#FL$PLA,IFLAGS	;Already written the directory/placed files?
+	BNE	6$		;Yes, don't write directory again	;021
+4$:	BIT	#DO.ACC,C$FLAG	;Did someone say /NOACCOUNTING?		;008
+	BEQ	5$		;Yes, skip accounts altogether		;008
+	CALL	WRTDIR		;Write directory information
+5$:	BIT	#DO.FIL,C$FLAG	;Did someone say "/NOFILE_DATA"?	;023
+	BEQ	100$		;Yes, no more to do			;023
+	BIT	#RS$VFY,RESSUB	;Is this a verify pass?			;023
+	BNE	6$		;Yes, stifle the message		;023
+	CMESSAGE #PLCIMG	;Next step is placed files		;021
+6$:	CLR	PPNIDX		;Initialize the PPN index
+	MOV	#CHNDEF,IOCHAN	;Initialize the available channel word
+10$:	CALL	PPNLOK		;Look up a PPN
+	CMPB	R0,#NOSUCH	;Done with PPNs
+	BEQ	100$		;Yes
+	MOVB	R0,R1		;Did we get an error?
+	BEQ	20$		;No, continue
+	CMESSAGE #ERRLOK	;Report an error in directory lookup
+	CMESSAGE <<R1,B>>	;Be specific
+	JMPX	RESTRT		;Restart BACKUP
+
+20$:	BIT	#IM$COP,IMGSUB	;Is this a /COPY?			;005
+	BEQ	30$		;No, don't check			;002
+	CALLX	CHKPLS		;Does this PPN match?
+	BCS	10$		;No, try next
+30$:	BIC	#GF.HOK,GENFLG	;Reset the "[0,1]init.sys found" flag	;019
+	CALL	OPNFIL		;Open next file
+	BCS	10$		;Error, try next directory
+	BIT	#IM$COP,IMGSUB	;Is this a /COPY?			;005
+	BEQ	305$		;No, don't check			;002
+	CALLX	CHKCOM		;Does the file match?
+	BCS	30$		;No, Open next
+305$:
+	MOV	#$CURFI,R0	;LODFAT's parameter
+	CALL	LODFAT		;Load file attributes
+	BIT	#RS$VFY,RESSUB	;Verify pass?
+	BNE	35$		;Yes, so we don't care if it's placed or not
+	BITB	#BFF$PL,FILFLG	;Is this file placed?
+	BNE	32$		;Yes
+
+; Non-Placed file entry
+	BITB	#FL$PLA,IFLAGS	;Have we completed the placed file pass?
+	BNE	35$		;Yes, so copy the file
+	BR	30$		;No, skip this one
+
+; Placed file entry
+32$:	BITB	#FL$PLA,IFLAGS	;Have we completed the placed file pass?
+	BNE	30$		;Yes, so skip it
+35$:	CALL	GTCHAN		;Get a channel to copy/verify the file
+	BCC	40$		;We got one
+	CALL	ACTSLP		;See if any buffers need service or sleep
+	BR	35$		;Try again
+
+40$:	MOV	$CURFI+C$PPN,PPNSAV ; Save a copy of the input PPN	;006
+	CALLX	CREFIL		;Create the file and open it or just open it
+	MOV	PPNSAV,$CURFI+C$PPN ; Restore the input PPN		;006
+	BIT	#RS.OPN,RSTFLG	;Did we really open the file?
+	BEQ	41$		;No, so skip it			;007;011
+	BIT	#GF.HOK,GENFLG	;Was [0,1]INIT.SYS the last file opened? ;019
+	BEQ	4000$		;No					;019
+	BIS	#C2$HOK,C$FLG2	;Yes, set the HOOK-OK flag		;019
+4000$:									;019
+	TST	BLKCNT		;Check for any blocks to copy
+	BNE	45$		;Yes, we have data to copy
+	TSTB	BLKCNT+2	;Anything here?
+	BNE	45$		;Yes
+41$:	MOV	IMGCHN,R0	;No, close the file and release the channel
+	CALL	CLSFIL		;Close it & print the results
+	BR	30$		;Next file/PPN
+45$:	CALL	QREAD		;Start up the async I/O for this file
+	JMP	30$		;Next file/PPN
+100$:	CALL	ACTSLP		;Finish up the I/O
+	CMP	BUFREE,BUFCNT	;Have all the buffers been returned?
+	BNE	100$		;No, wait for them
+999$:	RETURN			;Exit the main line
+
+GLOBAL	<ERRLOK,$CURFI,FILLIS,IMGCHN,RSTFLG>				;006
+GLOBAL	<GD1BID,DTAAVL>							;024
+GLOBAL	<GENFLG>							;019
+GLOBAL	<$RESMS,$OLDFI>							;025
+
+.DSABL	LSB
+
+.SBTTL	Queue up the .READA's
+;+
+; QREAD - Queue up the .READA's for the file
+;-
+
+.ENABLE	LSB
+
+QREAD:	BIC	#FL$END,IFLAGS	; Say we are working on this file
+	MOV	#1,VIRBLK	; Start the read at block 1
+	CLR	VIRBLK+2	; Clear the high order byte as well
+	MOV	BLKSIZ,R0	; Number of bytes to move
+	MOV	R0,BYTES	; Stuff it
+	ASH	#-9.,R0		; Number of blocks
+	MOV	R0,BLOCKS	; Stuff it
+10$:	SUB	BLOCKS,BLKCNT	; Subtract blocks from the file's size
+	SBC	BLKCNT+2	;  cover any borrow necessary
+	BCC	30$		; More to do, that's good
+	ADD	BLOCKS,BLKCNT	; Opps, no that many left, re-think this mess
+	MOV	BLKCNT,BYTES	;  and adjust the number of bytes used
+	SWAB	BYTES		; Convert to number of word
+	ASL	BYTES		; Now we have a number of bytes
+	BIS	#FL$END,IFLAGS	; Say we have finished with this file now
+	TST	BYTES		; Is there really more to do?
+	BEQ	40$		; No
+	.BR	30$		; Yes
+30$:	CALL	REDFIL		; Fill the record with data
+	ADD	BLOCKS,VIRBLK	; Update virtual block number LSW
+	ADC	VIRBLK+2	;  And virtual block number MSB
+	BIT	#FL$END,IFLAGS	; More to do?
+	BEQ	10$		; Yes, do it
+40$:   	MOV	IMGCHN,R2	; Get the channel number we're working with*2
+	ASR	R2		; * 1
+	MUL	#CHNTBS,R2	; Index into chntbl
+	BISB	#CH$AQ,CT.FLG+CHNTBL(R3) ; All I/O is now queued for the channel
+       	RETURN			; All done
+
+GLOBAL	<BLKSIZ>
+
+.DSABLE	LSB
+
+
+.SBTTL	Read from the file
+
+;+
+; REDFIL - Read information from the file
+;-
+
+.ENABLE	LSB
+
+REDFIL:	TST	BUFREE		; Are there any buffers we can grab?
+	BGT	10$		; Yes, find it and map it
+	CALL	ACTSLP		; Handle buffer action routines or sleep
+	BR	REDFIL		; And try again
+10$:	MOV	#BUFTBL-BUFTBS,R3 ; Setup a pointer into the buffer control area
+12$:	ADD	#BUFTBS,R3	; point at next entry
+	BITB	#BF$IN,BT.FLG(R3) ; Is this one inuse?
+	BNE	12$		; Yes, try again	
+	DEC	BUFREE		; One less free buffer
+	BISB	#BF$IN,BT.FLG(R3) ; Mark the buffer inuse
+	MOVB	IMGCHN,BT.CHN(R3) ; Set the buffer channel
+	MOV	VIRBLK,BT.LSW(R3) ; Set the buffer LSW
+	MOVB	VIRBLK+2,BT.MSB(R3) ; Set the buffer MSB
+	MOV	BT.PHY(R3),GD1BID ; Pick up the block id		;024
+	CALBX	MAPBUF,<#GD1BID,#DTAAVL,#GDBVA>; Map the buffer		;024
+	MOV	#RCRA,@#FIRQB+FQFIL ; Completion routine address
+	MOV	R3,@#FIRQB+FQPPN ; Buffer Id we used
+	MOV	#XRB,R0		; Setup the XRB pointer
+	MOV	BYTES,(R0)+	; byte count
+	CLR	(R0)+		; Must be clear
+	MOV	GDBVA,(R0)+	; Buffer virtual address		;024
+	MOVB	#4,(R0)+	; Input Channel * 2
+	MOVB	VIRBLK+2,(R0)+	; MSB
+	MOV	VIRBLK,(R0)+	; LSB
+	CLR	(R0)+		; No max time for terminal read
+	CLR	(R0)		; And no read check
+25$:	TST	MODE		; Are we async?
+	BEQ	70$		; Yes
+	.READ			; do it!
+	MOV	R3,FIRQB+FQPPN	; make sure RCRA's parameter is still loaded
+	BR	75$		; Skip the .READA
+70$:	.READA			; do it!
+75$:	MOV	FIRQB,R2
+	BEQ	99$
+	CMPB	R2,#INUSE	; INUSE = 3 Busy?
+	BEQ	20$		; Yes, veg out
+	CMPB	R2,#NOBUFS	; NOBUFS = 40 Resource wait?
+	BEQ	20$		; Yes, veg out
+	CRASH	R2		; Allow no other errors			;020
+
+20$:	CALL	SLEEP		; Good night, system is busy
+	BR	25$		; Reissue the call
+
+99$:	TST	MODE		; Are we async?
+	BEQ	199$		; Yes
+	CALL	RCRA		; If we're sync
+199$:	CLR	R2		; Work register
+	MOVB	BT.CHN(R3),R2	; Get the channel number back*2
+	ASR	R2		; * 1
+	MUL	#CHNTBS,R2	; Index into chntbl
+	INCB	CT.IOC+CHNTBL(R3) ; And indicate one more I/O
+200$:	RETURN
+
+GLOBAL	<NOBUFS,INUSE>
+GLOBAL	<GDBVA>								;024
+
+.DSABLE	LSB
+
+
+.SBTTL	Read/Write completion routine
+
+;+
+; WCRA - Write complete routine
+; RCRA - Read completion routine
+;
+; Don't use any registers (R0-R5) unless you save them first!
+;
+;-
+
+.ENABL	LSB
+
+WCRA:	MOV	R0,-(SP)	;; Save R0
+	MOV	FIRQB+FQPPN,R0	;; Load it with our parameter (address)
+	BISB	#BF$WR,BT.FLG(R0) ;; Set the bit to indicate write complete
+	BR	10$		;; Continue in line
+
+RCRA:	MOV	R0,-(SP)	;; Save R0
+	MOV	FIRQB+FQPPN,R0	;; Load it with our parameter (address)
+	BISB	#BF$RD,BT.FLG(R0) ;; Set the bit to indicate read complete
+
+10$:	MOVB	FIRQB,BT.ERR(R0) ;; Where to put the error
+	MOV	XRB+XRBC,BT.IOC(R0) ;; Where to put the number of bytes read
+	INC	BUFSER		;; Say that someone needs service
+	MOV	(SP)+,R0	;; Restore R0				;024
+	TST	MODE		;; Are we async?
+	BEQ	20$		;; Yes, exit
+	RETURN			;; If we're sync
+20$:	.ASTX			;; And that's it			;024
+
+.DSABL	LSB
+
+
+.SBTTL	Write account attributes
+
+;+
+; WRTDIR - Write directory information to output volume
+;
+;	CALL	WRTDIR
+;
+;	All registers are preserved.
+;
+;-
+
+.ENABLE	LSB
+
+WRTDIR:	SAVREG			;Keep our promise about saving registers
+	BIT	#RS$VFY,RESSUB	;Is this a verify pass?			;009
+	BNE	5$		;Yes, stifle the monologue		;009
+	CMESSAGE #ACCIMG	;Let the user know what we're doing
+5$:	CALLX	CLRFQB		;Clear out the FIRQB			;003
+	MOVB	#UU.ATR,@#FIRQB+FQFUN ;Read Pack Attributes		;003
+	MOV	#-4,@#FIRQB+FQFIL ;Subfunction code			;003
+	MOV	$SAVDEV,@#FIRQB+FQDEV  ;Device				;003
+	MOV	$SAVUNT,@#FIRQB+FQDEVN ;Unit				;003
+	.UUO								;003
+	CRASH								;006
+	MOVB	@#FIRQB+FQEXT,PCLSIZ ;Get pack clustersize		;003
+        CLR	PPNIDX		;Initialize the PPN index
+10$:	CALL	PPNLOK		;Look up a PPN, R2 = PPN, $CURFI+C$PPN = PPN
+	CMPB	R0,#NOSUCH	;Done with PPNs
+	BNE	15$		;No, keep going
+	JMP	100$		;Yes, exit
+
+15$:	BIT	#IM$COP,IMGSUB	;Is this a /COPY?			;005
+	BEQ	18$		;No, don't check			;002
+	CALL	CHKPLS		;Does this PPN match?			;002
+	BCS	10$		;No					;002
+
+;+
+; Create the account on the output volume
+;-
+
+18$:									;002
+	MOV	$CURFI+C$PPN,$OLDFI+C$PPN ; Make a copy of the PPN	;025
+	BIT	#IM$COP,IMGSUB	;Is this a /COPY?			;025
+	BEQ	1810$		;No, don't change the PPN		;025
+	CALLX	RENPPN		;Change the PPN to match output mask	;025
+1810$:	BIT	#RS$VFY,RESSUB	;Is this a verify pass?			;025
+	BNE	55$		;Yes, don't try to write the account	;009
+	CALLX	CLRFQB		;Clear out the FIRQB
+	MOVB	#UU.RAD,@#FIRQB+FQFUN ;The function
+	MOV	PPNIDX,@#FIRQB+FQFIL ;Index of account
+	MOV	R2,@#FIRQB+FQNAM1 ;PPN
+	MOV	$DSKDEV,@#FIRQB+FQDEV  ;Device
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;Unit
+	.UUO
+	MOVB	@#FIRQB,R4	;Pick up error code
+	BEQ	20$		;None, write the attribute
+	CMPB	R4,#PRVIOL	;Is it protection violation?		
+	BEQ	10$		;Yes, so skip this account		;026
+	CMESSAGE #ERRRAD,<<$OLDFI+C$PPN+1,B>,<$OLDFI+C$PPN,B>>		;026
+				;Tell them about the problem
+
+20$:	MOV	@#FIRQB+36,-(SP);Save UFD clustersize
+	CMP	(SP),PCLSIZ	;Is UFD clus size >= pack clus size?	;003
+	BGE	40$		;Yes, leave it alone			;025
+	CLR	(SP)		;No, use pack clustersize		;003
+40$:									;006
+	CALLX	CLRFQB		;Initialize the FIRQB			;026
+	MOV	#FIRQB+FQFIL,R1	;R1 -> FIRQB				;026
+.ASSUME	UU.PAS	EQ	0	;Function code = Create user account
+	MOV	#<400*200+1>,(R1)+ ;Preextend by 1 cluster, New format	;026
+	COM	(R1)+		;-1 = Place in the middle of the disk	;026
+	MOV	@#$CURFI+C$PPN,(R1)+ ;PPN to create			;006
+	CMP	(R1)+,(R1)+	;Pick up after the password		;026
+	COM	(R1)+		;-1 = Unlimited logged-out quota (LSB)	;026
+	COM	(R1)+		;-1 = No expiration date		;026
+	COM	(R1)+		;-1 = Unlimited logged-in quota (LSB)	;026
+	COM	(R1)+		;-1 = Unlimited logged-in/out quota (MSB) ;026
+	CLR	(R1)+		;Not used
+	MOV	$SAVDEV,(R1)+  	;Device
+	MOV	$SAVUNT,(R1)+ 	;Unit
+	MOV	(SP)+,(R1)+	;Clustersize
+	.UUO			;Do it
+	MOVB	FIRQB,R4	;Error?
+	BEQ	55$		;No, now write attributes of the account
+	CMPB	#FIEXST,R4	;Already exists?			;022
+	BEQ	50$		;Yes, do attributes			;008
+	CMPB	#BADFUO,R4	;?Illegal SYS () usage?			;022
+	BNE	48$		;No					;022
+	MOVB	#PRVIOL,R4	;Yes, make it clearer			;022
+	.BR	48$		;And tell 'em				;022
+
+48$:	CMESSAGE #ERRCAT,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>		;022
+	BR	80$		;and get out				;022
+
+50$:	CMP	R2,$CURFI+C$PPN ;Old PPN same as new PPN?		;016
+	BNE	60$		;No, don't update attributes		;016
+	.BR	55$		;Yes, do attributes
+
+55$:	CLR	INDX		;Index					;009
+	BR	57$		;Dive right in				;009
+56$:	INC	INDX		;Go for the next attribute		;009
+57$:	CALLX	CLRFQB		;Clear out the FIRQB
+	MOV	#FIRQB+FQFUN,R1	;Get ready for function code
+	MOVB	#UU.ATR,(R1)+	;Function code is read accounting data
+	MOVB	#-1,(R1)+	;Read Attributes
+	CLRB	(R1)+		;0=Lookup by index
+	MOV	R2,(R1)+ 	;Set up PPN to look up
+	MOVB	INDX,(R1)+	;Index					;009
+	MOV	$DSKDEV,@#FIRQB+FQDEV ;Set up device name
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;And unit number/flag
+	.UUO			;Now get the data
+	MOVB	@#FIRQB,R4	;Pick up error code
+	BEQ	70$		;None, write the attribute
+	CMPB	R4,#EOF		;No more attributes?
+	BEQ	60$		;True, we are done with this account
+	CMPB	R4,#PRVIOL	;Is it protection violation?		
+	BEQ	90$		;Yes, so skip this account		
+	CMESSAGE #ERRRAD,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>
+				;Tell them about the problem
+	BR	80$		;And forget about this record
+
+60$:	CALLX	ACRLIS		;List this to the listing file		
+	BR	90$
+
+70$:	BIT	#RS$VFY,RESSUB	;Is this a verify pass?			;009
+	BNE	110$		;Yup, go do it				;009
+	; Write the attribute back out.
+	MOV	#FIRQB+FQFUN,R1	;Get ready for function code
+	MOVB	#UU.ATR,(R1)+	;Function code is write accounting data
+	MOVB	#-2,(R1)+	;Write Attributes
+	MOV	@#$CURFI+C$PPN,@#FIRQB+FQPPN ;Set up the output PPN	;006
+	MOVB	@#FIRQB+FQNAM1,@#FIRQB+FQSIZM ;Attribute type
+	MOV	$SAVDEV,@#FIRQB+FQDEV ;Set up device name
+	MOV	$SAVUNT,@#FIRQB+FQDEVN ;And unit number/flag
+	.UUO	
+	MOVB	FIRQB,R4	;Pick up error code
+	BEQ	56$		;None, do next attribute
+	CMESSAGE #ERWRAT,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>		;022
+	.BR	80$		;Print the error
+
+80$:	CMESSAGE <<R4,B>>	;And give them the RSTS error code
+90$:	JMP	10$		;Next PPN
+
+100$:	RETURN			;Now we're done
+
+110$:	MOV	R0,-(SP)	; Sav a reg				;009
+	MOV	R2,-(SP)	; And another				;009
+	MOV	#FIRQB+FQNAM1+1,R0 ; Point at the returned attributes	;009
+	MOV	#DSIBUF,R1	; Handy buffer to use			;009
+	MOV	#13.,R2		; Number of bytes of attribute info	;009
+120$:	MOVB	(R0)+,(R1)+	; Store the attributes in DSIBUF	;009
+	SOB	R2,120$		; All of 'em				;009
+	; Now we need to lookup the output account attributes		;009
+	CALLX	CLRFQB		;Clear out the FIRQB			;009
+	MOV	#FIRQB+FQFUN,R1	;Get ready for function code		;009
+	MOVB	#UU.ATR,(R1)+	;Function code is read accounting data	;009
+	MOVB	#-1,(R1)+	;Read Attributes			;009
+	CLRB	(R1)+		;0=Lookup by index			;009
+	MOV	@#$CURFI+C$PPN,(R1)+ ;PPN to lookup			;009
+	MOVB	INDX,(R1)+	;Index					;009
+	MOV	$SAVDEV,@#FIRQB+FQDEV ;Set up device name		;009
+	MOV	$SAVUNT,@#FIRQB+FQDEVN ;And unit number/flag		;009
+	.UUO			;Now get the data			;009
+	TSTB	@#FIRQB		;Pick up error code			;009
+	BNE	140$		;No errors allowed here			;009
+	;Now we need to compare the two sets of data			;009
+	MOV	#FIRQB+FQNAM1+1,R0 ; Point to start of returned data	;009
+	MOV	#DSIBUF,R1	; And to the saved data			;009
+	MOV	#13.,R2		; Load up the count			;009
+130$:	CMPB	(R0)+,(R1)+	; And check 'em out			;009
+	BNE	1420$		; No differences allowed		;009
+	SOB	R2,130$		; All of 'em				;009
+	;If we get here, we had a good compare of account data		;009
+	BR	150$		; Done with this attribute		;009
+
+140$:	CMPB	@#FIRQB,#EOF	;Error=Attribute doesn't exist?		;013
+	BNE	1410$		;No, some other error			;013
+	CMESSAGE #ERVAAT,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>		;013
+	BR	160$		;Exit					;017
+1410$:	CMESSAGE #ERRVAD,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>		;013
+	BR	160$		;Exit					;017
+1420$:	CMESSAGE #VEREAT,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>>		;009
+
+150$:	MOV	(SP)+,R2	; Restore a reg				;009
+	MOV	(SP)+,R0	; And the other				;009
+	JMP	56$		;Next account				;009
+
+160$:	MOV	(SP)+,R2	; Restore a reg				;017
+	MOV	(SP)+,R0	; And the other				;017
+	JMP	60$		;Next account				;017
+
+GLOBAL	<C$FLAG,$DSKDEV,$DSKUNT,ERRRAD,ERRRAT,$CURFI,PRVIOL,EOF,RECPTR>
+GLOBAL	<$SAVDEV,$SAVUNT,ACCIMG,PLCIMG>
+GLOBAL	<IMGSUB>							;005
+GLOBAL	<DSIBUF,VEREAT>							;009
+GLOBAL	<ERVAAT,ERRVAD>							;013
+GLOBAL	<FIEXST,BADFUO,ERWRAT,ERRCAT>					;022
+.DSABLE	LSB
+
+
+.SBTTL	Wildcard PPN lookup
+
+;+
+; PPNLOK - Wildcard PPN lookup
+;
+;	PPNIDX = Index at time of last call
+;	PPNWLD = Wildcard PPN specification
+;
+;	CALL	PPNLOK
+;
+;	R0 = Returned error code
+;	R1 = Undefined
+;	R2 = copy of current PPN
+;
+;	$CURFI	Updated with new PPN
+;
+;	PPNIDX = New index to use
+;-
+
+PPNLOK:	CALLX	CLRFQB		;Clear out the FIRQB
+	MOV	#FIRQB+FQFUN,R1	;Now R1 -> FIRQB @ FQFUN
+	MOVB	#UU.PPN,(R1)+	;Set up for wildcard PPN lookup
+	MOV	PPNIDX,(R1)+	;Place index in the FIRQB
+	MOV	#-1,(R1)	;Wildcard mask is [*,*]
+	MOV	$DSKDEV,@#FIRQB+FQDEV ;Set up device name
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;And unit number/real flag
+	.UUO			;Now do the lookup
+	MOVB	@#FIRQB,R0	;Did it work?
+	BNE	10$		;No, error
+	MOV	(R1),$CURFI+C$PPN ;And return it to the user
+	MOV	(R1),R2		;Second copy
+	INC	PPNIDX		;Now update index for the next file
+10$:	RETURN			;And we're done
+
+GLOBAL	<$CURFI,$DSKDEV,$DSKUNT>
+
+
+.SBTTL	Open the next file
+
+;+
+; OPNFIL - Open the next file
+;
+;	$CURFI+C$PPN = Current PPN
+;	$DSKDEV = Input device name
+;	$DSKUNT = Input unit number
+;	DSKFIL = Channel number times two
+;
+;	CALL	OPNFIL
+;
+;	$CURFI all set up for the new file
+;
+;	C = 1 If we are unable to open the file (go to next directory)
+;-
+
+OPNFIL:	MOV	R1,-(SP)	;Get a work register
+10$:	CALLX	CLRFQB		;Clear out FIRQB
+	MOV	#FIRQB+FQFUN,R1	;R1 -> FIRQB @ FQFUN
+	MOVB	#UU.ONX,(R1)+	;Function is open-next
+	MOV	#SAVFIL,(R1)+	;On the input file channel
+	MOV	#$CURFI,R5	;R5 -> Current file cells
+	MOV	(R5)+,(R1)+	;Set up the current PPN
+	MOV	R1,R0		;R0 -> Firqb @ FQFIL
+	MOV	#134745,(R1)	;Set up ???
+	MOV	(R1)+,(R1)	;       ??????
+	MOV	(R1)+,(R1)	;	??????.???
+	MOV	#100000!4096.!2048.!16.,@#FIRQB+FQMODE
+				;Mode is Read-regard, Don't upd date, seq cache
+	MOV	$DSKDEV,@#FIRQB+FQDEV ;Set up device name
+	MOV	$DSKUNT,@#FIRQB+FQDEVN ;And unit number/real flag
+	.UUO			;Now do the open
+	CALLX	BUFWAT,R5	;Check for small buffers		
+	 BR	10$		;None, try again			
+	MOVB	@#FIRQB,R1	;Pick up error code
+	BEQ	20$		;None, that's good
+	CMPB	R1,#NOSUCH	;Is it from no more files?		
+	BEQ	70$		;Yes, so done with this directory
+	CMESSAGE #ERROFR,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Tell them about the problem
+	CMESSAGE <<R1,B>>	;And tell them what RSTS told us
+	CALLX	CLRFQB		;Clear out the FIRQB
+.ASSUME	CLSFQ	EQ	0	;Function is close
+	MOVB	#DSKFIL,@#FIRQB+FQFIL ;On the disk file channel
+	CALFIP			;Now close the channel
+	CRASH			;And die on errors
+	BR	70$		;And get out
+
+20$:	BIT	#DDRLO,@#FIRQB+FQNENT ;No error, but do we have access?	
+	BNE	10$		;No, skip this file			
+	MOV	#FIRQB+FQPPN,R1	;R1 -> FIRQB @ FQPPN
+	CMP	(R1)+,#<1+<0*400>> ;Is this file in [0,1]?
+	BNE	50$		;No, not this time
+	CMP	@#FIRQB+FQEXT,#^RSYS ;Is it [0,1]*.SYS?
+	BNE	50$		;No, so no special checks
+	CMP	(R1)+,#^RBAD	;Is it BAD???.SYS
+	BEQ	30$		;Yes, so more checks
+	CMP	(R1),#^RT	;No, it it ???T.SYS
+	BNE	50$		;No, not a special file
+	CMP	-(R1),#^RSAT	;Is it SATT.SYS?
+	BR	40$		;Join common check
+
+30$:	CMP	(R1),#^RB	;Is it BADB.SYS?
+40$:	BEQ	10$		;Ignore BADB.SYS or SATT.SYS
+	MOV	#FIRQB+FQNAM1,R1 ; Set up the name again		;004
+	CMP	(R1)+,#^RINI	;Is it INIT.SYS?			;004
+	BNE	50$		;No					;004
+	CMP	(R1),#^RT	;?					;004
+	BNE	50$		;No					;004
+	BIS	#GF.HOK,GENFLG	;Set flag saying [0,1]INIT.SYS-found	;019
+50$:	CALLX	RAD$FN		;Now convert the file name
+	MOV	#FIRQB+20,R1	;R1 -> FIRQB @ date and time information
+	MOV	(R1)+,(R5)+	;Save date of last access/modification
+.ASSUME	C$MDAT	EQ	C$NAME+10.
+	MOV	#1440.,(R5)+	;Time of last access/modification is midnight
+.ASSUME	C$MTIM	EQ	C$MDAT+2
+	MOV	(R1)+,(R5)+	;Save date of creation
+.ASSUME	C$CDAT	EQ	C$MTIM+2
+	MOV	(R1)+,(R5)+	;And time of creation
+.ASSUME	C$CTIM	EQ	C$CDAT+2
+	MOV	#256.,FILCLU	;Guess at clustersize of 256.
+	MOVB	(R1)+,FILCLU	;Move in clustersize
+	BEQ	60$		;Good guess, all done
+	CLRB	FILCLU+1	;Clear MSB of clustersize
+60$:	MOVB	(R1)+,FILPRR	;Save the protection code
+	MOV	@#FIRQB+FQSIZ,FILSIZ ;Set up filesize LSB
+	MOVB	@#FIRQB+FQSIZM,FILSIZ+2 ;And filesize MSB
+	MOV	FILSIZ,$CURFI+C$SIZ ;Save the size for the listing function
+	MOV	FILSIZ+2,$CURFI+C$SIZ+2 ;Save the MSB also		
+	CLRB	FILSIZ+3	;Make sure no extraneous bits lie around 
+	MOV	FILSIZ,BLKCNT	;Set up count of blocks to do LSB	
+	MOV	FILSIZ+2,BLKCNT+2 ; and count of blocks to do MSB	
+	TST	(PC)+		;Clear carry for success
+70$:	SEC			;Set carry for failure
+	MOV	(SP)+,R1	;Restore work register
+	RETURN			;Now we're done
+
+GLOBAL	<$DSKDEV,$DSKUNT,ERROFR,NOBUFS,NOSUCH,FILPRR,FILSIZ>
+GLOBAL	<C$FLG2>							;004
+
+
+.SBTTL	Convert number to ASCII with leading zeroes
+
+;+
+; NUMLD0 - Convert number with leading zeroes
+;
+;	R0 = Number to convert
+;	R5 -> Area to perform conversion
+;
+; Note: This routine will convert numbers in the range of 0-999 only.
+;-
+
+NUMLD0:	SAVREG			;Save the world, I wanna get back
+	MOV	#POWERS,R1	;R1 -> Powers of 10
+	MOV	R0,R3		;Copy number to a convenient place
+10$:	CLR	R2		;Clear MSB for divide
+	DIV	(R1)+,R2	;R2 = Digit, R3 = remaining values
+	ADD	#'0,R2		;Convert digit to ASCII
+	MOVB	R2,(R5)+	;And store it
+	TST	(R1)		;Is there more to do?
+	BNE	10$		;Yes, so loop
+	MOV	R5,TOS.R5(SP)	;Be sure to give the user the new R5
+	RETURN			;And we're done
+
+
+;+
+; LODFAT - Load file attributes
+;
+; This subroutine is responsible for loading the file attribute cells
+; in the block header data area (BBHDAT) and in our private impure area.
+;-
+
+LODFAT:	MOV	#BBHDAT+BBH$FN+1,R5 ;R5 -> File name save area + 1
+	MOVB	#'[,(R5)+	;Set up an open bracket
+	CLR	R0		;Get ready for project number
+	BISB	$CURFI+C$PPN+1,R0 ;Pick up project code
+	CALL	NUMLD0		;Now convert it to ASCII
+	CLR	R0		;Get ready for programmer number
+	BISB	$CURFI+C$PPN,R0	;Now get the prorgammer number
+	CALL	NUMLD0		;And convert it to ASCII
+	MOVB	#'],(R5)+	;Now the closing bracket
+	MOV	#$CURFI+C$NAME,R2 ;R2 -> File name of current file
+	MOV	#10.,R3		;R3 = Length of a file name
+10$:	MOVB	(R2)+,R0	;Get a byte
+	CMPB	R0,#40		;Is it a space?
+	BEQ	20$		;Yes, so skip it
+	MOVB	R0,(R5)+	;Save the byte
+20$:	SOB	R3,10$		;For the whole thing
+	MOVB	#';,(R5)+	;Now the ; for version number
+	MOVB	#'1,(R5)+	;This is always version 1 in RSTS/E
+	SUB	#BBHDAT+BBH$FN+1,R5 ;R5 = Length of file specification
+	MOVB	R5,BBHDAT+BBH$FN ;Now store it
+	CALLX	CLRFQB		;Clear out the FIRQB
+	MOV	#FIRQB+FQFUN,R1	;R1 -> FIRQB @ FQFUN
+	MOVB	#UU.FIL,(R1)+	;Function file utilities
+	MOV	#<SAVFIL/2>+<20*400>,(R1)+ ;From the input channel, lookup DCN
+	INC	@#FIRQB+FQSIZ	;We want information on VBN #1
+	.UUO			;Now go for it
+	MOVB	@#FIRQB,R3	;Pick up error code
+	BEQ	30$		;None, that's good
+	CMESSAGE #ERRDFF,<<$CURFI+C$PPN+1,B>,<$CURFI+C$PPN,B>,#10.,#$CURFI+C$NAME>
+				;Report the error
+	CMESSAGE <<R3,B>>	;And report the RSTS error code
+	CLR	FILDCN		;We don't know start DCN
+	CLRB	FILFLG		;Nor do we know flags
+	CLR	FILRTS		;We don't know RTS
+	CLR	FILRTS+2	;Part 1 or 2
+	CLR	@#FIRQB+FQPPN	;Be sure we don't have attributes
+	BR	40$		;Now go create fake attributes
+
+30$:	MOV	-(R1),FILDCN	;Save the start DCN of the file
+	MOVB	-(R1),FILFLG	;And save the file flags
+	MOV	@#FIRQB+34,FILRTS ;Set the RTS name part 1
+	MOV	@#FIRQB+36,FILRTS+2 ;Now set the RTS name part 2
+40$:	MOV	#$CURFI+C$ATTR,R4 ;R4 -> Attribute area in current file cells
+	MOV	#FIRQB+FQPPN,R1	;R1 -> Attribute area in FIRQB
+	CLR	FILSTR		;Guess file doesn't have attributes
+45$:	TST	(R1)+		;Does file have attributes?		;006
+	BNE	50$		;Yes, it sure does
+	CMP	R1,#FIRQB+FQCLUS ;No, have we looked at the whole thing? ;006
+	BNE	45$		;No, loop for more			;006
+
+; Code below creates "fake" attributes for native mode files
+
+	MOV	(PC)+,(R4)+	;Set up record type and record attributes
+	 .BYTE	4,0		; As Stream sequential
+	CLR	(R4)+		;Indicate no maximum record size
+	MOVB	FILSIZ+2,(R4)+	;And file size MSB
+	CLRB	(R4)+		;Clear out unused area for good measure
+	MOV	FILSIZ,(R4)+	;Set up file size LSB
+	MOVB	FILSIZ+2,(R4)+	;And file used MSB
+	CLRB	(R4)+		;Clear out unused area for good measure
+	MOV	FILSIZ,(R4)+	;Set up file used LSB
+	MOV	#1000,(R4)+	;Indicate we've used the entire last block
+	MOV	(PC)+,(R4)+	;Set up bucket size and VFC area length
+	 .BYTE	1,0		; As one block, zero bytes
+	CLR	(R4)+		;Set up no maximum record size
+	MOV	FILCLU,(R4)+	;And make the DEQ be the clustersize
+	BITB	#100,FILPRR	;Is this an executable file?
+	BEQ	70$		;No, so join up with attributed files now
+	MOV	#1,$CURFI+C$ATTR ;Set record type and attributes as Fixed Seq
+	MOV	#512.,$CURFI+C$ATTR+2 ;Indicate record size is 512. bytes
+	MOV	#512.,$CURFI+C$ATTR+20 ;And maximum record size is 512. bytes
+	BR	70$		;Now join up attributed files
+
+; Real attribute copier
+
+50$:	INC	FILSTR		;Indicate file does have attributes
+	MOV	#10.,R3		;Count of words to copy
+	MOV	#FIRQB+FQPPN,R1	;Point to attributes to copy		;006
+60$:	MOV	(R1)+,(R4)+	;Copy an attribute
+	SOB	R3,60$		;For all the attributes
+
+70$:	MOV	#BBHDAT+BBH$RT,R5 ;R5 -> Record type in block header
+	MOV	$CURFI+C$ATTR,(R5)+ ;Copy record type/record attributes	;002
+	MOV	$CURFI+C$ATTR+2,(R5)+ ;Copy record size			;002
+	MOV	$CURFI+C$ATTR+16,(R5)+ ;Set up bucket size/VFC length
+	MOV	$CURFI+C$ATTR+20,(R5)+ ;Set up maximum record size
+	MOV	FILSIZ,(R5)+	;Set up LSB of file size		;002
+	MOV	FILSIZ+2,(R5)+	;Set up MSB of file size		;002
+
+; Note: The code below depends on the ordering of $CURFI and BFA$RS!
+
+;	MOV	#$CURFI+C$POS,R2 ;R2 -> $CURFI RSTS specific attributes
+;	MOV	#CURCPY,R3	;R3 -> Current values in thread list
+;80$:	MOV	(R3)+,(R2)+	;Copy a word
+;	CMP	R3,#CUREND	;Are we done yet?
+;	BNE	80$		;No, so loop
+
+	MOVB	FILPRR,R2	;R2 has RSTS style protection
+	MOVB	R2,$CURFI+C$PCOD ;Now save it in current file cells
+	MOVB	#300,R3		;We want to see if file is priv/exec
+	BICB	R2,R3		;Privileged executable?
+	BNE	90$		;No, not this time
+	MOV	#^B<0011001100110000>,R4 ;Disallow read/write to all but system
+	BR	110$		;Now join up
+
+90$:	BITB	#100,R2		;Executable file
+	BNE	100$		;Yes, it sure is
+	MOV	#^B<0100010001000100>,R4 ;Disallow execute access to everyone
+	BR	110$		;Now join up
+
+100$:	CLR	R4		;Don't start disallowing anything
+	BICB	#^B<00010101>,R2 ;Trim off all the execute protect bits
+	ASLB	R2		;Now shift read/write bits into read position
+	BISB	FILPRR,R2	;Now "execute meaning" has been lost
+
+110$:	CLR	R3		;R3 will hold VMS protection code
+	MOV	#3,R5		;Count of protection fields
+120$:	BITB	#20,R2		;Read protect set?
+	BEQ	130$		;No, not this time
+	BIS	#^B<0001>,R3	;Yes, so set it in the VMS position
+130$:	BITB	#40,R2		;Write protect set?
+	BEQ	140$		;No, not this time
+	BIS	#^B<1110>,R3	;Yes, so set WED in the VMS position
+140$:	ASH	#4,R3		;Shift VMS protection code
+	ASLB	R2		;Shift RSTS protection code
+	ASLB	R2		;To skip past this field
+	SOB	R5,120$		;Loop for the whole thing
+	BIS	R3,R4		;Now R4 has VMS protection code
+	MOV	R4,FILPRO	;Now save it
+150$:	MOV	#1,RSTSTR	;Indicate what we got was real
+	RETURN			;Now we're done
+
+GLOBAL	<BBHDAT,$CURFI,ERRDFF,FILPRO,RSTSTR,FILCLU,FILRTS,FILDCN,FILSTR>
+GLOBAL	<FILFLG>
+
+
+;+
+; GTCHAN - Get a channel from the free channel pool
+;
+; Input:
+;	IOCHAN - bitmap of available channels
+;
+; Output:
+;	Error - Carry bit set
+;
+;	Else  - IOCHAN is updated
+;		IMGCHN is the channel number * 2
+;
+;-
+
+GTCHAN:	CMP	#-1,IOCHAN	;Any free stuff at all?
+	BNE	5$		;Yes, continue
+	SEC			;No, error
+	RETURN			;Fast return
+
+5$:	MOV     #1,R0           ;Turn on the lower order bit       
+10$:	BIT	IOCHAN,R0	;Is the bit on?
+	BEQ	20$		;No, so this channel is available
+	ASL	R0		;Next bit to test
+	BNE	10$		;Test next channel number if there are any
+	SEC			;Indicate no channels available
+        BR	30$		;Exit
+
+20$:	BIS	R0,IOCHAN	;Channel is now in use
+	CLR	R1		;Reset channel number n=0
+25$:	INC	R1		;Setup channel number n+1
+	ASR	R0		;Move the bit to the right
+	BNE	25$		;More?  If so use the next channel
+	MOV	R1,IMGCHN	;And set the result
+	ASL	IMGCHN		;*2
+	MUL	#CHNTBS,R1	;Index into chntbl
+	CLRB	CT.FLG+CHNTBL(R1) ;Clear the flags
+	CLRB	CT.IOC+CHNTBL(R1) ;Clear the I/O count
+	MOV	$CURFI+C$PPN,CT.PPN+CHNTBL(R1) ;Load the PPN
+	MOV	#10.,R0		;Length of ascii name
+	MOV	#$CURFI+C$NAME,R2;Source
+	MOV	#CT.NAM+CHNTBL,R3;First name entry
+	ADD	R1,R3		;Name entry for this channel
+27$:	MOVB	(R2)+,(R3)+	;Move the data
+	SOB	R0,27$		;Loop
+	MOV	#8.,R0		;Length of file date/time info
+	MOV	#$CURFI+C$MDAT,R2 ;Source
+	MOV	#CT.DAT+CHNTBL,R3 ;First date entry
+	ADD	R1,R3		;Date entry for the channel
+28$:	MOVB	(R2)+,(R3)+	;Move the data
+	SOB	R0,28$		;Loop
+	CLC			;Make sure the carry is clear
+
+30$:	RETURN			;Done
+
+GLOBAL	<IOCHAN,IMGDAT>
+
+
+.SBTTL	Setup buffers
+;+
+; SETBUF - Allocate buffers for the async I/O (unless we already have)
+;-
+
+.ENABLE LSB
+
+SETBUF:	CLR	BUFSER		;No buffers need service
+	TST	IFLAGS		;Has anything happened yet?
+	BNE	90$		;Yes, so we already have the buffers
+	CLR	BUFREE		;No buffers are ready for use
+	MOV	#BUFTBL,R3	;Pointer into buffer table
+	CLR	BUFCNT		;No buffers yet
+10$:	CALBX	GETBUF,<#GD1BID,#DTAAVL,#GDBVA> ; Get a buffer		;024
+	TST	R0		;Did we get it?
+	BNE	90$		;No, no more available
+	INC	BUFCNT		;Buffer count++
+	CLRB	BT.FLG(R3)	;Clear out any flags
+	CLRB	BT.CHN(R3)	;  and channel info
+	MOV	GD1BID,BT.PHY(R3) ;Save the physical address		;024
+	INC	BUFREE		;Increment the count of free buffers
+	ADD	#BUFTBS,R3	;Get ready to load next table entry
+	CMP	BUFCNT,#MAXBUF	;Can we allocate any more?
+	BNE	10$		;Yes, so do it
+90$:	RETURN	
+
+GLOBAL	<RESSUB>
+.DSABLE	LSB
+
+
+;+
+;	ACTSLP - Handle buffer action routines or go to sleep
+;	SLEEP - Go to sleep for 1 second
+;-
+
+.ENABL	LSB
+
+ACTSLP:	TST	@#BUFSER	; Does anyone need service?
+	BLE	SLEEP		; No, just wait
+
+5$:	MOV	#BUFTBL-BUFTBS,R0 ; No, just scan the table
+10$:	ADD	#BUFTBS,R0	; Try the next
+	BITB	#BF$RD!BF$WR,BT.FLG(R0) ;Is this the one?
+	BEQ	10$		; No, try next
+
+20$:	BITB	#BF$RD,BT.FLG(R0) ;Read service?
+	BEQ	30$		;No, must be Write service.
+	CALL	READSR		;Off to Read service land.
+	BR	40$		;Any more?
+30$:	CALL	WRITSR		;Off to Write service land.
+40$:	TST	@#BUFSER	;More?
+	BLE	50$		;No, exit
+	BR	5$		;Yes, handle it
+
+SLEEP:	MOV	XRB+XRLEN,-(SP) ; Save the buffer length		;020
+	WSIG$S			;Veg for a second
+	MOV	(SP)+,XRB+XRLEN	; Restore buffer length			;020
+50$:	RETURN			;And return
+.DSABL	LSB
+
+
+;+
+; READSR - Read service routine
+; WRITSR - Write service rouitine
+;
+; After a .READA or a .WRITA completes we will eventually get here to 
+; process the result (That way we don't have to deal with it right away if
+; we're busy with something else)
+;
+;	On entry:
+;	R0 -> buffer control block
+;-
+
+.ENABL	LSB
+
+READSR:	TSTB	BT.ERR(R0)	;Any error?
+	BEQ	10$		;No, good
+	CALL	IOERR		;Handle it and continue
+10$:	BICB	#BF$RD,BT.FLG(R0) ; The read processing is now done
+	CALL	WRTFIL		;Start up the write
+	BR	20$
+
+WRITSR:	TSTB	BT.ERR(R0)	; Any error?
+	BEQ	12$		; No, good
+	CALL	IOERR		; Yes, handle it and continue
+12$:	CLR	R2
+	MOVB	BT.CHN(R0),R2	; Get the channel number back*2
+	ASR	R2		; * 1
+	MUL	#CHNTBS,R2	; Index into chntbl
+	DECB	CT.IOC+CHNTBL(R3) ; Say one less I/O
+	BNE	15$		; Get out fast if there is more to do
+	BITB	#CH$AQ,CT.FLG+CHNTBL(R3); All I/O been queued for the channel?
+	BEQ	15$		; No, continue
+	MOV	R0,-(SP)	; Save R0
+	CLR	R2		; Scratch register
+	MOVB	BT.CHN(R0),R2	; Load R2 with the channel number * 2
+	MOV	R2,R0		; Load up the parameter R0
+	BIS	#RS.OPN,RSTFLG	; Say, this file is open		;015
+	CALL	CLSFIL		; Close the file
+	MOV	(SP)+,R0	; Restore R0
+
+15$:	CLRB	BT.FLG(R0)	; Clean up the buffer (say we're done with it)
+	INC	BUFREE		; Indicate that another buffer is free
+20$:	DEC	BUFSER		; Indicate that we don't need service	
+	RETURN
+
+.DSABL	LSB
+
+
+;+
+; CLSFIL - Close the current input file and release the channel
+;
+;	On entry:
+;	R0 - Channel Number * 2
+;
+;	On exit:
+;	R0 - garbage
+;+
+
+.ENABL	LSB
+
+CLSFIL:	MOV	R1,-(SP)	; Save R1
+	MOV	R2,-(SP)	; Save R2
+	MOV	R3,-(SP)	; Save R3
+	MOV	R4,-(SP)	; Save R4				;025
+	BIT	#RS$VFY,RESSUB	; Verify pass?
+	BNE	10$		; Yes, skip the dates section
+	BIT	#RS.OPN,RSTFLG	; Did we open the output file?		;011
+	BEQ	10$		; No, skip the dates			;011
+
+; Write file dates
+	MOV	R0,R1		; Get the channel number back
+	ASR	R1		; *1
+	MOV	R1,IMGCH1	; This is a parameter for the dates routine
+	MUL	#CHNTBS,R1	; Index into the channel table
+	MOV	#IMGDAT,R3	; Target
+	MOV	#8.,R2		; Bytes to move
+5$:	MOVB	CT.DAT+CHNTBL(R1),(R3)+ ; Load date/time info
+	INC	R1		;Next byte
+	SOB	R2,5$		;Loop
+	MOV	R0,-(SP)	;Save R0
+	CALLX	DATES		;Write out the date/time info to disk
+	MOV	(SP)+,R0	;Restore R0
+
+; Close the file
+10$:	MOVB	#CLSFQ,FIRQB+FQFUN ; Close function
+	MOVB	R0,FIRQB+FQFIL	; The channel of choice to close
+	CALFIP			; Do it
+
+; And update the channel mask
+	MOV	#1,R1		; Update IOCHAN mask
+	ASR	R0		; Channel * 1
+	MOV	R0,-(SP)	; Save that...
+12$:	ASL	R1		; New bit to turn off
+	SOB	R0,12$		; Keep going?
+	ASR	R1		; Fix things up
+	BIC	R1,IOCHAN	; New IOCHAN
+
+; Write out the logging infomation
+	MOV	(SP)+,R1	; Get back the channel number
+	BIT	#RS.OPN,RSTFLG	; Did we open the output file?		;015
+	BEQ	20$		; No, don't log it			;015
+	MUL	#CHNTBS,R1	; Make it into an index
+	MOV	CT.PPN+CHNTBL(R1),$IMGFI+C$PPN ; Load the ppn field
+	MOV	#10.,R0		;Length of ascii name
+	MOV	#$IMGFI+C$NAME,R3;Destination
+	MOV	#CT.NAM+CHNTBL,R2;First name entry
+	ADD	R1,R2		;Name entry for this channel
+15$:	MOVB	(R2)+,(R3)+	;Move the data
+	SOB	R0,15$		;Loop
+	MOVB	$RESMSK+C$PPN,R1 ;Pick up output programmer number	;025
+	CMPB	R1,#377		;Is it specific?			;025
+	BEQ	16$		;No, not this time			;025
+	MOVB	R1,$OLDFI+C$PPN	;Yes, so use it				;025
+16$:	MOVB	$RESMSK+C$PPN+1,R1 ;Pick up output project number	;025
+	CMPB	R1,#377		;Is it specific?			;025
+	BEQ	17$		;No, not this time			;025
+	MOVB	R1,$OLDFI+C$PPN+1 ;Yes, so use it			;025
+17$:	MOV	#$RESMSK+C$NAME,R1 ; R1 -> output name mask		;025
+	MOV	#$IMGFI+C$NAME,R2  ; R2 -> source name			;025
+	MOV	#$OLDFI+C$NAME,R3  ; R3 -> output name			;025
+	MOV	#10.,R0		   ; R0 = length of file name		;025
+18$:	MOVB	(R2)+,(R3)	; Copy a byte				;025
+	MOVB	(R1)+,R4	; Get a mask byte			;025
+	CMPB	R4,#'?		; Is it wild?				;025
+	BEQ	19$		; Yes, use IMGFI as is			;025
+	MOVB	R4,(R3)		; No, use mask byte instead		;025
+19$:	INC	R3		; Point to next slot			;025
+	SOB	R0,18$		; Loop for whole name			;025
+	CALL	FILLIS		; Write out the information in $IMGFI
+
+20$:	MOV	(SP)+,R4	; Restore R4				;025
+	MOV	(SP)+,R3	; Restore R3
+	MOV	(SP)+,R2	; Restore R2
+	MOV	(SP)+,R1	; Restore R1
+	RETURN
+
+GLOBAL	<$IMGFI,DATES,IMGCH1>
+
+.DSABL	LSB
+
+
+;+
+; WRTFIL - Write information from a buffer to a file or
+;	   Do initial setup for VFYFIL (verify mode)
+;
+; When we get here we already have a buffer with data in it, we just need
+; to map it and write it back out.
+;
+;	On entry:
+;	R0 -> Buffer control block
+;-
+
+.ENABL	LSB
+
+WRTFIL:	MOV	BT.PHY(R0),GD1BID ; Pick up the block ID		;024
+	MOV	R0,-(SP)	; Save R0
+	CALBX	MAPBUF,<#GD1BID,#DTAAVL,#GDBVA>				;024
+	MOV	(SP)+,R0	; Restore R0
+	MOV	#WCRA,@#FIRQB+FQFIL; Completion address
+	MOV	R0,@#FIRQB+FQPPN ; Our parameter (buffer control block)
+	MOV	#XRB,R1		; Pointer to the XRB
+	MOV	BT.IOC(R0),(R1)+; Buffer length
+	MOV	BT.IOC(R0),(R1)+; Bytes to be written
+	MOV	GDBVA,(R1)+	; Buffer virtual address		;024
+	MOVB	BT.CHN(R0),(R1)+; Channel number to write on
+	MOVB	BT.MSB(R0),(R1)+; MSB
+	MOV	BT.LSW(R0),(R1)+; LSW
+	CLR	(R1)+		; not used
+	CLR	(R1)		; modifier
+	BIT	#RS$VFY,RESSUB	; Are we in verify mode?
+	BEQ	10$		; No, continue
+	JMP	VFYFIL		; Yes, but don't handle it here
+10$:	TST	MODE		; Are we Async?
+	BEQ	15$		; Yes, sure are
+	.WRITE			; Poof
+	BR	16$		; Skip the .WRITA
+15$:	.WRITA			; Poof
+16$:	MOV	FIRQB,R2
+	BEQ	99$
+	CMPB	R2,#INUSE	; INUSE = 3 Busy?
+	BEQ	20$		; Yes, veg out
+	CMPB	R2,#NOBUFS	; NOBUFS = 40 Resource wait?
+	BEQ	20$		; Yes, veg out
+	BR	VFYERR		; Handle fatal errors
+
+20$:	CALL	SLEEP		; No resources, veg for a bit
+	BR	10$
+
+99$:	TST	MODE		;Are we async?
+	BEQ	199$		;Yes, exit fast
+	MOV	R0,@#FIRQB+FQPPN ; Parameter for WCRA (address)
+	CALL	WCRA		;If we're sync
+199$:	RETURN
+
+.DSABL	LSB
+
+
+;+
+; VFYFIL - Verify file information, called by WRTFIL after some
+;          setup of the FIRQB and XRB
+;
+;  Notes:
+;	o This always issues the call in async mode since only .READA
+;	  has read check
+;
+;	o On entry we are setup to do a .WRITA, so we change things (XRB)
+;	  around to do the .READA instead.
+;-
+
+.ENABL	LSB
+
+VFYFIL:	CLR	@#XRB+XRBC	; Byte count must be 0
+	MOV	#1,@#XRB+XRMOD	; Indicate read check
+
+10$:	.READA			; Do the .READA
+	MOV	FIRQB,R2
+	BEQ	99$
+	CMPB	R2,#3		; INUSE = 3 Busy?
+	BEQ	20$		; Yes, veg out
+	CMPB	R2,#40		; NOBUFS = 40 Resource wait?
+	BEQ	20$		; Yes, veg out
+
+VFYERR:	CRASH	R2		; Allow no other errors			;020
+
+20$:	CALL	SLEEP		; No resources, veg for a bit
+	BR	10$
+
+99$:	RETURN
+
+.DSABL	LSB
+
+;+
+;	IOERR - Handle I/O errors on .READ or .WRITE type requests
+;
+;	On entry:
+;	R0 -> Buffer control block
+;
+;	On exit:
+;	R0, R1, R2, R3, R4 - preserved or not changed
+;	R4, R5 - garbage (if used by cmessage)
+;-
+
+.ENABL	LSB
+
+IOERR:	MOV	R0,-(SP)	;Save it
+	MOV	R1,-(SP)	;Save it
+	MOV	R2,-(SP)	;Save it
+	MOV	R3,-(SP)	;Save it
+	MOV	R4,-(SP)	;Save it
+	CLR	R1		;Setup a work register
+	MOVB	BT.CHN(R0),R1	;Pick up the channel this happended on/for
+	ASR	R1		;*1
+	MUL	#CHNTBS,R1	;Turn it into a channel index
+	BITB	#CF$ER,CT.FLG+CHNTBL(R1);Is the channel already "in error"
+	BNE	99$		;Yes, we've already taken action
+	BISB	#CF$ER,CT.FLG+CHNTBL(R1);Now we're "in error"
+
+; Load the file name in case we need it
+
+	MOV	#10.,R4		;Length of ascii name
+	MOV	#$IMGFI+C$NAME,R3;Destination
+	MOV	#CT.NAM+CHNTBL,R2;First name entry
+	ADD	R1,R2		;Name entry for this channel
+5$:	MOVB	(R2)+,(R3)+	;Move the data
+	SOB	R4,5$		;Loop
+
+; Now print the correct error message
+
+	CLR	R2		;Setup R2
+	MOVB	BT.ERR(R0),R2	;Load R2 with the error
+	CMPB	R2,#NOROOM	;Did we run out of room?
+	BNE	7$		;No, so handle it
+	CRASH	R2		;We will not put up with NOROOM errors
+7$:	BIT	#RS$VFY,RESSUB	;During the verify pass?
+	BEQ	10$		;No, during the write pass
+	CMPB	#DATERR,R2	;Is this a data error?
+	BNE	20$		;No, it's an unexpected error during read
+
+; Error during verify (we expect these to happen a lot)
+
+	CMESSAGE #ERRVFD,<<CT.PPN+1+CHNTBL(R1),B>,<CT.PPN+CHNTBL(R1),B>,#10.,#$IMGFI+C$NAME>	
+	BR	99$		;And exit
+
+; Handle unexpected errors below
+
+10$:	CMESSAGE #UNXWRO,<<CT.PPN+1+CHNTBL(R1),B>,<CT.PPN+CHNTBL(R1),B>,#10.,#$IMGFI+C$NAME> ;018
+	CMESSAGE R2		;Tell them what happended
+	BR	99$		;And exit
+
+20$:	CMESSAGE #ERRVFD,<<CT.PPN+1+CHNTBL(R1),B>,<CT.PPN+CHNTBL(R1),B>,#10.,#$IMGFI+C$NAME>
+	CMESSAGE R2		;Tell them what happened
+	.BR	99$		;And continue		
+
+99$:	MOV	(SP)+,R4	;Restore R4
+	MOV	(SP)+,R3	;Restore R3
+	MOV	(SP)+,R2	;Restore R2
+	MOV	(SP)+,R1	;Restore R1
+	MOV	(SP)+,R0	;Restore R0
+	RETURN			;As if nothing happened
+
+GLOBAL	<ERRVFD,UNXWRO,UNXVRO,DATERR,NOROOM>
+
+.DSABL	LSB
+.END

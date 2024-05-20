@@ -1,0 +1,96 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /INIT:INIPFX/
+TITLE	SILNDX,<READ AND CHECK SIL INDEX>,0A,10-MAY-91,WJS
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for SILNDX
+
+;+
+;
+;  000	WJS  26-Sep-83	CREATION - Copied/modified from V8.0-06
+;
+;-
+
+.SBTTL	Order the CSECTs in memory
+
+	ORG	SILNDX		; SIL Index read/verify routine
+
+
+.SBTTL	Define SILBUF (I/O buffer)
+
+	GLOBAL	<SILBUF>	; I/O buffer is defined in base modules
+
+.SBTTL	SILNDX - read SIL index into SILBUF, check for validity
+
+;+
+; SILNDX - Read SIL index into memory from open file, check for validity
+;
+;	CALL	SILNDX,R5,<POINTER TO FIRQB>
+;
+;	SIL index has been read into SILBUF
+;	Z=1 if file is a valid SIL (i.e. BEQ valid)
+;	Z=0 if file is not a SIL (i.e. BNE invalid)
+;	R0 = number of blocks in SIL index
+;	R1 destroyed
+;-
+
+;SILNDX::
+	MOV	(R5)+,R1	; Point to FCB for SIL
+	ADD	#FQFCB,R1
+	CLR	FCNVB(R1)	; Read index (it starts at block 0)
+	MOV	#SI.SIZ/2,R0	; Set word count of maximum index
+	CALLX	READ.,R5,SILBUF	; Read index into SILBUF
+	MOV	#SILBUF,R0	; Point to index buffer
+	CMP	(R0),#1		; How many entries does the SIL have ?
+								.ASSUME SI.NUM EQ 0
+	BLO	50$		; None ??
+	BEQ	10$		; One entry => go check checksum
+	CMP	(R0),#SI.NMD	; Does it have too many entries ?
+	BHI	50$		; Yes => return Not Equal (it's invalid)
+10$:	CLR	-(SP)		; Clear a word on the stack
+20$:	MOV	(R0)+,R1	; Get a word of the index
+	XOR	R1,(SP)		; Make a checksum
+	CMP	R0,#SILBUF+SI.CHK+2	; Was that the checksum word we just did ?
+	BLO	20$		; Not yet
+	TST	(SP)+		; Yes, is the result 0?
+	BNE	50$		; No, error
+	CMP	(R0)+,#^RSIL	; Well, make final check on SIL index
+								.ASSUME SI.SIL EQ SI.CHK+2
+	BNE	50$		; Return Not Equal if invalid
+	MOV	SILBUF+SI.NUM,R1  ; Get number of entries in SIL index
+	CLR	R0		; Zero a counter for index blocks
+	INC	R0		; Increment index block counter for 1st block
+	SUB	#SI.1ST,R1	;   and count the entries it could contain
+	BLOS	40$		; That's it, one block.  => all done
+25$:	INC	R0		; Increment index block counter for another block
+	SUB	#SI.OTH,R1	;   and count the entries it could contain
+	BHI	25$		; More entries to account for => continue
+	MOV	R2,-(SP)	; Save a register
+	MOV	#SILBUF+SI.MOR,R1  ; R1 -> beginning of index's second block
+	MOV	#SILBUF+SI.RST,R2  ; R2 -> where to move it down to
+30$:	MOV	(R1)+,(R2)+	   ; Move down one word
+	CMP	R1,#SILBUF+SI.SIZ  ; Have we moved all possible index blocks ?
+	BLO	30$		   ; No => go move another word
+	MOV	(SP)+,R2	; Restore R2
+40$:	SEZ			; Indicate goodness (BEQ will now succeed)
+50$:	RETURN	R5
+	.END

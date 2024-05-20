@@ -1,0 +1,203 @@
+.INCLUDE	%CMN:COMMON%
+.INCLUDE	%SYSTEM:CMNDEF%
+
+TITLE	GETREQ,<Sequential Request Get Routine>,0F,13-NOV-89,DBM
+
+;
+;		COPYRIGHT (c) 1974, 1989 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	GETREQ Edit History
+;+
+; EDIT	BY	DATE		REASON
+; 000	DBM	11-Jan-90	Creation
+;-
+
+.SBTTL	Program description
+
+;+
+; The GETREQ routine is called by OMSMGR to read a request record from
+; the OMS log file.  The OMSREQ map is the destination of the GET
+;
+; If the log file is not yet open, GETREQ will open it.
+;
+; The GETCLS routine can be called to close the log file.
+; (Since a CLOSE statement from BP2 will have no effect)
+;-
+
+.SBTTL	Define the PSECTS
+
+	.PSECT	GETRED,RW,D,GBL,REL,OVR	; Data area for GET routine
+	.PSECT	GETREQ,RO,I,GBL,REL,CON	; Code area for GET routine
+
+.SBTTL	Main program logic
+
+	.ENABL	LSB
+
+GETREQ::NOP				; For debugging, *** remove ***
+	CALLX	CLRFQB			; Clear out the FIRQB
+	MOVB	#UU.FCB,FIRQB+FQFUN	; Get open file statistics
+	MOVB	LOG.CH,FIRQB+FQFIL	; For log file channel
+	.UUO				; Do it
+	MOVB	FIRQB,R0		; Any error?
+	BEQ	10$			; No, so file is already open
+	CALL	80$			; Yes, so we need to open the file
+10$:	TST	AT.BEG			; Read attributes of file yet?
+	BNE	20$			; Yes, on with the show
+	CALL	150$			; Get attributes for this file
+20$:	CMP	CU.BLK,AT.USZ		; Reached EOF yet?
+	BLOS	30$			; Nope
+	CMP	CU.BLK+2,AT.USZ+2	; Maybe, block is a longword
+	BLOS	30$			; Nope
+	CMP	CU.OFF,AT.OFF		; Last block, check offset
+	BLO	30$			; EOF not yet reached
+	MOV	#EOF,R0			; Set error code in R0
+ERROR:	TRAP	377			; Return error in R0 to BP2
+
+30$:	MOV	#BUFBEG,R1		; Fetch pointer to I/O buffer
+	ADD	CU.OFF,R1		; Compute pointer into I/O buffer
+40$:	CMP	R1,#BUFEND		; Finished with this buffer?
+	BLO	45$			; Nope, go fetch length of record
+	CALL	110$			; Yes, increment block and zero buffer
+	CALL	100$			; Read next buffer
+45$:	MOV	(R1)+,R3		; Fetch length of record from buffer
+	MOV	#156.,R0		; Preset "Size of record too large"
+	CMP	R3,#RECSIZ		; Is record really too big?
+	BHI	ERROR			; Yep, return error to BP2
+	INC	R3			; Round record length up...
+	ASR	R3			; To compute length in words
+	MOV	#OMSREQ,R2		; Fetch pointer to OMSREQ buffer
+50$:	CMP	R1,#BUFEND		; Finished with this buffer?
+	BLO	60$			; Nope, go fetch a word
+	CALL	110$			; Yes, increment block and zero buffer
+	CALL	100$			; Read next buffer
+60$:	MOV	(R1)+,(R2)+		; Copy a word of data
+	SOB	R3,50$			; Loop until record is copied
+70$:	SUB	#BUFBEG,R1		; Convert pointer back into offset
+	MOV	R1,CU.OFF		; Store offset back in local data area
+	RETURN				; Return to caller
+
+80$:	CALL	140$			; Run log file name thorugh .FSS
+	MOVB	#OPNFQ,FIRQB+FQFUN	; Set OPEN FOR INPUT function
+	MOVB	LOG.CH,FIRQB+FQFIL	; Channel number * 1
+	ASLB	FIRQB+FQFIL		;                * 2
+	MOV	#114400,FIRQB+FQMODE	; Set Read-regardless, cache:SEQ modes
+	CALFIP				; Try to open the file
+	MOVB	FIRQB,R0		; Any error?
+	BNE	ERROR			; Yes.  Return error to BP2
+	BR	SETBOF			; No, set current pointers to BOF
+
+100$:	CALLX	CLRXRB			; Clear out the XRB
+	MOV	#XRB,R0			; Get handy pointer
+	MOV	#BUFEND-BUFBEG,(R0)+	; Length of input buffer
+	CLR	(R0)+			; Must be zero, for a .READ
+	MOV	#BUFBEG,(R0)+		; Starting address of buffer
+	MOVB	LOG.CH,(R0)		; Channel number * 1
+	ASLB	(R0)+			;                * 2
+	MOVB	CU.BLK,(R0)+		; MSB of block number
+	MOV	CU.BLK+2,(R0)		; LSB of block number
+	.READ				; Do it
+	MOVB	FIRQB,R0		; Any error?
+	BNE	ERROR			; Yes, give it to BP2
+	RETURN				; No, return to caller
+
+110$:	ADD	#BUFSIZ,CU.BLK+2	; Update low order blocks read
+	ADC	CU.BLK			; Update high order blocks read
+120$:	CLR	-(R1)			; Zero out the buffer
+	CMP	R1,#BUFBEG		; Back at beginning yet?
+	BNE	120$			; No, keep looping
+	RETURN				; Back to caller
+
+140$:	CALLX	CLRFQX			; Clear out FIRQB and XRB
+	MOV	#XRB,R0			; Get handy pointer
+	MOV	#LOGNML,(R0)		; Length of file name string
+	MOV	(R0)+,(R0)+		; Two places
+	MOV	#LOGNAM,(R0)		; Pointer to file name
+	.FSS				; Run it through .FSS
+	RETURN
+
+150$:	CALLX	CLRFQB			; Clear out the FIRQB
+	MOV	#FIRQB+FQFUN,R0		; Get handy pointer
+	MOVB	#UU.ATR,(R0)+		; Function is file attributes
+	MOVB	LOG.CH,(R0)+		; For log file channel
+	CLRB	(R0)+			; Set flag to read attributes
+	.UUO				; Read the attributes
+	MOVB	FIRQB,R0		; Any error?
+BNE.ER:	BNE	ERROR			; Yes, return it to BP2
+	MOV	#AT.BEG,R1		; Point to attributes area
+	MOV	#FIRQB+FQPPN,R0		; Point to returned attributes
+	MOV	#AT.CNT,R4		; Set count of attributes
+160$:	MOV	(R0)+,(R1)+		; Copy a word out of the FIRQB
+	SOB	R4,160$			; Loop until done
+	MOV	#240,R0			; Preset "?Attributes not matched" error
+	CMP	AT.BEG,#1003		; Correct file/record format?
+	BNE	BNE.ER			; No
+	CMPB	AT.VFC,#HDRSIZ		; Correct header size?
+	BNE	BNE.ER			; No
+	TST	AT.MRL			; Correct record size?  (Must be 0)
+	BNE	BNE.ER			; No
+	RETURN				; Return to caller
+
+	.GLOBL	EOF,NOSUCH,FUNERR
+	.DSABL	LSB
+
+GETCLS::				; SUB to close the log file
+	CALLX	CLRFQB			; Clear out the FIRQB
+	MOVB	LOG.CH,FIRQB+FQFIL	; Set channel # * 1
+	ASLB	FIRQB+FQFIL		;               * 2
+	CALFIP				; Close the file
+	MOVB	FIRQB,R0		; Any error (Shouldn't be, but...)
+	BNE	BNE.ER			; Yes???????????
+SETBOF::CLR	CU.BLK			; Clear out current block values
+	CLR	CU.BLK+2		;  both words
+	MOV	#<BUFEND-BUFBEG>,CU.OFF	;  so current location is 0:512
+	CLR	AT.BEG			; Signal attributes need to be read
+	RETURN				; Back to caller
+
+	.PSECT	GETRED			; Data section for GETREQ
+
+; Log file name
+
+LOGNAM:	.ASCII	"OMS$:REQLOG.OMS"
+LOGNML	=: .-LOGNAM
+
+; Attribute area:
+
+	.EVEN
+AT.BEG:					; Beginning of attribute area
+AT.RFM:	.BLKW0				; Record format/attr and file org
+AT.LRL:	.BLKW0				; Largest record length in file
+AT.FSZ:	.BLKW0	2			; File size
+AT.USZ:	.BLKW0	2			; Current # of blocks in use
+AT.OFF:	.BLKW0				; Offset to next available byte in block
+AT.BKT:	.BLKB0				; Bucket size
+AT.VFC:	.BLKB0				; Fixed header size (VFC format)
+AT.MRL:	.BLKW0				; Maximum record length
+AT.END:
+AT.CNT	=: <AT.END-AT.BEG>/2		; # of attributes
+
+CU.BLK:	.BLKW0	2			; Current block in buffer
+CU.OFF:	.WORD	BUFEND-BUFBEG		; Offset in buffer (Initialize to 0:512)
+
+; I/O buffer
+
+BUFBEG:	.BLKB0	512.			; One block buffer
+BUFEND:
+BUFSIZ	=: <.-BUFBEG>/512.		; Size of buffer in blocks
+
+	.END

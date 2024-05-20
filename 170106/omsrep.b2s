@@ -1,0 +1,100 @@
+1	SUB REPLY (WORD BRDCST.FLG)
+	!		PROGRAM		: OMS.TSK			 &
+	!		PACKAGE		: OMS				 &
+	!		MODULE		: REPLY.B2S			 &
+	!****************************************************************& 
+	!								 & 
+	!		  C O P Y R I G H T				 & 
+	!								 & 
+	!								 & 
+	!		      Copyright (C) 1983, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.		 & 
+	!								 & 
+	!								 & 
+	! This software is furnished under a license and may be used and & 
+	! copied  only  in accordance with the terms of such license and & 
+	! with the  inclusion  of  the  above  copyright  notice.   This & 
+	! software  or  any  other copies thereof may not be provided or & 
+	! otherwise made available to any other person.  No title to and & 
+	! ownership of the software is hereby transferred.		 & 
+	!								 & 
+	! The information in this software is subject to change  without & 
+	! notice  and should not be construed as a commitment by Digital & 
+	! Equipment Corporation.					 & 
+	!								 & 
+	! DIGITAL assumes no responsibility for the use  or  reliability & 
+	! of its software on equipment that is not supplied by DIGITAL.	 & 
+	!								 & 
+	!****************************************************************&
+	! ++
+	! This routine expects the reply to be in the mapped area OMSREP &
+	! and the original request to be in the mapped area OMSREQ.  If	 &
+	! the reply's status is pending or the OMS work file status is	 &
+	! "keep requests", the reply is stored in the work file.  If the &
+	! reply's status is other than pending and the OMS work file	 &
+	! status is "don't keep requests", this module calls the DELREQ	 &
+	! to delete any other pending replies to the request and the	 &
+	! original request.  When the reply is kept in the work file and &
+	! it's status in not pending, the request's action key and index &
+	! are cleared, and the the request's status is set to the status &
+	! of the reply.  When the reply's status is pending, the	 &
+	! request's action time and index are updated.  This routine	 &
+	! also checks the special case of OMS shutting down with a	 &
+	! /NOABORT.  In this case, the STOP.OMS flag is set when the	 &
+	! current pending request count becomes zero.  The OMSREP map is &
+	! always  copied into OMSREQ map before returning to the caller	 &
+	! because the broadcast routine expects it to be there.		 &
+	! --
+
+
+
+	OPTION TYPE = EXPLICIT
+
+	%INCLUDE "SYSTEM:CMNDEF.B2S"
+	%INCLUDE "SYSTEM:OMSCMN.B2S"
+
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("REPLY Entered", 1%)		!  Tell'em they're here
+    %END %IF
+
+ REPLY_START:
+	CFM.FLD = REQ.NUM			! Set up for SNDCFM
+	CALL SNDCFM				! Send the reply
+	IF (REQ.NUM = 0%)			! Did SNDCFM abort request?
+	THEN
+	   OMSREQ = OMSREP			! Yes, set up for possible cfm
+	   REQ.NUM = 0%				!   but make sure seq # = 0%
+	   GOTO REPLY_END			!   all done in here
+	END IF
+
+	IF REP.STS = STS.PEN			! Reply still pending?
+	THEN
+	  REQ.REM = REM.START			! Yes, restart action time index
+	  CALL GETDAT BY REF			!   Load up new reminder time &
+		(REQ.ACT BY DESC, FALSE,	!     into action field	      &
+			REM.MAX / REQ.REM)	!     based on delta time
+	ELSE
+	  REQ.NUM = 0%				! No, mark slot data as invalid
+	  PNDREQ(SLOT.NUM) = 0%			!   Make this slot available
+	  IF STOPPING.OMS AND (NOT STOP.OMS)	!   STOP/NOABORT in progress?
+	  THEN
+	    PND.REQ.CNT = PND.REQ.CNT - 1%	!   Yes, decrement pending count
+	    STOP.OMS = (PND.REQ.CNT = 0%)	!     and set STOP flag if zero
+	  END IF
+	END IF
+
+	CALL PUTSYS BY REF(SLOT.NUM,OMSREQ)	! Update the sys file
+	UPD.ACT = TRUE				! Need to get new event time
+	OMSREQ = OMSREP				! Put reply in common I/O buffer
+	CALL PUTREQ BY REF(OMSREQ) IF KEEP.REQ	! Write reply to log file
+	CALL BRDCST IF BRDCST.FLG		! Do the broadcast, if needed
+
+
+ REPLY_END:
+
+    %IF %DEBUG %THEN
+	JUNK = DBG("REPLY Exit", -1%)		!  Tell em we're leaving
+    %END %IF
+
+	SUBEND

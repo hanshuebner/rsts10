@@ -1,0 +1,499 @@
+.INCLUDE	%CMN:COMMON%
+TITLE	XMIT,<MESSAGE SENDER>,0A,10-MAY-91,SJM/PRL/KCG/DBM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR XMIT
+;+
+;
+;  001	SJM  23-Sep-82	CREATION - And it was a good thing
+;  002	PRL  10-Feb-84	Support sends by local object type
+;			Support sending URP confirmation packets
+;  003	PRL  15-May-84	Change layout of XMIT header
+;			Add code to support type 4 (send URP)
+;  004	KCG  15-May-84	Add .INKLUDGEs and LOT macro call
+;  005	KCG  18-Jun-84	Add code to support to Send by Job no + Rcvr ID.
+;
+;			[RSTS/E V10.0]
+;  006	DBM  29-Jun-89	Add OMS support
+;  007	DBM  26-Oct-89	Modify retry paramters
+;  008	DBM  26-Dec-89	Define a low priority XMIT queue for OMS messages
+;
+;-
+
+.SBTTL	MACROS - SUCK IN NEEDED MACROS
+
+	.LIBRARY	%SYSTEM:PBSMAC%
+
+	.MCALL	SKDJDB,SKDSTA
+	.MCALL	PSECTS,BITDEF,SAVREG
+	.MCALL	FQBERR,CR$LF
+	.MCALL	SUBRIB,GETLUN,RETLUN,GETBUF,RETBUF,MOVSTR
+	.MCALL	GETDEV,RETDEV
+	.MCALL	STALL,XMIT,XMITM,XMTBLK,LOT
+
+	SKDJDB
+	SKDSTA
+	PSECTS
+	BITDEF
+	CR$LF
+	XMTBLK
+	LOT
+
+.SBTTL	XMITQM	- QUEUE UP AN UNMAPPED ASYNC SEND OR BROADCAST MESSAGE
+.SBTTL	XMITQ	- QUEUE UP AN ASYNC SEND OR BROADCAST MESSAGE
+
+;+
+;
+; XMITQM::
+; XMITQ::
+;
+;
+; INPUTS:
+;		R0 -> MESSAGE BLOCK
+;
+; CALL:
+;	JSR	PC,XMITQ
+;
+;
+; BACK:
+;		ALL REGISTERS PRESERVED
+;
+;
+; THIS ROUTINE WILL LINK A MESSAGE ONTO THE END OF THE PENDING XMIT QUEUE
+; AND THEN REQUEST THE XMIT SUB-PROCESS
+;
+;-
+
+	.PSECT	XMITER,RO,CON
+
+XMITQM::SAVREG
+	BIT	#BIT0,R0		;IS MESSAGE PROPERLY WORD ALIGNED?
+	BNE	10$			;NO SO ERROR
+	MOV	R0,R3			;SET R3 AS A POINTER TO THE INPUT
+	TST	(R0)+			;SKIP TO THE LENGTH FIELD
+	MOV	(R0),R1			;SETUP SIZE
+	BEQ	10$			;ZERO LENGTH SO ERROR
+	MOV	R1,R4			;SAVE THE SIZE OF INPUT
+	ASR	R4			;MAKE R4 A WORD COUNT
+	BCS	10$			;Odd byte count, so error	;006
+	CLR	R2			;SET AS A GET
+	GETBUF	R0,R1,CLEAR
+	BCC	20$			;
+10$:	SEC				;ENSURE ERROR RETURN
+	RETURN				;NO ROOM OR ILLEGAL REQUEST
+
+20$:	MOV	R0,R5			;SAVE ADDRESS OF BLOCK
+	MOV	R1,R2			;SAVE THE REAL LENGTH FOR A BIT
+	ASR	R1			;GET WORD COUNT OF LENGTH
+30$:	MOV	(R3)+,(R5)+		;COPY UNMAPPED INTO MAPPED MEMORY
+	SOB	R4,30$
+	MOV	R2,XMITLN(R0)		;FIX TO REFLECT THE REAL LENGTH
+	.BR	XMITQ			;AND FALL INTO THE MAPPED QUEUE
+
+XMITQ::	CMP	XMITLN(R0),#XMITFX	;IS MESSAGE AT LEAST THE MIN LENGTH?
+	BLO	30$			;NO, SO RETURN THE ERROR
+	PUSH	<R1,R2>			;SAVE TWO WORKING REGS
+	MOV	#XMITLH,R2		;GET ADDRESS OF LIST HEAD
+	TST	XMITAL(R0)		;Is this an OMS message block?	;008
+	BEQ	10$			;Nope.  We're all set		;008
+	MOV	#XMT2LH,R2		;Yes.  Get secondary list head	;008
+	INC	XMTCNT			;Inc # messages currently queued;008
+10$:	MOV	R2,R1			;SAVE ADDRESS OF PREVIOUS
+	MOV	(R1),R2			;GET ADDRESS OF NEXT
+	BNE	10$			;CONTINUE TILL WE FIND THE LAST
+	MOV	R0,(R1)			;MAKE US THE LAST
+	CLR	(R0)			;AND MAKE SURE IT'S REALLY LAST
+	CLRB	XMITRT(R0)		;AND SET UP A RE-TRY COUNTER
+	POP	<R2,R1>			;RESTORE THE WORKING REGS
+	PUSH	SJOB			;SAVE CURRENT JOB
+	MOV	#P.XMIT,SJOB		;SETUP XMIT AS CURRENT JOB
+	PUSH	R5			;SAVE R5
+	CALLX	GETJDB			;GET A POINTER TO THE XMIT JDB
+	TST	(R5)+			;SKIP TO THE SLEEP TIMER
+	TST	XMITAL(R0)		;Is this an OMS message block?	;008
+	BEQ	15$			;Nope.  So cancel current sleep	;008
+	CMP	#-1,(R5)		;Is a sleep time already set?	;008
+	BNE	20$			;Yes, don't override it		;008
+15$:	CLR	(R5)			;Request XMIT ASAP		;008
+	.ASSUME	SLEP EQ 2
+20$:	POP	R5			;RESTORE R5
+	POP	SJOB			;AND THE REAL JOB NUMBER
+	TST	(PC)+			;CLEAR CARRY
+30$:	SEC				;OR SET CARRY AND
+	RETURN
+
+	GLOBAL	<P.XMIT,SJOB>
+
+	.SAVE
+	.PSECT	GIMPURE
+
+XMITLH:	.WORD	0			;LIST HEAD FOR THE XMIT QUEUE
+XMT2LH:	.WORD	0			;List head for OMS XMIT queue	;008
+XMTCNT:	.WORD	0			;Count of OMS messages in queue	;008
+
+	.RESTOR
+
+.SBTTL	XMITDQ	- DEQUEUE A SEND OR BROADCAST MESSAGE
+
+;+
+;
+; XMITDQ:
+;
+;
+; INPUTS:
+;	R0 ->	Message to be de-queued
+;
+;
+; CALL:
+;	JSR	PC,XMITDQ
+;
+;
+; BACK:
+;		ALL REGISTERS PRESERVED
+;
+;
+; This routine will de-link the first message from the appropriate
+; XMIT queue and then de-allocate it
+;
+;-
+
+XMITDQ:SAVREG
+	MOV	R0,R2			;Copy pointer to message block	;008
+	TST	XMITAL(R2)		;Is this an OMS message block?	;008
+	BNE	10$			;Yes.  De-queue from that list	;008
+	MOV	(R2),XMITLH		;Delink msg, setting nxt as 1st	;008
+	BR	20$			;Go return the buffer		;008
+
+10$:	MOV	(R2),XMT2LH		;Delink msg, setting nxt as 1st	;008
+	DEC	XMTCNT			;Count this OMS message as sent	;008
+	.BR	20$			;Go return the buffer		;008
+
+20$:	MOV	XMITLN(R2),R1		;R1 = Length of buffer		;008
+	RETBUF	R2,R1			;Return buffer to pool		;008
+	RETURN				;Back to caller			;008
+
+.SBTTL	XMIT	- SEND OR BROADCAST MESSAGE
+
+;+
+;
+; XMIT::
+;
+;
+; INPUTS:
+;		R0 -> MESSAGE BLOCK
+;
+; CALL:
+;	JSR	PC,XMIT
+;
+;
+; BACK:
+;		ALL REGISTERS PRESERVED
+;
+;	THIS ROUTINE ATTEMPTS TO SEND OR BROADCAST THE FIRST FIRST
+;	MESSAGE PACKET ON THE XMIT QUEUE, IT WILL RETRY A FIXED NUBER
+;	OF TIMES ON RECOVERABLEERRORS OR TOSS THE MESSAGE ON NON-RECOVERABLE
+;	ERRORS OR IN THE CASE OF RETRY TIME OUTS. AFTER THE MESSAGE HAS BEEN
+;	SENT OR TOSSED, IT IS DEQUEUED AND DEALLOCATED, AND WE START ON THE
+;	NEXT ITEM ON THE QUEUE....
+;-
+
+XMIT::	MOV	XMITLH,R0		;GET ADDRES OF FIRST ITEM
+	BNE	5$			;Got one, check out the targets	;008
+	MOV	XMT2LH,R0		;No hi-priority msg, get 1st OMS;008
+	BEQ	110$			;No messages at all.  Exit	;008
+5$:	MOVB	XMITCT(R0),R1		;GET COUNT OF TARGETS
+	BEQ	100$			;NOTHING HERE SO RETURN BUFFER
+	MUL	#XMITTL,R1		;NOW IS LENGTH OF TARGET AREA
+	ADD	#XMITFX,R1		;PLUS FIXED LENGTH=OFFSET TO DATA
+	MOV	XMITLN(R0),R2		;GET RAW LENGTH
+	SUB	R1,R2			;NOW IS LENGTH OF DATA
+	BEQ	100$			;NO DATA, SO RETURN BUFFER
+	ADD	R0,R1			;NOW POINT TO DATA
+	MOVB	XMITCT(R0),R3		;GET COUNT OF TARGETS
+
+; R0 -> PACKET
+; R1 -> DATA
+; R2  = LENGTH OF DATA
+; R3  = COUNT OF TARGETS
+
+	MOV	R0,R4			;GET ADDRESS OF PACKET
+	ADD	#XMITFX-XMITTL,R4	;NOW ALMOST HAVE ADDR OF FIRST TARGET
+10$:	ADD	#XMITTL,R4		;NOW HAVE ADDRESS OF NEXT TARGET
+
+; R4  = START OF TARGET DEFINITION
+
+	CMP	#-1,(R4)		;HAVE WE FINISHED THIS ONE?
+	BEQ	90$			;YES, SO ON TO THE NEXT
+	TSTB	(R4)			;Broadcast or send?		;006
+	BEQ	20$			;broadcast if zero		;002
+	CALL	SND			;we want some kind of send	;002
+	BR	30$			;AND JOIN COMMON CODE
+
+20$:	CALL	BRO			;WE WANT A BROADCAST
+30$:	CLR	-(SP)			;Come back quick as the default	;008
+	TST	R5			;ANY ERRORS?
+	BEQ	80$			;NO
+	BMI	60$			;No, we need to be rescheduled	;008
+	TST	XMITAL(R0)		;Is this an OMS message block?	;008
+	BEQ	40$			;Nope.  We're all set		;008
+	CMP	XMTCNT,#10.		;Already have too many messages?;008
+XMTMAX	== .-2
+	BHI	80$			;Yep.  Don't waste the memory	;008
+40$:	CMPB	#30.,XMITRT(R0)		;HAS THE RETRY COUNT EXPIRED?
+$$RTRY	== .-4
+	BLT	80$			;YES SO CHUCK THE MESSAGE
+	INCB	XMITRT(R0)		;SHOW US ON THE NEXT RE-TRY
+	CMPB	#20.,XMITRT(R0)		;Have we tried this a lot?	;008
+	BGE	50$			;NO, SO USE THE SHORT TIMER
+	MOV	#3,(SP)			;Use a moderate timer		;008
+50$:	CMP	#NOBUFS,R5		;WAS ERROR NO SMALL BUFFS?
+	BEQ	60$			;YES
+	CMP	#NOROOM,R5		;WAS ERROR NO ROOM
+	BNE	80$			;NO SO TOSS THE MESSAGE
+	ADD	#5,(SP)			;Yes, sleep a little longer	;006
+60$:	STALL	(SP)+			;REQUEST A RETRY LATER
+
+80$:	POP				;TRASH THE SLEEP TIMER
+	CLRB	XMITRT(R0)		;AND RE-SET THE RE-TRY COUNTER
+	MOV	#-1,(R4)		;SHOW THIS TARGET AS DONE
+90$:	SOB	R3,10$			;IF ANY TARGETS LEFT GO DO THE NEXT
+100$:	CALL	XMITDQ			;RETURN THE BUFFER
+	BR	XMIT			;AND GO DO ANOTHER
+
+110$:	STALL	#-1			;SLEEP FOR A LONG TIME
+
+	GLOBAL	<NOBUFS,NOROOM,NOSUCH>
+
+.SBTTL	SND	- SEND MESSAGE
+
+;+
+;
+; SND:
+;
+;
+;INPUTS
+;	R0 -> PACKET
+;	R1 -> DATA
+;	R2  = LENGTH OF DATA
+;	R4 -> target definition block:					
+;
+;		+0 (byte) send mode (byte):
+;			1 = send by job no. or local object
+;			2 = send by receiver ID
+;			3 = return URP confirmation ( Rcvr ID + Job no. )
+;			4 = send URP/ORP message
+;		+1 (byte) job-no*2 or LOT (1), 0 (2,3), req type (4)
+;		+2 (word) 0 or 1st 2 chars of ID (2,3), LOT (4)
+;		+4 (word) 0 or next 2 chars of ID
+;		+6 (word) 0 or last 2 chars of ID
+;
+; CALL:
+;
+;	JSR	PC,SND
+;
+;BACK
+;	R5  = ERROR CODE OR ZERO
+;
+;		ALL OTHER REGISTERS PRESERVED
+;
+; THE MESSAGE IS SENT TO THE RECEIVER BY SEND RECEIVE, OR AN ERROR
+; OCCURS.
+;
+; Rewrite occured via 002, 003, and 005  (KCG) 18-Jun-84
+;-
+
+	.ENABL 	LSB
+
+SND:	SAVREG				;save all regs	
+	CALLX	CLRFQX			;clear the FIRQB & XRB
+	MOVB	#-11.,FIRQB+4		;load send w privs subfun
+	MOVB	(R4)+,R3		;R3 = send code	
+	CMPB	R3,#2			;2 = send by rcvr name?
+	BEQ	30$			;yes, so go do it
+	BLO	10$			;1 = send by job no. or LOT
+	CMPB	R3,#3			;3 = return URP confirmation?
+	BEQ	20$			;yes, so go do it
+					;4 = send URP/ORP message	;006
+	MOVB	(R4)+,FIRQB+24		;load request type byte		;006
+	MOVB	(R4),FIRQB+5		;load receiver's LOT		;006
+	BR	40$			;and join common
+
+10$:	MOVB	(R4),FIRQB+5		;load job no./local obj	
+	BR	40$			;and join common
+
+20$:	MOV	R1,R0			;get pointer to URP data
+	MOVB	(R4),@#FIRQB+5		;load in job number with this rcvr
+	BISB	#BIT0,@#FIRQB+5		;ensure bit0 is set
+	MOVSTR	R0,#FIRQB+24,#6		;copy 3 URP words into FIRQB
+	CLR	R2			;don't send any data
+	MOVB	#-1.,FIRQB+4		;send without privs
+30$:	INC	R4			;skip over job no/lot byte
+	MOVSTR	R4,#FIRQB+6,#6		;copy rcvr ID into FIRQB
+	.BR	40$			;and join common
+
+40$:	MOV	R2,XRB+XRLEN		;load length of data buffer
+	MOV	R2,XRB+XRBC		;send it all
+	MOV	R1,XRB+XRLOC		;load data buffer addr
+	.MESAG				;send it
+	CLR	R5			;clear reg to hold error code
+	BISB	FIRQB+0,R5		;load error code
+	MOV	R5,TOS.R5(SP)		;return error code in R5
+	RETURN				;and exit
+
+	.DSABL	LSB
+
+.SBTTL	BRO	- BROADCAST MESSAGE
+
+;+
+;
+; BRO:
+;
+;
+;INPUTS
+;	R0 -> PACKET
+;	R1 -> DATA
+;	R2  = LENGTH OF DATA
+;	R4  = Target definition block:
+;		,-------+-------.
+;		|  Job	|   0	|
+;		|-------+-------|
+;		|Starting offset|
+;		|---------------|
+;		|Current offset |
+;		|---------------|
+;		|[p,pn] of onwer|
+;		`---------------'
+; CALL:
+;	JSR	PC,BRO
+;
+; BACK:
+;	R5  = ERROR CODE OR ZERO
+;
+;		ALL OTHER REGISTERS PRESERVED
+;
+; Rewrite occurred for /NOTIFY support during edit 006 - DBM
+;-
+
+BRO:	CLR	R5			; Assume we'll be done with target
+	SAVREG				; Save the world
+	SUB	XMITLN(R0),R2		; Convert message buffer length...
+	ADD	XMITAL(R0),R2		; ...to actual message length
+	MOV	(PC)+,R3		; Fetch # of jobs to check per run burst
+..BRCT::.WORD	8.			; (Patch here to tune performance)
+10$:	MOV	R4,R5			; Copy targer pointer @ current job
+	INC	R5			; Point to current job #
+.ASSUME	XMITJB	EQ XMITTG+1
+	CALLX	CLRFQB			; Clear out the FIRQB
+	MOVB	#UU.SYS,@#FIRQB+FQFUN	; Function is Return Job Information
+	;CLRB	@#FIRQB+FQSIZM		;  subcode 0
+	MOVB	(R5),@#FIRQB+FQFIL	; This job #
+	BNE	20$			; Proceed if we've been thru already
+	PUSH	R1			; Save R1 for a millisec...
+	ADD	XMITSO(R4),R1		; First time in, point to message
+					; (R1 guaranteed odd by SNDOMS.MAC)
+	MOVB	#7,(R1)+		; Change ORP message into /NOTIFY msg
+	MOV	#<12*400>+15,(R1)	;  by inserting <BEL><CR><LF>
+	POP	R1			; Restore registers
+	BR	30$			; Now start with job 1
+
+20$:	.UUO				; Real job.  Find out about it
+	CMPB	@#FIRQB,#BADFUO		; Tried a job > JOB MAX?
+	BEQ	50$			; Yes, so we're all done
+	FQBERR	30$			; No, any other errors means no job
+	CMP	XMITPN(R4),@#FIRQB+FQPFLG ; Do the [p,pn]'s match?
+	BNE	30$			; Nope.  Next job
+	CALL	DOBRO			; Go do the broadcast
+	BCS	30$			; Couldn't be done, try next job
+	CMP	XMITCO(R4),R2		; Are we done yet?
+	BEQ	30$			; Yes, try the next job
+	CMPB	$$RTRY,XMITRT(R0)	; Will we retry this KB?
+	BLO	40$			; Yes, so that's what we'll do
+30$:	INCB	(R5)+			; Try the next job
+.ASSUME	XMITSO	EQ XMITJB+1
+	MOV	(R5)+,(R5)		; Reset the starting offset
+.ASSUME	XMITCO	EQ XMITSO+2
+	CLRB	XMITRT(R0)		; Start over with retries
+	SOB	R3,10$			; Stay here if we have the time
+	DEC	TOS.R5(SP)		; This run burst is used up	;008
+	BR	50$			; So get out			;008
+
+40$:	MOVB	#NOBUFS,TOS.R5(SP)	; Y'all come back now, heah?
+50$:	RETURN
+
+	GLOBAL	<PRVIOL,BADFUO>
+
+.SBTTL	DOBRO	- ACTUAL BROADCASTER
+
+;+
+;
+; DOBRO:
+;
+;
+;INPUTS
+;	R0 -> PACKET
+;	R1 -> DATA
+;	R2  = LENGTH OF DATA
+;	R4 -> Target destination packet
+;
+;	@#FIRQB+FQSIZM = Destination KB number
+;
+; CALL:
+;	JSR	PC,DOBRO
+;
+;
+;BACK
+;
+;		ALL OTHER REGISTERS PRESERVED
+;
+;-
+
+DOBRO:	SAVREG
+	MOVB	@#FIRQB+FQSIZM,R3	; Get the job's console KB number
+	BMI	20$			; It's detached, so forget this guy
+	CALLX	CLRXRB			; Clear XRB
+	MOV	XMITCO(R4),R5		; Get the current data offset
+	SUB	R5,R2			; Compute length to send
+	ADD	R5,R1			; And starting address of the data
+	MOV	#XRB,R0			; R0 -> XRB
+	MOV	#6.,(R0)+		; Function is broadcast
+	MOV	R2,(R0)+		; Store length of data
+	MOV	R1,(R0)+		; Store address of data
+	MOV	#<TTYHND*400>,(R0)+	; Terminal handler in high byte
+	MOV	R3,(R0)			; Store KB number
+	.SPEC				; Do the broadcast
+	SUB	@#XRB+XRBC,R2		; Compute length sent
+	BNE	10$			; Something got out, that's good
+	CALLX	CLRFQB			; Find out why nothing was sent...
+	MOVB	#UU.TRM,@#FIRQB+FQFUN	; Set up for UU.TRM
+	MOVB	R3,@#FIRQB+FQSIZM	;  for our destination KB number
+	.UUO				; Get terminal characteristics, pt 1
+	MOVB	@#FIRQB+FQFIL,R3	; Fetch the KB's status byte
+	BMI	20$			; Modem is hung up
+	ASR	R3			; Is terminal disabled?
+	BCS	20$			; Yes
+	INCB	@#FIRQB+35		; Is terminal gagged?
+	BEQ	20$			; Yes
+10$:	ADD	R2,XMITCO(R4)		; Update count of bytes sent
+	TST	(PC)+			; Clear carry and skip
+20$:	SEC				; Say nothing got out
+	RETURN				; Back to caller
+
+	.END

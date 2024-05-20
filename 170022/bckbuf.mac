@@ -1,0 +1,606 @@
+.INCLUDE /SYSTEM:BCKPFX/
+TITLE	BCKBUF,<Backup buffer handling>,0H,23-DEC-91,KPH/BGN/REG/WRM/DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for BCKBUF
+
+;+
+;
+;  000	KPH  01-Dec-83	Creation for Version 9.0 RSTS/E
+;  001	KPH  10-Jan-85	Add best-fit region support
+;  002	KPH  15-Jan-85	Add /BUFFER=MAXIMUM
+;  003	KPH  07-Mar-85	Bugfixes; small buffer waits
+;			Return "C" to caller when no buffers in GETMEM
+;  004	KPH  16-Apr-85	Bugfix in GETMEM (don't sleep with ASTs enabled)
+;  005  BGN  15-May-89  Add support for users without INSTAL priv
+;  006  BGN  25-May-89  Make INIBUF smarter - Don't init the dynamic region
+;			if we already have one
+;  007  BGN  26-Oct-89	Add support for image mode
+;  008	REG  01-Feb-90	Reenable AST's before leaving GETMEM
+;  009  WRM  22-Feb-90	changes to use fastmapping and TFEA$
+;  010  REG  03-Apr-90	Add big blocks
+;  011  REG  17-Apr-90	Map on create, so fast mapping will work
+;  012  REG  26-May-90	Redo adaptive code; clear sign extend
+;  013  REG  28-May-90	Default fast mapping to "off" (USEFMP=0)
+;  014  REG  29-May-90	Fast map IOT return in R0: 1=success, not 0
+;  015  REG  30-May-90	Fast map R0: Use bit 15 to say "map rest of library";
+;			R0 negative return is error, positive is success.
+;  016  REG  06-JUL-90	Give nice error for NOROOM after UU.RTS
+;
+;			[RTS V10.1]
+;  017  REG  07-Jan-91	Free up one APR
+;  018	DRP  10-Oct-91	Fix bug in GETMEM where the C bit is destroyed by
+;			the enable AST call on exit.
+;-
+
+.SBTTL	Notes on buffer handling
+
+.REM	*
+
+These buffer routines work on fixed-size buffers located in a dynamic
+memory region. The monitor .PLAS directive is used to map portions
+of this dynamic region, as needed, into virtual address space.
+
+These routines refer to the concept of a buffer address. A buffer
+address is defined as the offset into the dynamic region in slivers
+(64 bytes). Valid buffer addresses are in the range of 0 to 65534
+(65535 is reserved for internal use).
+
+The GETBUF and MAPBUF routines map through the window requested by the user.
+The RETBUF routine maps using the DTAAPR, so it has to restore the mapping 
+afterwards.
+
+*
+
+.SBTTL	Call all needed MACROs
+
+.MCALL	SUBR,CALB,.ASCIC,WSIG$S,ENAR$S,DSAR$S,$CUI,TFEA$S,FEADF$
+
+	FEADF$	;make some definitions					;009
+	IS.SET=2							;009
+	$DSW=46								;009
+
+$CUI	MSG
+
+.SBTTL	Define our private data area
+
+	.PSECT	RODATA,RO,D,LCL,REL,CON
+
+MODNAM:	.ASCIC	<"BCKBUF">	; Module name
+
+.EVEN	;In the quietest moments
+
+; Note: The data below is SAV so that we can be sure to not lose
+; it if we are overlaid.
+
+	.PSECT	BCKBUF,RW,D,LCL,REL,CON,SAV
+
+FREES:	.BLKW			; "Address" of first free buffer
+WINTBL:	.BLKB	<ENDAPR-BASAPR>	; Window ID table
+.even
+WINAPR:	.BLKB	<<ENDAPR-BASAPR>*2>  ; APR per window table for fast map ;009
+
+.EVEN	;In the quietest moments
+FSTMAP:: .WORD	0		;fast map available (ON) flag		;009
+USEFMP:: .WORD	0		;use fast map if not zero		;013
+
+	; .PLASF is a replacement MACRO for .PLAS that
+	;  looks to see if FAST MAP is on, if so uses it
+
+	.MACRO	.PLASF	?A,?B,?X
+
+		TST	FSTMAP
+		BNE	a
+		.PLAS
+		BR	x
+
+a:		MOV	R0,-(SP)
+		MOV	R1,-(SP)
+		MOV	R2,-(SP)
+		CLR	R0
+		BISB	@#FIRQB+6,R0	;WID#
+		MOVB	WINAPR(R0),R0	;APR BASE
+		BIS	#100000,R0	;Map remaining space if R2 too big ;015
+		MOV	@#FIRQB+16,R1	;offset
+		CLR	R2		;CRAFQ length
+		  IOT
+		MOV	R0,@#FIRQB	;error?
+		BMI	b		;Yes, leave it alone		;015
+		CLR	@#FIRQB		;No, return success		;015
+b:									;015
+		MOV	(SP)+,R2
+		MOV	(SP)+,R1
+		MOV	(SP)+,R0
+x:
+	.ENDM
+
+	
+
+.SBTTL	Initialize buffer handling routines
+
+;+
+; INIBUF - Initialize buffer handling routines
+;
+;	BLKSIZ = Block size for I/O
+;
+;	CALLX	INIBUF
+;
+; Buffer pool is all set up.
+;
+;	LIBID = Library ID of pool
+;	FREES = Buffer ID of first free buffer
+;	$BUFSZ = Size of "large" buffers
+;-
+
+	.PSECT	ROCODE,RO,I,LCL,REL,CON
+
+INIBUF::BIT	#GF.DYN,GENFLG	;Do we really want to do this?		;006
+	BEQ	2$		;Yes we do, continue			;006
+	JMP	70$		;No, we already have a region so leave  ;006
+2$:	SAVREG			;Save all registers
+	CALL	FMP.ON		;go turn fastmapping on			;009
+	CLR	FSTMAP		;presume no fast map			;009
+	TFEA$S	#T4$FMP		;is fast mapping turned on?		;009
+	BCS	1$		;that is error so don't trust it	;009
+	CMPB	#IS.SET,@#$DSW	;so is or not?				;009
+	BNE	1$		;nope-					;009
+	MOV	#1,FSTMAP	; yes -mark it as on for us then	;009
+1$:	MOV	BLKSIZ,R1	;R1 = Blocksize for writing I/O buffers
+	ADD	#HBSIZE+77,R1	;Add in header size and round up to sliver
+	ASH	#-6,R1		;Now R1 has block size in slivers
+	BIC	#176000,R1	;Clear out the sign extend		;010
+	MOV	R1,$BUFSZ	;Now save size in slivers for our use
+	ASL	R1		;Now get size in slivers for two I/O buffers
+	ADD	#<4000/100>-1,R1 ;Round up to a K amount
+	ASH	#-5,R1		;Now we have minimum region size in K
+	MOVB	RGNSIZ,R2	;R2 = requested region size
+	BPL	3$		;Real size, go use it			;002
+	MOV	#255.,R2	;Requesting maximum, so make it 255K	;010
+3$:	CMPB	R2,R1		;Is the region size requested large enough? ;002
+	BHIS	5$		;Yes, it sure is
+	MOVB	R1,R2		;No, so use our calculated amount instead
+5$:	CALLX	CLRFQB		;Clear the FIRQB
+	MOV	#FIRQB+FQFUN,R3	;R3 -> FIRQB @ FQFUN			;001
+	MOVB	#UU.RTS,(R3)+	;Function code is RTS maintainence	;001
+	MOV	#30,(R3)+	;Subfunction is create region		;001
+	MOV	R2,@#FIRQB+FQSIZ ;Set the region size
+	BIS	#140000,@#FIRQB+FQSIZ ;And set the best-fit flag	;001
+	.UUO			;Now create the region
+	CALLX	BUFWAT,R5	;Check for small buffers		;003
+	 BR	5$		;None, try again			;003
+	MOVB	@#FIRQB,R5	;R5 = Returned error code
+	BEQ	10$		;None, that's good
+	CMPB	R5,#NOROOM	;Do we have enough room?		;001
+	BEQ	16$		;No, give them a nice message		;016
+	CMPB	R5,#BADCNT	;This error will occur if a user without;005
+	BEQ	16$		;Install priv can not create the region	;005
+	CMESSAGE #ERCRGN	;Tell them error creating region
+	CMESSAGE R5		;Be specific
+	JMPX	RESTRT		;And do the error restart
+
+10$:	MOV	(R3),LIBID	;Pick up the created region ID		;003
+	CMPB	@#FIRQB+FQSIZ,R2 ;Did we get the size we asked for?	;001
+	BEQ	20$		;Yes, sure did				;001
+	MOVB	@#FIRQB+FQSIZ,R2 ;R2 = size we actually got		;012
+	BIC	#177400,R2	;Clear the sign extend			;012
+	CMP	R2,#3		;minimum size to work at all		;012
+	BLO	16$		;sorry, too small			;012
+	CMESSAGE #RGNSML,R2	;Indicate created region is smaller	;001
+	CMPB	R2,R1		;Is this region large enough?		;001
+	BHIS	20$		;Yes, sure is				;001
+	MOV	R2,-(SP)	;Save region size			;010
+	ASH	#10.,R2		;Change it to blocksize/2		;010
+	SUB	#HBSIZE,R2	;Take off for header 			;010
+	BIC	#1777,R2	;Round down to nearest 1K (512.)	;012
+	CMP	R2,#2048.	;Is it at least minimum block size?	;012
+	BHIS	1510$		;Yes, no worries			;012
+	MOV	(SP)+,R2	;No, restore region size		;012
+	BR	16$		;And error out				;012
+1510$:	CMP	R2,BLKSIZ	;Compare with old size?			;012
+	BEQ	1530$		;Equal, no worries			;012
+	BHI	1520$		;BIGGER, can't have that		;012
+	BIT	#DO.RES,C$FLAG	;smaller, so is this a restore?		;012
+	BNE	1610$		;Yes, can't use a smaller blocksize	;012
+	BR	1530$		;No, we can use it			;012
+1520$:	MOV	BLKSIZ,R2	;So set it to old size			;012
+1530$:	MOV	R2,BLKSIZ	;set the new block size			;009
+	MOV	R2,BBHDAT+BBH$BS ;Set it in here too			;010
+	MOV	R2,R1		;R1 = Blocksize for writing I/O buffers	;010
+	ADD	#HBSIZE+77,R1	;Add in header size and round up to sliver;010
+	ASH	#-6,R1		;Now R1 has block size in slivers	;010
+	BIC	#176000,R1	;Clear out the sign extend		;010
+	MOV	R1,$BUFSZ	;Now save size in slivers for our use	;010
+	CMESSAGE #REDUBK,R2	;tell the user what we did		;009
+	MOV	(SP)+,R2	;Restore region size			;010
+	BR	20$		;and away we go...			;009
+
+16$:	CMESSAGE #NORRGN	;Tell them no room for region		;012
+	JMPX	RESTRT		;And get out				;001
+
+1610$:	CMESSAGE #NORBLK,<BLKSIZ> ;Tell them no room for this blocksize	;012
+	JMPX	RESTRT		;And get out				;001
+
+20$:	ASH	#5,R2		;Now we have region size in slivers	;003
+	MOV	#WINTBL,R1	;R1 -> Window ID table
+	MOV	#BASAPR,R3	;R3 = Base APR to map
+	
+30$:	CALLX	CLRFQB		;Set up the FIRQB
+	MOVB	#CRAFQ,@#FIRQB+4 ;We want to create a window
+	MOVB	R3,@#FIRQB+7	;Using the APR value in R3
+	MOV	$BUFSZ,@#FIRQB+12 ;Window size is a buffer's worth
+	CMP	$BUFSZ,#128.	;Did they request a  B I G  blocksize?	;010
+	BLE	32$		;No, relax				;010
+	MOV	#128.,@#FIRQB+12 ;Yes, stop 'em at 4K			;010	
+32$:	MOV	#202,@#FIRQB+FQMODE ;Allowing R/W access		;011
+	.PLAS			;Now go for it
+	CALLX	BUFWAT,R5	;Check for small buffers		;003
+	 BR	30$		;None, try again			;003
+	CRASH			;Die on other errors			;003
+
+	MOVB	@#FIRQB+6,(R1)+	;Save the address of the window
+	CALL	100$		;go construct data table for fast map	;009
+	BIT	#DO.IMA,C$FLAG	;Are we in image mode?			;007
+	BNE	35$		;Yes, so one addr window is enough	;007
+
+	INC	R3		;And advance to the next APR value
+	CMP	R3,#ENDAPR	;Are we done yet?
+	BLO	30$		;No, loop for all the windows
+
+35$:	MOV	#-1,FREES	;Initially no buffers are free
+	CLR	-(SP)		;Create a cell for buffer to return
+	MOV	SP,R3		;Now R3 -> Return cell
+
+50$:	SUB	$BUFSZ,R2	;Do we still have room in the buffer area?
+	BCS	60$		;No, I hope we got something at all
+	CALB	RETBUF,R3	;Return the buffer
+	BCS	55$		;And die on errors
+	INC	BUFCNT		;Say one more buffer			;017
+	ADD	$BUFSZ,(R3)	;Advance to next buffer
+	BR	50$		;And loop
+
+55$:	TST	(SP)+		;Clean up the stack
+	BR	70$		;And return with the error indication
+
+60$:	TST	(SP)+		;Clean up the stack
+	CLR	BUFUSE		;Indicate no buffers are in use		;017
+	TST	BUFCNT		;Did we get any buffers?		;017
+	BNE	65$		;Yes, that's good			;006
+	MOV	#NOBUFS,R0	;Indicate no buffer space available
+65$:	BIS	#GF.DYN,GENFLG	;Indicate we have a good dynamic region	;006
+70$:	RETURN			;And quit
+
+100$:	MOV	R3,-(SP)	;working space- this is the base APR	;009+
+	MOV	R1,-(SP)	; ..
+	CLR	R1		;we will being working with a byte value
+	BISB	@#FIRQB+6,R1	;get the wid (window ID #)
+	CMP	R1,#3		;safety check
+	BGT	110$		;if >3 can not be fastmapping
+	ASH	#3,R3		;APR*16.
+	BIS	#100,R3		;use data space (if non-I&D sys will handle)
+	MOVB	R3,WINAPR(R1)	;save the fastmap data per window
+	BR	120$		;normal exit
+
+110$:	CLR	FSTMAP		;for what ever reason don't allow it
+120$:	MOV	(SP)+,R1	;restore space
+	MOV	(SP)+,R3	;  and the APR
+	RETURN			;go do next window			;009-
+
+
+FMP.ON:	TST	USEFMP		;even try to use fast mapping?		;009+
+	BEQ	130$		;if zero no
+	MOV	#1,@#XRB	;yes- so set it to on
+	.SET
+130$:	RETURN
+
+FMP.OF:	MOV	#1,@#XRB	;turn fastmapping off regardless
+	.CLEAR
+	RETURN								;009-
+
+GLOBAL	<NOBUFS,BLKSIZ,$BUFSZ,LIBID,RGNSIZ,ERCRGN,BUFUSE,BUFCNT,NORRGN>	;001
+GLOBAL	<RGNSML,NOROOM,BADCNT,GENFLG>					;006
+GLOBAL	<C$FLAG>							;007
+GLOBAL	<REDUBK,BBHDAT>							;010
+GLOBAL	<NORBLK>							;012
+
+.SBTTL	Return a buffer to the pool
+
+;+
+; RETBUF - Return a buffer to the pool
+;
+;	R5 -> Argument list
+;		.WORD	1	(# of arguments)
+;		.WORD	BUFADR	(Address of buffer to return)
+;
+;		SAVDTA	Current data map ID
+;
+;	CALL	RETBUF
+;
+;	R0 = Zero to indicate success, or some error code defined
+;	     in the error package.
+;
+;	This routine will disable ASTs when it modifies DTAAPR and
+;	the free buffer chain. If ASTs were already disabled, they will
+;	remain disabled on exit.
+;-
+
+RETBUF::SUBR	BUFADR		;Define input parameters
+	DSAR$S			;					;017
+	ROL	R3		;;Save C to see if ASTs are already disabled;017
+	MOVB	WINTBL+<DTAAPR-BASAPR>,R2 ;;R2 = ID of data/image window;017
+	CALL	SETAPS		;;Set up the FIRQB
+	MOV	@BUFADR(R5),@#FIRQB+16 ;And offset into the library
+	.PLASF			;;Now go for it-use fast map if on	;009
+	CRASH			;;We expect this to work!
+	MOV	FREES,@#<BASAPR*20000> ;;Save the link to next free buf ;007
+	MOV	@BUFADR(R5),FREES ;;And save the link to this buffer
+	DEC	BUFUSE		;;Indicate one less buffer in use	;017
+	CALL	SETAPS		;;Set up the FIRQB			;017
+	MOV	SAVDTA,@#FIRQB+16 ;And offset into the library		;017
+	.PLASF			;;Now go for it-use fast map if on	;017
+	CRASH			;;We expect this to work!		;017
+	ROR	R3		;;Do we need to enable ASTs?
+	BCS	10$		;;No, our caller had them disabled
+	ENAR$S			;;Enable AST recognition
+10$:	RETURN			;That was nice n' easy
+
+GLOBAL	<BUFUSE>
+GLOBAL	<SAVDTA>							;017
+
+.SBTTL	Allocate a buffer from the pool
+
+;+
+; GETBUF - Get a buffer from the pool
+;
+;	R5 -> Argument list
+;		.WORD	2 or 3	(# of arguments)
+;		.WORD	BUFADR	(Address to place buffer address)
+;		.WORD	VIRADR	(Address to place virtual address)
+;		.WORD	APRADD	(Address of APR # to use for mapping)
+;
+;		SAVDTA	Current data map ID
+;		SAVXOR	Current XOR map ID
+;
+;	CALL	GETBUF
+;
+;	R0 = Zero to indicate success, or some error code defined
+;	     in the error package.
+;
+; Note: Buffers are not zeroed! CPU time is expensive... we'd like
+;       to stream!
+;
+;-
+
+GETBUF::SUBR	<BUFADR,APRADD,VIRADR> ;Set up argument list
+	DSAR$S			;;Disable ASTs for a while		;017
+	ROL	R3		;;Save state of ASTs before the call	;017
+	MOVB	@APRADD(R5),R4	;;Pick up the caller's mapping
+	MOVB	WINTBL-BASAPR(R4),R2 ;;R2 = Window ID of scratch window
+	ASH	#15,R4		;;Get virtual address of buffer
+	CALL	SETAPS		;;Set up to map the window
+	MOV	#FREES,R2	;;R2 -> Free area control cell
+	CMP	(R2),#-1	;;Are we out of buffers?
+	BEQ	10$		;;Yes, give an error
+	MOV	(R2),@#FIRQB+FQSIZ ;;Map the first free buffer
+	.PLASF			;;Go and map the buffer, use fast map if on ;009
+	CRASH			;;Die on errors
+	MOV	(R2),@BUFADR(R5) ;;Return the buffer address to the user
+	CMPB	@APRADD(R5),#DTAAPR ;;Is this the data APR?		;017
+	BNE	2$		;;No, XOR APR				;017
+	MOV	(R2),SAVDTA	;;Save the data ID			;017
+	BR	3$		;;					;017
+
+2$:	MOV	(R2),SAVXOR	;;Save the XOR ID			;017
+3$:	MOV	(R4),(R2)	;;Now set the new link to first buffer
+	INC	BUFUSE		;;Indicate one more buffer in use	;017
+	ROR	R3		;;Did use have ASTs enabled?
+	BCS	5$		;;No, so don't enable them now
+	ENAR$S			;;Enable ASTs now
+5$:	MOV	R4,@VIRADR(R5)	;And return the virtual address
+	RETURN			;And we're done
+
+10$:	ROR	R3		;;User have ASTs enabled?
+	BCS	20$		;;No, not this time
+	ENAR$S			;;Yes, so enable ASTs now
+20$:	MOV	#NOBUFS,R0	;Set the error code
+	RETURN			;And we're done
+
+GLOBAL	<BUFUSE,NOBUFS>
+GLOBAL	<SAVDTA,SAVXOR>							;017
+
+.SBTTL	Map a buffer
+
+;+
+; MAPBUF - Map a buffer
+;
+;	R5 -> Argument list
+;		.WORD	3		(Number of arguments)
+;		.WORD	BUFADR		(Address of buffer ID)
+;		.WORD	APRADR		(Address of APR address)
+;		.WORD	VIRADR		(Address to return virtual address)
+;
+;	CALL	MAPBUF
+;
+;	R0 = Returned error code
+;
+; The MAPBUF routine is used to explicitly map a buffer. It is used when
+; the mapping of a buffer established in GETBUF needs to be changed.
+;-
+
+MAPBUF::SUBR	<BUFADR,APRADR,VIRADR>
+	DSAR$S			;;Disable ASTs for a while		;017
+	ROL	R4		;;Save state of ASTs before the call	;017
+	MOVB	@APRADR(R5),R3	;;R3 = APR value to use
+	MOVB	WINTBL-BASAPR(R3),R2 ;;R2 = Window ID of requested window
+	CALL	SETAPS		;;Set up the window
+	MOV	@BUFADR(R5),@#FIRQB+16 ;;Offset to the specified buffer ID
+	CMPB	R3,#DTAAPR	;;Is this the data APR?			;017
+	BNE	2$		;;No, don't save it			;017
+	MOV	@BUFADR(R5),SAVDTA ;;Save the data ID			;017
+	BR	3$		;;					;017
+
+2$:	MOV	@BUFADR(R5),SAVXOR ;;Save the XOR ID			;017
+3$:	.PLASF			;;Now map it, use fast map if on	;009
+	CRASH			;;Die on errors
+	ASH	#15,R3		;;Now R3 has the virtual address
+	MOV	R3,@VIRADR(R5)	;;So return it to the user
+	MOVB	@#FIRQB,R0	;;Return the error code
+	ROR	R4		;;Did use have ASTs enabled?		;017
+	BCS	5$		;;No, so don't enable them now		;017
+	ENAR$S			;;Enable ASTs now			;017
+5$:	RETURN			;And we're done
+
+GLOBAL	<SAVDTA,SAVXOR>							;017
+
+.SBTTL	Set up FIRQB for MAPFQ	
+
+;+
+; SETAPS - Set up FIRQB for MAPFQ
+;
+;	LIBID = Region ID of library
+;	R2 = Window ID of window
+;
+;	CALL	SETAPS
+;
+;	R1 = Undefined
+;-
+
+SETAPS:	CALLX	CLRFQB		;Clear out the FIRQB
+	MOV	#FIRQB+FQFIL,R1	;R1 -> FIRQB @ FQFIL
+	MOV	#MAPFQ,(R1)+	;We want to map a window
+	MOVB	R2,(R1)		;Using the passed window ID
+	MOV	LIBID,@#FIRQB+14 ;Now store our library ID
+	MOV	#2,@#FIRQB+22	;And request write access
+	RETURN			;And we're done
+
+GLOBAL	<LIBID>
+
+.SBTTL	Allocate memory from the dynamic lowcore pool
+
+;+
+; GETMEM - Allocate memory from the dynamic lowcore pool
+;
+;	R1 = Amount of memory to allocate
+;
+;	CALL	GETMEM
+;
+;  If allocation is possible:
+;
+;	C = 0 (BCC branches)
+;
+;	R0 = Address of memory allocated
+;	R1 = Amount of memory actually allocated
+;
+;  If allocation is not possible:
+;
+;	C = 1 (BCS branches)
+;
+;	R0 = Undefined
+;	R1 = Undefined
+;
+; Note: Do not come here with ASTs disabled. We enable and disable them
+;	throughout our various steps without regard for the previous
+;	state.
+;-
+
+GETMEM::MOV	R2,-(SP)	;Save caller's R2
+	MOV	R1,-(SP)	;Save caller's R1
+10$:	MOV	#FRELST,R0	;Now get pointer to free list		;018
+	DSAR$S			;Disable AST recognition		;017
+	CALLX	$RQCB		;;And allocate some memory
+	BCC	50$		;;We've got some memory, that's good
+	ENAR$S			;;Enable ASTs again			;018
+	MOVB	CURSIZ,R0	;Pick up current size			;018
+	MOVB	R0,R2		;Save the current amount of memory	;018
+	INCB	R0		;We want 1K more, please		;018
+20$:	DSAR$S			;Disable ASTs				;018
+	CALLX	CLRXRB		;;Clear out the XRB
+	MOVB	R0,@#XRB	;;Now set up the quantity of memory we want
+	.CORE			;;And ask for it
+	CMPB	@#FIRQB,#INUSE	;;Are we doing asynch I/O to lowcore?
+	BNE	30$		;;No, not this time
+	MOV	#-1,@#XRB	;;Yes, so set up for a long wait
+	MOV	#.,@#XRB+4	;;Identify our location to the monitor	;010
+	.SLEEP			;;Now wait for the I/O to finish
+	ENAR$S			;;Enable ASTs to process those completions ;004
+	BR	20$		;And try again
+
+	; Note, at this point ASTs are disabled.			;018
+
+30$:	CMPB	@#FIRQB,#EDBMCE	;;Allocated as much memory as we can?	;018
+	BEQ	40$		;;Yes, so tell caller about that	;004
+	CRASH			;;Die on errors
+	ENAR$S			;;Enable ASTs				;018
+	MOVB	R0,CURSIZ	;Set up the new current size		;018
+	ASH	#11.,R2		;Now R2 has starting address of area	;018
+	MOV	#2048.,R1	;And R1 has number of bytes in area	;018
+	MOV	#FRELST,R0	;And R0 has the free memory list head	;018
+	DSAR$S			;Disable ASTs				;018
+	CALLX	$RLCB		;;Now release the memory
+	ENAR$S			;;Enable ASTs				;018
+	MOV	(SP),R1		;Get back the user's requested size	;018
+	BR	10$		;Now try again				;018
+
+40$:	COM	(SP)+		;;Set carry and forget caller's R1	;018
+	;SEC			;;From COM above			;018
+	BR	60$		;;Now get out				;018
+
+50$:	TST	(SP)+		;;Forget caller's R1			;018
+	;CLC			;;From TST above			;018
+60$:	ROL	-(SP)		;;Preserve the C bit			;018
+	ENAR$S			;;Enable ASTs				;018
+	ROR	(SP)+		;Restore the saved C bit		;018
+	MOV	(SP)+,R2	; and the saved R2			;018
+	RETURN			;And we're done
+
+GLOBAL	<FRELST,CURSIZ,INUSE,EDBMCE>					;003
+
+.SBTTL	Return memory to the dynamic lowcore pool
+
+;+
+; RETMEM - Return memory to the dynamic lowcore pool
+;
+;	R1 = Bytes to return
+;	R2 -> Memory to return
+;
+;	CALL	RETMEM
+;
+;	All registers are preserved
+;
+; Note: If the byte count to be returned is not a multiple of four,
+;	part of the pool will not be deallocated. This can cause
+;	fragmentation. BEWARE!
+;-
+
+RETMEM::SAVREG			;Save all registers
+	MOV	#FRELST,R0	;;Point to free memory list header
+	BIC	#3,R1		;;Round down count to 2 word boundry
+	BIC	#3,R2		;;Now round it down correctly
+	DSAR$S			;Disable ASTs				;017
+	ROL	-(SP)		;;And save the previous enable/disable state;017
+	CALLX	$RLCB		;;Now release the memory
+	ROR	(SP)+		;;Do we need to enable ASTs?		;017
+	BCS	10$		;;No, not this time			;017
+	ENAR$S			;;Yes, so enable them			;017
+10$:	RETURN			;And now we're done			;017
+
+GLOBAL	<FRELST>
+
+.END

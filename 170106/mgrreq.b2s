@@ -1,0 +1,405 @@
+1	SUB REQEST
+	!
+	!
+	!********************************************************************
+	!
+	!	s u b p r o g r a m   t i t l e
+	!
+	!	  subprogram : REQEST
+	!	     version : V10.1
+	!	        edit : A
+	!	   edit date : 10-MAY-91
+	!	   author(s) : DBM
+	!
+	!********************************************************************
+	!
+	!		  C O P Y R I G H T
+	!
+	!
+	!		      Copyright (C) 1988, 1991 by
+	!	Digital Equipment Corporation, Maynard, Mass.
+	!
+	!
+	! This software is furnished under a license and may be used and
+	! copied  only  in accordance with the terms of such license and
+	! with the  inclusion  of  the  above  copyright  notice.   This
+	! software  or  any  other copies thereof may not be provided or
+	! otherwise made available to any other person.  No title to and
+	! ownership of the software is hereby transferred.
+	!
+	! The information in this software is subject to change  without
+	! notice  and should not be construed as a commitment by Digital
+	! Equipment Corporation.
+	!
+	! DIGITAL assumes no responsibility for the use  or  reliability
+	! of its software on equipment that is not supplied by DIGITAL.
+	!
+	!********************************************************************
+	!
+	!	m o d i f i c a t i o n   h i s t o r y   l o g
+	!
+	! VER/ED	EDIT DATE	REASON
+	!
+	! V10.0		23-Nov-88	(DBM) Creation
+	! V10.0-K	17-Apr-90	(DBM) Add FLG.OMS support
+	!
+	!********************************************************************
+	!
+	!	s u b p r o g r a m   d e s c r i p t i o n
+	!
+	!	This subprogram is called to process the command:
+	!
+	!		REQUEST	[["]message-text["]]
+	!
+   	!	Qualifiers:
+	!
+	!		/FACILITY=name		(DEBUG mode only)
+	!		/PROMPT
+	!		/[NO]REPLY
+	!		/[NO]TIME_OUT=n		(Optional)
+	!
+	!********************************************************************
+
+	!********************************************************************
+	!
+	!	C o m p i l e   O P T I O N s
+	!
+	!********************************************************************
+
+	OPTION	TYPE = EXPLICIT
+
+	!********************************************************************
+	!
+	!	I N C L U D E   r e q u i r e d   M A P s , C O M M O N s
+	!
+	!********************************************************************
+
+	%INCLUDE "CUI:CUICMN.E2S"		! Include CUI data section
+	%INCLUDE "SYSTEM:CMNDEF.B2S"		! Include OMS common defs
+	%INCLUDE "SYSTEM:OMSKEY.B2S"		! Include CUI key definitions
+
+	DECLARE WORD CONSTANT QUOTE = 34%
+
+	DECLARE STRING TEMP, NOTIFY_TEXT, CCL.TXT
+	DECLARE	WORD CMDLEN, WAIT_TIME, NOTIFY, TIME_OUT, CCL.FLG, OMSJOB
+	DECLARE	WORD FUNCTION DSPERR (STRING)
+
+	EXTERNAL WORD FUNCTION						      &
+			PRIVED (STRING),	! Function to check for priv  &
+			FORMAT,			! Function to format replies  &
+			MGRSND (WORD, WORD),	! Function to send to OMS     &
+			MGRRCV (STRING, WORD, WORD, STRING) ! FN to rcv OMS ack
+
+	MAP (FMTBUF)	STRING	FILL = 160%
+	MAP DYNAMIC (FMTBUF)	STRING REQUEST
+
+	EXTERNAL WORD CONSTANT	NOTOPN, EOF, CTRLCE
+
+	EXTERNAL WORD				! Patch points for OMSSUB     &
+				OMS$LO,		!   OMS Local Object Type     &
+				OMS$MM,		!   Message Max for declare   &
+				OMS$PD,		!   Raise privs for declare   &
+				OMS$PS		!   Raise privs for send
+
+	MAP (OMSREQ)	STRING	FILL = 14%,	! Layout parameter buffer     &
+			WORD	OMSCMD,		!   Command sent to OMS	      &
+				FILL(6),	!   Skip to error status word &
+				ERRSTS		!   Error returned from call
+
+	MAP (CMDBUF)	STRING	FILL = 512%	! Layout of command buffer:
+	MAP (CMDBUF)	BYTE	FLD.REP,	! Byte for OC$REP	      &
+				FLD.TYP,	! Byte for request type	      &
+			BYTE	FLD.TXT1,	! Byte for OC$TXT	      &
+				FLD.LEN1,	! Byte for text length	      &
+			STRING	FLD.REQ1 = 250%,! String for request text     &
+			BYTE	FLD.TXT2,	! Byte for OC$TXT (Long req)  &
+				FLD.LEN2,	! Byte for long text length   &
+			STRING	FLD.REQ2 = 250%	! String for long request text
+
+	MAP DYNAMIC (CMDBUF) BYTE FLD.FAC, FLD.FLEN, STRING FLD.FNAM
+
+	MAP (CMDBUF)	BYTE	FLD.SEQ, FLD.STS, ! OC$SEQ, and STS.ABO	      &
+			WORD	FLD.ID,		!   REQ.SEQ		      &
+			BYTE	FLD.TXT, FLD.LEN! OC$TXT and message length
+
+	MAP DYNAMIC (CMDBUF) STRING ABORT_MESSAGE, ABORT_TEXT
+
+	!	m a i n   s u b p r o g r a m   l o g i c
+
+	CALL FET$CQ (RPLY.Q)
+	FLD.REP = OC$REP
+	FLD.TYP = U.PRES AND (NOT U.NO)
+
+	! Parse DCL symbol name here, if we want to support /REPLY=symbol_name
+
+	CCL.FLG = FALSE				! Assume it wasn't /REPLY
+	IF FLD.TYP				! Was it /REPLY?
+	THEN
+	  CALL FET$A				! Yes, check for symbol name
+	  IF U.PRES				!   Was one specified?
+	  THEN
+	    CCL.FLG = TRUE			!   Yes, set execute CCL flag
+	    CCL.TXT = (LEFT$(U.STR, U.LEN))	!     Fetch symbol name
+	    IF LEFT$(CCL.TXT, 1%) = "$"		!     Reserved symbol name?   &
+	    OR EDIT$(LEFT$(CCL.TXT, 2%), 32%) = "F$"
+	    THEN
+	      JUNK = DSPERR("?Reserved symbol name")
+	      GOTO REQUEST_END			!     Yes, print error and exit
+	    END IF
+	    CCL.TXT = "$" + CCL.TXT + " :"	!     Build CCL text
+	    CALL FET$CQ(GBL.Q)			!     /Global symbol?
+	    CCL.TXT = CCL.TXT + "=" IF U.PRES	!     Yes, so we need two ='s
+	    CCL.TXT = CCL.TXT + "= "		!     Finish CCL set-up
+	  END IF
+	END IF
+
+	CALL FET$CQ (TIM.Q)			! Look for /[NO]TIME_OUT
+	IF U.NO					! Not there or /NOTIME_OUT?
+	THEN
+	  TIME_OUT = -MAXINT			! Yep, wait forever for reply
+	ELSE
+	  CALL FET$A				! /TIME_OUT, any value?
+	  IF U.PRES
+	  THEN
+	    TIME_OUT = U.LOW			!   Yes, save the value
+	  ELSE
+	    TIME_OUT = 60%			!   No, set reasonable timeout
+	  END IF
+	  TIME_OUT = TIME_OUT * 60%		! Convert minutes to seconds
+	END IF
+
+	CALL FET$P (STR.T)
+	IF U.PRES
+	THEN
+	  U.STR = EDIT$(U.STR, 32% + 256%)	! Upcase unquoted chars
+	  IF  (ASCII(U.STR) = QUOTE)					      &
+	  AND (ASCII(RIGHT$(U.STR, U.LEN)) = QUOTE)			      &
+	  AND (U.LEN > 2%)
+	  THEN
+	    REQ.TXT = SEG$(U.STR, 2%, U.LEN - 1%)
+	    REQ.LEN = U.LEN - 2%
+	  ELSE
+	    REQ.TXT = LEFT$(U.STR, U.LEN)
+	    REQ.LEN = U.LEN
+	  END IF
+	  GOTO ADD_REQUEST
+	END IF
+
+	PRINT "Enter text of your request below, type CTRL/Z to send:"
+	SET NO PROMPT
+	ON ERROR GOTO PROMPT_ERR
+	REQ.LEN = 0%
+
+	WHILE (REQ.LEN <= REQSIZ)
+	  LINPUT TEMP
+	  REQ.TXT = LEFT$(REQ.TXT, REQ.LEN) + TEMP + CR.LF
+	  REQ.LEN = REQ.LEN + LEN(TEMP) + 2%
+	NEXT
+	PRINT "?Request text is too long"
+	GOTO REQUEST_END
+
+ PROMPT_ERR:
+	RESUME CHECK_LEN IF ERR = EOF
+
+ CHECK_LEN:
+	SET PROMPT
+	ON ERROR GO BACK			! Go back if error not EOF
+	IF (REQ.LEN = 0%)			! Any text specified?
+	THEN
+	  PRINT "?No text entered, request not sent"
+	  GOTO REQUEST_END			! Nope, get out
+	END IF
+
+ ADD_REQUEST:
+	FLD.TXT1 = OC$TXT			! Say we have request text
+	TEMP = LEFT$(REQ.TXT, REQ.LEN) + STRING$(REQSIZ - REQ.LEN, 0%)
+	LSET FLD.REQ1 = TEMP			! Store first half of req text
+	RSET FLD.REQ2 = TEMP			! Store last half of req text
+
+	IF REQ.LEN <= 250%			! Did we use both halves?
+	THEN
+	  FLD.LEN1 = WORD.TO.BYTE(REQ.LEN)	! No, set first half length,
+	  FLD.LEN2, FLD.TXT2 = 0%		!   zero out last half,
+	  CMDLEN = REQ.LEN + 4%			!   and set cmd buffer length
+	ELSE
+	  FLD.LEN1 = WORD.TO.BYTE(250%)		! Yes, set first half length,
+	  FLD.LEN2 = WORD.TO.BYTE(REQ.LEN - 250%) ! set second half length,
+	  FLD.TXT2 = OC$TXT			!   set second half field flag,
+	  CMDLEN = REQ.LEN + 6%			!   and set cmd buffer length
+	END IF
+
+	REQ.FAC = "USER  "			! Default facility name
+	%IF %DEBUG
+	%THEN
+	  CALL FET$CQ (FAC.Q)
+	  IF U.PRES
+	  THEN
+	    GOTO REQUEST_END UNLESS PRIVED("SEND")
+	    CALL FET$A
+	    U.LEN = MIN(6%, 510% - CMDLEN, U.LEN)
+	    REMAP (CMDBUF)	STRING	FILL = CMDLEN,			      &
+					FLD.FAC, FLD.FLEN,		      &
+					FLD.FNAM = U.LEN
+	    FLD.FAC = OC$FAC
+	    FLD.FLEN = U.LEN
+	    FLD.FNAM = EDIT$(LEFT$(U.STR, U.LEN), 32%)
+	    REQ.FAC = FLD.FNAM
+	    CMDLEN = CMDLEN + U.LEN + 2%
+	  END IF
+	%END %IF
+
+	REQ.NUM = 0%				! Say no ack received
+	NOTIFY_TEXT = "acknowledgement"		! Initial wait is for ack
+	WAIT_TIME = 90%				! Time out after 90 seconds
+	NOTIFY = 15%				! Give reminders every 15 secs
+
+						! Set up for OMSSUB calls:
+	OMS$PD = TRUE				! Raise privs for declare
+	OMS$PS = FALSE				! Drop privs for send
+	ON ERROR GOTO CTRL_C_CHECK		! We want to know about ^C's
+	JUNK = CTRLC				! So tell us if one occurs
+
+	GOTO REQUEST_END			! Quit if		      &
+	  UNLESS MGRSND(OC.REQ, CMDLEN)		!   unable to send cmd packet
+	OMSJOB = REQ.JOB			! Save job # of OMS
+
+ RECEIVE_LOOP:
+
+	IF NOT MGRRCV(REQ.TXT, WAIT_TIME, NOTIFY, NOTIFY_TEXT)
+						! Wait for an ack or a reply
+	THEN					! If we did *not* get anything,
+	  IF REQ.NUM				!   Already received ack?
+	  THEN
+	    IF WAIT_TIME < 0%			!   Yes, still wait for a reply?
+	    THEN
+	      GOTO RECEIVE_LOOP			!     Yes, try receive again
+	    ELSE
+	      TEMP = "User specified timeout value exceeded"
+	      GOTO ABORT_REQUEST		!     No, better abort request
+	    END IF
+	  ELSE
+	    GOTO REQUEST_END			!   No, forget it
+	  END IF
+	END IF
+
+	SELECT ERRSTS				! Got something, check it out
+
+	  CASE 0%				! (No error)
+	    IF REQ.JOB				! Is this a reply message?
+	    THEN
+	      REQ.TYP = ML.REQ OR ML.REP	! Yes, set type field,
+	      REQ.FLG = FLG.OPR			!   flag always says from oper,
+	      REQ.FLG = FLG.OMS IF OMSJOB = REQ.JOB !unless it came from OMS
+	      REQ.DATE, REQ.TIME = 0%		!   always use current date/time
+	      REMAP (FMTBUF) REQUEST = FORMAT	!   format reply header
+	      PRINT #OUT.CHNL, REQUEST;		!   Display header 	      &
+			 LEFT$(REQ.TXT, REQ.LEN)!	...and reply
+	      PRINT "?Request aborted" IF REQ.STS AND STS.ABO
+
+	    ELSE				! No, tell user OMS is active...
+	      IF FLD.TYP			! REQUEST/REPLY?
+	      THEN
+		TEMP = "Request"		! Yep, call it a "Request"
+	      ELSE
+		TEMP = "Message"		! Nope, call it a "Message"
+	      END IF
+	      PRINT #OUT.CHNL, TEMP; REQ.NUM; "sent to"; REQ.KB;	      &
+		"operator terminal";
+	      PRINT #OUT.CHNL, "s"; IF (REQ.KB <> 1%)
+	      PRINT #OUT.CHNL
+	      NOTIFY = ABS%(TIME_OUT)		! Set new notify time
+	      WAIT_TIME = TIME_OUT		! And new wait time
+	      IF TIME_OUT <> - MAXINT		! Waiting forever?
+	      THEN
+	        NOTIFY_TEXT = "reply"		! No, timed wait for a reply
+	      ELSE
+		NOTIFY_TEXT = ""		! Yes, no waiting message
+	      END IF
+	    END IF
+
+	  CASE NOTOPN
+	    PRINT "?Operator/Message Services shutting down"
+
+	  CASE ELSE
+	    PRINT "?Program failure in ";P.NAM	!   This may be a bug
+	    PRINT ERT$(ERRSTS); " in OMSRCV"	!   Display error and module
+	    GOTO REQUEST_END			!   Get out now
+
+	END SELECT
+
+	IF REQ.STS AND STS.PEN			! Is request still pending?
+	THEN
+	  GOTO RECEIVE_LOOP 			! Yes, keep request active
+	ELSE
+	  IF CCL.FLG AND (REQ.STS AND STS.ANS)	! No, give reply to DCL?
+	  THEN					!   Yes, so do it
+	    ON ERROR GO BACK			!     We don't expect errors
+	    FQB = SYS("14"C + CCL.TXT + '"' + LEFT$(REQ.TXT, REQ.LEN) + '"')
+	  END IF
+	  GOTO REQUEST_END			!   No, we're done in here
+	END IF
+
+ CTRL_C_CHECK:
+	ON ERROR GO BACK UNLESS			! Go back unless...	      &
+	  (ERR = CTRLCE) AND (REQ.NUM <> 0%)	!   ^C typed and req was rcv'd
+	TEMP = "Request aborted by user (^C)"
+	RESUME ABORT_REQUEST			! Go abort the pending request
+
+ ABORT_ERR:
+	PRINT "?Error occurred while aborting request..." UNLESS ERR = CTRLCE
+	JUNK = RCTRLC				! No more need for trap
+	ON ERROR GO BACK			! Awwwwwwwwwww, frack.
+						! (Lt. Starbuck, is that you?)
+ ABORT_REQUEST:
+	JUNK = CTRLC + RCTRLO(0%)		! Reset trap and restore output
+	ON ERROR GOTO ABORT_ERR			! Hope nothing happens, but...
+	PRINT "?Aborting request..."		! Tell user we're alive
+	FQB = STRING$(40%, 0%)			! Initialize SYS call area
+	FQJOB = 6%				! SYS call to FIP
+	FQFUN = 22%				! .MESAG
+	FQFIL = -11%				! Message send w/privileges
+	FQSIZM = WORD.TO.BYTE(BITVAL(7%) + OMS.LOT) ! Destination
+	FQBWRD(15%) = OC.REP			! ORP command is REPLY
+
+	FLD.SEQ = OC$SEQ			! Set seq # field value
+	FLD.STS = STS.ABO			! We want to abort the request
+	FLD.ID = REQ.NUM			! This one here, in fact
+	FLD.TXT = OC$TXT			! We even have a reply text
+
+	JUNK = LEN(TEMP)			! Figure out its length
+	REMAP (CMDBUF) ABORT_MESSAGE = 6% + JUNK
+	REMAP (CMDBUF) STRING FILL = 6%, ABORT_TEXT = JUNK
+	FLD.LEN = JUNK				! Store the length
+	ABORT_TEXT = TEMP			! And the text
+
+	ON ERROR GOTO ABORT_ERR			! Hope nothing happens, but...
+	FQB = SYS(FQB + ABORT_MESSAGE)		! Here goes...
+	CAUSE ERROR CTRLCE IF ERR = CTRLCE	! No error, re-initiate ^C error
+						! If that's what caused abort
+	GOTO REQUEST_END			! Otherwise we're done
+
+15000	!	F U N C T I O N S
+
+	DEF WORD DSPERR(STRING ERR_TEXT)	! Display error text
+
+	  DSPERR = RCTRLO(0%)			! Ensure echo is on
+	  PRINT IF CCPOS(0%)			! and carriage is at left margin
+
+	  IF U.POS				! Redisplay command line?
+	  THEN
+	    CALL FET$CS BY REF			! Yes, fetch the command line
+	    IF (U.STAT = 0%)			!   If we got it,
+	    THEN
+	      PRINT RECORD 32%, LEFT$(U.STR, U.LEN) ! Repaint command line
+	      PRINT RECORD 32%, TAB(U.POS - 1%);"^" ! Point to the problem
+	    END IF
+	  END IF
+
+	  PRINT ERR_TEXT			! Print error text
+
+	END DEF
+
+32767	!
+ REQUEST_END:
+	JUNK = RCTRLC				! Ensure ^C trap is off
+	SUBEND

@@ -1,0 +1,4992 @@
+.INCLUDE /CMN:COMMON/
+TITLE	FORTH,<FORTH FOR RSTS>,0C,19-JUL-91,JSJ/GPK/KPH
+
+;
+;	THIS SYSTEM IS IN THE PUBLIC DOMAIN AND CAN BE USED
+;	WITHOUT RESTRICTION.  PLEASE CREDIT THE FORTH INTEREST
+;	GROUP IF YOU REPUBLISH SUBSTANTIAL PORTIONS.
+;
+
+; ****************************************************************
+;
+; PDP-11 FORTH              INTRODUCTION              PDP-11 FORTH
+;
+; ****************************************************************
+;
+;
+;
+;  PDP-11 FORTH      RT-11, RSX-11M, AND STAND-ALONE      JANUARY 1980
+;                                                      
+;
+;
+;	DEVELOPED BY THE
+;		FORTH INTEREST GROUP / FORTH IMPLEMENTATION TEAM
+;		P.O. BOX 1105
+;		SAN CARLOS, CA. 94070
+;
+;
+;	IMPLEMENTED BY
+;		JOHN S. JAMES
+;		P.O. BOX 348
+;		BERKELEY, CA. 94701
+;
+;
+;	Modified to RSTS-only by
+;		Paul Koning
+;	      	DEC MKO1-2/L2
+;		Merrimack, NH 03054
+;
+;	Network support and various bugfixes by
+;		Kevin Herbert
+;		DEC MK01-2/G29
+;		Merrimack, NH 03054
+;
+;	THE FORTH INTEREST GROUP / FORTH IMPLEMENTATION TEAM
+;	ALSO HAS DEVELOPED NEARLY IDENTICAL VERSIONS OF THIS
+;	SYSTEM FOR THE
+;		8080
+;		6800
+;		6502
+;		9900
+;		PACE
+;	
+;
+;	FOR MORE INFORMATION, WRITE:
+;
+;		JOHN S. JAMES
+;		P.O. BOX 348
+;		BERKELEY, CA. 94701
+;
+;			OR
+;
+;		FORTH INTEREST GROUP
+;		P.O. BOX 1105
+;		SAN CARLOS, CA. 94070
+;
+;
+;	'PDP' AND 'RSX' ARE TRADEMARKS OF DIGITAL EQUIPMENT CORPORATION.
+
+;	THIS FORTH SYSTEM HAS
+;		- FULL LENGTH NAMES
+;		- EXTENSIVE COMPILE-TIME CHECKS AND ERROR MESSAGES
+;		- DOUBLE INTEGER I/O
+;		- A FORTH ASSEMBLER, PERMITTING STRUCTURED, INTERACTIVE
+;		  DEVELOPMENT OF DEVICE HANDLERS, SPEED-CRITICAL 
+;		  ROUTINES.        
+;		- A variety of useful routines in assorted files of FORTH code
+;		- LINKED VOCABULARIES
+;		- HOOKS FOR MULTITASKING/MULTIUSER (CURRENTLY SINGLE TASK)
+;		- Runs as a runtime system (7K of shared code) under RSTS
+;		  V7.2 or later.  It initially uses 2K of impure space,
+;		  but will dynamically expand as needed (up to 24KW max)
+;		  to accommodate additional dictionary entries.
+;		  It contains access to a number of the RSTS system
+;		  functions, such as disk I/O to any channel, 24-bit
+;		  block numbers, CCL support, and file primitives (open,
+;		  close, filename string scan)
+;		- Support for distributed applications via DECnet support,
+;		  re-direction of terminal I/O and task-to-task communications
+;
+;	IT IS ALIGNED WITH THE 1978 STANDARD OF THE FORTH INTERNATIONAL
+;	STANDARDS TEAM.
+;
+;
+;
+;	RECOMMENDED DOCUMENTATION:
+;		- A FORTH LANGUAGE MANUAL.  WE PARTICULARLY RECOMMEND EITHER
+;			(A) 'USING FORTH', BY FORTH, INC.
+;				OR
+;			(B) 'A FORTH PRIMER', BY W. RICHARD STEVENS, KITT
+;			    PEAK NATIONAL OBSERVATORY.
+;		  EITHER IS AVAILABLE THROUGH THE FORTH INTEREST GROUP,
+;		  P.O. BOX 1105, SAN CARLOS, CA. 94070.
+;		- PDP-11 FORTH USER'S GUIDE, AVAILABLE FROM JOHN S. JAMES,
+;		  ADDRESS ABOVE.
+;		- FORTH REFERENCE CARD FOR THE FORTH IMPLEMENTATION TEAM
+;		  COMMON MODEL, AVAILABLE FROM FIG.
+;		- 'FIG-FORTH INSTALLATION MANUAL', ALSO FROM FIG.
+;
+;
+;
+;	ACKNOWLEDGMENTS:
+;		     THIS FORTH SYSTEM (IN 'FORTH.MAC') IS A GROUP PRODUCT
+;		OF THE FORTH IMPLEMENTATION TEAM OF THE FORTH INTEREST
+;		GROUP (P.O. BOX 1105, SAN CARLOS CA. 94070).  THE IMPLEMENTER
+;		IS RESPONSIBLE FOR THIS PDP-11 VERSION OF THE MODEL, AND FOR
+;		THE SOFTWARE ON SCREENS IN 'FORTH.DAT'.  ALTHOUGH THE LATTER
+;		IS NOT AN OFFICIAL RELEASE OF THE F.I.G., THE CONTRIBUTIONS
+;		FROM MEMBERS OF THE GROUP ARE TOO NUMEROUS TO CITE
+;		INDIVIDUALLY.
+;		     IN ADDITION WE APPRECIATE THE PDP-11 CODING
+;		IMPROVEMENTS SUGGESTED BY STUART R. DOLE, DOLE & FARMER,  
+;		PO BOX 142, PETALUMA, CA. 94952; BY PAUL EDELSTEIN;
+;		BY RICK STEVENS OF KITT PEAK; AND OTHERS.
+
+; Summary of changes from the original implementation:
+;
+;	New "HEAD" macro
+;	RT/RSX/Standalone I/O replaced with RSTS I/O
+;	New, faster (FIND), more compact comparisons
+;	Additional documentation in the code
+;	New words: ?CR, ASCII, RESTORE, <CMOVE -TEXT DUMP 1- 2- 2* 2/ /LOOP
+;	New internal functions
+;	General code bumming
+;	Remove ?TERMINAL from definition of VLIST
+;	TYPE becomes a primitives
+;	New word: " for defining a string: ( ==> address count )
+;	File access words: FILEOPEN FILECLOSE DFILEIO FILENAME
+;		SAVE FLOAD
+;	Convert into a runtime system
+;	+ORIGIN ?ALIGN TRAVERSE removed (not needed anymore)
+;	Memory auto-sizing tied into stack space check
+;	Double-precision words: 2DUP 2SWAP 2OVER 2ROT 2DROP 2@ 2!
+;		D- D0= D0< D= D< D> DU< DMIN DMAX DABS D2* D2/
+;	Run entry; version level checking on saved code
+;	Modified FORTH and ;CODE to be pure (assembler changed also)
+;	Support for 8-bit character sets
+;	Control/C and trap intercepts
+;	New line inputter, escape sequence handling
+;	Escape sequence dispatcher in QUIT
+;	Doubleword loops
+;	CIS checked for
+;	FPP flag set/cleared as appropriate in Key
+;	Eliminated "U" register (User area base) and USER word
+;	Better ?PAIRS                                                     
+;	DECnet support
+;
+
+; ****************************************************************
+;
+;	BRINGING UP THE SYSTEM
+;
+;  ****************************************************************
+;
+;
+;
+;  To bring up the system under RSTS:
+;	- Make sure COMMON.MAC and ERR.STB from the RSTS distribution
+;	  kit are available on your system.  The following assumes
+;	  the files are in your own account, but you may obtain
+;	  them from anywhere by appropriate changes to the command
+;	  lines.  You also need the MACRO, LINK, SILUS and UTILTY
+;	  programs.
+;	- Proceed as follows:
+;		RUN MACRO
+;		FORTH,FORTH/C=COMMON,FORTH
+;		^Z
+;		RUN LINK
+;		FORTH,,FORTH/U:4000/H:177776=FORTH,ERR.STB
+;		PATCH
+;		^Z
+;		RUN SILUS
+;		[0,1]FORTH.RTS,TT:=FORTH
+;		^Z
+;		RUN $UTILTY
+;		ADD FORTH
+;		EXIT
+;	  You can now SWITCH to FORTH.  It should come up and type
+;	  "FIG-FORTH" and the version number.
+;	- Test that it is up by trying some arithmetic or definitions, e.g.
+;		88 88 * .		(note that the '.' means print)
+;		: SQUARE DUP * ;
+;		25 SQUARE .
+;	  or type VLIST for a list of all the FORTH operations in the
+;	  dictionary.
+;	- The classic FORTH disk (screen) functions access a screen
+;	  image file (containing 1024. byte screens) in SY:FORTH.DAT.
+;	  To execute LOAD, LIST, etc. commands you need to have that
+;	  file available.  Alternatively, you can access another file
+;	  of that format by opening it first on channel 15 using:
+;		15 FILEOPEN filespec
+;	  Check the screen file by typing:
+;		1 LIST
+;	  which should list the screen which loads the editor, 
+;	  assembler, and string routines.
+;
+;
+;  The FORTH virtual file "FORTH.DAT" is used for storing source
+;  programs (or data).  this file has 70 1 KB screens (1-70),
+;  i.e. 140 PDP-11 disk blocks.   Screens 6-30
+;  contain a text editor, assembler, string package, and miscellaneous 
+;  examples.  Screens 40 through 47 contain a binary stand-alone
+;  system (not used under RSTS).  Users may want to save their
+;  source programs and data in the blank screens.
+;  The size of this FORTH screens file (FORTH.DAT) can be increased
+;  if needed.  
+;
+
+.SBTTL	Differences from the FIG model
+
+; ****************************************************************
+;                     
+;		VARIATIONS FROM F.I.G. MODEL
+;
+; ****************************************************************
+;
+;
+;  'FIRST' AND 'LIMIT' HAVE BEEN MADE USER VARIABLES, NOT CONSTANTS.
+;  THEREFORE WHEN THEY ARE USED, 'FIRST @' AND 'LIMIT @' ARE
+;  REQUIRED.
+;
+;  THE MACHINE-INDEPENDENT I/O SECTION WAS MOVED TO NEAR THE END OF
+;  THE DICTIONARY
+;
+
+.SBTTL	Register and macro definitions
+
+; ****************************************************************
+;
+;		Set up registers and macros.
+;
+; ****************************************************************
+
+
+W	=	R3		; Temporary used by NEXT (inner interpreter)
+IP	=	R4		; FORTH instruction counter
+S	=	R5		; FORTH stack pointer
+RP	=	SP		; FORTH return-stack pointer
+
+;
+;  Note - code routines can use registers 0, 1, 2 and 3 without
+;  restoring them.
+;
+;
+;  Macro definitions  
+;
+;
+;
+;  The HEAD macro creates a FORTH dictionary header.  Its arguments are:
+;  (1)	Name - the name of the operation being defined.
+;  (2)	Label - the assembly-language label associated with the 'code field'
+;	of this dictionary header.  These labels are used in the precompiled-
+;	FORTH section of the system.  When possible, the FORTH operation 
+;	name itself is used as the assembly label; otherwise an abbreviation
+;	is used.  By convention, these names are limited to five characters,
+;	for consistency among assemblers for different microprocessors.
+;	(the FORTH implementation team uses the same labels in all of its
+;	versions.)
+;   (3)	Code - pointer to the machine-language "code routine" associated 
+;	with this operation type or data type.  e.g. for any colon definition,
+;	this argument is DOCOL, the label of a five-instruction assembly
+;	routine which uses the return stack to handle the nested execution
+;	of another level of forth operations.  For any constant, this code
+;	routine is DOCON, and similarly for all other data types.
+;	The code argument may be omitted.  In that case, the HEAD
+;	macro leaves the code field pointing two bytes beyond itself, where
+;	machine-language code must begin - and the operation so defined is
+;	called a "primitive".  The "nucleus section" of this version of
+;	forth contains about 45 primitives, from which the whole system
+;	is built; in effect, these primitives define the virtual forth
+;	machine.  (a few operations in the "precompiled FORTH" section
+;	of the system have been replaced with primitives, to optimize
+;	execution speed.
+;   (4)	The keyword IMM if the operation is an immediate operation.
+;
+;  The HEAD macro creates a FORTH header consisting of
+;	length byte
+;	name of the operation - variable length, padded with space to even
+;		address boundary if required.
+;	link field, which points to the beginning of the previous dictionary
+;		header (used at compile time), bottom bit set for immediate
+;		operations.
+;	code pointer.
+;
+
+.NOCROSS	LINK0,LINK1,LINK2,LINK3,TLINK,$$$$$$,$$$$$0
+
+.MACRO	HEAD	NAME,LABEL,CODE,OPT
+.SBTTL	Definition for NAME
+.IF	IDN	<OPT>,<IMM>
+$$$$$0	=	1
+.IFF
+$$$$$0	=	0
+.ENDC
+TLINK	=	.
+.IF	NB	^^NAME^
+	 .ASCIC	^^NAME^
+.IFF
+	 .BYTE	1,0
+.ENDC
+.IF	NE	<.-$FORTH>&1
+	 .BYTE	40
+.ENDC
+$$$$$$	=	0
+.IRPC	N,^^NAME^
+.IIF	EQ	$$$$$$,	$$$$$$ = ''N
+.ENDR
+.IRP	N,<\$$$$$$&3>
+	 .WORD	LINK'N!$$$$$0
+LINK'N	=	TLINK
+.ENDR
+LABEL::
+.IF	NB	<CODE>
+	 .WORD	CODE
+.IFF
+	 .WORD	.+2
+.ENDC
+.ENDM	HEAD
+
+;
+;  THE 'NEXT' MACRO TRANSFERS CONTROL FROM ONE FORTH OPERATION TO THE
+;  'CODE ROUTINE' OF THE NEXT.  NOTICE THAT ONLY TWO INSTRUCTION
+;  EXECUTIONS ARE REQUIRED TO TRANSFER CONTROL FROM USEFUL OPERATIONS
+;  OF ONE FORTH PRIMITIVE TO THOSE OF THE NEXT.
+;
+
+.MACRO	NEXT
+	 MOV	(IP)+,W
+	 JMP	@(W)+
+.ENDM	NEXT
+
+;
+; Macro to define counted strings
+;
+
+.MACRO	.ASCIC	TEXT
+.NCHR	$$$$$$,^^TEXT^
+	 .ASCII	<$$$$$$>^TEXT^
+.ENDM	.ASCIC
+
+
+; Macros to save/restore registers across CIS instructions
+
+.MACRO	SAVCIS
+	 MOV	R4,-(SP)
+	 MOV	R5,-(SP)
+.ENDM	SAVCIS
+
+.MACRO	RESCIS
+	 MOV	(SP)+,R5
+	 MOV	(SP)+,R4
+.ENDM	RESCIS
+
+	.NLIST	MEB
+
+.SBTTL	Storage layout
+
+; I/O buffer layout
+
+DATSIZ	=:	512.		;Size of data area
+
+NTILEN	=:	256.		;Network input buffer
+NTOLEN	=:	512.		;Network output buffer
+ULA	=:	1		;ULA to use for our work
+MSGMAX	=:	65535.-NTOLEN.	;Maximum size messages to send (not segments!)
+
+.DSECT
+BLKHI:	.BLKB			;High order block number
+CHAN:	.BLKB			;Channel number, update flag
+BLKLO:	.BLKW			;Low order block number
+IOBUF:	.BLKB	DATSIZ		;Data portion
+IOTERM:	.BLKW			;Terminator word
+BUFSIZ:				;Total size of buffer
+
+; Low memory layout
+
+BUFCNT	=:	3		;Number of I/O buffers to allocate
+
+FQBSAV	=:	0		;Save area for FIRQB and XRB for network I/O
+.ASSUME	<<FQBSIZ+XRBSIZ>/2> LE 30
+     
+.DSECT	NSTORG			;Begin right above RSTS stuff
+
+RUNFLG:	.BLKW			;Run entry flag
+SPBASE:	.BLKW	  		;Parameter stack base
+RPBASE:	.BLKW			;Return stack base
+TIBPTR:	.BLKW			;Terminal input buffer base
+NAMSIZ:	.BLKW			;Maximum size of a name
+.FENCE:	.BLKW			;Fence value for FORGET
+.DP:	.BLKW			;Dictionary pointer: next free word
+VOCLNK:	.BLKW			;Link to vocabulary list
+.FIRST:	.BLKW			;Start of first disk I/O buffer
+.LIMIT:	.BLKW			;End of last disk I/O buffer
+.CCPTR:	.BLKW			;Control/C trap pointer
+.TRPPT:	.BLKW			;Trap pointer
+LDBLK:	.BLKW			;Block being loaded
+.IN:	.BLKW			;Pointer into the input buffer
+.OUT:	.BLKW		     	;Pointer into the output buffer
+SCREEN:	.BLKW			;Current screen number
+CONTXT:	.BLKW	5 		;Search context (transient + 4 resident)
+CURRNT:	.BLKW			;Definition context
+LATPTR:	.BLKW			;Points to latest word CREATEd
+.STATE:	.BLKW			;Compilation/execution state switch
+.BASE:	.BLKW			;Current radix
+.DPL:	.BLKW			;Position of decimal point from NUMBER
+FIELD:	.BLKW	 		;Output field width
+.CSP:	.BLKW			;Current stack pointer, for compiler
+.RNUM:	.BLKW			;Current cursor, for editor
+.HLD:	.BLKW			;Pointer to last character in PAD
+.USE:	.BLKW			;Disk buffer use pointer
+.PREV:	.BLKW			;
+.FILE:	.BLKW			;Current channel number
+.LPTR:	.BLKW			;Pointer to start of current line (for FLOAD)
+WAITTM:	.BLKW			;Wait time on next KB: read
+.TOP:	.BLKW			;Top of memory
+FPPFLG:	.BLKB	  		;Non-zero if FPP to be saved
+CISFLG:	.BLKB			;Non-zero if CIS present
+	.BLKW			;Working cell just before TIBUF
+TIBUF:	.BLKB	132.		;Terminal input stream
+	.BLKW			;Plus some room for termination
+DSKBUF:	.BLKW	<BUFCNT*BUFSIZ>/2 ;Disk I/O buffers
+ENDBUF:		 		;End of same
+LINBUF:	.BLKB	132.		;Source line input buffer
+	.BLKW  			;Plus terminator
+CHRPNT:	.BLKW			;Pointer into CHRBUF
+CHRCNT:	.BLKW			;Count of chars remaining
+CHRBUF:	.BLKB	132.		;Terminal input buffer
+CONPOS:	.BLKW			;Position of "console" terminal (network only)
+INICLR:				;Last address + 1 to clear in INIT
+NETFLG:	.BLKB			;Network flags
+NETCNT:	.BLKB			;Network polling supression counter
+NTIEP:	.BLKW		     	;Current network input empty pointer
+NTIEND:	.BLKW			;Highest used address + 1 in NTIBUF
+NTIBUF:	.BLKB	NTILEN		;Network input buffer			
+NTOFP:	.BLKW			;Network output buffer fill pointer
+NTOBUF:	.BLKB	NTOLEN		;Network output buffer
+NTOMSG:	.BLKW			;Size of current message being accumulated
+DICT:				;Start of dictionary
+
+.SBTTL	Bit definitions
+
+.BSECT	,NOCREF			;In NETFLG (network flags)
+
+NF$OCN:	.BLKB	.		;Data in NTOBUF is not first segment
+NF$ICN:	.BLKB	.		;Data in NTIBUF is not last segment
+NF$IKB:	.BLKB	.		;Input keyboard data request outstanding
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+	.BLKB	.		;Reserved
+NF$NET:	.BLKB	.		;Re-direct standard I/O through network
+
+.SBTTL	Network I/O definitions
+
+.DSECT	,NOCREF
+
+NI$BYT:	.BLKB		     	;Supply a byte for terminal I/O
+NI$STR:	.BLKB			;Supply a string (with word count)
+				;for terminal I/O
+NI$USR:	.BLKB			;Supply user data
+NI$NL:	.BLKB			;Go to new line
+NI$IKB:	.BLKB			;Request terminal input data, followed by
+				;wait time as a word
+
+.SBTTL	Ordering the Csects
+
+	DEFORG	PATCH		;Patch space
+	DEFORG	$FORTH		;Mainline code
+	DEFORG	FTEXT		;Text area      
+	DEFORG	MSGPTR		;Message pointers
+	ORG	VECTOR		;Pseudovectors
+
+	ORG	$FORTH		;Back to code
+
+.SBTTL	Vocabulary manipulation (in ONLY vocabulary)
+
+.ENABL	LSB
+                      
+LINK0=0		; Initialize last links for ONLY vocabulary
+LINK1=0		;  (for all 4 links)    
+LINK2=0
+LINK3=0
+
+	HEAD	VOCABULARY,VOCAB,DOCOL			; ***** VOCABULARY
+;	<BUILDS OCTAL 20001 , HERE 8 DUP ALLOT ERASE
+;	DOES> 2+ CONTEXT !
+
+	.WORD	BUILD,LIT,20001,COMMA,HERE,LIT,8.,DUP,ALLOT,ERASE
+	.WORD	DOES,TWOP,CONT,STORE,SEMIS
+                                              
+	HEAD	ONLY,ONLY,DOCOL				; ***** ONLY
+; This fakes an invocation of DOVOC but the vocabulary header itself
+; lives in impure space, so the actual code must be different.
+;	CONTEXT 10 ERASE {xonly} CONTEXT ! ALSO
+
+	.WORD	CONT,LIT,10.,ERASE,LIT,XONLY,CONT,STORE,ALSO,SEMIS
+
+	HEAD	FORTH,FORTH,DOCOL			; ***** FORTH
+; This fakes an invocation of DOVOC but the vocabulary header itself
+; lives in impure space, so the actual code must be different.
+;	{xforth} CONTEXT !
+
+	.WORD	LIT,XFORTH,CONT,STORE,SEMIS
+
+	HEAD	ALSO,ALSO,DOCOL				; ***** ALSO
+; Moves the transient search list entry (the first one) over to the
+; head of the resident search list, pushing other entries out of the way
+;	CONTEXT DUP 2+ 8 <CMOVE 0 CONTEXT !
+
+	.WORD	CONT,DUP,TWOP,LIT,8.,BCMOVE,ZERO,CONT,STORE,SEMIS
+
+	HEAD	DEFINITIONS,DEFIN,DOCOL			; ***** DEFINITIONS
+;	CONTEXT @ -DUP 0=
+;	IF CONTEXT 2+ @
+;	ENDIF CURRENT !
+
+	.WORD	CONT,AT,DDUP,ZEQU,ZBRAN,10$-.
+	.WORD	CONT,TWOP,AT
+10$:	.WORD	CURR,STORE,SEMIS
+
+	HEAD	VLIST,VLIST,DOCOL			; ***** VLIST
+;	?CR 5 0 
+;	DO 4 0
+;	 DO CONTEXT J @* + @ -DUP
+;	  IF I 2* + -DUP
+;	   IF
+;	    BEGIN OUT 64 > IF CR ENDIF
+;	     DUP DUP C@ < 
+;	     IF ID. SPACE SPACE 
+;	     ENDIF PFA LFA @ -2 AND DUP 0= UNTIL
+;	    DROP
+;	   ENDIF
+;	  ENDIF
+;	 LOOP
+;	LOOP
+
+	.WORD	QCR,LIT,5,ZERO,XDO
+20$:	.WORD	LIT,4,ZERO,XDO
+30$:	.WORD	CONT,J,TWOST,PLUS,AT,DDUP,ZBRAN,70$-.
+	.WORD	I,TWOST,PLUS,AT,DDUP,ZBRAN,70$-.
+40$:	.WORD	OUT,LIT,100,GREAT,ZBRAN,50$-.
+	.WORD	CR
+50$:	.WORD	DUP,DUP,CAT,LIT,200,LESS,ZBRAN,60$-.,IDDOT,SPACE,SPACE
+60$:	.WORD	PFA,LFA,AT
+	.WORD	LIT,-2,AND,DUP,ZEQU,ZBRAN,40$-.,DROP
+70$:	.WORD	XLOOP,30$-.
+	.WORD	XLOOP,20$-.
+	.WORD	SEMIS
+
+	HEAD	ORDER,ORDER,DOCOL			; ***** ORDER
+
+;	CONTEXT 10 OVER + SWAP
+;	DO I @ -DUP
+;	 IF 4 - NFA ID.
+;	 ENDIF 2
+;	/LOOP CR
+
+	.WORD	CONT,LIT,10.,OVER,PLUS,SWAP,XDO
+80$:	.WORD	I,AT,DDUP,ZBRAN,90$-.
+	.WORD	LIT,4,SUB,NFA,IDDOT
+90$:	.WORD	TWO,XSLOO,80$-.,CR,SEMIS
+
+	HEAD	<>,NULL,DOCOL,IMM			; ***** THE NULL
+;  THE NULL OPERATION (ASCII 0) STOPS INTERPRETATION/COMPILATION
+;  AT END OF A TERMINAL INPUT LINE, OR A DISK SCREEN.  ALL DISK
+;  BUFFERS MUST TERMINATE WITH NULLS, AND 'EXPECT' PLACES NULLS
+;  AFTER EACH TERMINAL INPUT LINE.
+;	BLK @ IF
+;	 LINE @ 0< IF
+;	  0 IN ! BLK @ B/SCR MOD 1 BLK +! 0= IF
+;	   ?EXEC R> DROP ENDIF
+;	 ELSE
+;	  R> DROP
+;	ENDIF ELSE R> DROP ENDIF
+
+	.WORD	BLK,AT,ZBRAN,100$-.,LINE,AT,ZLESS
+	.WORD	ZBRAN,100$-.,ZERO,IN,STORE,BLK,AT,BSCR,MOD
+	.WORD	ONE,BLK,PSTOR,ZEQU,ZBRAN,110$-.,QEXEC
+100$:	.WORD	FROMR,DROP
+110$:	.WORD	SEMIS
+
+OL0	=	LINK0
+OL1	=	LINK1
+OL2	=	LINK2
+OL3	=	LINK3
+
+.DSABL	LSB
+
+.SBTTL	Primitives
+
+LINK0=0		; Initialize last link for FORTH vocabulary
+LINK1=0		;  (for all 4 links)
+LINK2=0
+LINK3=0
+
+.ENABL	LSB
+
+; ****************************************************************
+; 
+;		NUCLEUS
+;
+; ****************************************************************
+;
+;
+;                                                          
+;  THE NUCLEUS CONTAINS THE PRIMITIVES FROM WHICH THE SYSTEM IS BUILT.
+;
+;
+;
+
+	HEAD	NOOP,NOOP,10$				; ***** NOOP
+;+
+; NOOP	-- Null operation
+;	( ==> )
+;-
+
+	HEAD	LIT,LIT					; ***** LIT
+;+
+; LIT	-- Push a literal
+;	( ==> n )
+;
+; Used by compiler
+;-
+
+	MOV	(IP)+,-(S)
+10$:	NEXT
+
+	HEAD	2LIT,DLIT				; ***** 2LIT
+;+
+; 2LIT	-- Push a double-length literal
+;	( ==> d )
+;
+; Used by compiler
+;-
+
+	MOV	(IP)+,-(S)
+	MOV	(IP)+,-(S)
+	NEXT                                               
+
+	HEAD	EXECUTE,EXEC				; ***** EXECUTE
+;+
+; EXECUTE	-- Execute a word whose CFA is on the stack
+;	( cfa => )
+;-
+
+	CALL	NTICHK		;Check for network messages
+	MOV	(S)+,W
+	JMP	@(W)+
+
+
+	HEAD	BRANCH,BRAN				; ***** BRANCH
+;+
+; BRANCH	-- Branch within code, displacement is inline
+;	( ==> )
+;
+; Used by compiler
+;-
+
+	CALL	NTICHK		;Check for network messages
+	ADD	(IP),IP
+	NEXT
+
+	HEAD	0BRANCH,ZBRAN				; ***** 0BRANCH
+;+
+; 0BRANCH	-- Branch if false, displacement is inline
+;	( flag ==> )
+;-
+
+	TST	(S)+
+	BNE	50$
+	CALL	NTICHK		;Check for network messages
+	ADD	(IP),IP
+	NEXT
+
+	HEAD	(LOOP),XLOOP				; ***** (LOOP)
+;+
+; (LOOP)	- Increment loop index and branch, displacement inline
+;	( ==> )
+;
+; Used by compiler
+;-
+
+	INC	(RP)
+20$:	CMP	(RP),2(RP)
+	BGE	40$
+30$:	CALL	NTICHK		 ;Check for network messages
+	ADD	(IP),IP
+	NEXT
+
+	HEAD	(/LOOP),XSLOO				; ***** (/LOOP)
+;+
+; (/LOOP)	-- Add top of stack to index, unsigned end test
+;	( increment ==> )
+;
+; Used by compiler
+;-
+
+	ADD	(S)+,(RP)
+	CMP	(RP),2(RP)	;Done yet?
+	BLO	30$		;No, so branch
+	BR	40$		;Yes, continue
+
+	HEAD	(+LOOP),XPLOO				; ***** (+LOOP)
+;+
+; (+LOOP)	-- Add top of stack to index, signed end test
+;	( increment ==> )
+;
+; Used by compiler     
+;-
+
+	ADD	(S),(RP)
+	TST	(S)+
+	BPL	20$		;Positive, use rest of (LOOP)
+	CMP	(RP),2(RP)	; HANDLE NEGATIVE INCREMENT
+	BGT	30$
+40$:	CMP	(RP)+,(RP)+
+50$:	TST	(IP)+
+	NEXT
+                                                                        
+	HEAD	(DO),XDO				; ***** (DO)
+;+
+; (DO)	-- Set up DO loop limit and index
+;	( limit initial-value ==> )
+;
+; Used by compiler
+;-
+
+	MOV	2(S),-(RP)
+	MOV	(S)+,-(RP)
+	TST	(S)+
+	NEXT
+
+	HEAD	I,I					; ***** I
+;+
+; I	-- Get current index
+;	( ==> index )
+;-
+
+	MOV	(RP),-(S)
+	NEXT
+
+	HEAD	I',ITICK				; ***** I'
+;+
+; I'	-- Get current loop limit
+;	( ==> limit )
+;-
+
+	MOV	2(RP),-(S)
+	NEXT
+
+	HEAD	J,J					; ***** J
+;+
+; J	-- Get index of next outer DO loop
+;	( ==> index )
+;-
+
+	MOV	4(RP),-(S)
+	NEXT
+
+	HEAD	(2LOOP),XDLOOP				; ***** (2LOOP)
+;+
+; (2LOOP)	- Increment loop index and branch, displacement inline
+;		  Double-length version of (LOOP)
+;	( ==> )
+;
+; Used by compiler
+;-
+
+	ADD	#1,2(RP)	;Increment low order
+	ADC	(RP)		; and high order
+920$:	CMP	(RP),4(RP)	;Compare with high order limit
+	BGT	940$		;Beyond the limit, leave
+	BLT	30$		;Not there yet, continue
+910$:	CMP	2(RP),6(RP)	;Equal, compare low order
+	BLO	30$		;Not there yet, continue
+940$:	ADD	#4*2,RP		;Pop two doublewords
+	BR	50$		; and continue in-line
+
+	HEAD	(2/LOOP),XDSLOO				; ***** (2/LOOP)
+;+
+; (2/LOOP)	-- Add top of stack to index, unsigned end test
+;	( d-increment ==> )
+;
+; Used by compiler
+;-
+
+	ADD	2(S),2(RP)	;Add low order
+	ADC	(RP)		; and carry it
+	ADD	(S)+,(RP)	;Add high order
+	TST	(S)+		;Now get rid of low order increment
+	CMP	(RP),4(RP)	;Done yet?
+	BLO	30$		;No, so branch
+	BHI	940$		;Yes, so fall through
+	BR	910$		;Maybe, look at low order
+
+
+	HEAD	(2+LOOP),XDPLOO				; ***** (2+LOOP)
+;+
+; (2+LOOP)	-- Add top of stack to index, signed end test
+;	( d-increment ==> )
+;
+; Used by compiler
+;-
+
+	ADD	2(S),2(RP)	;Add low order
+	ADC	(RP)		; and carry it
+	ADD	(S),(RP)	;Now add in high order
+	MOV	(S)+,(S)	;Put high order inc on top of low order
+	TST	(S)+		;Check sign of high order
+	BPL	920$		;Positive, use rest of (LOOP)
+	CMP	(RP),4(RP)	;Compare high order
+	BGT	30$		;Not there yet, branch
+	BLT	940$		;Past the limit, fall through
+	CMP	2(RP),6(RP)	;Equal, check low order
+	BGT	30$		;Not there yet, branch
+	BR	940$		; otherwise fall through
+
+	HEAD	(2DO),XDDO				; ***** (2DO)
+;+
+; (2DO)	-- Set up DO loop limit and index
+;	( d-limit d-initial-value ==> )
+;
+; Used by compiler
+;-
+
+	MOV	6(S),-(RP)
+	MOV	4(S),-(RP)
+	MOV	2(S),-(RP)
+	MOV	(S),-(RP)
+	ADD	#4*2,S		;Pop 2 longwords
+	NEXT
+
+	HEAD	2I,DI,DR+2				; ***** 2I
+;+
+; 2I	-- Get current index
+;	( ==> d-index )
+;-
+
+; Same code as 2R
+
+	HEAD	2I',DITICK				; ***** 2I'
+;+
+; 2I'	-- Get current loop limit
+;	( ==> d-limit )
+;-
+
+	MOV	6(RP),-(S)	;Push low order
+	MOV	4(RP),-(S)	; and high order
+	NEXT
+
+	HEAD	2J,DJ					; ***** 2J
+;+
+; 2J	-- Get index of next outer DO loop
+;	( ==> d-index )
+;-
+
+	MOV	12(RP),-(S)	;Push low order
+	MOV	10(RP),-(S)	; and high order
+	NEXT     
+
+	HEAD	DIGIT,DIGIT				; ***** DIGIT
+;+
+; DIGIT	-- Check ASCII character for validity as a digit
+;	( ascii-digit    base ==> digit-value true )
+;	( ascii-nondigit base ==> false )
+;
+; Used by compiler
+;-
+
+	MOV	2(S),R0		; Get digit value
+	SUB	#'0,R0		; Check for valid digit
+	CMP	R0,#9.		; IF GREATER THAN 9,
+	BLOS	60$
+	ADD	#'0,R0		; Get the ascii back
+	BIC	#40,R0		; Convert lower to upper case
+	SUB	#'A-10.,R0	; Adjust for hex letters
+	CMP	R0,#10.		; AND THEN IF <10 (A)
+	BLO	70$		; ERROR
+60$:	CMP	R0,(S)+		; Check against base
+	BHIS	70$		; Error if too large
+	MOV	R0,(S)		; Return value
+	MOV	#1,-(S)		; VALID RETURN
+	NEXT
+
+70$:	CLR	(S)		; ERROR - RETURN '0' FLAG
+	NEXT
+
+.DSABL	LSB
+
+.ENABL	LSB
+
+	HEAD	(FIND),PFIND				; ***** (FIND)
+;+
+; (FIND)	-- Find a word in the dictionary
+;	( address start-nfa ==> pfa true )
+;	( address start-nfa ==> false )
+;
+;  Used by compiler.  Find a word in the dictionary.
+;  string-address is address of the length byte of the
+;  string being sought.  start-nfa is name-field address of
+;  word in dictionary where search begins.  pfa is
+;  parameter-field address of the dictionary entry
+;  which is found.  if word not found, only one result
+;  (0, false) is returned.
+;-
+
+; SETUP - GET ARGS, PRESERVE NEEDED REGISTERS
+
+	MOV	(S)+,R0		; DICTIONARY ADDRESS
+	MOV	(S)+,R1		; STRING ADDRESS
+	MOV	R5,-(RP)	; PRESERVE REGISTERS
+	MOV	R4,-(RP)
+	MOV	R3,-(RP)
+	MOV	(R1)+,R2	; Pick up length and first byte
+
+;  Fast test to eliminate most words.
+;  Compare first word of each string for match on length and first char
+;  if mismatch, skip to end of name
+
+10$:	MOV	(R0)+,R3	; Pick up length and first character
+	CMP	R2,R3		; Match on length and starting char?
+	BEQ	30$		; Yes, must do full comparison
+	BIC	#^C<37>,R3	; Get length by itself
+20$:	ADD	R3,R0		; Skip over string
+	BIC	#1,R0		; Force word alignment
+	MOV	(R0),R0		; Get link to next entry
+	BIC	#1,R0		; Clear out "immediate" bit
+	BNE	10$		; Not a null link, check again
+	MOV	(RP)+,R3	; Restore registers
+	MOV	(RP)+,R4
+	MOV	(RP)+,R5
+	CLR	-(S)		; Return failure
+	NEXT			; We are done - failure to find
+
+;  End of fast elimination test
+
+30$:	BIC	#^C<37>,R3	; Get length by itself
+	MOV	R1,R5		; Copy string pointer for search loop
+	DEC	R3		; Adjust char count (first one already done)
+	BEQ	50$		; None left, so match
+40$:	CMPB	(R0)+,(R5)+	; Match?
+	BNE	20$		; No, skip to next entry
+	SOB	R3,40$		; Compare all the bytes
+50$:	ADD	#5,R0		; Skip extra byte, LFA and CFA
+	BIC	#1,R0		; Force even address
+	MOV	(RP)+,R3	; Restore registers
+	MOV	(RP)+,R4
+	MOV	(RP)+,R5
+	MOV	R0,-(S)		; Return the PFA
+	MOV	#1,-(S)		;  and "true"
+	NEXT
+
+
+	HEAD	ENCLOSE,ENCL				; ***** ENCLOSE
+;+
+; ENCLOSE	-- Break a word out of input buffer
+; 	( address delimiter ==> address start-offset end-offset next-char )
+; Searches for space or tab if the argument is negative
+;
+; Used by compiler
+;-
+
+	MOV	(S),R0		; DELIMITER
+	MOV	2(S),R1		; STARTING ADDRESS
+	CMP	-(S),-(S)	; MAKE SPACE FOR RESULTS
+	TST	R0		;Looking for space/tab?
+	BMI	100$		;Yes, do that
+60$:	CMPB	(R1)+,R0
+	BEQ	60$		; SKIP OVER LEADING DELIMITERS
+	DEC	R1
+	MOV	R1,4(S)
+70$:	TSTB	(R1)		; TEST FOR NULL
+	BEQ	140$
+	CMPB	(R1)+,R0	; NOT NULL, SO FIND END OF TOKEN
+	BNE	70$
+80$:	MOV	R1,(S)
+	DEC	R1
+90$:	MOV	R1,2(S)		; FINISH UP AND RETURN 
+	MOV	6(S),R1
+	SUB	R1,(S)
+	SUB	R1,2(S)
+	SUB	R1,4(S)
+	NEXT
+
+100$:	MOV	#40,R0		;Get a convenient constant (space)
+110$:	CMPB	(R1)+,R0	;Leading space?
+	BEQ	110$		;Yes
+	CMPB	-1(R1),#'I&37	;Leading tab?
+	BEQ	110$		;Yes, skip that
+  	DEC	R1		;Back up
+	MOV	R1,4(S)		;Save starting offset
+120$:	TSTB	(R1)		;End of string?
+	BEQ	140$		;Yes, exit loop
+	CMPB	(R1),R0		;Space to end token?
+	BEQ	130$		;Yes, done
+	CMPB	(R1)+,#'I&37	;Tab?
+	BNE	120$		;No, look further
+	BR	80$		;Yes, done
+
+130$:	INC	R1		;Bump the string pointer
+	BR	80$		; and join common code
+
+140$:	MOV	R1,(S)		; HANDLE NULL CASE
+	CMP	R1,4(S)
+	BNE	90$
+	INC	R1
+	BR	90$
+
+.DSABL	LSB
+
+.SBTTL	System-dependent I/O
+
+;
+;  THE NEXT HEADERS POINT TO INSTALLATION-DEPENDENT TERMINAL I/O
+;  ROUTINES.
+;
+
+;+
+; EMIT	-- Output character whose code is on the stack
+;	( code ==> )
+;-
+
+  	HEAD	EMIT,EMIT,PEMIT				; ***** EMIT
+
+;+                      
+; EMITC	-- Output character whose code is on the stack,
+;	   without messing up control characters
+;	( code ==> )
+;-
+
+	HEAD	EMITC,EMITC,PEMITC			; ***** EMITC
+
+;+
+; KEY	-- Get a character from the terminal
+;	( ==> char )
+;-
+
+	HEAD	KEY,XKEY,PKEY				; ***** KEY
+
+;+
+; ?TERMINAL	-- Get a character from the terminal, if there is one
+;	( ==> char )	if there is a character pending
+;	( ==> 0 )	if no character
+;-
+
+	HEAD	?TERMINAL,QTERM,PQTER			; ***** ?TERMINAL
+
+;+
+; CR	- Output carriage return-line feed
+;	( ==> )
+;-
+
+	HEAD	CR,CR,PCR				; ***** CR
+
+;+
+; ?CR	- Output carriage return-line feed if not currently at left margin
+;  	( ==> )
+;-
+
+	HEAD	?CR,QCR,PQCR				; ***** ?CR
+
+;+
+; RESTORE	-- Cancel ^O
+;	( ==> )
+;-
+
+	HEAD	RESTORE,RESTO,PRESTO			; ***** RESTORE
+
+;+
+; (EXPECT)	-- Read a line into a buffer
+;	( address length ==> count ) 
+;-
+
+	HEAD	(EXPECT),XEXPEC,PGETLN
+
+.SBTTL	Network task-to-task communications
+
+;+
+; ?REMOTE -- Check if running in network mode
+;
+;	( ==> {-1 if Net | 0 if local)
+;
+
+.ENABL	LSB
+
+	HEAD	?REMOTE,QREMOT
+
+	TSTB	NETFLG		;Check network flag
+.ASSUME	NF$NET EQ 200
+	SXT	-(S)		;Save the result
+	NEXT			;That was sure easy
+
+.DSABL	LSB
+
+;+
+; REMOTE -- Send data to the remote program
+;
+;	( word count, data... ==> )
+;-
+
+.ENABL	LSB
+
+	HEAD	REMOTE,REMOTE
+
+	MOV	(S)+,R3		;Get the word count
+	TSTB	NETFLG		;Network connection?
+	BMI	10$		;Yes, go send a message
+.ASSUME	NF$NET	EQ	200
+	ASL	R3		;No, get count in bytes
+	ADD	R3,S		;Clean up the stack
+	BR	30$		;And exit
+
+10$:	MOVB	#NI$USR,R2	;Indicate this is user data
+	CALL	NTOBYT		; ...
+	MOV	R3,R2		;Copy the length in words
+	ASL	R2		;Make it a byte count for the remote system
+	CALL	NTOWRD		;And send the byte count
+20$:	MOV	(S)+,R2		;Get a word
+	CALL	NTOWRD		;And send it out
+	SOB	R3,20$		;Loop for the whole thing
+	CALL	NTOCHK		;Check on sending the buffer
+30$:	NEXT			;And we're done
+
+.DSABL	LSB
+
+;+
+; REMBUF - Send data to the remote system, from a buffer
+;
+;	( byte count, data address ==>)
+;-
+
+.ENABL	LSB
+
+	HEAD	REMBUF,REMBUF
+
+	TSTB	NETFLG		;Is this a network connection?
+.ASSUME	NF$NET	EQ	200
+	BMI	10$		;Yes, go set up the message
+	CMP	(S)+,(S)+	;No, clean up the stack
+	BR	30$		;And exit
+
+10$:	MOV	#NI$USR,R2	;Indicate this is user data
+	CALL	NTOBYT		;And set that in the message
+	MOV	(S)+,R2		;Get the byte count
+	CALL	NTOWRD		;And send that
+	MOV	(S)+,R3		;Get the pointer to the data itself
+20$:	MOV	R2,-(SP)	;Save the byte count
+	MOVB	(R3)+,R2	;Pick up a byte
+	CALL	NTOBYT		;And send it
+	MOV	(SP)+,R2	;Restore byte count
+	SOB	R2,20$		;And loop
+	CALL	NTOCHK		;Check on sending the buffer
+30$:	NEXT			;Off to the next word
+
+.DSABL	LSB
+
+.SBTTL	Character moving
+
+.ENABL	LSB
+
+	HEAD	CMOVE,CMOVE				; ***** CMOVE
+;+
+; CMOVE	-- Move characters in memory, from start to end
+;	( from to count ==> )
+;-
+
+	MOV	(S)+,R2		; Get byte count
+	MOV	(S)+,R0		;  "to" address
+	MOV	(S)+,R1		;   "from" address
+	TST	R2		; Anything to move?
+	BEQ	20$		; No
+10$:	MOVB	(R1)+,(R0)+
+	SOB	R2,10$
+20$:	NEXT
+
+	HEAD	^/<CMOVE/,BCMOVE			; ***** <CMOVE
+;+
+; <CMOVE	-- Move characters in memory, from end to start
+;	( from to count ==> )
+;
+; This one differs from CMOVE in that it starts moving at the end of
+; the string.  This is useful in case the buffers overlap
+;-
+
+	MOV	(S)+,R2		; Get byte count
+	MOV	(S)+,R0		;  "to" address
+	MOV	(S)+,R1		;   "from" address
+	TST	R2		; Anything to move?
+	BEQ	40$		; No
+	ADD	R2,R1		;Point beyond "from"
+	ADD	R2,R0		; and beyond "to"
+30$:	MOVB	-(R1),-(R0)
+	SOB	R2,30$
+40$:	NEXT
+
+	HEAD	-TEXT,DTEXT				; ***** -TEXT
+;+
+; -TEXT	-- Compare two strings
+;	( address1 count address2 ==> address flag )
+;
+; Returns flag as -1 if first string less than second, 0 if equal, 1 if
+; first string greater than.  Uses bytewise comparisons, unsigned.
+;-
+
+	MOV	(S)+,R2		;Point to second string
+	MOV	(S)+,R0		;Get count
+	MOV	(S)+,R1		;Point to first string
+50$:	CMPB	(R1)+,(R2)+	;Compare a byte
+	BNE	60$		;Mismatch, check it out
+	SOB	R0,50$		;Loop through it all
+	CLR	R0		;Indicate equality
+	BR	70$		;Done
+
+60$:	CMPB	-(R1),-(R2)	;Compare the mismatching bytes again
+	SXT	R0		;Set R0 = 0 if >, -1 if <
+	BMI	70$		;Was <
+	INC	R0		;Make it 1 to indicate >
+70$:	MOV	R1,-(S)		;Save address of mismatch
+	MOV	R0,-(S)		;Save result of comparison
+	NEXT			;All done
+
+.DSABL	LSB
+
+.SBTTL	Arithmetic primitives
+
+.ENABL	LSB
+
+	HEAD	U*,USTAR				; ***** U*
+;+
+; U*	- Unsigned multiply
+;	( n1 n2 ==> d )
+;
+; Multiplies two unsigned single-length numbers, double length result.
+;-
+
+	JSR	PC,UMULT
+	NEXT
+
+
+UMULT:	MOV	(S)+,R2
+	MOV	#20,-(RP)	; SET LOOP COUNT
+	CLR	R0
+	CLR	R1
+10$:	ROL	R1
+	ROL	R0
+	ROL	R2
+	BCC	20$
+	ADD	(S),R1
+	ADC	R0
+20$:	DEC	(RP)
+	BNE	10$
+	MOV	R1,(S)
+	MOV	R0,-(S)
+	TST	(RP)+		; POP TEMPORARY
+	RTS	PC
+
+	HEAD	U/,USLAS				; ***** U/
+;+
+; U/	-- Unsigned divide
+;	( d-dividend divisor ==> remainder quotient )
+;
+; Divides unsigned double-length dividend by single-length divisor, leaves
+; both remainder and quotient on the stack
+;-
+
+	JSR	PC,UDIV
+	NEXT
+
+
+UDIV:	MOV	(S)+,R2	; DIVISOR
+	MOV	(S)+,R0
+	MOV	(S)+,R1
+	MOV	#20,-(S)	; LOOP COUNT
+30$:	ASL	R1
+	ROL	R0
+	BEQ	40$		; NO NEED TO SUBTRACT
+	SUB	R2,R0
+	INC	R1
+	BCC	40$
+	ADD	R2,R0		; MUST RESTORE
+	DEC	R1
+40$:	DEC	(S)		; LOOP SIXTEEN TIMES
+	BNE	30$
+	TST	(S)+		; POP TO DISCARD COUNT
+	MOV	R0,-(S)		; REMAINDER
+	MOV	R1,-(S)		; QUOTIENT
+	RTS	PC
+
+	HEAD	AND,AND					; ***** AND
+;+
+; AND	-- Bitwise AND operation
+;	( n1 n2 ==> result )
+;-
+
+	COM	(S)
+	BIC	(S)+,(S)
+	NEXT
+
+	HEAD	OR,OR					; ***** OR
+;+
+; OR	-- Bitwise OR operation
+;	( n1 n2 ==> result )
+;-
+
+	BIS	(S)+,(S)
+	NEXT
+
+	HEAD	XOR,XOR					; ***** XOR
+;+
+; XOR	-- Bitwise Exclusive OR operation
+;	( n1 n2 ==> result )
+;-
+
+	MOV	(S)+,R0
+	XOR	R0,(S)
+	NEXT
+
+.DSABL	LSB
+
+.SBTTL	Stack manipulation
+
+.ENABL	LSB
+
+	HEAD	SP@,SPAT				; ***** SP@
+;+
+; SP@	-- Return address top of parameter stack
+;	( ==> address )
+;
+; The address returned is the parameter stack pointer value prior to
+; pushing it onto the stack
+;-
+  
+	MOV	S,R1
+	MOV	R1,-(S)
+	NEXT
+
+	HEAD	RP@,RPAT				; ***** RP@
+;+
+; RP@	-- Return address top of return stack
+;	( ==> address )
+;-
+
+	MOV	RP,-(S)
+	NEXT
+
+	HEAD	SP!,SPSTO				; ***** SP!
+;+
+; SP!	-- Reset parameter stack to base
+;	( ==> )
+;-
+
+	MOV	SPBASE,S	;Reset stack pointer to base
+	NEXT
+
+	HEAD	(SP!),PSPSTO				; ***** (SP!)
+;+
+; (SP!)	-- Change parameter stack pointer
+;	( new-pointer ==> )
+;-
+
+	MOV	(S),S		;Update stack pointer
+	NEXT
+
+	HEAD	RP!,RPSTO				; ***** RP!
+;+
+; RP!	-- Reset return stack to base
+;	( ==> )
+;
+; This function should only be executed in words that don't plan to
+; return control to their caller, since by resetting the return
+; stack you lose track of who that was.
+;-
+
+	MOV	RPBASE,RP	;Reset return stack to base
+	NEXT
+
+	HEAD	<;S>,SEMIS				; ***** ;S
+;+
+; ;S	-- End of word, return to caller
+;	( ==> )
+;
+; Pops instruction pointer off the return stack, and goes there.  Compiled
+; by ; to exit from a word.
+;-
+
+	MOV	(RP)+,IP
+	NEXT
+
+	HEAD	LEAVE,LEAVE				; ***** LEAVE
+;+
+; LEAVE	-- Leave a loop
+;	( ==> )
+;
+; Sets I' equal to I so at next LOOP (or +LOOP or /LOOP) the loop will end.
+; Used to terminate a DO loop prematurely.
+;-
+
+	MOV	(RP),2(RP)
+	NEXT
+
+	HEAD	2LEAVE,DLEAVE				; ***** 2LEAVE
+;+
+; 2LEAVE -- Leave a loop
+;	( ==> )
+;
+; Sets 2I' equal to 2I so at next 2LOOP (or 2+LOOP or 2/LOOP) the loop will
+; end.  Used to terminate a 2DO loop prematurely.
+;-
+
+	MOV	(RP),4(RP)	;Plug in high order
+	MOV	2(RP),6(RP)	; and low order
+	NEXT
+
+	HEAD	^/>R/,TOR				; ***** >R
+;+
+; >R	-- Move from parameter stack to return stack
+;	( n ==> )
+;
+; Moves a value to the return stack for temporary stoarage
+;-
+
+	MOV	(S)+,-(RP)
+	NEXT
+
+	HEAD	R>,FROMR				; ***** R>
+;+
+; R>	-- Move from return stack to parameter stack
+;	( ==> n )
+;
+; Moves a value from the return stack to the parameter stack.
+; This is the reverse of >R
+;-
+
+	MOV	(RP)+,-(S)
+	NEXT
+
+	HEAD	R,R,I+2					; ***** R
+;+
+; R	-- Return value on top of return stack
+;	( ==> n )
+;
+; Returns the value that was pushed on the return stack with >R, without
+; removing it from the return stack, as R> would do.
+;-
+
+; This uses the code from I because they are identical
+;	MOV	(RP),-(S)
+;	NEXT
+
+	HEAD	^/2>R/,DTOR,XDO+2			; ***** D>R
+;+
+; 2>R	-- Move double-length value from parameter stack to return stack
+;	( d ==> )
+;
+; Moves a double-length value to the return stack for temporary stoarage
+;-
+
+; Uses same code as (DO)
+;	MOV	2(S),-(RP)
+;	MOV	(S)+,-(RP)
+;	TST	(S)+
+;	NEXT
+
+	HEAD	2R>,DFROMR				; ***** 2R>
+;+
+; 2R>	-- Move double-length value from return stack to parameter stack
+;	( ==> d )
+;
+; Moves a double-length value from the return stack to the parameter stack.
+; This is the reverse of 2>R
+;-
+
+	MOV	2(RP),-(S)
+	MOV	(RP)+,-(S)
+	TST	(RP)+
+	NEXT
+
+	HEAD	2R,DR					; ***** 2R
+;+
+; 2R	-- Return double-length value from top of return stack
+;	( ==> d )
+;
+; Copies double-length value on top of the return stack to the
+; parameter stack, without removing it from the return stack as 2R> would.
+;-
+
+	MOV	2(RP),-(S)
+	MOV	(RP),-(S)	;Preserve the stack order
+	NEXT
+
+	HEAD	0=,ZEQU					; ***** 0=
+;+
+; 0=	-- Test for equal to zero
+;	( n ==> flag )
+;-
+
+	TST	(S)
+	BEQ	20$
+10$:	CLR	(S)
+	NEXT
+
+	HEAD	0<,ZLESS				; ***** 0<
+;+
+; 0<	-- Test for less than zero
+;	( n ==> flag )
+;-
+
+	TST	(S)
+	BPL	10$
+20$:	MOV	#1,(S)
+	NEXT
+
+	HEAD	0<=,ZLEQ				; ***** 0<=
+;+
+; 0<=	-- Test for less than or equal to zero
+;	( n ==> flag )
+;-
+
+	TST	(S)
+	BLE	20$
+	BR	10$
+
+	HEAD	0>,ZGTR					; ***** 0>
+;+
+; 0>	-- Test for greater than zero
+;	( n ==> flag )
+;-
+
+	TST	(S)
+	BGT	20$
+	BR	10$
+
+	HEAD	0>=,ZGEQ				; ***** 0>=
+;+
+; 0>=	-- Test for greater than or equal to zero
+;	( n ==> flag )
+;-
+
+	TST	(S)
+	BGE	20$
+	BR	10$
+
+	HEAD	PICK,PICK				; ***** PICK
+;+
+; PICK	-- Get a value from anywhere in the parameter stack
+;	( position ==> n )
+;
+; Used to get a value from somewhere deep in the parameter stack.  The
+; position is the cell-number, counting from 0 (not including the position
+; itself).  Therefore, 0 PICK is DUP, 1 PICK is OVER, etc.
+;-
+
+	MOV	(S)+,R0		;Get position
+	ASL	R0		;Make byte offset
+	ADD	S,R0		;Compute address of value
+	MOV	(R0),-(S)	;Return it
+	NEXT
+
+.DSABL	LSB
+
+.SBTTL	Arithmetic
+
+.ENABL	LSB
+
+	HEAD	+,PLUS					; ***** +
+;+
+; +	-- Add single-length values
+;	( n1 n2 ==> result )
+;-
+
+	ADD	(S)+,(S)
+	NEXT
+
+	HEAD	D+,DPLUS				; ***** D+
+;+
+; D+	-- Add double-length values
+;	(d1 d2 ==> d-result )
+;-
+
+	ADD	2(S),6(S)	; ADD LOW
+	ADC	4(S)
+	ADD	(S),4(S)	; ADD HIGH
+	CMP	(S)+,(S)+
+	NEXT
+
+	HEAD	MINUS,MINUS				; ***** MINUS  
+;+
+; MINUS	-- Change sign
+;	( n ==> -n )
+;-
+
+	NEG	(S)
+	NEXT
+
+	HEAD	DMINUS,DMINU				; ***** DMINUS
+;+
+; DMINUS	-- Change sign of double-length value
+;	( d ==> -d )
+;-
+
+	NEG	(S)
+	NEG	2(S)
+	SBC	(S)
+	NEXT
+
+	HEAD	OVER,OVER				; ***** OVER
+;+
+; OVER	-- Make a copy of second value on parameter stack
+;	( n1 n2 ==> n1 n2 n1 )
+;-
+
+	MOV	2(S),-(S)
+	NEXT
+
+	HEAD	DROP,DROP				; ***** DROP
+;+
+; DROP	-- Drop a value from the parameter stack
+;	( n ==> )
+;-
+
+	TST	(S)+
+	NEXT
+
+	HEAD	SWAP,SWAP				; ***** SWAP
+;+
+; SWAP	-- Interchange top of stack with next on stack
+;	( n1 n2 ==> n2 n1 )
+;-
+
+	MOV	2(S),R1
+	MOV	(S)+,(S)
+	MOV	R1,-(S)
+	NEXT
+
+	HEAD	DUP,DUP					; ***** DUP
+;+
+; DUP	-- Make a copy of top of stack
+;	( n ==> n n )
+;-
+
+	MOV	(S),-(S)
+	NEXT
+
+.DSABL	LSB
+
+.SBTTL	Fetch and store
+
+.ENABL	LSB
+
+	HEAD	+!,PSTOR				; ***** +!
+;+
+; +!	-- Add value to memory
+;	( n address ==> )
+;
+; The address must be even
+;-
+
+	ADD	2(S),@(S)+
+	TST	(S)+
+	NEXT
+
+	HEAD	TOGGLE,TOGGL				; ***** TOGGLE
+;+
+; TOGGLE	-- Toggle a bit in a byte
+;	( address bit ==> )
+;-
+
+	MOVB	@2(S),R1	; Get the byte to toggle
+	XOR	R1,(S)		; Xor it with the toggle
+	MOV	(S)+,R1		; Get the result
+       	MOVB	R1,@(S)+	; Now store it back
+	NEXT
+
+	HEAD	@,AT					; ***** @
+;+
+; @	-- Fetch a single-length value
+;	( address ==> n )
+;
+; The address must be even
+;-
+
+	MOV	@(S)+,-(S)
+	NEXT
+
+	HEAD	C@,CAT					; ***** C@
+;+
+; C@	-- Fetch a character (byte)
+;	( address ==> n )
+;
+; The value is not sign-extended, i.e. the result is in the range 0-255
+;-
+
+	CLR	R1		; Make sure no sign extension
+	BISB	@(S)+,R1
+	MOV	R1,-(S)
+	NEXT
+
+	HEAD	!,STORE					; ***** !
+;+
+; !	-- Store a value
+;	( value address ==> )
+;
+; The address must be even
+;-     
+
+	MOV	2(S),@(S)+
+	TST	(S)+
+	NEXT
+
+	HEAD	C!,CSTOR				; ***** C!
+;+
+; C!	-- Store a character (byte)
+;	( value address ==> )
+;-
+
+	MOVB	2(S),@(S)+
+	TST	(S)+
+	NEXT
+
+	HEAD	2@,DAT					; ***** 2@
+;+
+; 2@	-- Fetch a double-length value
+;	( address ==> d )
+;
+; To conform to PDP-11 and VAX standards of byte ordering in longword
+; (double length) integers, the word order in memory expected by 2@
+; is the opposite of the stack order, i.e. low order 16 bits at the 
+; low address, high order next.  The stack order is high order on
+; top, i.e. at the lower address.  This allows storing double-length
+; values into disk buffers for writing to files that other languages
+; and systems will understand.
+;-
+
+	MOV	(S),R0		;Get address
+	MOV	(R0)+,(S)	;Fetch low order
+	MOV	(R0),-(S)	; and high order
+       	NEXT
+
+	HEAD	2!,DSTOR				; ***** 2!
+;+
+; 2!	-- Store double-length value
+;	( d-value address ==> )
+;-
+
+	MOV	(S)+,R0		;Get address
+	MOV	2(S),(R0)+	;Store low order
+	MOV	(S)+,(R0)	;Store high order
+	TST	(S)+		;Toss low order
+	NEXT
+
+.DSABL	LSB
+
+.SBTTL	Start and end a definition
+
+.ENABL	LSB
+
+; ****************************************************************
+;
+;		PRE-COMPILED FORTH SECTION
+;
+; ****************************************************************
+;
+;
+;
+
+	HEAD	<:>,COLON,DOCOL				; ***** :
+;	?EXEC !CSP CREATE ] (;CODE)
+
+	.WORD	QEXEC,SCSP,CREAT,RBRAC,PSCOD
+DOCOL::	MOV	IP,-(RP)
+	MOV	W,IP
+	NEXT
+
+	HEAD	<;>,SEMI,DOCOL,IMM			; ***** ;
+;	?CSP COMPILE ;S SMUDGE [ ;S
+
+	.WORD	QCSP,COMP,SEMIS,SMUDG,LBRAC,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Constants and variables
+
+.ENABL	LSB
+
+	HEAD	CONSTANT,CON,DOCOL			; ***** CONSTANT
+;	CREATE SMUDGE , (;CODE)
+
+	.WORD	CREAT,SMUDG,COMMA,PSCOD
+DOCON:	MOV	(W),-(S)
+	NEXT
+
+	HEAD	VARIABLE,VAR,DOCOL			; ***** VARIABLE
+;	CONSTANT (;CODE)
+
+	.WORD	CON,PSCOD
+DOVAR:	MOV	W,-(S)
+	NEXT
+
+	HEAD	2VARIABLE,DVAR,DOCOL			; ***** 2VARIABLE
+
+;	SWAP VARIABLE ,
+
+	.WORD	SWAP,VAR,COMMA,SEMIS
+
+	HEAD	2CONSTANT,DCON,DOCOL			; ***** 2CONSTANT
+
+;	SWAP CONSTANT , (;CODE)
+
+	.WORD	SWAP,CON,COMMA,PSCOD
+
+	MOV	(W)+,-(S)	;Push low order
+	BR	DOCON		;Go do high order
+
+.DSABL	LSB
+
+.SBTTL	Pre-defined constants
+
+.ENABL	LSB
+
+	HEAD	-1,MONE,DOCON				; ***** -1
+	.WORD	-1
+
+	HEAD	0,ZERO,DOCON				; ***** 0
+	.WORD	0
+
+	HEAD	1,ONE,DOCON				; ***** 1
+	.WORD	1
+
+	HEAD	2,TWO,DOCON				; ***** 2
+	.WORD	2
+
+	HEAD	3,THREE,DOCON				; ***** 3
+	.WORD	3
+
+	HEAD	BL,BL,DOCON				; ***** BL
+;  BLANK.
+	.WORD	40
+
+	HEAD	C/L,CL,DOCON				; ***** C/L
+;  # OF CHARACTERS PER LINE
+	.WORD	64.
+
+; 'FIRST' AND 'LIMIT' MOVED TO USER AREA
+
+	HEAD	B/BUF,BBUF,DOCON			; ***** B/BUF
+;  BYTES PER DISK-BLOCK BUFFER.
+	.WORD	DATSIZ
+
+	HEAD	B/SCR,BSCR,DOCON			; ***** B/SCR
+;  DISK BLOCKS PER FORTH SCREEN.
+	.WORD	2
+
+.DSABL	LSB
+
+.SBTTL	Pre-defined variables
+
+.ENABL	LSB
+
+	HEAD	RUN-FLAG,RFLAG,DOCON			; ***** RUN-FLAG
+	.WORD	RUNFLG
+
+	HEAD	S0,SZERO,DOCON	 			; ***** S0
+;  STACK ORIGIN.
+	.WORD	SPBASE
+
+	HEAD	R0,RZERO,DOCON				; ***** R0
+;  RETURN STACK ORIGIN.
+	.WORD	RPBASE
+
+	HEAD	TIB,TIB,DOCON				; ***** TIB
+;  TERMINAL INPUT BUFFER.
+	.WORD	TIBPTR
+
+	HEAD	WIDTH,WIDTH,DOCON			; ***** WIDTH
+;  MAXIMUM NAME LENGTH (DEFAULT, 31 CHARACTERS).
+	.WORD	NAMSIZ
+
+	HEAD	FENCE,FENCE,DOCON			; ***** FENCE
+;  PREVENTS 'FORGET' BELOW THIS 'FENCE' SETTING.
+	.WORD	.FENCE
+
+	HEAD	DP,DP,DOCON				; ***** DP
+;  DICTIONARY POINTER TO NEXT AVAILABLE SPACE.
+	.WORD	.DP
+
+	HEAD	VOC-LINK,VOCL,DOCON			; ***** VOC-LINK
+;  VOCABULARY LINK (MAINLY FOR FUTURE USE).
+	.WORD	VOCLNK
+
+	HEAD	FIRST,FIRST,DOCON			; ***** FIRST
+;  ADDRESS OF BEGINNING OF DISK BUFFER.
+	.WORD	.FIRST
+
+	HEAD	LIMIT,LIMIT,DOCON			; ***** LIMIT
+;  ADDRESS JUST BEYOND END OF DISK BUFFERS.
+	.WORD	.LIMIT
+
+	HEAD	'INTERRUPT,INTRP,DOCON			; ***** 'INTERRUPT
+; Word to execute when ^C is typed
+	.WORD	.CCPTR
+
+	HEAD	'TRAP,TTRAP,DOCON			; ***** 'TRAP
+; Word to execute when a trap occurs
+	.WORD	.TRPPT
+
+	HEAD	BLK,BLK,DOCON				; ***** BLK
+;  CURRENT DISK BLOCK BEING LOADED (0=TERMINAL)
+	.WORD	LDBLK
+
+	HEAD	IN,IN,DOCON				; ***** IN
+;  OFFSET IN TERMINAL INPUT BUFFER.
+	.WORD	.IN
+
+	HEAD	SCR,SCR,DOCON				; ***** SCR
+;  CURRENT FORTH DISK SCREEN.
+	.WORD	SCREEN
+
+	HEAD	CONTEXT,CONT,DOCON			; ***** CONTEXT
+	.WORD	CONTXT
+
+	HEAD	CURRENT,CURR,DOCON			; ***** CURRENT
+	.WORD	CURRNT
+
+	HEAD	L-PTR,LPTR,DOCON			; ***** L-PTR
+	.WORD	LATPTR
+
+	HEAD	STATE,STATE,DOCON			; ***** STATE
+	.WORD	.STATE
+
+	HEAD	BASE,BASE,DOCON				; ***** BASE
+	.WORD	.BASE
+
+	HEAD	DPL,DPL,DOCON				; ***** DPL
+;  OFFSET OF DECIMAL POINT AFTER DOUBLE-INTEGER INPUT.
+	.WORD	.DPL
+
+	HEAD	FLD,FLD,DOCON				; ***** FLD
+;  OUTPUT FIELD WIDTH.
+	.WORD	FIELD
+
+	HEAD	CSP,CSP,DOCON				; ***** CSP
+;  USED BY COMPILER TO HOLD CURRENT STACK POSITION,
+;  FOR ERROR CHECKING.
+	.WORD	.CSP
+
+	HEAD	R#,RNUM,DOCON				; ***** R#
+;  CURSOR POSITION (FOR SOME EDITORS).
+	.WORD	.RNUM
+
+	HEAD	HLD,HLD,DOCON				; ***** HLD
+;  POINTS TO LAST CHARACTER HELD IN 'PAD'
+	.WORD	.HLD
+
+	HEAD	USE,USE,DOCON				; ***** USE
+	.WORD	.USE
+
+	HEAD	PREV,PREV,DOCON				; ***** PREV
+	.WORD	.PREV
+
+	HEAD	FILE,FILE,DOCON				; ***** FILE
+	.WORD	.FILE
+
+	HEAD	LINE,LINE,DOCON				; ***** LINE
+; Pointer to start of stream file source line
+	.WORD	.LPTR
+
+	HEAD	TOP,TOP,DOCON				; ***** TOP
+; Current top of memory
+	.WORD	.TOP
+
+	HEAD	LINEBUF,LBUF,DOCON			; ***** LINEBUF
+; Stream file source line buffer
+	.WORD	LINBUF
+
+.DSABL	LSB
+
+.SBTTL	Incrementing
+
+.ENABL	LSB
+
+	HEAD	1+,ONEP					; ***** 1+
+	INC	(S)
+	NEXT
+
+	HEAD	2+,TWOP					; ***** 2+
+	ADD	#2,(S)
+	NEXT
+
+	HEAD	1-,ONEM					; ***** 1-
+	DEC	(S)
+	NEXT
+
+	HEAD	2-,TWOM					; ***** 2-
+	SUB	#2,(S)
+	NEXT
+
+	HEAD	2*,TWOST				; ***** 2*
+	ASL	(S)
+	NEXT
+
+	HEAD	2/,TWOSL				; ***** 2/
+	ASR	(S)
+	NEXT
+
+	HEAD	D1+,DONEP				; ***** D1+
+	ADD	#1,2(S)		;Increment low order
+	ADC	(S)		; carry into high order
+	NEXT
+
+	HEAD	D2+,DTWOP				; ***** D2+
+	ADD	#2,2(S)		;Increment low order
+	ADC	(S)		; carry into high order
+	NEXT
+
+	HEAD	D1-,DONEM				; ***** D1-
+	SUB	#1,2(S)		;Decrement low order
+	SBC	(S)		; carry into high order
+	NEXT
+
+	HEAD	D2-,DTWOM				; ***** D2-
+	SUB	#2,2(S)		;Decrement low order
+	SBC	(S)		; carry into high order
+	NEXT
+
+	HEAD	D2*,DTWOST				; ***** D2*
+	ASL	2(S)		;Shift low order
+	ROL	(S)		;Rotate high order
+	NEXT
+
+	HEAD	D2/,DTWOSL				; ***** D2/
+	ASR	(S)		;Shift high order
+	ROR	2(S)		;Rotate low order
+	NEXT
+
+	HEAD	CSWAP,CSWAP				; ***** CSWAP
+	SWAB	(S)
+	NEXT
+
+.DSABL	LSB
+
+.SBTTL	Space allocation
+
+.ENABL	LSB
+
+	HEAD	HERE,HERE,DOCOL				; ***** HERE
+;	DP @
+
+	.WORD	DP,AT,SEMIS
+
+	HEAD	ALLOT,ALLOT,DOCOL			; ***** ALLOT
+;	DP +! 256 ?MEMORY
+
+	.WORD	DP,PSTOR,LIT,400,QMEM,SEMIS
+
+	HEAD	<,>,COMMA,DOCOL				; ***** ,
+;	HERE ! 2 ALLOT
+
+	.WORD	HERE,STORE,TWO,ALLOT,SEMIS
+
+;  THIS SYSTEM DOES NOT USE 'C,'
+
+.DSABL	LSB
+
+.SBTTL	Memory allocation
+
+.ENABL	LSB
+
+	HEAD	?MEMORY,QMEM,DOCOL			; ***** ?MEMORY
+; ( #bytes ==> )
+; Make sure at least #bytes of room is left between dictionary and stack
+;	BEGIN SP@ OVER - HERE U<
+;	WHILE 2048 +MEMORY
+;	REPEAT DROP
+
+10$:	.WORD	SPAT,OVER,SUB,HERE,ULESS,ZBRAN,20$-.
+	.WORD	LIT,1024.*2,AMEM,BRAN,10$-.
+20$:	.WORD	DROP,SEMIS
+
+	HEAD	+MEMORY,AMEM,DOCOL			; ***** +MEMORY
+; ( increment ==> )
+; Increase memory allocation by specified value, rounded to 2KB multiple
+;	TOP @ + 2047 + 0 2048 U/ SWAP DROP DUP (MEMORY) 5 ?ERROR
+;	2048 * TOP @ DUP SP@ - >R R - OVER R - R> <CMOVE
+;	TOP @ - DUP TOP +! DUP CSP +! DUP S0 +! SP@ + (SP!) DROP
+
+	.WORD	TOP,AT,PLUS,LIT,3777,PLUS,ZERO,LIT,4000
+	.WORD	USLAS,SWAP,DROP,DUP,PMEM,LIT,5,QERR
+	.WORD	LIT,4000,STAR,TOP,AT,DUP,SPAT,SUB,TOR,R,SUB,OVER,R,SUB
+	.WORD	FROMR,BCMOVE,TOP,AT,SUB,DUP,TOP,PSTOR,DUP,CSP,PSTOR
+	.WORD	DUP,SZERO,PSTOR,SPAT,PLUS,PSPSTO,DROP,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Comparisons
+
+.ENABL	LSB
+
+	HEAD	-,SUB					; ***** -
+	SUB	(S)+,(S)
+	NEXT
+
+	HEAD	<=>,EQUAL				; ***** =
+	CMP	(S)+,(S)
+	BEQ	20$		;True
+10$:	CLR	(S)		;False
+	NEXT
+
+	HEAD	^/</,LESS				; ***** <
+	CMP	(S)+,(S)
+	BLE	10$		;False (backwards comparison)
+20$:	MOV	#1,(S)		;True
+	NEXT
+
+	HEAD	^/<=/,LEQ				; ***** <=
+	CMP	(S)+,(S)
+	BGE	20$		;True (backwards comparison)
+	BR	10$		;False
+
+	HEAD	^/>/,GREAT				; ***** >
+	CMP	(S)+,(S)
+	BLT	20$		;True (backwards comparison)
+	BR	10$		;False
+
+	HEAD	^/>=/,GEQ				; ***** >=
+	CMP	(S)+,(S)
+	BLE	20$		;True (backwards comparison)
+	BR	10$		;False
+
+	HEAD	U<,ULESS				; ***** U<
+	CMP	(S)+,(S)	;Note comparison is backwards
+	BHI	20$		;Branch if U<
+	BR	10$		;Exit false
+
+	HEAD	U<=,ULEQ				; ***** U<=
+	CMP	(S)+,(S)	;Note comparison is backwards
+	BHIS	20$		;Branch if U<=
+	BR	10$		;Exit false
+
+	HEAD	U>,UGTR					; ***** U>
+	CMP	(S)+,(S)	;Note comparison is backwards
+	BLO	20$		;Branch if U>
+	BR	10$		;Exit false
+
+	HEAD	U>=,UGEQ				; ***** U>=
+	CMP	(S)+,(S)	;Note comparison is backwards
+	BLOS	20$		;Branch if U>=
+	BR	10$		;Exit false
+
+.DSABL	LSB
+
+.SBTTL	Misc. stack handling
+
+.ENABL	LSB
+
+	HEAD	ROT,ROT					; ***** ROT
+	MOV	(S),R0
+	MOV	4(S),(S)
+	MOV	2(S),4(S)
+	MOV	R0,2(S)
+	NEXT
+
+	HEAD	SPACE,SPACE,DOCOL			; ***** SPACE
+;	BL EMIT
+
+	.WORD	BL,EMIT,SEMIS
+
+	HEAD	-DUP,DDUP				; ***** -DUP
+	TST	(S)
+	BEQ	30$
+	MOV	(S),-(S)
+30$:	NEXT
+
+
+	HEAD	?STACK,QSTAC,DOCOL			; ***** ?STACK
+;  ERROR CHECK.
+;	S0 @ 2 - SP@ U< 1 ?ERROR
+;	SP@ HERE 128 + U< 2 ?ERROR
+
+	.WORD	SZERO,AT,TWO,SUB,SPAT,ULESS,ONE,QERR
+	.WORD	SPAT,HERE,LIT,200,PLUS,ULESS,TWO,QERR
+	.WORD	SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Double integer manipulation
+
+.ENABL	LSB
+
+	HEAD	2DUP,TWODUP,DOCOL			; ***** 2DUP
+;	OVER OVER
+
+	.WORD	OVER,OVER,SEMIS
+
+	HEAD	2SWAP,DSWAP,DOCOL			; ***** 2SWAP
+;	>R ROT ROT R> ROT ROT
+
+	.WORD	TOR,ROT,ROT,FROMR,ROT,ROT,SEMIS
+
+	HEAD	2DROP,DDROP,DOCOL			; ***** 2DROP
+;	DROP DROP
+
+	.WORD	DROP,DROP,SEMIS
+
+	HEAD	2OVER,DOVER,DOCOL			; ***** 2OVER
+;	>R >R 2DUP R> R> 2SWAP
+
+	.WORD	TOR,TOR,TWODUP,FROMR,FROMR,DSWAP,SEMIS
+
+	HEAD	2ROT,DROT,DOCOL				; ***** 2ROT
+;	>R >R 2SWAP R> R> 2SWAP
+
+	.WORD	TOR,TOR,DSWAP,FROMR,FROMR,DSWAP,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Double integer arithmetic
+
+.ENABL	LSB
+
+	HEAD	D-,DSUB,DOCOL				; ***** D-
+;	DMINUS D+
+
+	.WORD	DMINU,DPLUS,SEMIS
+
+	HEAD	D0=,DZEQU,DOCOL				; ***** D0=
+;	OR 0=
+
+	.WORD	OR,ZEQU,SEMIS
+
+	HEAD	D0<,DZLES,DOCOL				; ***** D0<
+;	SWAP DROP 0<
+
+	.WORD	SWAP,DROP,ZLESS,SEMIS
+
+	HEAD	D0<=,DZLEQ,DOCOL			; ***** D0<=
+;	1. D- D0<
+
+	.WORD	DLIT,1,0,DSUB,DZLES,SEMIS
+
+	HEAD	D0>,DZGTR,DOCOL				; ***** D0>
+;	DMINUS D0<
+
+	.WORD	DMINU,DZLES,SEMIS
+
+	HEAD	D0>=,DZGEQ,DOCOL			; ***** D0>=
+;	SWAP DROP 0>=
+
+	.WORD	SWAP,DROP,ZGEQ,SEMIS
+
+	HEAD	D=,DEQU,DOCOL				; ***** D=
+;	D- D0=
+
+	.WORD	DSUB,DZEQU,SEMIS
+
+	HEAD	D<,DLESS,DOCOL				; ***** D<
+;	D- D0<
+
+	.WORD	DSUB,DZLES,SEMIS
+
+	HEAD	D<=,DLEQ,DOCOL				; ***** D<=
+;	D- D0<=
+
+	.WORD	DSUB,DZLEQ,SEMIS
+
+	HEAD	D>,DGTR,DOCOL				; ***** D>
+;	D- D0>
+
+	.WORD	DSUB,DZGTR,SEMIS
+
+	HEAD	D>=,DGEQ,DOCOL				; ***** D>=
+;	D- D0>=
+
+	.WORD	DSUB,DZGEQ,SEMIS
+
+	HEAD	DU<,DULES				; ***** DU<
+	MOV	(S)+,R0		;Get high order
+	MOV	(S)+,R1		;Get low order
+	CMP	(S)+,R0		;Compare high order
+	BLO	20$		;Branch if less
+	BNE	10$		;Branch if greater
+	CMP	(S),R1		;Otherwise compare low order
+	BLO	20$		;Branch if less
+10$:	CLR	(S)		;Indicate false result
+	NEXT
+
+20$:	MOV	#1,(S)		;Indicate true result
+	NEXT			;Done
+
+	HEAD	DU>,DUGTR,DOCOL				; ***** DU>
+;	2SWAP DU<
+
+	.WORD	DSWAP,DULES,SEMIS
+
+	HEAD	DU<=,DULEQ,DOCOL			; ***** DU<=
+;	DU> 0=
+
+	.WORD	DUGTR,ZEQU,SEMIS
+
+	HEAD	DU>=,DUGEQ,DOCOL			; ***** DU>=
+;	DU< 0=
+
+	.WORD	DULES,ZEQU,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Dictionary manipulation
+
+.ENABL	LSB
+
+	HEAD	LATEST,LATES,DOCOL			; ***** LATEST
+;	L-PTR @
+
+	.WORD	LPTR,AT,SEMIS
+
+;
+;  The next 4 operators can depend on computer word size.
+;  They convert addresses within the name fields of FORTH
+;  dictionary entries.
+;
+; LFA, CFA and NFA expect a pointer to the parameter field to start from.
+; PFA expects a pointer to the name field to start from.
+;
+
+	HEAD	LFA,LFA,DOCOL				; ***** LFA
+;	2- 2-
+
+	.WORD	TWOM,TWOM,SEMIS
+
+	HEAD	CFA,CFA,DOCOL				; ***** CFA
+;	2-
+
+	.WORD	TWOM,SEMIS
+
+	HEAD	NFA,NFA,DOCOL				; ***** NFA
+;	LFA DUP @ 2- IF BEGIN 2- DUP @ 127 AND BL < UNTIL ELSE 0 ENDIF
+
+	.WORD	LFA,DUP,AT,TWOM,ZBRAN,20$-.
+10$:	.WORD	TWOM,DUP,AT,LIT,177,AND,BL,LESS,ZBRAN,10$-.,SEMIS
+
+20$:	.WORD	ZERO,SEMIS
+
+	HEAD	PFA,PFA,DOCOL				; ***** PFA
+;	DUP C@ 31 AND 1+ + =CELLS 2+ 2+
+
+	.WORD	DUP,CAT,LIT,37,AND,ONEP,PLUS,ECELL,TWOP,TWOP,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Compiler syntax checkers
+
+.ENABL	LSB
+
+;
+;  THE NEXT 7 OPERATIONS ARE USED BY THE COMPILER, FOR
+;  COMPILE-TIME SYNTAX-ERROR CHECKS.
+;
+
+	HEAD	!CSP,SCSP,DOCOL				; ***** !CSP
+;	SP@ CSP !
+
+	.WORD	SPAT,CSP,STORE,SEMIS
+
+	HEAD	?ERROR,QERR,DOCOL			; ***** ?ERROR
+;	SWAP IF ERROR ENDIF DROP
+
+	.WORD	SWAP,ZBRAN,10$-.,ERROR,SEMIS
+10$:	.WORD	DROP,SEMIS
+
+	HEAD	?COMP,QCOMP,DOCOL			; ***** ?COMP
+;	STATE @ 0= 17 ?ERROR
+
+	.WORD	STATE,AT,ZEQU,LIT,17.,QERR,SEMIS
+
+	HEAD	?EXEC,QEXEC,DOCOL			; ***** ?EXEC
+;	STATE @ 18 ?ERROR
+
+	.WORD	STATE,AT,LIT,18.,QERR,SEMIS
+
+	HEAD	?PAIRS,QPAIR,DOCOL			; ***** ?PAIRS
+
+;+
+; ?PAIRS	-- Check for matching conditional/loop/etc. blocks
+;	( pfa1 pfa2 ==> )
+;
+; pfa2 is the pfa of the word that's supposed to be matched.  If it
+; doesn't, the name of that word is displayed in the message
+;-
+
+;	swap over -
+;	if restore ?cr here count type ."  ? "
+;	 19 message space nfa id. sp! quit
+;	endif drop
+
+	.WORD	SWAP,OVER,SUB,ZBRAN,20$-.
+	.WORD	RESTO,QCR,HERE,COUNT,TYPE,PDOTQ
+	.ASCIC	< ? >
+	.EVEN
+	.WORD	LIT,19.,MESS,SPACE,NFA,IDDOT,SPSTO,QUIT
+
+20$:	.WORD	DROP,SEMIS
+
+	HEAD	?CSP,QCSP,DOCOL				; ***** ?CSP
+;	SP@ CSP @ - 20 ?ERROR
+
+	.WORD	SPAT,CSP,AT,SUB,LIT,20.,QERR,SEMIS
+
+	HEAD	?LOADING,QLOAD,DOCOL			; ***** ?LOADING
+;	BLK @ 0= 22 ?ERROR
+
+	.WORD	BLK,AT,ZEQU,LIT,22.,QERR,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Compile things
+
+.ENABL	LSB
+
+	HEAD	COMPILE,COMP,DOCOL			; ***** COMPILE
+;  COMPILE THE EXECUTION ADDRESS FOLLOWING.
+;	?COMP >R DUP 2+ R> @ ,
+
+	.WORD	QCOMP,FROMR,DUP,TWOP,TOR,AT,COMMA,SEMIS
+
+	HEAD	[,LBRAC,DOCOL,IMM			; ***** [
+;  STOP COMPILATION, ENTER EXECUTION STATE.
+;	0 STATE !
+
+	.WORD	ZERO,STATE,STORE,SEMIS
+
+	HEAD	],RBRAC,DOCOL				; ***** ]
+;  ENTER COMPILATION STATE.
+;	1 STATE STORE
+
+	.WORD	ONE,STATE,STORE,SEMIS
+
+	HEAD	SMUDGE,SMUDG,DOCOL			; ***** SMUDGE
+;  ALTER LATEST WORD NAME (SO THAT DICTIONARY SEARCH
+;  WON'T FIND A PARTIALLY-COMPLETE ENTRY.
+;	LATEST OCTAL 200 TOGGLE
+
+	.WORD	LATES,LIT,200,TOGGL,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Radix manipulation
+
+.ENABL	LSB
+
+	HEAD	HEX,HEX,DOCOL				; ***** HEX
+;	16 BASE !
+
+	.WORD	LIT,16.,BASE,STORE,SEMIS
+
+	HEAD	DECIMAL,DEC,DOCOL			; ***** DECIMAL
+;	10 BASE !
+
+	.WORD	LIT,10.,BASE,STORE,SEMIS
+
+	HEAD	OCTAL,OCTAL,DOCOL			; ***** OCTAL
+;	8 BASE !
+
+	.WORD	LIT,8.,BASE,STORE,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Code field manipulation
+
+.ENABL	LSB
+
+	HEAD	<(;CODE)>,PSCOD,DOCOL			; ***** (;CODE)
+; USED ONLY BY COMPILER; COMPILED BY ';CODE'.
+; Stores address of code that follows in-line into the CFA of the current
+; definition.
+;	>R LATEST PFA CFA !
+
+	.WORD	FROMR,LATES,PFA,CFA,STORE,SEMIS
+
+	HEAD	<;CODE>,SCODE,DOCOL,IMM			; ***** ;CODE
+; Create new data type with code routine written in assembly language.
+;	?CSP COMPILE (;CODE) [COMPILE] [ SMUDGE
+
+	.WORD	QCSP,COMP,PSCOD,LBRAC,SMUDG,SEMIS
+
+	HEAD	^/<BUILDS/,BUILD,DOCOL			; ***** <BUILDS
+;  CREATE NEW DATA TYPE WITH CODE ROUTINE IN HIGHER-LEVEL FORTH.
+;	0 CONSTANT
+
+	.WORD	ZERO,CON,SEMIS
+
+	HEAD	DOES>,DOES,DOCOL			; ***** DOES>
+;	R> LATEST PFA ! (;CODE)
+
+	.WORD	FROMR,LATES,PFA,STORE,PSCOD
+DODOE:	MOV	IP,-(RP)
+	MOV	(W)+,IP
+	MOV	W,-(S)
+	NEXT
+
+.DSABL	LSB
+
+.SBTTL	String handling
+
+.ENABL	LSB
+
+	HEAD	COUNT,COUNT				; ***** COUNT
+;  CONVERT STRING TO THE FORMAT USED BY 'TYPE'.
+
+	CLR	R0		;Avoid sign extension
+	BISB	@(S),R0		;Get count
+	INC	(S)		;Point past count byte
+	MOV	R0,-(S)		;Push length
+	NEXT
+
+
+	HEAD	TYPE,TYPE,PTYPE				; ***** TYPE
+; The code for this one is in the system-dependent I/O section
+
+	HEAD	<=CELLS>,ECELL,DOCOL			; ***** =CELLS
+;  NOTE - I NEED THIS, TO FORCE EVEN ADDRESS.
+;	DUP 1 AND +
+
+	.WORD	DUP,ONE,AND,PLUS,SEMIS
+
+	HEAD	-TRAILING,DTRAI				; ***** -TRAILING
+
+10$:	MOV	(S),R0		;Get current count
+	BEQ	30$		;Nothing left, exit
+	ADD	2(S),R0		;Point beyond string
+	CMPB	-(R0),#40	;Space?
+	BNE	30$		;No, leave
+	DEC	(S)		;Yes, shorten string
+	BR	10$		; and do it again
+
+30$:	NEXT
+
+	HEAD	("),PQUOT,DOCOL				; ***** (")
+; Used only by compiler.  Compiled by '"'
+;	R COUNT DUP 1+ =CELLS R> + >R
+
+	.WORD	R,COUNT,DUP,ONEP,ECELL,FROMR,PLUS,TOR,SEMIS
+
+	HEAD	(STRING),PSTRG,DOCOL			; ***** (STRING)
+; Define ASCII string delimited by some character
+;	STATE @ IF COMPILE (") WORD HERE C@ 1+ =CELLS ALLOT
+;	ELSE WORD HERE COUNT ENDIF
+
+	.WORD	STATE,AT,ZBRAN,40$-.
+	.WORD	COMP,PQUOT,WORD,HERE,CAT,ONEP,ECELL,ALLOT,SEMIS
+
+40$:	.WORD	WORD,HERE,COUNT,SEMIS
+
+	HEAD	",QUOTE,DOCOL,IMM			; ***** "
+; Define ASCII string.
+;	?COMP ASCII " (STRING)
+
+	.WORD	QCOMP,LIT,'",PSTRG,SEMIS
+
+	HEAD	(."),PDOTQ,DOCOL			; ***** (.")
+;  USED ONLY BY COMPILER.  COMPILED BY '."'
+;	R COUNT DUP 1+ =CELLS R> + >R TYPE
+
+	.WORD	R,COUNT,DUP,ONEP,ECELL,FROMR,PLUS,TOR,TYPE,SEMIS
+
+	HEAD	.",DOTQ,DOCOL,IMM			; ***** ."
+;  TYPE ASCII MESSAGE.
+;	ASCII " STATE @ IF COMPILE (.") WORD HERE C@ 1+ =CELLS ALLOT
+;	 ELSE WORD HERE COUNT TYPE ENDIF
+
+	.WORD	LIT,'",STATE,AT,ZBRAN,50$-.
+	.WORD	COMP,PDOTQ,WORD,HERE,CAT,ONEP,ECELL
+	.WORD	ALLOT,SEMIS
+
+50$:	.WORD	WORD,HERE,COUNT,TYPE
+	.WORD	SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Input from the terminal
+
+.ENABL	LSB
+
+	HEAD	EXPECT,EXPEC,DOCOL			; ***** EXPECT
+; Read N characters into memory or until delimiter
+;	( address n ==> )
+
+;	0 wait over swap (expect) + 0 swap 2dup 1+ c! c!
+
+	.WORD	ZERO,WAIT,OVER,SWAP,XEXPEC,PLUS,ZERO
+	.WORD	SWAP,TWODUP,ONEP,CSTOR,CSTOR,SEMIS
+
+	HEAD	QUERY,QUERY,DOCOL			; ***** QUERY
+;	TIB @ 80 EXPECT 0 IN !
+
+	.WORD	TIB,AT,LIT,80.,EXPEC,ZERO,IN,STORE,SEMIS
+
+	HEAD	WAIT,WAIT				; ***** WAIT
+
+;+
+; WAIT	-- Set the wait time on next terminal input request
+;	( time ==> )
+;-
+
+	MOV	(S)+,WAITTM	;Store it
+	NEXT
+
+.DSABL	LSB
+
+.SBTTL	Terminal buffer handling
+
+.ENABL	LSB
+
+	HEAD	FILL,FILL				; ***** FILL
+
+	MOV	(S)+,R0		;Get byte to fill with
+	MOV	(S)+,R1		;Get count
+	MOV	(S)+,R2		; and address
+	TST	R1		;Nothing to clear?
+	BEQ	20$		;Right
+10$:	MOVB	R0,(R2)+	;Fill a byte
+	SOB	R1,10$
+20$:	NEXT			;Done
+
+
+	HEAD	ERASE,ERASE,DOCOL			; ***** ERASE
+;	0 FILL
+
+	.WORD	ZERO,FILL,SEMIS
+
+	HEAD	BLANKS,BLANK,DOCOL			; ***** BLANKS
+;	BL FILL
+
+	.WORD	BL,FILL,SEMIS
+
+	HEAD	HOLD,HOLD,DOCOL				; ***** HOLD
+;	-1 HLD +! HLD @ C!
+
+	.WORD	MONE,HLD,PSTOR,HLD,AT,CSTOR,SEMIS
+
+	HEAD	PAD,PAD,DOCOL				; ***** PAD
+;	HERE 128 +
+
+	.WORD	HERE,LIT,128.,PLUS,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Input stream processing
+
+.ENABL	LSB
+
+	HEAD	(IN),PIN,DOCOL				; ***** (IN)
+;	BLK @ IF LINE @ 0< IF BLK @ BLOCK
+;	 ELSE LINEBUF ENDIF ELSE TIB @ ENDIF IN @ +
+	.WORD	BLK,AT,ZBRAN,20$-.,LINE,AT,ZLESS,ZBRAN,10$-.
+	.WORD	BLK,AT,BLOCK,BRAN,30$-.
+10$:	.WORD	LBUF,BRAN,30$-.
+20$:	.WORD	TIB,AT
+30$:	.WORD	IN,AT,PLUS,SEMIS
+
+	HEAD	(CIN),PCIN,DOCOL			; ***** (CIN)
+;	(IN) C@ DUP IF 1 IN +! ENDIF
+
+	.WORD	PIN,CAT,DUP,ZBRAN,40$-.
+	.WORD	ONE,IN,PSTOR
+40$:	.WORD	SEMIS
+
+	HEAD	WORD,WORD,DOCOL				; ***** WORD
+;	(IN) SWAP ENCLOSE HERE 34 BLANK IN +! OVER - >R R HERE C! +
+;	HERE 1+ R> CMOVE
+
+	.WORD	PIN,SWAP,ENCL,HERE,LIT,42,BLANK,IN
+	.WORD	PSTOR,OVER,SUB,TOR,R,HERE,CSTOR,PLUS
+	.WORD	HERE,ONEP,FROMR,CMOVE,SEMIS
+
+	HEAD	ASCII,ASCII,DOCOL,IMM			; ***** ASCII
+;	(CIN) LITERAL
+
+	.WORD	PCIN,LITER,SEMIS
+
+	HEAD	2ASCII,DASCI,DOCOL,IMM			; ***** 2ASCII
+;	(CIN) (CIN) CSWAP OR LITERAL
+
+	.WORD	PCIN,PCIN,CSWAP,OR,LITER,SEMIS
+
+	HEAD	%C,RADC,DOCOL				; ***** %C
+;	(in) c@
+;	dup ascii $ = if drop 27 else
+;	dup ascii . = if drop 28 else
+;	dup ascii ? = if drop 29 else
+;	dup 36 digit  if swap drop dup 10 < if 30 + else -9 + endif
+;	else drop 0
+;	endif endif endif endif
+;	dup if 1 in +! endif
+
+	.WORD	PIN,CAT
+	.WORD	DUP,LIT,'$,EQUAL,ZBRAN,50$-.,DROP,LIT,27.,BRAN,100$-.
+50$:	.WORD	DUP,LIT,'.,EQUAL,ZBRAN,60$-.,DROP,LIT,28.,BRAN,100$-.
+60$:	.WORD	DUP,LIT,'?,EQUAL,ZBRAN,70$-.,DROP,LIT,29.,BRAN,100$-.
+70$:	.WORD	DUP,LIT,36.,DIGIT,ZBRAN,90$-.
+	.WORD	SWAP,DROP,DUP,LIT,10.,LESS,ZBRAN,80$-.
+	.WORD	LIT,<^R  0>,PLUS,BRAN,100$-.
+80$:	.WORD	LIT,<^R  A>-10.,PLUS,BRAN,100$-.
+90$:	.WORD	DROP,ZERO
+100$:	.WORD	DUP,ZBRAN,110$-.,ONE,IN,PSTOR
+110$:	.WORD	SEMIS
+
+	HEAD	%,RAD50,DOCOL,IMM			; ***** %
+;	%c 40 * %c + 40 * %c + literal
+
+	.WORD	RADC,LIT,50,STAR,RADC,PLUS,LIT,50,STAR,RADC,PLUS
+	.WORD	LITER,SEMIS
+
+	HEAD	2%,DRAD50,DOCOL,IMM			; ***** 2%
+;	[compile] % [compile] %
+
+	.WORD	RAD50,RAD50,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Number processing
+
+.ENABL	LSB
+
+	HEAD	(NUMBER),PNUMB,DOCOL			; ***** (NUMBER)
+;	BEGIN 1+ DUP >R C@ BASE @ DIGIT
+;	 WHILE SWAP BASE @ U* DROP ROT BASE @ U* DROP ROT BASE @ U* D+
+;	  DPL AT 1+ IF ONE DPL +! ENDIF R>
+;	REPEAT R>
+
+10$:	.WORD	ONEP,DUP,TOR,CAT,BASE,AT,DIGIT
+	.WORD	ZBRAN,30$-.,SWAP,BASE,AT,USTAR,DROP
+	.WORD	ROT,BASE,AT,USTAR,DPLUS
+	.WORD	DPL,AT,ONEP,ZBRAN,20$-.,ONE,DPL,PSTOR
+20$:	.WORD	FROMR,BRAN,10$-.
+30$:	.WORD	FROMR,SEMIS
+
+	HEAD	NUMBER,NUMB,DOCOL			; ***** NUMBER
+;	0 0 ROT DUP 1+ C@ ASCII - = DUP >R + -1
+;	BEGIN
+;	 DPL ! (NUMBER) DUP C@ BL -
+;	 WHILE
+;	  DUP C@ ASCII . - 0 ?ERROR 0
+;	REPEAT DROP R> IF DMINUS ENDIF
+
+	.WORD	ZERO,ZERO,ROT,DUP,ONEP,CAT,LIT,'-,EQUAL
+	.WORD	DUP,TOR,PLUS,MONE
+40$:	.WORD	DPL,STORE,PNUMB,DUP,CAT,BL,SUB
+	.WORD	ZBRAN,50$-.,DUP,CAT,LIT,56,SUB
+	.WORD	ZERO,QERR,ZERO,BRAN,40$-.
+50$:	.WORD	DROP,FROMR,ZBRAN,60$-.,DMINU
+60$:	.WORD	SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Find a name in the dictionary
+
+.ENABL	LSB
+
+	HEAD	-FIND,DFIND,DOCOL			; ***** -FIND
+;	-1 WORD (-FIND)
+
+	.WORD	MONE,WORD,PDFIND,SEMIS
+
+	HEAD	(-FIND),PDFIND,DOCOL			; ***** (-FIND)
+;	HERE C@ WIDTH @ MIN HERE C!
+;	HERE COUNT UPPER 0 5 0
+;	DO DROP CONTEXT I 2* + @ DUP
+;	 IF HERE SWAP HERE 1+ C@ 3 AND 2* + @ -DUP
+;	  IF (FIND) DUP
+;	   IF
+;	    LEAVE
+;	   ENDIF
+;	  ELSE
+;	   DROP 0
+;	  ENDIF
+;	 ENDIF
+;	LOOP
+
+	.WORD	HERE,CAT,WIDTH,AT,MIN,HERE,CSTOR
+	.WORD	HERE,COUNT,UPPER,ZERO,LIT,5,ZERO,XDO
+10$:	.WORD	DROP,CONT,I,TWOST,PLUS,AT,DUP,ZBRAN,20$-.
+	.WORD	HERE,SWAP,HERE,ONEP,CAT,THREE,AND
+	.WORD	TWOST,PLUS,AT,DDUP,ZBRAN,15$-.
+	.WORD	PFIND,DUP,ZBRAN,20$-.
+	.WORD	LEAVE,BRAN,20$-.
+
+15$:	.WORD	DROP,ZERO
+20$:	.WORD	XLOOP,10$-.,SEMIS
+
+
+	HEAD	UPPER,UPPER				; ***** UPPER
+;  SETS STRINGS TO UPPER CASE - TO ALLOW
+;  LOWER AS WELL AS UPPER CASE FROM TERMINAL.
+
+	MOV	(S)+,R0		;Get count
+	MOV	(S)+,R1		; and string pointer
+	TST	R0		;Anything to do?
+	BEQ	60$		;No, exit
+30$:	CMPB	(R1),#'A+40	;Possible lowercase GL?
+	BLO	50$		;No way
+	CMPB	(R1),#'Z+40	;Sure?
+	BLOS	40$		;Yes, upcase it
+	CMPB	(R1),#340	;Possible lowercase GR?
+	BLO	50$		;No
+	CMPB	(R3),#376	;Check it
+	BHI	50$		;No, skip
+40$:	BICB	#40,(R1)	;Upcase
+50$:	INC	R1		;Advance pointer
+	SOB	R0,30$		; and around and around
+60$:	NEXT			;Done
+
+.DSABL	LSB
+
+.SBTTL	Error handling
+
+.ENABL	LSB
+
+	HEAD	ERROR,ERROR,DOCOL			; ***** ERROR
+;	RESTORE ?CR HERE COUNT TYPE ."  ? "
+;	MESSAGE SP! QUIT
+
+	.WORD	RESTO,QCR,HERE,COUNT,TYPE,PDOTQ
+	.ASCIC	^/ ? /
+	.EVEN
+	.WORD	MESS,SPSTO,QUIT
+
+	HEAD	ID.,IDDOT,DOCOL				; ***** ID.
+;	-DUP IF COUNT 31 AND TYPE SPACE ENDIF
+
+	.WORD	DDUP,ZBRAN,20$-.
+	.WORD	COUNT,LIT,37,AND,TYPE,SPACE
+20$:	.WORD	SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Create new words
+
+.ENABL	LSB
+
+	HEAD	CREATE,CREAT,DOCOL			; ***** CREATE
+;	-FIND IF NFA ID. 4 MESSAGE SPACE ENDIF
+;	HERE DUP C@ WIDTH @ MIN 1+ =CELLS ALLOT DUP OCTAL 200 TOGGLE
+;	DUP DUP 1+ C@ 3 AND 2* CURRENT @ + DUP @ ,
+;	! L-PTR ! HERE 2+ ,
+
+	.WORD	DFIND,ZBRAN,10$-.,NFA,IDDOT
+	.WORD	LIT,4,MESS,SPACE
+10$:	.WORD	HERE,DUP,CAT,WIDTH,AT,MIN,ONEP,ECELL,ALLOT
+	.WORD	DUP,LIT,200,TOGGL
+	.WORD	DUP,DUP,ONEP,CAT,THREE,AND,TWOST,CURR,AT,PLUS,DUP,AT,COMMA
+	.WORD	STORE,LPTR,STORE,HERE,TWOP,COMMA,SEMIS
+
+	HEAD	[COMPILE],BCOMP,DOCOL,IMM		; ***** [COMPILE]
+;	-FIND 0= 0 ?ERROR CFA ,
+
+	.WORD	DFIND,ZEQU,ZERO,QERR,CFA,COMMA,SEMIS
+
+	HEAD	LITERAL,LITER,DOCOL,IMM			; ***** LITERAL
+;	STATE @ IF COMPILE LIT , ENDIF
+
+	.WORD	STATE,AT,ZBRAN,20$-.,COMP,LIT,COMMA
+20$:	.WORD	SEMIS
+
+	HEAD	DLITERAL,DLITE,DOCOL,IMM		; ***** DLITERAL
+;	STATE @ IF SWAP COMPILE 2LIT , , ENDIF
+
+	.WORD	STATE,AT,ZBRAN,30$-.,SWAP,COMP,DLIT,COMMA,COMMA
+30$:	.WORD	SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Interpretation main loop
+
+.ENABL	LSB
+
+	HEAD	INTERPRET,INTER,DOCOL			; ***** INTERPRET
+;	BEGIN -FIND
+;	 IF DUP LFA @ 1 AND STATE @ < IF CFA , ELSE CFA EXEC ENDIF
+;	  ?STACK
+;	 ELSE HERE NUMBER DPL @ 1+
+;	  IF DLITERAL ELSE DROP LITERAL ENDIF
+;	 ?STACK ENDIF
+;	AGAIN
+
+10$:	.WORD	DFIND
+	.WORD	ZBRAN,40$-.,DUP,LFA,AT,ONE,AND,STATE,AT,LESS
+	.WORD	ZBRAN,20$-.,CFA,COMMA,BRAN,30$-.
+20$:	.WORD	CFA,EXEC
+30$:	.WORD	QSTAC,BRAN,70$-.
+40$:	.WORD	HERE,NUMB,DPL,AT,ONEP,ZBRAN,50$-.,DLITE,BRAN,60$-.
+50$:	.WORD	DROP,LITER
+60$:	.WORD	QSTAC
+70$:	.WORD	BRAN,10$-.
+
+	HEAD	IMMEDIATE,IMMED,DOCOL			; ***** IMMEDIATE
+;	LATEST PFA LFA 1 TOGGLE
+
+	.WORD	LATES,PFA,LFA,ONE,TOGGL,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Comments, command input processing loop
+
+.ENABL	LSB
+
+	HEAD	(,PAREN,DOCOL,IMM			; ***** (
+;	ASCII ) WORD
+
+	.WORD	LIT,'),WORD,SEMIS
+
+	HEAD	<\>,BSLASH,DOCOL,IMM			; ***** \
+;	R> DROP {NULL}
+
+	.WORD	FROMR,DROP,NULL,SEMIS
+
+	HEAD	QUIT,QUIT,DOCOL				; ***** QUIT
+;	RUN-FLAG @ IF BYE ENDIF 0 BLK ! [COMPILE] [
+;	BEGIN RP! 14 FILE ! RESTORE ?CR
+;	 OCTAL 100000 WAIT TIB @ DUP 128 (EXPECT) +
+;	 ' (INT) CFA 'INTERRUPT ! ' (TRAP) CFA 'TRAP !
+;	 DUP C@ 128 =
+;	 IF ASCII $ OVER C! DUP TIB @ - IN ! 155 WORD (-FIND)
+;	  IF 0 ROT C! 0 IN ! ?CR CFA EXECUTE ?STACK
+;	  ELSE 0 ERROR
+;	  ENDIF
+;	 ELSE 0 SWAP 2DUP 1+ C! C! 0 IN ! INTERPRET
+;	 ENDIF STATE @ 0= IF RESTORE ."  ok" ENDIF
+;	AGAIN
+
+	.WORD	RFLAG,AT,ZBRAN,10$-.,BYE
+10$:	.WORD	ZERO,BLK,STORE,LBRAC
+20$:	.WORD	RPSTO,LIT,14.,FILE,STORE,RESTO,QCR
+	.WORD	LIT,100000,WAIT,TIB,AT,DUP,LIT,128.,XEXPEC,PLUS
+	.WORD	LIT,PINT,INTRP,STORE,LIT,PTRAP,TTRAP,STORE
+	.WORD	DUP,CAT,LIT,200,EQUAL,ZBRAN,40$-.
+	.WORD	LIT,'$,OVER,CSTOR,DUP,TIB,AT,SUB,IN,STORE
+	.WORD	LIT,233,WORD,PDFIND,ZBRAN,30$-.
+	.WORD	ZERO,ROT,CSTOR,ZERO,IN,STORE,QCR,CFA,EXEC,QSTAC,BRAN,50$-.
+30$:	.WORD	ZERO,ERROR
+
+40$:	.WORD	ZERO,SWAP,TWODUP,ONEP,CSTOR,CSTOR,ZERO,IN,STORE,INTER
+50$:	.WORD	STATE,AT,ZEQU,ZBRAN,20$-.,RESTO,PDOTQ
+	.ASCIC	^/ ok/
+	.EVEN
+	.WORD	BRAN,20$-.
+
+	HEAD	ABORT,ABRT,DOCOL			; ***** ABORT
+;	SP! DECIMAL RESTORE RUN-FLAG @ IF BYE ENDIF
+;	CR ." FIG-FORTH V2.0+" CR ONLY FORTH DEFINITIONS QUIT
+
+	.WORD	SPSTO,DEC,RESTO,RFLAG,AT,ZBRAN,60$-.,BYE
+60$:	.WORD	CR,PDOTQ
+	.ASCIC	^/FIG-FORTH V2.0+/
+	.EVEN
+	.WORD	CR,ONLY,FORTH,DEFIN,QUIT
+
+.DSABL	LSB
+
+.SBTTL	Multiplication and division
+
+.ENABL	LSB
+
+	HEAD	S->D,STOD				; ***** S->D
+	TST	(S)		; Check the sign
+	SXT	-(S)		;  and extend it
+	NEXT
+
+;
+;  NOTE - THIS SYSTEM DOESN'T NEED THE OPERATIONS '+-' AND 'D+-',
+;    BECAUSE 'M*' AND 'M/' ARE DEFINED IN CODE.
+;
+	HEAD	ABS,ABS,DOCOL				; ***** ABS
+;	DUP 0< IF MINUS ENDIF
+
+	.WORD	DUP,ZLESS,ZBRAN,10$-.,MINUS
+10$:	.WORD	SEMIS
+
+	HEAD	DABS,DABS,DOCOL				; ***** DABS
+;	DUP 0< IF DMINUS ENDIF
+
+	.WORD	DUP,ZLESS,ZBRAN,20$-.,DMINU
+20$:	.WORD	SEMIS
+
+	HEAD	MIN,MIN,DOCOL				; ***** MIN
+;	OVER OVER > IF SWAP ENDIF DROP
+
+	.WORD	OVER,OVER,GREAT,ZBRAN,30$-.,SWAP
+30$:	.WORD	DROP,SEMIS
+
+	HEAD	MAX,MAX,DOCOL				; ***** MAX
+;	OVER OVER < IF SWAP ENDIF DROP
+
+	.WORD	OVER,OVER,LESS,ZBRAN,40$-.,SWAP
+40$:	.WORD	DROP,SEMIS
+
+	HEAD	DMIN,DMIN,DOCOL				; ***** DMIN
+;	2OVER 2OVER D> IF 2SWAP ENDIF 2DROP
+
+	.WORD	DOVER,DOVER,DGTR,ZBRAN,50$-.,DSWAP
+50$:	.WORD	DDROP,SEMIS
+
+	HEAD	DMAX,DMAX,DOCOL				; ***** DMAX
+;	2OVER 2OVER D< IF 2SWAP ENDIF 2DROP
+
+	.WORD	DOVER,DOVER,DLESS,ZBRAN,60$-.,DSWAP
+60$:	.WORD	DDROP,SEMIS
+
+	HEAD	M*,MSTAR				; ***** M*
+	MOV	(S)+,R0
+	MUL	(S),R0
+	MOV	R1,(S)
+	MOV	R0,-(S)
+	NEXT
+
+	HEAD	M/,MSLAS				; ***** M/
+	MOV	2(S),R0
+	MOV	4(S),R1
+	DIV	(S)+,R0
+	MOV	R1,2(S)
+	MOV	R0,(S)
+	NEXT
+
+	HEAD	*,STAR,DOCOL				; ***** *
+;	M* DROP
+
+	.WORD	MSTAR,DROP,SEMIS
+
+	HEAD	/MOD,SLMOD,DOCOL			; ***** /MOD
+;	>R S->D R> M/
+
+	.WORD	TOR,STOD,FROMR,MSLAS,SEMIS
+
+	HEAD	/,SLASH,DOCOL				; ***** /
+;	/MOD SWAP DROP
+
+	.WORD	SLMOD,SWAP,DROP,SEMIS
+
+	HEAD	MOD,MOD,DOCOL				; ***** MOD
+;	/MOD DROP
+
+	.WORD	SLMOD,DROP,SEMIS
+
+	HEAD	*/MOD,SSMOD,DOCOL			; ***** */MOD
+;	>R M* R> M/
+
+	.WORD	TOR,MSTAR,FROMR,MSLAS,SEMIS
+
+	HEAD	*/,SSLA,DOCOL				; ***** */
+;	*/MOD SWAP DROP
+
+	.WORD	SSMOD,SWAP,DROP,SEMIS
+
+	HEAD	M/MOD,MSMOD,DOCOL			; ***** M/MOD
+;	>R 0 R U/ R> SWAP >R U/ R>
+
+	.WORD	TOR,ZERO,R,USLAS,FROMR
+	.WORD	SWAP,TOR,USLAS,FROMR,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	System-independent disk I/O
+
+.ENABL	LSB
+
+; ****************************************************************
+;
+;	DISK I/O  (SECTION COMMON TO ALL OPERATING SYSTEMS)
+;	NOTE THAT EACH OPERATING SYSTEM DEFINED 'R/W' - READ
+;	OR WRITE A 512-BYTE RANDOM-ACCESS BLOCK.
+;
+; ****************************************************************
+
+;
+; 'USE' AND 'PREV' MOVED TO USER AREA
+;
+
+	HEAD	+BUF,PBUF,DOCOL				; ***** +BUF
+;	518 + DUP LIMIT @ = IF DROP FIRST @ ENDIF DUP PREV @ -
+
+	.WORD	LIT,BUFSIZ,PLUS,DUP,LIMIT,AT,EQUAL
+	.WORD	ZBRAN,10$-.,DROP,FIRST,AT
+10$:	.WORD	DUP,PREV,AT,SUB,SEMIS
+
+	HEAD	UPDATE,UPDAT,DOCOL			; ***** UPDATE
+;	PREV @ @ OCTAL 100000 OR PREV @ !
+
+	.WORD	PREV,AT,AT,LIT,100000,OR,PREV
+	.WORD	AT,STORE,SEMIS
+
+	HEAD	EMPTY-BUFFERS,MTBUF,DOCOL		; ***** EMPTY-BUFFERS
+;	FIRST @ LIMIT @ OVER - ERASE
+
+	.WORD	FIRST,AT,LIMIT,AT,OVER,SUB,ERASE,SEMIS
+
+	HEAD	FLUSH,FLUSH,DOCOL			; ***** FLUSH
+;  SOME SYSTEMS DEFINE THIS IN THE EDITOR, NOT HERE.
+;	LIMIT @ FIRST @ DO
+;	 I @ 0< IF I 4 + I 2+ @ I C@ 0 I 1+ C@ 127 AND R/W ENDIF 518 /LOOP
+;	EMPTY-BUFFERS
+
+	.WORD	LIMIT,AT,FIRST,AT,XDO
+20$:	.WORD	I,AT,ZLESS,ZBRAN,30$-.,I,LIT,IOBUF,PLUS,I,TWOP,AT
+	.WORD	I,CAT,ZERO,I,ONEP,CAT,LIT,177,AND,RW
+30$:	.WORD	LIT,BUFSIZ,XSLOO,20$-.,MTBUF,SEMIS
+
+	HEAD	FBUFFER,FBUFF,DOCOL			; ***** FBUFFER
+;	USE @ DUP >R BEGIN +BUF UNTIL USE ! R @ 0<
+;	IF R 4 + R 2+ @ R C@ 0 R 1+ C@ 127 AND R/W ENDIF
+;	R ! R 2+ ! R PREV ! R> 4 +
+
+	.WORD	USE,AT,DUP,TOR
+40$:	.WORD	PBUF,ZBRAN,40$-.,USE,STORE
+	.WORD	R,AT,ZLESS,ZBRAN,50$-.
+	.WORD	R,LIT,IOBUF,PLUS,R,TWOP,AT,R,CAT,ZERO
+	.WORD	R,ONEP,CAT,LIT,177,AND,RW
+50$:	.WORD	R,STORE,R,TWOP,STORE,R,PREV,STORE,FROMR,LIT,IOBUF,PLUS,SEMIS
+
+	HEAD	BUFFER,BUFFE,DOCOL			; ***** BUFFER
+;	7400 FBUFFER
+
+	.WORD	LIT,17*400,FBUFF,SEMIS
+
+	HEAD	FBLOCK,FBLOC,DOCOL			; ***** FBLOCK
+;	CSWAP OR (DO) PREV @ DUP 2+ @ OVER @ 32767 AND 2R D- OR
+;	IF BEGIN +BUF 0= IF DROP 2R FBUFFER DUP 2R 255 AND -1
+;	  R CSWAP 127 AND R/W >R 4 - R> 0= IF R> DROP 0 >R
+;	   0 OVER ! ENDIF ENDIF
+;	  DUP 2+ @ OVER @ 32767 AND 2R D- OR 0= UNTIL
+;	 DUP PREV ! ENDIF
+;	R> R> DROP IF 4 + ELSE DROP 0 ENDIF
+
+	.WORD	CSWAP,OR,XDO,PREV,AT,DUP,TWOP,AT,OVER,AT
+	.WORD	LIT,77777,AND,DR,DSUB,OR,ZBRAN,80$-.
+60$:	.WORD	PBUF,ZEQU,ZBRAN,70$-.
+	.WORD	DROP,DR,FBUFF
+	.WORD	DUP,DR,LIT,377,AND,MONE,R,CSWAP,LIT,177,AND,RW
+	.WORD	TOR,LIT,IOBUF,SUB,FROMR,ZEQU,ZBRAN,70$-.,FROMR,DROP,ZERO,TOR
+	.WORD	ZERO,OVER,STORE
+70$:	.WORD	DUP,TWOP,AT,OVER,AT,LIT,77777,AND,DR,DSUB,OR,ZEQU,ZBRAN,60$-.
+	.WORD	DUP,PREV,STORE
+80$:	.WORD	FROMR,FROMR,DROP,ZBRAN,90$-.,LIT,IOBUF,PLUS,SEMIS
+
+90$:	.WORD	DROP,ZERO,SEMIS
+
+	HEAD	BLOCK,BLOCK,DOCOL			; ***** BLOCK
+;	0 15 FBLOCK -DUP 0= IF 11 .ERR ENDIF
+
+	.WORD	ZERO,LIT,17,FBLOC,DDUP,ZEQU,ZBRAN,100$-.,LIT,EOF,PERR
+100$:	.WORD	SEMIS
+
+	HEAD	(LINE),PLINE,DOCOL			; ***** (LINE)
+;	>R C/L B/BUF */MOD R> 1 - B/SCR * 1+ BLOCK + C/L
+
+	.WORD	TOR,CL,BBUF,SSMOD,FROMR,ONE,SUB,BSCR
+	.WORD	STAR,ONEP,PLUS,BLOCK,PLUS,CL,SEMIS
+
+	HEAD	.LINE,DLINE,DOCOL			; ***** .LINE
+;	(LINE) -TRALING TYPE
+
+	.WORD	PLINE,DTRAI,TYPE,SEMIS
+
+	HEAD	LOAD,LOAD,DOCOL				; ***** LOAD
+;	BLK @ >R IN @ >R LINE @ >R -1 LINE ! 0 IN !
+;	1 - B/SCR * 1+ BLK ! INTERPRET
+;	R> LINE ! R> IN ! R> BLK !
+
+	.WORD	BLK,AT,TOR,IN,AT,TOR,LINE,AT,TOR,MONE,LINE,STORE
+	.WORD	ZERO,IN,STORE,ONE,SUB,BSCR,STAR,ONEP,BLK,STORE,INTER
+	.WORD	FROMR,LINE,STORE,FROMR,IN,STORE,FROMR,BLK,STORE,SEMIS
+
+	HEAD	-->,ARROW,DOCOL,IMM			; ***** -->
+;	?LOADING LINE @ 0< IF 0 IN ! B/SCR BLK @ 1 - OVER MOD - BLK +! ENDIF
+
+	.WORD	QLOAD,LINE,AT,ZLESS,ZBRAN,110$-.
+	.WORD	ZERO,IN,STORE,BSCR,BLK,AT,ONE,SUB,OVER,MOD,SUB,BLK,PSTOR
+110$:	.WORD	SEMIS
+
+	HEAD	(FLOAD),PFLOA,DOCOL			; ***** (FLOAD)
+; ( status ==> )
+;	FILE @ 1- -DUP 0= 11 ?ERROR DUP FILE ! DUP FILECLOSE DROP
+;	416 @ 0= IF % FTH 416 ! ENDIF SWAP
+;	(FILEOPEN) 9 ?ERROR BLK @ >R LINE @ >R
+;	IN @ >R 1 BLK ! 0 LINE !
+;	BEGIN 0 IN ! LINEBUF GETLINE >R DROP
+;	R MINUS 0< IF INTERPRET ENDIF R> 0< UNTIL LINEBUF 128 ERASE
+;	R> IN ! R> LINE ! R> BLK ! FILE @ FILECLOSE DROP 1 FILE +!
+
+	.WORD	FILE,AT,ONEM,DDUP,ZEQU,LIT,11.,QERR,DUP,FILE,STORE
+	.WORD	DUP,FCLOS,DROP,LIT,FIRQB+FQEXT,AT,ZEQU,ZBRAN,120$-.
+	.WORD	LIT,^RFTH,LIT,FIRQB+FQEXT,STORE
+120$:	.WORD	SWAP,PFOPN,LIT,9.,QERR,BLK,AT,TOR
+	.WORD	LINE,AT,TOR,IN,AT,TOR,ONE,BLK,STORE,ZERO,LINE,STORE
+130$:	.WORD	ZERO,IN,STORE,LBUF,GETL,TOR,DROP
+	.WORD	R,MINUS,ZLESS,ZBRAN,140$-.,INTER
+140$:	.WORD	FROMR,ZLESS,ZBRAN,130$-.,LBUF,LIT,128.,ERASE
+	.WORD	FROMR,IN,STORE,FROMR,LINE,STORE
+	.WORD	FROMR,BLK,STORE,FILE,AT,FCLOS,DROP,ONE,FILE,PSTOR,SEMIS
+
+	HEAD	FLOAD,FLOAD,DOCOL,IMM			; ***** FLOAD
+;	FILENAME STATE @ IF COMPILE (FLOAD) ELSE (FLOAD) ENDIF
+
+	.WORD	FNAME,STATE,AT,ZBRAN,150$-.
+	.WORD	COMP
+150$:	.WORD	PFLOA,SEMIS
+
+;
+;  NOTE - THE INSTALLATION-DEPENDENT I/O IS AT THE END
+;  OF THE DICTIONARY - JUST BELOW 'TASK'.  'XI/O' IS THE
+;  PRIMITIVE READ OR WRITE OF A 512-BYTE BLOCK.
+;
+
+.DSABL	LSB
+
+GLOBAL	<EOF>
+
+                  
+.ENABL	LSB
+	HEAD	MESSAGE,MESS,DOCOL			; ***** MESSAGE
+;	-DUP
+;	IF 1- DUP 22 U>
+;	 IF 1+ ." Message # " .
+;	 ELSE 2* {msgptr} + @ -DUP IF COUNT TYPE
+;	 ENDIF
+;	ENDIF
+
+	.WORD	DDUP,ZBRAN,20$-.,ONEM,DUP,LIT,22.,UGTR,ZBRAN,10$-.
+	.WORD	ONEP,PDOTQ
+	.ASCIC	^/Message # /
+	.EVEN
+	.WORD	DOT
+	.WORD	SEMIS
+
+10$:	.WORD	TWOST,LIT,MSGPTR,PLUS,AT,DDUP,ZBRAN,20$-.
+	.WORD	COUNT,TYPE
+20$:	.WORD	SEMIS
+
+
+.MACRO	MSG	CODE,TEXT
+	TMPORG	FTEXT
+$$$$$1	=	.
+	.ASCIC	<TEXT>
+	.EVEN
+	TMPORG	MSGPTR,<^D'CODE-1*2>
+	.WORD	$$$$$1
+	UNORG
+.ENDM	MSG
+
+
+	MSG	1,<Empty stack>
+	MSG	2,<Stack or dictionary full>
+	MSG	3,<has incorrect address mode>
+	MSG	4,<isn't unique>
+	MSG	5,<Memory overflow>
+	MSG	6,<Disk range>
+	MSG	7,<Checksum error>
+	MSG	8,<Save file I/O error>
+	MSG	9,<File not found>
+	MSG	10,<Line too long>
+	MSG	11,<FLOADs nested too deeply>
+	MSG	17,<Compilation only, use in definition>
+	MSG	18,<Execution only>
+	MSG	19,<Missing>
+	MSG	20,<Definition not finished>
+	MSG	21,<In protected dictionary>
+	MSG	22,<Use only when loading>
+	MSG	23,<Declare vocabulary>
+
+.DSABL	LSB
+
+.SBTTL	Tick, Forget, structured flow control
+
+.ENABL	LSB
+
+; ****************************************************************
+;
+;	MISCELLANEOUS HIGHER LEVEL
+;
+; ****************************************************************
+
+	HEAD	',TICK,DOCOL,IMM			; ***** '
+;	-FIND 0= 0 ?ERROR LITERAL
+
+	.WORD	DFIND,ZEQU,ZERO,QERR,LITER,SEMIS
+
+;~~/\~~
+;;;	HEAD	FORGET,FORGE,DOCOL			; ***** FORGET
+;	CURRENT @ CONTEXT @ - 24 ?ERROR [COMPILE] ' DUP
+;	TOP @ OVER U< SWAP FENCE @ U< OR 21 ?ERROR
+;	DUP NFA DP ! LFA @ -2 AND CONTEXT @ !
+
+	.WORD	CURR,AT,CONT,AT,SUB,LIT,24.,QERR,TICK,DUP
+	.WORD	TOP,AT,OVER,ULESS,SWAP,FENCE,AT,ULESS,OR,LIT,21.,QERR
+	.WORD	DUP,NFA,DP,STORE,LFA,AT,LIT,-2,AND,CONT,AT
+	.WORD	STORE,SEMIS
+
+	HEAD	BACK,BACK,DOCOL				; ***** BACK
+;	HERE - ,
+
+	.WORD	HERE,SUB,COMMA,SEMIS
+
+	HEAD	BEGIN,BEGIN,DOCOL,IMM			; ***** BEGIN
+;	?COMPILE HERE ' BEGIN
+
+	.WORD	QCOMP,HERE,LIT,BEGIN+2,SEMIS
+
+	HEAD	ENDIF,ENDIF,DOCOL,IMM			; ***** ENDIF
+;	?COMPILE DUP ' ELSE =
+;	IF DROP ELSE ' IF ?PAIRS ENDIF
+;	HERE OVER - SWAP !
+
+	.WORD	QCOMP,DUP,LIT,ELSE+2,EQUAL,ZBRAN,11$-.
+	.WORD	DROP,BRAN,12$-.
+
+11$:	.WORD	LIT,IF+2,QPAIR
+12$:	.WORD	HERE,OVER,SUB,SWAP,STORE,SEMIS
+
+	HEAD	THEN,THEN,DOCOL,IMM			; ***** THEN
+;	ENDIF
+
+	.WORD	ENDIF,SEMIS
+
+	HEAD	DO,DO,DOCOL,IMM				; ***** DO
+;	COMPILE (DO) HERE ' DO
+
+	.WORD	COMP,XDO,HERE,LIT,DO+2,SEMIS
+
+	HEAD	LOOP,LOOP,DOCOL,IMM			; ***** LOOP
+;	' DO ?PAIRS COMPILE (LOOP) BACK
+
+	.WORD	LIT,DO+2,QPAIR,COMP,XLOOP,BACK,SEMIS
+
+	HEAD	+LOOP,PLOOP,DOCOL,IMM			; ***** +LOOP
+;	' DO ?PAIRS COMPILE (+LOOP) BACK
+
+	.WORD	LIT,DO+2,QPAIR,COMP,XPLOO,BACK,SEMIS
+
+	HEAD	/LOOP,SLOOP,DOCOL,IMM			; ***** /LOOP
+;	' DO ?PAIRS COMPILE (/LOOP) BACK
+
+	.WORD	LIT,DO+2,QPAIR,COMP,XSLOO,BACK,SEMIS
+
+	HEAD	2DO,DDO,DOCOL,IMM			; ***** 2DO
+;	COMPILE (2DO) HERE ' 2DO
+
+	.WORD	COMP,XDDO,HERE,LIT,DDO+2,SEMIS
+
+	HEAD	2LOOP,DLOOP,DOCOL,IMM			; ***** 2LOOP
+;	' 2DO ?PAIRS COMPILE (2LOOP) BACK
+
+	.WORD	LIT,DDO+2,QPAIR,COMP,XDLOOP,BACK,SEMIS
+
+	HEAD	2+LOOP,DPLOOP,DOCOL,IMM			; ***** 2+LOOP
+;	' 2DO ?PAIRS COMPILE (2+LOOP) BACK
+
+	.WORD	LIT,DDO+2,QPAIR,COMP,XDPLOO,BACK,SEMIS
+
+	HEAD	2/LOOP,DSLOOP,DOCOL,IMM			; ***** 2/LOOP
+;	' 2DO ?PAIRS COMPILE (2/LOOP) BACK
+
+	.WORD	LIT,DDO+2,QPAIR,COMP,XDSLOO,BACK,SEMIS
+
+	HEAD	UNTIL,UNTIL,DOCOL,IMM			; ***** UNTIL
+;	' BEGIN ?PAIRS COMPILE 0BRANCH BACK
+
+	.WORD	LIT,BEGIN+2,QPAIR,COMP,ZBRAN,BACK,SEMIS
+
+	HEAD	END,END,DOCOL,IMM			; ***** END
+;	UNTIL
+
+	.WORD	UNTIL,SEMIS
+
+	HEAD	AGAIN,AGAIN,DOCOL,IMM			; ***** AGAIN
+;	' BEGIN ?PAIRS COMPILE BRANCH BACK
+
+	.WORD	LIT,BEGIN+2,QPAIR,COMP,BRAN,BACK,SEMIS
+
+	HEAD	REPEAT,REPEAT,DOCOL,IMM			; ***** REPEAT
+;	>R >R AGAIN R> R> ' WHILE ?PAIRS HERE OVER - SWAP !
+
+	.WORD	TOR,TOR,AGAIN,FROMR,FROMR,LIT,WHILE+2,QPAIR
+	.WORD	HERE,OVER,SUB,SWAP,STORE,SEMIS
+
+	HEAD	IF,IF,DOCOL,IMM				; ***** IF
+;	COMPILE 0BRANCH HERE 0 , ' IF
+
+	.WORD	COMP,ZBRAN,HERE,ZERO,COMMA,LIT,IF+2,SEMIS
+
+	HEAD	ELSE,ELSE,DOCOL,IMM			; ***** ELSE
+;	' IF ?PAIRS COMPILE BRANCH HERE 0 , SWAP ' IF ENDIF ' ELSE
+
+	.WORD	LIT,IF+2,QPAIR,COMP,BRAN,HERE,ZERO,COMMA
+	.WORD	SWAP,LIT,IF+2,ENDIF,LIT,ELSE+2,SEMIS
+
+	HEAD	WHILE,WHILE,DOCOL,IMM			; ***** WHILE
+;	IF DROP ' WHILE
+
+	.WORD	IF,DROP,LIT,WHILE+2,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Output functions
+
+.ENABL	LSB
+
+	HEAD	SPACES,SPACS,DOCOL			; ***** SPACES
+;	0 MAX -DUP IF 0 DO SPACE LOOP ENDIF
+
+	.WORD	ZERO,MAX,DDUP,ZBRAN,20$-.,ZERO,XDO
+10$:	.WORD	SPACE,XLOOP,10$-.
+20$:	.WORD	SEMIS
+
+	HEAD	^/<#/,BDIGS,DOCOL			; ***** <#
+;	PAD HLD !
+
+	.WORD	PAD,HLD,STORE,SEMIS
+
+	HEAD	#>,EDIGS,DOCOL				; ***** #>
+;	DROP DROP HDL @ PAD OVER -
+
+	.WORD	DROP,DROP,HLD,AT,PAD,OVER,SUB,SEMIS
+
+	HEAD	SIGN,SIGN,DOCOL				; ***** SIGN
+;	ROT 0< IF ASCII - HOLD ENDIF
+
+	.WORD	ROT,ZLESS,ZBRAN,30$-.,LIT,'-,HOLD
+30$:	.WORD	SEMIS
+
+	HEAD	#,DIG,DOCOL				; ***** #
+;	BASE @ M/MOD ROT 9 OVER < IF 7 + ENDIF ASCII 0 + HOLD
+
+	.WORD	BASE,AT,MSMOD,ROT,LIT,9.,OVER,LESS
+	.WORD	ZBRAN,40$-.,LIT,'A-'9-1,PLUS
+40$:	.WORD	LIT,'0,PLUS,HOLD,SEMIS
+
+	HEAD	#S,DIGS,DOCOL				; ***** #S
+;	BEGIN # OVER OVER OR 0= UNTIL
+
+50$:	.WORD	DIG,OVER,OVER,OR,ZEQU,ZBRAN,50$-.,SEMIS
+
+	HEAD	D.R,DDOTR,DOCOL				; ***** D.R
+;	>R SWAP OVER DABS <# #S SIGN #> R> OVER - SPACES TYPE
+
+	.WORD	TOR,SWAP,OVER,DABS,BDIGS,DIGS,SIGN,EDIGS
+	.WORD	FROMR,OVER,SUB,SPACS,TYPE,SEMIS
+
+	HEAD	.R,DOTR,DOCOL				; ***** .R
+;	>R S->D R> D.R
+
+	.WORD	TOR,STOD,FROMR,DDOTR,SEMIS
+
+	HEAD	D.,DDOT,DOCOL				; ***** D.
+;	0 D.R SPACE
+
+	.WORD	ZERO,DDOTR,SPACE,SEMIS
+
+	HEAD	.,DOT,DOCOL				; ***** .
+;	S->D D.
+
+	.WORD	STOD,DDOT,SEMIS
+
+	HEAD	?,QUEST,DOCOL				; ***** ?
+;	@ .
+
+	.WORD	AT,DOT,SEMIS
+
+	HEAD	U.,UDOT,DOCOL				; ***** U.
+;	0 D.
+
+	.WORD	ZERO,DDOT,SEMIS
+
+	HEAD	U.R,UDOTR,DOCOL				; ***** U.R
+;	0 SWAP D.R
+
+	.WORD	ZERO,SWAP,DDOTR,SEMIS
+
+	HEAD	DU.R,DUDOTR,DOCOL			; ***** DU.R
+;	>R <# #S #> R> OVER - SPACES TYPE
+
+	.WORD	TOR,BDIGS,DIGS,EDIGS,FROMR,OVER,SUB
+	.WORD	SPACS,TYPE,SEMIS
+
+	HEAD	DU.,DUDOT,DOCOL				; ***** DU.
+;	0 DU.R SPACE
+
+	.WORD	ZERO,DUDOTR,SPACE,SEMIS
+
+	HEAD	O.,ODOT,DOCOL				; ***** O.
+;	BASE @ SWAP 0 OCTAL <# # # # # # # #> TYPE BASE !
+
+	.WORD	BASE,AT,SWAP,ZERO,OCTAL,BDIGS,DIG,DIG,DIG,DIG,DIG,DIG
+	.WORD	EDIGS,TYPE,BASE,STORE,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Listing utilities
+
+.ENABL	LSB
+
+	HEAD	LIST,LIST,DOCOL				; ***** LIST
+; ( N---.  LIST GIVEN SCREEN.)
+;	DECIMAL CR DUP SCR ! ." Screen # " . 16 0 DO
+;	 CR I 3 .R SPACE I SCR @ .LINE LOOP
+;	CR
+
+	.WORD	DEC,CR,DUP,SCR,STORE,PDOTQ
+	.ASCIC	^/Screen # /
+	.EVEN
+	.WORD	DOT,LIT,16.,ZERO,XDO
+10$:	.WORD	CR,I,THREE,DOTR,SPACE
+	.WORD	I,SCR,AT,DLINE,XLOOP,10$-.,CR,SEMIS
+
+	HEAD	INDEX,INDEX,DOCOL			; ***** INDEX
+;  LIST FIRST LINE OF A RANGE OF DISK SCREENS.
+;	CR 1+ SWAP DO CR I 3 .R SPACE 0 I .LINE LOOP
+	.WORD	CR,ONEP,SWAP,XDO
+20$:	.WORD	CR,I,THREE,DOTR,SPACE,ZERO,I,DLINE
+	.WORD	XLOOP,20$-.,SEMIS
+
+
+	HEAD	DUMP,DUMP,DOCOL				; ***** DUMP
+;	OVER + SWAP DO I O. ASCII / EMIT 16 0 DO SPACE
+;	  I J + @ O. 2 /LOOP CR 16 /LOOP
+        
+	.WORD	OVER,PLUS,SWAP,XDO
+30$:	.WORD	I,ODOT,LIT,'/,EMIT,LIT,16.,ZERO,XDO
+40$:	.WORD	SPACE,I,J,PLUS,AT,ODOT,TWO,XSLOO,40$-.
+	.WORD	CR,LIT,16.,XSLOO,30$-.,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	System-specific terminal I/O
+
+.ENABL	LSB
+
+; ****************************************************************
+;
+; INSTALLATION-DEPENDENT SECTION (TERMINAL AND DISK I/O, AND TRAPS)
+;               
+; ****************************************************************
+
+.SBTTL	RSTS/E terminal output processing
+                        
+PEMITC:	TSTB	NETFLG		;Is this a network connection?
+	BMI	20$		;Yes, re-direct the I/O
+.ASSUME	NF$NET	EQ	200
+	CALL  	CLRXRB		;Clear out the XRB
+	MOV	#40000,XRB+XRMOD ;Set transparent controls modifier
+	BR	10$		; and merge into common code
+        
+PEMIT:	TSTB	NETFLG		;Is this a network connection?
+	BMI	20$		;Yes, re-direct the I/O
+.ASSUME	NF$NET	EQ	200
+	CALL	CLRXRB		;Clear out the XRB
+10$:	MOV	S,XRB+XRLOC	;Set buffer address
+	MOV	#1,XRB+XRLEN	;Buffer size
+	MOV	#1,XRB+XRBC	; and byte count
+    	.WRITE			;Output it to the KB
+	TST	(S)+		;Now remove the character from the stack
+	NEXT			;Done
+ 
+20$:	CLR	R2		;Function is output byte
+.ASSUME	NI$BYT	EQ	0
+; // Need to change PEMIT so that it will do non-transparent processing
+	CALL	NTOBYT		;Now output it
+	MOV	(S)+,R2		;Get the byte itself
+	CALL	UPDPOS		;Update horizontal position
+30$:	CALL	NTOBYT		;And output it
+	CALL	NTOCHK		;Check on sending the packet
+        NEXT			;And exit
+                 
+PRESTO: TSTB	NETFLG		;Network connection?
+	BMI	40$		;Yes, this is a NOP
+.ASSUME	NF$NET	EQ	200
+	.TTRST			;Cancel ^O
+40$:	NEXT
+
+PQCR:	TSTB	NETFLG		;Network connection?
+	BPL	50$		;No, not this time
+.ASSUME	NF$NET	EQ	200
+	TST	CONPOS		;Yes, check our position
+	BR	60$		;And join up
+
+50$:	CALL	CLRXRB		;Clear the XRB
+	.POSTN	 		;Find current position
+	TST	XRB+2		;At left margin?
+60$:	BEQ	70$		;Yes, no output
+PCR:	CLR	CONPOS		;Clear out position
+	MOVB	#NI$NL,R2	;Assume we should send a network request
+	TSTB	NETFLG		;Network connection?
+	BMI	30$		;Yes, send a message
+.ASSUME	NF$NET	EQ	200
+	CALL	CLRXRB		;Clear XRB
+	MOV	#80$,XRB+XRLOC	;Point to string to print
+	MOV	#2,XRB+XRLEN	;Buffer size
+	MOV	#2,XRB+XRBC	; and byte count
+	.WRITE			;Output it
+70$:	NEXT			;Done
+
+80$:	.ASCII	<15><12>
+
+PTYPE:	TST	(S)		;Anything to output?
+    	BNE	90$		;Yes, go for it
+	CMP	(S)+,(S)+	;No, clean up the stack
+	BR	100$		;And get out
+
+90$:	TSTB	NETFLG		;Doing network I/O?
+	BMI	110$		;Yes, go for it
+.ASSUME	NF$NET	EQ	200
+	CALL	CLRXRB		;Clear out the XRB
+	MOV	(S),XRB+XRLEN	;Set up buffer length
+	MOV	(S)+,XRB+XRBC	; and byte count the same
+	MOV	(S)+,XRB+XRLOC	;  and buffer address
+	.WRITE			;Output it
+100$:	NEXT
+
+110$:    MOVB	#NI$STR,R2	;Function is output string
+    	CALL	NTOBYT		;Now output it
+	MOV	(S)+,R2		;Get length of string
+	CALL  	NTOWRD		;And output it
+	MOV	(S)+,R3		;Pick up pointer to string
+120$:	MOV	R2,-(SP)	;Save byte count
+	MOVB	(R3)+,R2	;Pick up a byte of output
+	CALL	UPDPOS		;Update position
+	CALL	NTOBYT		;And output it
+	MOV	(SP)+,R2	;Restore byte count
+	SOB	R2,120$		;Now loop for all the output
+	CALL	NTOCHK		;And check on sending the message
+	NEXT			;Now exit
+
+.DSABL	LSB
+
+.SBTTL	UPDPOS	Horizontal position calculator
+
+;+
+; UPDPOS - Calculate horizontal position
+;
+;	R2 = Character to output
+;
+;	CALL	UPDPOS
+;-
+
+UPDPOS:	INC	CONPOS		;Guess at a printable character
+	CMPB	R2,#40		;Good guess?
+	BHIS	10$		;Yes, get out
+	CLR	CONPOS		;No, reset position
+10$:	RETURN			;Now exit
+
+.ENABL	LSB
+
+ 	HEAD	OUT,OUT					; ***** OUT
+
+	TSTB	NETFLG		;Network request?
+	BMI	10$		;Yes, so get position we maintain
+.ASSUME	NF$NET	EQ	200
+	CALL	CLRXRB		;No, clear out the XRB
+	.POSTN			;Get current position
+	CLR	-(S)		;Clear out a spot
+	MOVB	XRB+2,(S)	;Get position
+  	NEXT
+
+10$:	MOV	CONPOS,-(S)	;Return the position
+	NEXT			;And out
+
+.DSABL	LSB
+
+.SBTTL	Terminal input processing
+
+PKEY:	CALL	GETIN,R5,<0>	;Get a character, wait for it
+	CMP	R0,#12		; IGNORE LINEFEED
+	BEQ	PKEY
+	MOV	R0,-(S)		;Return the value
+	NEXT
+
+PQTER:	CALL	GETIN,R5,<20000> ;Get a character right now
+	CMP	R0,#12		; IGNORE LINEFEED
+	BNE	10$
+	CLR	R0
+10$:	MOV	R0,-(S)		;Return the result
+	NEXT  
+
+;+
+;	( address size ==> bytecount )
+;
+;	Delimiter starts at <address> + <count>
+;	Must leave room for one byte of zero past end of buffer
+;-
+
+PGETLN:	MOV	(S)+,R2		;Get buffersize
+	MOV	(S),R3		; and address
+10$:	CALL	GETIN2,R5,<0>	;Get another byte
+	BCC	20$		;Have delimiter, what a deal
+	MOVB	R0,(R3)+	;Store a byte
+	SOB	R2,10$		;Loop around
+	NEG	(S)		;Set up to store count
+  	ADD	R3,(S)		;Compute byte count
+	BR	40$		;Now leave
+           
+20$:	NEG	(S)		;Set up to store count
+	ADD	R3,(S)		;Compute data byte count
+	MOVB	R0,(R3)+	;Store this byte
+	DEC	R2		;Count a byte
+	BEQ	40$		;Exit if no room left
+30$:	TST	CHRCNT		;Anything left in the record buffer?
+	BEQ	40$		;No, leave loop
+	CALL	GETIN,R5,<0>	;Get another byte
+	MOVB	R0,(R3)+	;Store it
+	SOB	R2,30$		;Loop around
+40$:	CLRB	(R3)		;Mark end of data
+	CLR	WAITTM		;Now clear the wait time
+	NEXT			;Done
+
+.SBTTL	Traps of various types
+
+.ENABL	LSB
+
+CP.FIS:	CALL	10$,R5		;Trap handling for simple traps
+CP.FPP:	CALL	10$,R5
+CP.BPT:	CALL	10$,R5
+CP.IOT:	CALL	10$,R5
+CP.EMT:	CALL	10$,R5
+CP.TRP:	CALL	10$,R5
+
+10$:	MOV	(SP),-(SP)	;Copy over saved R5
+	SUB	#CP.FIS+4,R5	;Compute trap code
+	MOV	R5,2(SP)	;Save it
+	MOV	(SP)+,R5	;Restore R5
+	BR	40$		;Go process trap
+           
+CP.BAD:	CMP	(SP),#CISOP	;CIS test trapped?
+	BNE	20$		;No
+	ADD	#CISSKP-CISOP,(SP) ;Yes, fix up return PC
+	RTI			; and return
+
+20$:	CMP	SP,#NSTORG	;Valid stack?
+	BLOS	30$		;Yes
+	MOV	#NSTORG,-(SP)	;No, validate it
+	TST	.TRPPT		;Still trapping?
+	BEQ	30$		;No
+	MOV	#PTRAP,.TRPPT	;Yes, so force to standard trap
+30$:	MOVB	FIRQB,-(SP)	;Save error code
+	MOVB	#-1,1(SP)	;Flag as FIRQB type error code
+40$:	CALL	DOTRAP,R5,<.TRPPT>
+
+
+	HEAD	(TRAP),PTRAP,DOCOL			; ***** (TRAP)
+;	RESTORE SP! RP@ 14 + @ DUP 0<
+;	IF 255 AND (ERR) TYPE
+;	ELSE " FIS FPP BPT IOT EMT TRAP" DROP + 4 -TRAILING
+;	 TYPE ."  trap"
+;	ENDIF ."  at PC " RP@ 16 + @ O.
+;	CR 18 6
+;	DO RP@ I + @ O. 9 EMIT 2
+;	/LOOP
+;	RP@ 18 + O.
+;	CR 2R> 2DROP 2R> 2DROP R> DROP
+;	R> 2R> 2DROP R> R> DROP 2>R
+;	BEGIN R> ?TRACE
+;	  RP@ R0 @ U>=
+;	UNTIL ?CR QUIT
+
+
+	.WORD	RESTO,SPSTO,RPAT,LIT,<1+6>*2,PLUS,AT,DUP,ZLESS,ZBRAN,50$-.
+	.WORD	LIT,377,AND,PERR,TYPE,BRAN,60$-.
+
+50$:	.WORD	LIT,90$,PLUS,LIT,4,DTRAI,TYPE,PDOTQ
+	.ASCIC	< trap>
+60$:	.WORD	PDOTQ
+	.ASCIC	< at PC >
+	.EVEN
+	.WORD	RPAT,LIT,<1+6+1>*2,PLUS,AT,ODOT,CR
+	.WORD	LIT,<2+1+6>*2,LIT,<2+1>*2,XDO
+70$:	.WORD	RPAT,I,PLUS,AT,ODOT,LIT,'I&37,EMIT,TWO,XSLOO,70$-.
+	.WORD	RPAT,LIT,<2+1+6>*2,PLUS,ODOT
+	.WORD	CR,DFROMR,DDROP,DFROMR,DDROP,FROMR,DROP
+	.WORD	FROMR,DFROMR,DDROP,FROMR,FROMR,DROP,DTOR
+80$:	.WORD	FROMR,QTRAC,RPAT,RZERO,AT,UGEQ,ZBRAN,80$-.
+	.WORD	QCR,QUIT
+
+90$:	.ASCII	"FIS FPP BPT IOT EMT TRAP"
+	.EVEN
+
+.DSABL	LSB
+
+.SBTTL	Tracing functions
+
+.ENABL	LSB
+
+	HEAD	(TRACE),PTRAC,DOCOL			; ***** (TRACE)
+;	begin 2- dup @ >r
+;	 r over 2+	=
+;	 r {docol}	= or
+;	 r ' noop cfa	= or
+;	 r ' i cfa	= or
+;	 r> ' (do) cfa	= or
+;	 over dup 2- @ swap over u<= swap 1 and 0= and and
+;	until
+;	2+ nfa id.
+
+10$:	.WORD	TWOM,DUP,AT,TOR
+	.WORD	R,OVER,TWOP,EQUAL
+	.WORD	R,LIT,DOCOL,EQUAL,OR
+	.WORD	R,LIT,NOOP,EQUAL,OR
+	.WORD	R,LIT,I,EQUAL,OR
+	.WORD	FROMR,LIT,XDO,EQUAL,OR
+;;;//	.WORD	OVER,DUP,TWOM,AT,SWAP,OVER,ULEQ,SWAP,ONE,AND,ZEQU,AND,AND
+	.WORD	ZBRAN,10$-.,TWOP,NFA,IDDOT,SEMIS
+
+	HEAD	?TRACE,QTRAC,DOCOL			; ***** ?TRACE
+;	dup
+;	{dict+6} pfa u>= over here u< and
+;	 over ' noop u>= or
+;	 over 1 and 0= and
+;	if (trace)
+;	else drop
+;	endif
+
+	.WORD	DUP,LIT,DICT+6,PFA,UGEQ,OVER,HERE,ULESS,AND
+	.WORD	OVER,LIT,NOOP+2,UGEQ,OR
+	.WORD	OVER,ONE,AND,ZEQU,AND,ZBRAN,20$-.
+	.WORD	PTRAC,SEMIS
+      
+20$:	.WORD	DROP,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Control/C trapping
+
+CP.CC:	MOV	(PC)+,-(SP)	;Push a trap code
+	 .BYTE	CTRLCE,-1	;Control-C and FIRQB style code
+	CALL	DOTRAP,R5,<.CCPTR> ;Process the trap
+
+CP.2CC:	CALL	CLRXRB		;Clear the XRB
+	.RTS			;Exit to private default
+EXIT:	TSTB	NETFLG		;Is this a network request?
+.ASSUME	NF$NET	EQ	200
+	BPL	10$		;No, not this time
+	CALL	CLRFQB		;Yes, clear out the FIRQB
+	MOVB	#UU.BYE,@#FIRQB+FQFUN ;Function is logout
+	MOVB	#2,@#FIRQB+FQFIL ;Skip quota checks
+	.UUO			;Now, go log out
+	CALL	CLRFQB		;If we got back, we must be privileged
+	MOVB	#UU.CHU,@#FIRQB+FQFUN ;So set to kill job
+	MOVB	#-1,@#FIRQB+35	;This is a kill job function
+	.UUO			;Now go do it
+10$:	.EXIT			;Exit to system default RTS
+
+.ENABL	LSB
+  
+DOTRAP:	;MOV	R5,-(SP)	;Save R5 (already saved)
+	MOV	R4,-(SP)	; and R4
+	MOV	R3,-(SP)	;  and R3
+	MOV	R2,-(SP)	;   and R2
+	MOV	R1,-(SP)	;    and R1
+	MOV	R0,-(SP)	;     and R0
+	MOV	@(R5),W		;Pick up code pointer for this trap
+	BEQ	EXIT		;Not yet (re)set, just exit
+	CLR	@(R5)+		;If we get two in a row, quit
+	MOV	5*2(SP),R5	;Restore R5 to entry value
+	BIC	#1,S		;Make sure the parameter stack is even
+	CMP	S,.TOP		;Legal stack?
+	BLO	10$		;Yes
+	MOV	SP,S		;No, force legal one
+	SUB	#40,S		; like so
+10$:	MOV	#20$,IP		;Continue here once trap is processed
+	JMP	@(W)+		;Now go execute the trap code
+
+20$:	.WORD	30$		;Pointer to code routine for next "word"
+30$:	.WORD	.+2		;Trap exit code is in line
+	MOV	(SP)+,R0	;Restore R0
+	MOV	(SP)+,R1	; and R1
+	MOV	(SP)+,R2	;  and R2
+	MOV	(SP)+,R3	;   and R3
+	MOV	(SP)+,R4	;    and R4
+	MOV	(SP)+,R5	;     and R5
+	TST	(SP)+		;Pop the trap code word
+	RTI			;All done
+
+       	HEAD	(INT),PINT,DOCOL				; ***** (INT)
+;	RUN-FLAG @ IF BYE ENDIF RESTORE ?CR ' COLD CFA DUP 'INTERRUPT !
+;	'TRAP ! ." ok" CR QUIT
+   
+	.WORD	RFLAG,AT,ZBRAN,40$-.,BYE
+40$:	.WORD	RESTO,QCR,LIT,COLD,DUP,INTRP,STORE,TTRAP,STORE,PDOTQ
+	.ASCIC	<ok>
+	.EVEN    
+	.WORD	CR,QUIT
+
+.DSABL	LSB
+
+GLOBAL	<CTRLCE>
+
+.SBTTL	System I/O related subroutines
+
+.ENABL	LSB
+
+CLRFQX:	MOV	#FIRQB,R0	;Start at the FIRQB
+	MOV	#<FQBSIZ+XRBSIZ>/2,R1 ;Get the length
+.ASSUME	<FIRQB+FQBSIZ> EQ XRB
+	BR	10$		;And join up
+                 
+CLRFQB:	MOV	#FIRQB,R0	;Point to FIRQB
+	MOV	#FQBSIZ/2,R1	;Length to clear
+	BR	10$		;Do it
+
+CLRXRB:	MOV	#XRB,R0		;Point to XRB
+	MOV	#XRBSIZ/2,R1	;Length to clear
+10$:	CLR	(R0)+		;Clear it
+	SOB	R1,10$
+	RETURN			;Done
+
+.DSABL	LSB
+
+.SBTTL	SAVFQX	Save FIRQB and XRB
+
+SAVFQX:	MOV	#FQBSAV,R0	;Point to FIRQB save area
+.ASSUME	<FIRQB+FQBSIZ> EQ XRB
+10$:	MOV	FIRQB-FQBSAV(R0),(R0)+ ;Move the word to the save area
+	CMP	R0,#FQBSAV+FQBSIZ+XRBSIZ ;Saved the whole thing yet?
+	BNE	10$		;No, loop for the rest
+	CALL	@(SP)+		;Call back caller to use the FIRQB and XRB
+	ROR	-(SP)		;Save carry from the caller
+	MOV	#FIRQB,R0	;Point to start of FIRQB
+.ASSUME	<FIRQB+FQBSIZ> EQ XRB
+20$:	MOV	FQBSAV-FIRQB(R0),(R0)+ ;Restore the word from the save area
+	CMP	R0,#FIRQB+FQBSIZ+XRBSIZ ;Restored the whole thing yet?
+	BNE	20$		;No, loop
+	ROL	(SP)+		;Restore carry
+	RETURN			;And we're done
+
+.SBTTL	GETIN	Get terminal input, no wait
+.SBTTL	GETIN2	Get terminal input, specifying wait time
+
+GETIN:	CLR	WAITTM		;Force normal read
+GETIN2:	TST	CHRCNT		;Do we have buffered chars?
+	BGT	50$		;Yes
+	TSTB	NETFLG		;Are we using network I/O?
+	BPL	30$		;No, not this time
+.ASSUME	NF$NET	EQ	200
+	BITB	#NF$IKB,NETFLG	;Yes, have we already made a data request?
+	BNE	10$		;Yes, don't send another one
+	CLR	CHRCNT		;Ensure a clean value here
+	MOV	#CHRBUF,CHRPNT	;And reset the pointer
+	MOVB	#NI$IKB,R2	;Set up to request input data
+    	CALL	NTOBYT		;And buffer that byte
+	MOV	WAITTM,R2	;Pick up the wait time
+	CALL	NTOWRD		;And go send that
+	CALL	NTOCHK		;Now check on sending the message
+	BISB	#NF$IKB,NETFLG	;Indicate we've requested data
+10$:	TST	(R5)		;Should we wait for the data?
+	BNE	20$		;No, not this time
+	CALL	NTOGO		;Yes, flush the output buffer
+	MOV	#-1,@#XRB	;Set a long conditional sleep
+	.SLEEP			;Now wait for a reply
+	CALL	NTICHU		;Try to get a network message unconditionally
+	BR	GETIN2		;And try again
+
+20$:	CLR	R0		;Indicate data not ready yet
+    	TST	(R5)+		;Bump past wait parameter
+	BR	55$		;And get out
+
+30$:   	CALL	CLRXRB		;Clear out the XRB
+	MOV	#CHRBUF,XRB+XRLOC                     
+	MOV	#128.,XRB+XRLEN	;Buffer size
+	MOVB	#14.*2,XRB+XRCI	; and channel number
+	MOV	(R5),XRB+XRMOD	;Set modifier
+	MOV	WAITTM,XRB+XRTIME ;Set wait time
+	.READ			;Do it
+	TSTB	FIRQB		;Worked?
+	BEQ	40$		;Yes
+	CMPB	FIRQB,#EOF	;Control/Z?
+	BEQ	40$		;Yes, treat as success
+	CMPB	FIRQB,#DATERR	;No data?
+	BNE	GETIN		;Not that, try again
+	CLR	XRB+XRBC	;Indicate nothing gotten
+	CLR	CHRBUF		;Fake a null in the buffer
+40$:	MOV	#CHRBUF,CHRPNT	;Point to start of buffer
+    	MOV	XRB+XRBC,CHRCNT	;Reset count
+50$:	CLR	R0		;Avoid sign extend    
+	BISB	@CHRPNT,R0	;Get the character
+	INC	CHRPNT		;Skip over it
+	DEC	CHRCNT		;One less buffered
+	TST	(R5)+		;Skip argument
+	CMPB	R0,#200		;Start of escape sequence?
+	BEQ	60$		;Yes, exit C clear
+	CMPB	R0,#12		;Line feed?
+	BEQ	60$		;Yes, exit C clear
+	CMPB	R0,#15		;Carriage return?
+	BEQ	60$		;Yes, exit C clear
+	CMPB	R0,#'Z&77	;Control/Z?
+  	BEQ	60$		;Yes, exit C clear
+	CMPB	R0,#33		;Escape?
+	BEQ	60$		;Yes, exit C clear
+55$:	SEC			;None of these, C set to flag no delimiter
+	BR	65$		;And exit
+
+60$:	CLR	CONPOS		;Delimiter, fix position
+65$:	RETURN	R5		;Done
+
+GLOBAL	<DATERR>
+
+.SBTTL	Startup
+                
+.ENABL	LSB
+
+	HEAD	COLD,COLD,DOCOLD			; ***** COLD
+
+INCOLD:	CLRB	NETFLG		;Initial P.NEW entry; not a network request
+DOCOLD:	MOV	#USRSP,SP	;Reset the stack
+	CALL	CLRFQB		;Clear out the FIRQB
+	MOVB	#RSTFQ,FIRQB+FQFUN ;Set function code
+	CALFIP			;Reset all channels
+	BIT	#JFNOPR,KEY	;Logged out?
+	BNE	20$		;Yes, go elsewhere
+	CALL	CLRXRB		;Clear out the XRB
+	MOV	#MINSIZ,XRB+0	;Set up minimum memory size
+	.CORE			;Set memory size at that amount
+	MOV	#^R...,FIRQB+FQNAM1 ;Set up for a null name
+	MOV	#^R...,FIRQB+FQNAM1+2
+	CALL	INIT		;Initialize impure area
+	MOV	#10$,IP		;Set up instruction pointer
+	NEXT			;Go finish startup
+
+;	(GO) 15 FILEOPEN FORTH:FORTH.DAT WARM
+
+10$:	.WORD	PGO,LIT,17,LIT,FDAT,COUNT,PFNAM,PFOPN
+FORTGO::.WORD	WARM,0,0,0,0
+
+FDAT:	.ASCIC	<FORTH:FORTH.DAT>
+	.EVEN
+
+20$:	TST	XRB+2		;New job?
+	BNE	30$		;No, so just kill it
+	CALL	CLRFQB		;Clear out the FIRQB again
+	MOV	#1*400+2,FIRQB+FQPPN ;Set PPN = [1,2]
+	MOV	#^RLOG,FIRQB+FQNAM1 ;Set up program to run
+	MOV	#^RIN,FIRQB+FQNAM1+2 ; = LOGIN
+	DEC	FIRQB+FQEXT	; LOGIN.* , that is
+	MOV	#32000.!100000,FIRQB+FQNENT ; at line 32000;PRIV
+	.RUN			;Look for it     
+30$:	CALL	CLRXRB		;Failed, clear the XRB
+	MOV	#80.,XRB+XRLEN	;Set buffer size
+	MOV	#CHRBUF,XRB+XRLOC ; buffer address
+	MOV	#100000,XRB+XRTIME ; and ^C style read
+	.READ			;Do it
+	BR	30$		;We got something, do it again to quit
+
+	HEAD	WARM,WARM				; ***** WARM
+
+DOWARM:	MOV	#USRSP,SP	;Reset the stack
+	MOV	#INITAB,R0	;Point to the startup table
+	MOV	#RPBASE,R1	;Point to where it goes
+	MOV	(R0)+,(R1)+	;Set up a few things
+	MOV	(R0)+,(R1)+
+	MOV	(R0)+,(R1)+
+	CLR	CHRCNT		;Cancel any stored terminal input
+	.STAT			;Find out our size
+	MOV	XRB+0,R0	;Get size in K
+	ASH	#11.,R0		;Convert to bytes
+	MOV	R0,.TOP		;Set in TOP
+	CLR	-(R0)		;Clear out end of stack space
+	CLR	-(R0)		; two words to allow for underflow
+	MOV	R0,SPBASE	;Set up stack base                
+	MOV	#40$,IP		;Point to code to execute
+	NEXT			;Do it
+
+;	SP! RP! DECIMAL ONLY FORTH DEFINITIONS EMPTY-BUFFERS
+;	' COLD CFA DUP 'INTERRUPT ! 'TRAP ! ABORT
+
+40$:	.WORD	SPSTO,RPSTO,DEC,ONLY,FORTH,DEFIN,MTBUF
+	.WORD	LIT,COLD,DUP,INTRP,STORE,TTRAP,STORE,ABRT
+
+; Startup table
+;	This table is moved into the user variables (starting with RP@)
+;	at startup time.                         
+
+INITAB:	.WORD	USRSP		; POINTER TO BEGINNING OF RETURN STACK
+	.WORD	TIBUF		; POINTER TO TERMINAL INPUT BUFFER
+	.WORD	37		; MAXIMUM NAME-FIELD WIDTH, NORMALLY 31
+	.WORD	DICT		; FENCE TO PROTECT AGAINST ACCIDENTAL
+				; 'FORGET' OF THE SYSTEM.
+	.WORD	DICT		; POINTER TO NEXT AVAILABLE DICTIONARY 
+				; LOCATION (RETURNED BY 'HERE').
+	.WORD	0		; POINTER TO INITIAL VOCABULARY LINK
+	.WORD	DSKBUF		; INITIALIZE 'FIRST'
+	.WORD	ENDBUF		; INITIALIZE 'LIMIT'
+	.WORD	COLD		; Initialize "INTERRUPT"
+TABEND:				;End of startup table
+
+.DSABL	LSB
+
+                                   
+.SBTTL	Run entry point
+                          
+.ENABL	LSB
+
+DORUN:	MOV	#USRSP,SP	;Reset the stack
+	MOV	#FIRQB,R0	;Point to FIRQB             
+	MOV	#FQBSAV,R1	; and to where it will be saved
+	MOV	#FQBSIZ/2,R2	;Word count
+10$:	MOV	(R0)+,(R1)+	;Move a word                                   
+	SOB 	R2,10$
+	CALL	INIT		;Set up the impure area
+	CLRB	NETFLG		;Initially, assure no network polling
+	MOV	#20$,IP		;Point to load code
+	NEXT			;Do it
+
+;	(GO) 192 (SP!) {fqbsav+fqsiz} @ 3 + 2/ 2/ DUP 2048 * TOP !
+;	(MEMORY) DROP 14 1                         
+;	DO I FILECLOSE DROP
+;	LOOP {nstorg} TOP @ OVER - 1. 1 15 DFILEIO
+;	RP! 1 RUN-FLAG +! >R SP! S0 ! 15 FILECLOSE DROP
+;	15 FILEOPEN FORTH:FORTH.DAT DROP
+;	EMPTY-BUFFERS R> 8 ?ERROR                           
+;	(CHECK) - IF 9 ERROR ENDIF
+;	{ check FPP, CIS, DECnet }
+
+;	{ fqbsav } { firqb } 32 CMOVE
+;	' (INT) CFA 'INTERRUPT ! ' (TRAP) CFA 'TRAP ! EXECUTE ?STACK BYE
+                  
+20$:	.WORD	PGO,LIT,300,PSPSTO,LIT,FQBSAV+FQSIZ,AT
+	.WORD	THREE,PLUS,TWOSL,TWOSL,DUP,LIT,1024.*2,STAR,TOP,STORE
+	.WORD	PMEM,LIT,14.,ONE,XDO                                        
+30$:	.WORD	I,FCLOS,DROP,XLOOP,30$-.
+	.WORD	LIT,NSTORG,TOP,AT,OVER,SUB
+	.WORD	ONE,ZERO,ONE,LIT,17,DFIO,RPSTO,ONE,RFLAG,PSTOR
+	.WORD	TOR,SPSTO,SZERO,STORE
+	.WORD	LIT,17,FCLOS,DROP,LIT,17,LIT,FDAT,COUNT,PFNAM,PFOPN,DROP
+	.WORD	MTBUF,FROMR,LIT,8.,QERR
+	.WORD	PCHEK,SUB,ZBRAN,40$-.,LIT,7,ERROR           
+            
+40$:	.WORD	50$,LIT,FQBSAV,LIT,FIRQB,LIT,FQBSIZ,CMOVE
+	.WORD	LIT,PINT,INTRP,STORE,LIT,PTRAP,TTRAP,STORE,EXEC,QSTAC,QUIT
+
+50$:	.WORD	60$		;Code pointer
+60$:	CLRB	CISFLG		;Assume no CIS
+    	CALL	CISCHK		;Check for it
+	TSTB	FPPFLG		;Does program want FPP saved?
+	BEQ	70$		;No, simple
+	MOV	#JFFPP,XRB+0	;Yes, set it up
+	.SET			; and tell the monitor
+70$:	CLRB	NETFLG		;Assure we're still not using DECnet
+				;(the SAVEd image might have changed this)
+	MOV	#NTIBUF,NTIEP	;But initialize input pointers anyway
+	MOV	#NTIBUF,NTIEND	; ...
+	MOV	#NTOBUF,NTOFP	;And output pointer
+	CLR	NTOMSG		;And message size
+	MOV	FQBSAV+FQNENT,R0 ;Get entry parameter
+	BIC	#100000,R0	;And ignore the sign bit
+	CMP	R0,#29000.	;Network entry?
+	BNE	120$		;No, not this time
+	MOVB	#NF$NET,NETFLG	;Indicate network connection
+80$:	CALL	CLRFQX		;Clear the FIRQB and XRB
+	INCB	FIRQB+FQFIL	;Function is declare receiver
+	MOVB	CORCMN+1,FIRQB+FQEXT ;Set the object code
+	MOVB	#4!10,FIRQB+FQEXT+1 ;Access is network only, oneshot
+	MOVB	#3,FIRQB+FQBUFL ;Three messages should do fine
+  	INCB	FIRQB+FQBUFL+1	;Ony one link please
+	.MESAG			;Now declare ourselves as a receiver
+    	MOVB	FIRQB,R0	;Error?
+	BEQ	90$		;No, we're a receiver now
+	CMPB	R0,#NOBUFS	;Yes, out of buffer space?
+	BNE	110$		;No, something else, fail
+	MOV	#2,XRB		;Yes, set to wait a short while
+	.SLEEP			;Now do it
+	BR	80$		;And try again
+
+90$:	CALL	CLRFQX		;It worked, get ready to receive CI
+	MOV	#2!<2*400>,FIRQB+FQFIL ;Set receive, truncate
+	MOV	#NTILEN,XRB+XRLEN ;Set size of network input buffer
+	MOV	#NTIBUF,XRB+XRLOC ;And point to it
+	.MESAG			;Try to get the message
+	MOVB	FIRQB,R0	;Pick up any error code
+  	BNE	110$  		;Got one, error, CI should have been waiting
+	CMPB	#-2,FIRQB+FQFIL ;Is this a connect initiate?
+    	BNE	110$		;No, something strange, error
+	MOV	FIRQB+FQPPN,R2	;Yes, pick up the LLA for our confirmation
+100$:	CALLX	CLRFQX		;Clear out FIRQB and XRB
+	MOV	#<-3&377>!<ULA*400>,FIRQB+FQFIL ;Connect confirm, include ULA
+	MOV	R2,FIRQB+FQPPN	;Set the correct LLA
+	.MESAG			;Now confirm the link
+	MOVB	FIRQB,R0	;Pick up any error code
+	BEQ	120$		;None, we're talking!
+	CMPB	R0,#NOBUFS	;Out of buffer space?
+	BNE	110$		;No, something else, give an error
+	MOV	#2,XRB		;Yes, set to wait a short while
+	.SLEEP		  	;Now do it
+	BR	100$		;And try again
+
+110$:	JMP	EXIT		;Network error, get out
+
+120$:	NEXT	    		;Done
+
+	HEAD	(CHECK),PCHEK,DOCOL			; ***** (CHECK)
+;	0 ' TASK LFA BEGIN DUP >R XOR R> @ -2 AND -DUP WHILE PFA LFA REPEAT
+
+	.WORD	ZERO,LIT,TASK-2
+130$:	.WORD	DUP,TOR,XOR,FROMR,AT,LIT,-2,AND,DDUP,ZBRAN,140$-.
+	.WORD	PFA,LFA,BRAN,130$-.
+
+140$:	.WORD	SEMIS
+
+GLOBAL	<NOBUFS>
+
+.DSABL	LSB 
+
+                 
+.SBTTL	Impure area initialization
+
+.ENABL	LSB
+
+INIT:	.NAME			;Set a name
+	MOV	#NSTORG,R0	;Point to start of impure data
+10$:	CLR	(R0)+		;Clear everything
+	CMP	R0,#INICLR	;Done?
+	BLO	10$		;Not yet
+	MOV 	#INITAB,R0	;Point to startup table
+	MOV	#RPBASE,R1	;Data goes here
+20$:	MOV	(R0)+,(R1)+	;Set up initial variables
+	CMP	R0,#TABEND	;End of startup table?
+	BLO	20$		;No, continue
+	.STAT			;Find out our size
+	MOV	XRB+0,R0	;Get size in K
+	ASH	#11.,R0		;Convert to bytes
+	MOV	R0,.TOP		;Set in TOP
+	MOV	#DSKBUF,.USE	;Set up disk buffer pointers
+	MOV	#DSKBUF,.PREV	; both of them
+	CLR	-(R0)		;Clear out end of stack space
+	CLR	-(R0)		; two words to allow for underflow
+	MOV	R0,SPBASE	;Set up stack base
+	MOV	#JFFPP,XRB+0	;Assume no FPP saving
+	.CLEAR			;Tell the monitor
+	CALL	CLRFQB		;Clear out the FIRQB
+	MOVB	#14.*2,FIRQB+FQFIL ;Set channel = 14
+	;MOVB	#CLSFQ,FIRQB+FQFUN ;Function = close
+.ASSUME	CLSFQ EQ 0
+	CALFIP			;Close channel 14, if open
+;// skip the below if DECnet connection
+	CALL	CLRFQB		;Clear out the FIRQB
+	MOVB	#14.*2,FIRQB+FQFIL ;Set channel = 14
+	MOV	#256.!100000,FIRQB+FQMODE ;Escape sequence mode
+	MOV	#"KB,FIRQB+FQDEV ;Device = job console
+	MOVB	#OPNFQ,FIRQB+FQFUN ; and function is OPEN
+	CALFIP			;Do it, can't fail
+CISCHK:	MOVCI			;Do a CIS instruction
+CISOP:	 .WORD	30$,30$,30$	;Descriptors for null strings
+	INCB	CISFLG		;Mark CIS present
+CISSKP:	RETURN
+
+30$:	.WORD	0,0		;Null string descriptor
+         
+	HEAD	(GO),PGO,DOCOL				; ***** (GO)
+;	SP! DECIMAL FORTH DEFINITIONS {data} HERE {count} DUP ALLOT CMOVE
+
+	.WORD	SPSTO,DEC,FORTH,DEFIN,LIT,40$,HERE
+	.WORD	LIT,70$-40$,DUP,ALLOT,CMOVE,SEMIS
+
+40$:	.ASCIC	<ONLY>
+	.BYTE	40
+	.WORD	0,0,0,20001
+50$:	.WORD	OL0,OL1,OL2,OL3
+	.ASCIC	<FORTH>
+	.WORD	0,0,0,20001
+60$:	.WORD	FL0,FL1,FL2,FL3
+70$:
+
+XONLY	=	DICT+<50$-40$>
+XFORTH	=	DICT+<60$-40$>
+	
+.DSABL	LSB
+
+.SBTTL	Miscellaneous system-specific words
+
+.ENABL	LSB
+
+	HEAD	BYE,BYE					; ***** BYE
+	TSTB	NETFLG		;Network connection?
+.ASSUME	NF$NET	EQ	200
+	BMI	10$		;Yes, we must exit then
+	CALL	CLRFQB		;Clear out the FIRQB
+	.RTS			;Exit to private default
+	JMP	DOCOLD		;Otherwise clean up and prompt
+
+10$:	JMP	EXIT
+
+	HEAD	(BYE),PBYE,EXIT				; ***** (BYE)
+
+	HEAD	(UUO),PUUO				; ***** (UUO)
+; ( function ==> status )
+	MOVB	(S),FIRQB+FQFUN	;Set function code
+	.UUO			;Do it
+	BR	50$		;Return the status
+
+	HEAD	(MEMORY),PMEM				; ***** (MEMORY)
+; ( size ==> status )
+	CALL	CLRXRB		;Clear out the XRB
+	MOV	(S),XRB		;Set desired size
+	.CORE
+	BR	50$		;Return status
+
+	HEAD	CCL,CCL,DOCOL,IMM			; ***** CCL
+;	0 (STRING) STATE @ IF COMPILE (CCL) ELSE (CCL) .ERR ENDIF
+                           
+	.WORD	ZERO,PSTRG,STATE,AT,ZBRAN,20$-.
+	.WORD	COMP,PCCL,SEMIS
+
+20$:	.WORD	PCCL,DOTER,SEMIS
+
+	HEAD	(CCL),PCCL				; ***** (CCL)
+; ( address count ==> status )
+
+	CALL	CLRXRB		;Clear out the XRB first         
+	MOV	(S),XRB+XRLEN	;Set buffer length
+	MOV	(S)+,XRB+XRBC	; and byte count
+	MOV	(S),XRB+XRLOC	;  and buffer address
+	.CCL			;Try to execute the CCL
+	BR	50$		;Return status
+
+	HEAD	RUN,RUN,DOCOL,IMM			; ***** RUN
+;	FILENAME STATE @ IF COMPILE (RUN) ELSE (RUN) DROP 0 ERROR ENDIF
+
+	.WORD	FNAME,STATE,AT,ZBRAN,30$-.,COMP,PRUN,SEMIS
+30$:	.WORD	PRUN,DROP,ZERO,ERROR,SEMIS
+
+	HEAD	(RUN),PRUN				; ***** (RUN)
+	MOV	(S),R0		;Get old status
+	BNE	RSTAT0		;Non-zero, stop now
+	TST	FIRQB+FQEXT	;Extension specified?            
+	BNE	40$		;Yes
+	DEC	FIRQB+FQEXT	;No, supply *
+40$:	.RUN			;Run it
+50$:	BR	RSTAT		;Return status
+
+	HEAD	SAVE,SAVE,DOCOL				; ***** SAVE
+;	[COMPILE] ' CFA 15 DUP FILECLOSE DROP [COMPILE] FILENAME 416 @ 0=
+;	IF 177734 @ 416 ! ENDIF (CREBIN) DROP (CHECK)
+;	S0 @ SP@ S0 ! 512 TOP @ OVER - 1. 0 15 DFILEIO
+;	>R 15 FILECLOSE DROP S0 ! 2DROP R> 8 ?ERROR
+
+	.WORD	TICK,CFA,LIT,15.,DUP,FCLOS,DROP,FNAME
+	.WORD	LIT,FIRQB+FQEXT,AT,ZEQU,ZBRAN,60$-.
+	.WORD	LIT,P.DEXT,AT,LIT,FIRQB+FQEXT,STORE
+60$:	.WORD	PCBIN,DROP,PCHEK,SZERO,AT,SPAT,SZERO,STORE
+	.WORD	LIT,NSTORG,TOP,AT,OVER,SUB,ONE,ZERO,ZERO,LIT,15.,DFIO
+	.WORD	TOR,LIT,15.,FCLOS,DROP
+	.WORD	SZERO,STORE,DDROP,FROMR,LIT,8.,QERR,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Command key routines
+
+.ENABL	LSB
+
+; These routines are entered from command dispatching in QUIT when
+; an escape sequence is used to terminate the command line.  The
+; terminal buffer contains the command line terminated by a null.
+; The word invoked is the one whose name matches the escape sequence
+; used but preceded by a "$" not an escape.
+
+	HEAD	$[29~,C.DO,DOCOL			; ***** $[29~
+;+
+; $[29~	-- Process the DO key
+;
+; Attempts to execute the line supplied as a DCL command
+;-
+
+;	1 word here count 1+ swap 1- ascii $ over c!
+;	swap (ccl) .err
+
+	.WORD	ONE,WORD,HERE,COUNT,ONEP,SWAP,ONEM,LIT,'$
+	.WORD	OVER,CSTOR,SWAP,PCCL,DOTER,SEMIS
+
+.DSABL	LSB
+
+.SBTTL	Disk I/O functions
+
+.ENABL	LSB
+
+; ***************
+;
+; RSTS DISK I/O
+;
+; ***************
+
+	HEAD	(CALFIP),PCFIP				; ***** (CALFIP)
+;	( channel status function ==> status )
+	MOV	(S)+,R0		;Get function
+	MOVB	R0,FIRQB+FQFUN	;Set it
+	MOV	(S)+,R0		;Get old status
+	BNE	RSTAT0		;Non-zero, skip operation
+	ASL	(S)		;Compute channel number * 2
+	MOVB	(S),FIRQB+FQFIL	;Set it
+	CALFIP			;Do it
+RSTAT:	MOVB	FIRQB,R0	;Get status
+RSTAT0:	MOV	R0,(S)		;Return it
+	NEXT
+
+	HEAD	(ERR),PERR				; ***** (ERR)
+;	( code ==> address length )
+	CALL	CLRFQB		;Clear out the FIRQB
+	MOV	(S)+,FIRQB+FQERNO ;Set the error code
+	MOVB	#UU.ERR,FIRQB+FQFUN ; and function
+	.UUO			;Get the text
+	MOV	#FIRQB+4,R0	;Point to text
+	MOV	#FIRQB+FQBSIZ,R1 ; and to end of FIRQB
+	MOV	R0,-(S)		;Push start of text
+10$:	TSTB	-(R1)		;Null padding?
+	BEQ	10$		;Yes, look some more
+	INC	R1		;Point beyond last char
+	SUB	R0,R1		;Compute length
+	MOV	R1,-(S)		;Save that
+	NEXT
+
+	HEAD	DFILEIO,DFIO				; ***** DFILEIO
+;	( address length d-block# function channel ==> status )
+	CALL	CLRXRB		;Clear out the XRB
+	MOV	(S)+,XRB+XRCI	;Set up channel
+.ASSUME	XRCI&1 EQ 0
+	ASLB	XRB+XRCI	; now times 2
+	MOV	(S)+,-(SP)	;Save function flag
+	MOVB	(S)+,XRB+XRBLKM ;Set up high order block number
+	INC	S		;Skip high byte
+	MOV	(S)+,XRB+XRBLK	;Set up low order block number
+	MOV	(S)+,XRB+XRLEN	;Set up buffer size
+	MOV	(S),XRB+XRLOC	;Set up buffer address
+	TST	(SP)+		;Read or write?
+	BEQ	20$		;Write
+	.READ			;Read, do that
+	BR	RSTAT		;Leave
+
+20$:	MOV	XRB+XRLEN,XRB+XRBC ;Set up byte count to write
+	.WRITE			;Write the buffer
+	BR	RSTAT		;Return status
+
+	HEAD	(FILEOPEN),PFOPN,DOCOL			; ***** (FILEOPEN)
+;	( channel status => status )
+;	2 (CALFIP)
+
+	.WORD	TWO,PCFIP
+	.WORD	SEMIS
+.ASSUME	OPNFQ EQ 2
+
+	HEAD	FILECLOSE,FCLOS,DOCOL			; ***** FILECLOSE
+;	( channel ==> status )
+;	DUP 0 OVER 0> IF 0 ELSE 20 ENDIF (CALFIP)
+;	SWAP LIMIT @ FIRST @
+;	DO I 1+ C@ 127 AND OVER DUP
+;	 0> IF =
+;	 ELSE +		( short for MINUS - )
+;	 ENDIF
+;	 IF I 518 ERASE
+;	 ENDIF
+;	518 /LOOP DROP
+
+	.WORD	DUP,ZERO,OVER,ZGTR,ZBRAN,30$-.
+	.WORD	ZERO,BRAN,40$-.
+.ASSUME	CLSFQ EQ 0
+30$:	.WORD	LIT,RSTFQ
+40$:	.WORD	PCFIP,SWAP,LIMIT,AT,FIRST,AT,XDO
+50$:	.WORD	I,ONEP,CAT,LIT,177,AND,OVER,DUP,ZGTR,ZBRAN,60$-.
+	.WORD	EQUAL,BRAN,70$-.
+60$:	.WORD	PLUS
+70$:	.WORD	ZBRAN,80$-.,I,LIT,BUFSIZ,ERASE
+80$:	.WORD	LIT,BUFSIZ,XSLOO,50$-.,DROP,SEMIS
+
+	HEAD	(CREATE),PCREAT,DOCOL			; ***** (CREATE)
+;	4 (CALFIP)
+
+	.WORD	LIT,CREFQ,PCFIP,SEMIS
+
+	HEAD	(CREBIN),PCBIN,DOCOL			; ***** (CREBIN)
+;	34 (CALFIP)
+
+	.WORD	LIT,CRBFQ,PCFIP,SEMIS
+                                  
+	HEAD	(FILENAME),PFNAM			; ***** (FILENAME)
+;	( address count ==> status )
+	CALL	CLRFQB		;Clear the FIRQB
+	CALL	CLRXRB		;Clear the XRB
+	MOV	(S),XRB+XRLEN	;Set buffer length
+	MOV	(S)+,XRB+XRBC	; and byte count
+	MOV	(S)+,XRB+XRLOC	;  and file spec address
+	.FSS			;Scan it
+	MOVB	FIRQB,R0	;Get status
+	MOV	R0,-(S)		;Return it
+	NEXT
+
+	HEAD	FILENAME,FNAME,DOCOL,IMM		; ***** FILENAME
+;	( ==> status )
+;	-1 (STRING) STATE @ IF COMPILE (FILENAME) ELSE (FILENAME) ENDIF
+                                  
+	.WORD	MONE,PSTRG,STATE,AT,ZBRAN,90$-.
+	.WORD	COMP                             
+90$:	.WORD	PFNAM,SEMIS
+
+
+
+	HEAD	FILEOPEN,FOPEN,DOCOL,IMM		; ***** FILEOPEN
+;	( channel ==> status )
+;	FILENAME STATE @ IF COMPILE (FILEOPEN) ELSE (FILEOPEN) ENDIF
+
+	.WORD	FNAME,STATE,AT,ZBRAN,100$-.
+	.WORD	COMP
+100$:	.WORD	PFOPN,SEMIS
+
+	HEAD	XI/O,XIO,DOCOL				; ***** XI/O
+;	( address d-block# flag channel ==> status )
+;	>R >R B/BUF ROT ROT R> R> DFILEIO
+
+	.WORD	TOR,TOR,BBUF,ROT,ROT,FROMR,FROMR,DFIO,SEMIS
+
+	HEAD	R/W,RW,DOCOL				; ***** R/W
+; READ OR WRITE 512-BYTE BLOCK, HANDLE ERRORS.
+;	( address d-block# flag channel ==> )
+;	( flag = 0: write, 1: read , -1: read w/ eof indication )
+;	( 0 = EOF, -1 = ok )
+;	OVER 0< IF XI/O -1 SWAP DUP 11 = IF 2DROP 0. ENDIF
+;	ELSE XI/O ENDIF -DUP IF .ERR ENDIF
+
+	.WORD	OVER,ZLESS,ZBRAN,110$-.,XIO,MONE,SWAP,DUP
+	.WORD	LIT,EOF,EQUAL,ZBRAN,120$-.,DDROP,ZERO,ZERO,BRAN,120$-.
+
+110$:	.WORD	XIO
+120$:	.WORD	DDUP,ZBRAN,130$-.,DOTER
+130$:	.WORD	SEMIS
+
+	HEAD	.ERR,DOTER,DOCOL			; ***** .ERR
+;	RESTORE ?CR DUP IF (ERR) TYPE CR QUIT ENDIF ERROR
+
+	.WORD	RESTO,QCR,DUP,ZBRAN,140$-.,PERR,TYPE,CR,QUIT
+
+140$:	.WORD	ERROR,SEMIS
+
+
+	HEAD	GETLINE,GETL,DOCOL			; ***** GETLINE
+; ( address ==> address length )
+; ( address ==> address -1 if end of file reached )
+; ( uses BLK, LINE, FILE )
+;	DUP LINE @ B/BUF /MOD BLK +! LINE !
+;	BEGIN DUP LINE @ B/BUF /MOD
+;	 BLK @ + 0 FILE @ FBLOCK -DUP
+;	 IF + DUP C@ 12 =
+;	  IF 1+
+;	  ENDIF
+;	  13 ENCLOSE DROP SWAP
+;	  IF DROP 0
+;	  ENDIF
+;	  2DUP + C@ >R >R SWAP 126 R U< 10 ?ERROR
+;	  R CMOVE R LINE +! R> + R 0=
+;	  IF 512 LINE !
+;	  ENDIF R>
+;	 ELSE 2DROP DROP DUP 1- -1
+;	 ENDIF UNTIL
+;	2 LINE +! 0 OVER C! 0 OVER 1+ C! OVER -
+
+	.WORD	DUP,LINE,AT,BBUF,SLMOD,BLK,PSTOR,LINE,STORE
+150$:	.WORD	DUP,LINE,AT,BBUF,SLMOD,BLK,AT,PLUS,ZERO,FILE
+	.WORD	AT,FBLOC,DDUP,ZBRAN,180$-.,PLUS,DUP,LIT,14,EQUAL,ZBRAN,155$-.
+	.WORD	ONEP
+155$:	.WORD	LIT,15,ENCL,DROP,SWAP,ZBRAN,160$-.,DROP,ZERO
+160$:	.WORD	TWODUP,PLUS,CAT,TOR,TOR,SWAP,LIT,126.,R,ULESS,LIT,10.,QERR
+	.WORD	R,CMOVE,R,LINE,PSTOR
+	.WORD	FROMR,PLUS,R,ZEQU,ZBRAN,170$-.,LIT,1000,LINE,STORE
+170$:	.WORD	FROMR,BRAN,190$-.
+
+180$:	.WORD	DDROP,DROP,DUP,ONEM,MONE
+190$:	.WORD	ZBRAN,150$-.
+	.WORD	TWO,LINE,PSTOR,ZERO,OVER,CSTOR,ZERO,OVER,ONEP,CSTOR
+	.WORD	OVER,SUB,SEMIS
+
+.DSABL	LSB
+
+GLOBAL	<EOF>
+
+.SBTTL	Network I/O
+
+.REM	*
+
+Network I/O is used to communicate with a remote client which has sent
+us a connection request.
+
+The high-level network I/O routines present a byte-stream oriented interface
+to the FORTH system. The data sending routines accept either bytes or words,
+and block them into multiple network segments to be sent to our partner.
+
+The data receiving routines return byte data, de-blocking the received
+network segments.
+
+*
+
+.SBTTL	NTOWRD	Send a word to our network partner
+
+;+
+; NTOWRD - Send a word to our network partner
+;
+;	R2 = Word to output
+;
+;	CALL	NTOWRD
+;
+;	R0 = Undefined
+;	R1 = Undefined
+;-
+
+NTOWRD:	CALL	NTOBYT		;Output the LSB
+	SWAB	R2		;Now get MSB in right place
+	CALL	NTOBYT		;Output the MSB
+	SWAB	R2		;Restore registers
+	RETURN			;And exit
+
+.SBTTL	NTOBYT	Send a byte to our network partner
+
+;+
+; NTOBYT - Send a byte to our network partner
+;
+;	R2 =  Character to output
+;
+;	CALL	NTOBYT
+;
+;	R0 =  Undefined
+; 	R1 =  Undefined
+;-              
+
+NTOBYT:	CMP	NTOFP,#NTOBUF+NTOLEN ;Any more room?
+; // above check should also consider buffer size of remote partner
+	BNE	10$		;Yes, just buffer it    
+	CLR	R1		;Indicate not end of message
+	CALL	NTOWRT		;And set up BOM flag and output message
+	BISB	#NF$OCN,NETFLG 	;Indicate we've done continuation
+10$:	MOVB	R2,@NTOFP	;Store the byte in the buffer
+	INC	NTOFP  		;And update the buffer pointer
+	INC	NTOMSG		;And account for one more byte in message
+	RETURN			;And we're done
+
+.SBTTL	NTOCHK	Send a message if message is getting long
+
+;+
+; NTOCHK - Send a message if message is getting long
+;               
+;	CALL	NTOCHK
+;
+;	R0 =  Undefined
+;	R1 =  Undefined
+;-
+
+.ENABL	LSB
+
+NTOCHK:	CMP	NTOMSG,#MSGMAX	;Is this message getting long?
+	BLO	10$		;No, nothing to do
+..NBLK	==:	.-2	;**Patch** NOP to disable blocking (for testing)
+	.BR	NTOGO		;Yes, flush buffer
+
+.SBTTL	NTOGO	Indicate no more data to send - send partial buffer
+
+;+
+; NTOGO - Send data accumulated so far
+;
+;	CALL	NTOGO
+;
+;	R0 =  Undefined
+;	R1 =  Undefined
+;-      
+
+NTOGO:	TST	NTOMSG		;Anything in buffer?
+	BEQ	10$		;No, ignore the flush
+	MOV	#2,R1		;Yes, indicate end of message
+	CALL	NTOWRT		;And output the buffer                   
+	BICB	#NF$OCN,NETFLG	;Indicate no more continuation
+	CLR	NTOMSG		;Clear message length
+10$:	RETURN			;And we're done
+
+.DSABL	LSB
+
+.SBTTL	NTOWRT	Send the network buffer to our network partner
+
+;+                 
+; NTOWRT - Send the network buffer to our network partner
+;
+;	R1 =  Message flags
+;		0 if segment isn't the end segment
+;		2 if segment is the end segment
+;               
+;	CALL	NTOWRT
+;
+;	R0 =  Undefined
+;	R1 =  Undefined
+;-      
+                              
+NTOWRT:	CALLX	SAVFQX		;Save FIRQB and XRB
+	BITB	#NF$OCN,NETFLG	;Beginning of message?
+	BNE	10$		;No, not this time
+	INC	R1		;Yes, set that in the flags
+10$:	MOV	R1,-(SP)	;Save message flags
+	CALLX	CLRFQX		;Clear FIRQB and XRB
+	MOV	(SP)+,R1	;Restore message flags
+  	MOV	#<-5&377>!<ULA*400>,FIRQB+FQFIL ;Set function and ULA
+	MOVB	R1,FIRQB+FQEXT 	;Set BOM/EOM flags
+	MOV	#XRB,R0	  	;Point to XRB
+	MOV	#NTOLEN,(R0)+	;Set length of buffer
+	MOV	NTOFP,(R0)	;Begin to calculate byte count
+	SUB	#NTOBUF,(R0)+	;Now actually get it
+	MOV	#NTOBUF,(R0)	;Set the address of the buffer
+	.MESAG			;Now send it out
+	MOVB	FIRQB,R0	;Pick up any error code
+	BEQ	60$		;None, it got out
+	CMPB	R0,#NOROOM	;Transmit queue full?
+	BEQ	20$		;Yes, set up a short wait
+	CMPB	R0,#NOBUFS	;No buffer space?
+	BNE	30$		;No, that's not it
+20$:	MOV	#2,XRB		;Set up a short wait
+	BR	40$		;And set up to wait
+        
+30$:	CMPB	R0,#INTLCK	;Have we been backpressured?
+  	BNE	50$		;No, that's not it
+	MOV	#-1,XRB		;Yes, set an infinite conditional sleep
+40$:	.SLEEP		  	;Wait for the condition to clear
+	BR	10$		;And try again
+
+50$:	JMP	EXIT		;By now, just get out and break the link
+
+60$:	MOV	#NTOBUF,NTOFP	;Reset the fill pointer 
+	RETURN			;All done
+
+GLOBAL	<NOBUFS,INTLCK,NOSUCH,NOROOM>    
+
+.SBTTL	NTICHK	Periodically check for network messages and process them
+.SBTTL	NTICHU	Unconditionally check for network messages and process them
+
+;+
+; NTICHK - Periodically check for network messages and process them
+; NTICHU - Unconditionally check for network messages and process them
+;
+;	CALL	NTICHK
+;	CALL	NTICHU
+;
+;	R0 =  Undefined
+;	R1 =  Undefined
+;	R2 =  Undefined
+;
+; This routine is used to check for incoming messages from our network
+; partner. We will process all requests in the input queue, and return
+; to our caller when we are done. This routine is called by various
+; FORTH words associated with loops, since there is no AST mechanism in
+; RSTS.
+;
+; NTICHK will only actually perform the check every 256 times that it
+; is called; NTICHU will always perform the check. This is done this way
+; because the polling operation is very expensive, and seriously degrades
+; the FORTH programs performance.
+;-
+
+.ENABL LSB
+
+NTICHK:	INCB	NETCNT		;Count one more time through polling
+	BNE	40$		;Didn't wrap - don't check the network
+NTICHU:	TSTB	NETFLG		;Network connection?
+	BPL	40$		;No, not this time
+.ASSUME	NF$NET	EQ	200
+	CALL	NTIRED		;Try to get a network message
+	BCS	40$		;None, nothing to do
+20$:	CALL	NTIBYT		;Got a message, fetch a byte
+    	BCS	40$		;End of message, get out
+	CMP	R0,#NTFMAX	;Function within range?
+	BHI	30$		;No, disconnect link
+	ASL	R0		;Get function code * 2
+	CALL	@NTFDSP(R0)	;Dispatch on the network function
+	BR	20$		;Now loop for more requests in this message
+
+30$:	JMP	EXIT		;Bad message, break link and clean up
+
+40$:	RETURN			;All done here
+
+.DSABL LSB
+
+.SBTTL	NTFDSP	Network function dispatch table
+
+.REM	*
+                                                                        
+The network function dispatch table contains the addresses of routines to
+process input network requests. These routines are synchronous; they will stall
+until they are complete. Note that a FORTH function may be in progress during
+this stall.
+
+*                
+
+NTFDSP:	.WORD	NTKINP		;Process network keyboard input
+	.WORD	NTABRT		;Abort current function (fake ^C)
+
+NTFMAX	=:	<<.-NTFDSP>/2>-1
+
+.SBTTL	NTKINP	Process keyboard input data
+
+;+
+; NTKINP - Process keyboard input data
+;
+;	CALL	NTKINP
+;
+; This routine is called in response to a network request to process keyboard
+; input. The format of the request is:
+;
+;	Byte count of input data (as a byte)
+;	Input data
+;
+; This routine will supply data to CHRBUF, the terminal input buffer.
+;-
+
+NTKINP:	CALL	NTIBYT		;Pick up the byte count
+	BCS	30$		;Error, byte count not specified
+	CLR	R2		;Get ready to copy byte count
+	BISB	R0,R2		;Now copy the byte count without sign extension
+	BEQ	20$		;Zero length record, must be read timeout
+10$:	CALL	NTIBYT		;Get ready to get a byte
+	BCS	30$		;Error, not yet at end of message
+	MOV     #CHRBUF,R1	;Pick up pointer to buffer
+	ADD	CHRCNT,R1	;Now point to where to store the character
+	MOVB	R0,(R1)		;And store it
+	INC	CHRCNT		;Indicate one more stored character
+	SOB	R2,10$		;Loop for the entire request
+20$:	BICB	#NF$IKB,NETFLG	;Indicate no longer a read outstanding
+	RETURN			;All done here
+
+30$:	JMP	EXIT		;Abort the link and get out
+
+.SBTTL	NTABRT	Abort the current function
+
+;+
+; NTABRT - Abort the current function
+;
+;	CALL	NTABRT
+;
+; This routine is used in response to a network abort request. We will fake
+; a PSW on the stack, adn then go to the control/c processor. Note that it
+; is likely that the processsor will not return; this is OK as we do not
+; have any context to keep.
+;-
+
+NTABRT:	MOV	#^B<1111100000000000>,-(SP) ;Set up a fake PSW
+	CALL	CP.CC		;Fake a ^C interrupt
+	RETURN			;And we're done (watch the stack!)
+
+.SBTTL	NTIBYT	Get a byte from our network partner
+
+;+
+; NTIBYT - Get a byte from our network partner
+;
+;	CALL	NTIBYT
+;       
+;	R0 = Byte of input data (if C=0)
+;	R1 = Undefined
+;
+;	C = 0 if data delivered
+;	C = 1 if no data available
+;-              
+                                 
+NTIBYT:	MOV	NTIEP,R1	;Get network empty pointer		
+	CMP	R1,NTIEND	;Data available?			
+	BNE	20$		;Yes, go pick it up
+	BITB	#NF$ICN,NETFLG	;No, is there more data in this segment?
+	BEQ	30$		;No more data, indicate failure
+10$:	CALL	NTIRED		;More data, try to read the message
+	BCC	NTIBYT		;Got one, go pick it up
+	MOV	#-1,XRB		;No message, set a long conditional sleep
+	.SLEEP			;And do it
+	BR	10$		;And loop
+
+20$:	MOVB	(R1)+,R0	;Get the data				
+	MOV	R1,NTIEP	;Reset the empty pointer		
+	TST	(PC)+		;Indicate goodness			
+30$:	 SEC			;Indicate buffer empty			
+	RETURN			;And we're done				
+
+.SBTTL	NTIRED	Read a buffer from our network partner
+                       
+;+
+; NTIRED - Read a buffer from our network partner
+;               
+;	CALL	NTIRED
+;
+;	R0 =  Undefined
+;	R1 =  Undefined
+;	
+;	C = 0 if message received
+;	C = 1 if no message in buffer
+;               
+; This routine is used to receive a network segment from our network partner.
+;-
+
+NTIRED:	CALL	SAVFQX		;Save FIRQB and XRB
+5$:	CALLX	CLRFQX		;Clear out the FIRQB and XRB
+	MOVB	#2,FIRQB+FQFIL	;Function code is receive message
+	MOV	#NTILEN,XRB+XRLEN ;Set buffer length
+	MOV	#NTIBUF,XRB+XRLOC ;Always read into network buffer
+	.MESAG			;Now get a message
+	MOVB	FIRQB,R0	;Pick up any error code
+	BEQ	10$		;None, good
+	CMPB	R0,#NOSUCH	;Is it just no message there?
+	BEQ	50$		;Yes, that's OK
+	BR	20$		;No, get out of here
+
+10$:	MOV	XRB+XRBC,NTIEND	;Calculate the data end address
+	ADD	#NTIBUF,NTIEND	; ...
+	MOV	#NTIBUF,NTIEP	;Reset the empty pointer
+	MOVB	FIRQB+FQFIL,R0	;Get type of message
+    	CMPB	R0,#-5		;Network data message?
+	BEQ	30$		;Yes, go process it
+	CMPB	R0,#-7		;Link service message?
+	BEQ	5$		;Yes, ignore it and try again
+20$:	JMP	EXIT		;Abort or disconnect, get out
+
+30$:	BISB	#NF$ICN,NETFLG	;Assume that this isn't the last segment
+	TST	FIRQB+12	;Is there more data in this buffer?
+	BNE	40$		;Yes, then this isn't the end
+	BITB	#2,FIRQB+FQEXT	;Is this the last segment?
+	BEQ	40$		;No, good guess
+	BICB	#NF$ICN,NETFLG	;Note that there aren't any more segments
+40$:	TST	(PC)+		;Indicate we received something
+50$:	 SEC			;No message received
+	RETURN			;And we're done
+
+.SBTTL	Final dictionary entry
+                                 
+.ENABL	LSB
+
+ 	HEAD	TASK,TASK,DOCOL				; ***** TASK
+; This is a placeholder for future use
+
+	.WORD	SEMIS
+                
+; Define the symbols for the FORTH vocabulary threads
+
+FL0	=	LINK0
+FL1	=	LINK1
+FL2	=	LINK2
+FL3	=	LINK3
+
+.DSABL	LSB
+
+.SBTTL	Pseudo-vectors
+
+.MACRO	VECTOR	AT,TO
+	ORG	VECTOR,AT-P.OFF
+	 .WORD	TO
+.ENDM	VECTOR
+
+MINSIZ	=	<<DICT+300.>+2047.>/2048.	;Minimum size in K
+FLAGS	=	PF.KBM+PF.CSZ+PF.NER		;Flags for this runtime system
+
+; Definitions for ODT
+
+O.MSIZ	==	MINSIZ
+O.SIZE	==	24.
+O.DEXT	==	^R4TH
+O.FLAG	==	FLAGS
+
+	VECTOR	P.MSIZ,MINSIZ	; Minimum size
+	VECTOR	P.SIZE,<<$FORTH/2048./4>*4> ; Maximum size
+	VECTOR	P.DEXT,<^R4TH>	; Default extension for .RUN
+	VECTOR	P.FLAG,FLAGS	; RTS flag word
+
+;				"All hope abandon, ye who enter here."
+;
+;				 - Dante Alighieri, "The Inferno"
+
+	VECTOR	P.FIS,	CP.FIS	; FIS errors
+	VECTOR	P.FPP,	CP.FPP	; FPP errors
+	VECTOR	P.BPT,	CP.BPT	; Breakpoint traps
+	VECTOR	P.IOT,	CP.IOT	; IOT traps
+	VECTOR	P.EMT,	CP.EMT	; EMT traps
+	VECTOR	P.TRAP,	CP.TRP	; TRAP traps
+	VECTOR	P.BAD,	CP.BAD	; Other baddies (traps to 4, 10, MMU)
+	VECTOR	P.CRAS,	CP.BAD	; (obsolete)
+	VECTOR	P.STRT,	CP.BAD	; (obsolete)
+
+;				"Enter these enchanted woods,
+;				 You who dare."
+;
+;				 - George Meredith, "The Woods of Westermain"
+
+	VECTOR	P.NEW,	INCOLD	; New user entry
+	VECTOR	P.RUN,	DORUN	; RUN entry
+
+	VECTOR	P.CC,	CP.CC	; Ctrl-C
+	VECTOR	P.2CC,	CP.2CC	; 2 fast ctrl-C's
+
+
+.END

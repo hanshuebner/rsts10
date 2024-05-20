@@ -1,0 +1,2432 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:MTDEF/
+TITLE	MSDVR,<TS11 MAGTAPE DRIVER>,0A,10-MAY-91,SJK/AJK/SRM/FRL/JHC/DBM/KPH/VAM/TPT
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR MSDVR
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;
+;  001  AJK  24-JUN-81  REWROTE REWIND DONE PROCESSING.
+;			ADDED CODE TO CHECK FOR UNIT OFFLINE IN TIME OUT
+;			ROUTINE AND IN DONE PROCESSING.
+;  002  AJK  08-JUL-82  ADDED CODE TO RESOLVE REWIND PROBLEM CAUSED BY
+;			MTU ENVOKING CONTINUATION PROCESS BEFORE REWIND
+;			IS COMPLETE.
+;
+;				[RSTS V9.0]
+;  003  FRL  25-Oct-83  Added extended level three queue (L3Q) capability
+;
+;				[Asynchronous driver Created]
+;  004  JHC  01-Feb-84  Modify code to provide asynchronous interface to 
+;			make it a screamer with TSV05,TK25, and TU80.
+;			Remove 20 pages of useless comments.  Most lower 
+;			case comments are for this work
+;  005	DBM  09-Mar-84	Redo ERL$MS and TMO$MS for asynch driver.
+;  006	JHC  05-May-85	Add support for EOV check by MTU
+;  007	DBM  08-May-84	Finish support for EOV check, and add .WEAK references
+;  008  JHC  21-May-84	Bug fixes: MTBCNT, TK25 error handling, TSV05 speed.
+;  009	JHC  07-Jun-84  More bug fixes. Clean up TCLAS3, TMO$MS, and TCLAS0
+;			errors (yes, they happen). Also repair device assign.
+;			Return ASYWRK block on Directive errors.
+;  010	JHC  19-Jun-84	Allow infinite Asynchronous I/O requests to be 
+;			outstanding to the user. Also make sure that 
+;			TSV05 is started up at low speed during ASN$MS.
+;  011	DBM  24-Jun-84	Fix bugs with high-speed bit, and infinite I/O
+;  012	JHC  27-Aug-84	Fix Asynch EOV bugs.
+;  013  JHC  31-Aug-84  MTBCNT bug, MTU returns, and EOF repairs
+;  014	DBM  07-Sep-84	Clean up TIMOUT and increase allowed rewind time
+;  015	DBM  13-Sep-84	Repair Synch EOF/EOV (Broken by Asynch EOF/EOV)
+;			TS05 speed switching to be done at priority 3
+;  016	KPH  29-Aug-84	Change ASIODN to ASYDNE
+;			Move to magtape phase
+;  017  JHC  08-Oct-84	Fix RETTSQ to work in INIT
+;  018	DBM  25-Oct-84	Fix MTU rewind handling, and other various bug(s)
+;  019	JHC  03-Jan-85	Make sure UMRs are returned on Timed out requests
+;
+;				[RSTS V9.1]
+;  020  VAM  28-Feb-85	Add Extended Set Density SPEC function
+;
+;				[RSTS V9.2]
+;  021	DBM  02-Oct-85	Rework done processing to clean up stack usage
+;			Include an updated revision of JHC's comments
+;			on done and rewind processing
+;  022	DBM  06-Dec-85	Store job number in TSQ to allow closes with I/O out
+;  023	TPT  13-Jan-86	Move BLDTSQ to MTA for MS/MU drivers
+;  024	DBM  16-Jan-86	Issue NOROOM errors only on write operations
+;  025	DBM  14-Feb-86	Increase timeout value for write and write TMK
+;
+;				[RSTS V9.3]
+;  026	DBM  13-May-86	Bug fix in ANSI processing (Read past EOV)
+;  027	DBM  18-Jun-86	Fix 026 (Gack!)
+;			Fix GETBIG calls.  Fix FP(MTA) hangs.
+;  028	DBM  22-Aug-86	Superlong timeouts for TK25 skips.  MT.OPN handling.
+;  029  DBM  15-Oct-86	    "        "      "  skips on all drive types.
+;			RETURN to MTA on FIP requests.
+;  030	DBM  01-Dec-86	Make drive initializations subsystem initializations
+;
+;				[RSTS V9.4]
+;  031  VAM  05-May-87	Fix bug in EOF1 block count field for ANSI tapes.
+;  032  VAM  13-May-87	Hack for rewind timeout errors.
+;
+;				[RSTS V9.5]
+;  033  VAM  12-Aug-87	Fix timeout errors correctly.
+;			Increase read/write and WTM timeout to 25 seconds
+;			 (for TK25).
+;			Correctly increment MTBCNT (for ANSI EOF1 trailer).
+;
+;				[RSTS V10.0]
+;  034  VAM  05-Feb-90	When reading, ignore records < 14. bytes long.
+;-
+
+.sbttl  TSQ -- including TS11 specific entries
+
+.DSECT	,NOCREF
+
+	.BLKW		; Queue link word (forward pointer)		;001
+TSQJOB:	.BLKB		; Job number					;022
+TSQTRY:	.BLKB		; Retry count and error flag			;001
+TSQL3Q:	.BLKW		; Completion queue and L3Q bits to set		;001
+TSQIDX:	.BLKB		; Device Index					;001
+TSQCEV:	.BLKB		; Request Error value				;001
+TSQRET:	.BLKW		; Parameter to return				;001
+TSQMTO:	.BLKB		; Open flag word				;022
+TSQMAM:	.BLKB		; Memory address of the transfer (msb)		;001
+TSQMAL:	.BLKW		; Low order memory address of transfer		;001
+TSQCNT:	.BLKW		; Word (or record) count of transfer/operation	;001
+TSQCMD:	.BLKB		; Function code of operation			;001
+TSQSTS:	.BLKB		; Operation status word				;001
+TSQASY:	.BLKW		; Pointer to ASYWRK block			;001
+TSQTOT:	.BLKW		; Total Transfer Counter			;001
+TSQDNE:	.BLKW		; Done queue thread word
+TSQECK:	.BLKW		; TSSR value for errored requests
+TSQLOP:	.BLKW		; Long operation timeout counter		;028
+	.BLKB 	3	; Unused in the current driver			;028
+TSQPUN:	.BLKB		; Physical Unit Number				;001
+TSQSIZ:			; Hokay, the size better = 1 small buffer	;001
+
+.SBTTL	TS11 MAGTAPE DDB EXTENSION
+
+.DSECT	MTFQB+2			;POSITION PAST THE CURRENT MTDDB SIZE
+
+MSHDR:	.BLKW			;HEADER OF RETURNED MESSAGE
+MSSIZ:	.BLKW			;SIZE OF MESSAGE RETURNED (12 or 14)
+RBPCR:	.BLKW			;RESIDUAL BYTE COUNT OR POSITION
+XSTAT0:	.BLKW			;EXTENDED STATUS REGISTER 0
+XSTAT1:	.BLKW			;EXTENDED STATUS REGISTER 1
+XSTAT2:	.BLKW			;EXTENDED STATUS REGISTER 2
+XSTAT3:	.BLKW			;EXTENDED STATUS REGISTER 3
+XSTAT4:	.BLKW			;extended status register 4 (TSV05 only) 
+TSSR:	.BLKW			;COPY OF TSSR AT INTERRUPT TIME
+MSPTR:	.BLKW			;POINTER TO MESSAGE TO SEND TO TS11
+MSCMD:	.BLKW		5.	;COMMAND BUFFER (alignable to modulo 4)
+MSAINF:	.BLKW			;STATUS WORD FOR THIS TS11 CONTROLLER
+MSUNST:	.BLKW			;UNIT STATUS AFTER LAST MOTION COMMAND.
+MSCHAR:	.BLKW		5.	;BUFFER FOR TS11 CHARACTERISTICS DATA (+1 for TSV05)
+MSERR:	.BLKB			; error left over from failed rewind (yes ugly)
+MSHITS:	.BLKB			; # of successfully streamed commands	
+MSQTSQ:	.BLKW			; the queue of waiting (and outstanding) TSQs 
+MSDTSQ:	.BLKW			; queue of TSQs awaiting done processing 
+MSDNE:	.BLKW			; Done queue thread word (repositioned)
+	.BLKB			; (Unused)				;028
+MSRWP:	.BLKB			; number of Reads/writes pending	;010
+.ASSUME	MSHDR	EQ	MTFQB+2	;MUST BE HERE OR INIT WILL GET SICK
+
+; BIT ASSIGNMENTS IN MSAINF
+
+.BSECT				;MSAINF - CONTROLLER STATUS WORD
+
+MS$TMO:	.BLKB	.		;TIMEOUT OCCURED
+MS$RWD:	.BLKB	.		; rewind in progress			
+MS$RP1:	.BLKB	.		; rewind-offline phase 1 in progress	
+MS$RP2:	.BLKB	.		; rewind-offline phase 2 in progress	
+MS$BAK:	.BLKB	.		;DOING BACKSPACE FOR RETRY
+MS$ERS:	.BLKB	.		;DOING AN ERASE FOR EXTENDED GAP
+MS$FTL:	.BLKB	.		; Drive is fatally ill, don't use it	;030
+MS$OUT:	.BLKB	.		; Command outstanding (will interrupt)	
+MS$UMR:	.BLKB	.		; Controller waiting for UMRs freed up	
+MS$LCK:	.BLKB	.		; Unit queue locked (unresolved problem)
+MS$ECA:	.BLKB	.		; Error State!				
+MS$WCH:	.BLKB	.		; Write Characterisitics in progress	
+MS$INT:	.BLKB	.		; Drive initialize in progress
+MS$RRC:	.BLKB	.		; Rewind error Recovery Check in progress
+MS$TM1:	.BLKB	.		;ONE TIMEOUT HAS OCCURRED FOR THIS UNIT
+MS$LOP:	.BLKB	.		;long operation in progress (rename old bit)
+
+.SBTTL  Define TS11 device types
+
+;+
+; This list of available TS11 units is also in the INIPFX
+; module of INIT.SYS.  To work correctly, both tables must
+; be exactly the same.  Be sure to make any changes for 
+; new devices to both tables.
+;-
+
+.DSECT			;TS DRIVE IDENTIFIERS		
+
+$TS11:	.BLKW		;TS11	- UNIBUS		
+$TU80:	.BLKW		;TU80	- UNIBUS		
+$TK25:	.BLKW		;TK25	- UNIBUS   OR	Q-BUS	
+$TS05:
+$TSV05:
+$TSU05:	.BLKW		;TS05	- UNIBUS   OR	Q-BUS	
+$TSEND:			;INVALID TS TYPE		
+
+
+.SBTTL	DEFINE HARDWARE REGISTERS
+
+.BSECT			; TCL	; TSSR - STATUS REGISTER
+
+	.BLKB	.	; -	; RESERVED
+SR.TC0:	.BLKB	.	; S	; TERMINATION CLASS CODE BIT
+SR.TC1:	.BLKB	.	; S	; TERMINATION CLASS CODE BIT
+SR.TC2:	.BLKB	.	; S	; TERMINATION CLASS CODE BIT
+SR.FC0:	.BLKB	.	; 7	; FATAL TERMINATION CLASS CODE BIT
+SR.FC1:	.BLKB	.	; 7	; FATAL TERMINATION CLASS CODE BIT
+SR.OFL:	.BLKB	.	; S,1,3	; UNIT OFFLINE
+SR.SSR:	.BLKB	.	; S	; SUB-SYSTEM READY
+SR.A16:	.BLKB	.	; S	; BIT 16 OF UNIBUS ADDRESS
+SR.A17:	.BLKB	.	; S	; BIT 17 OF UNIBUS ADDRESS
+SR.NBA:	.BLKB	.	; S	; NEED BUFFER ADDRESS
+SR.NXM:	.BLKB	.	; 4,5	; NON-EXISTENT MEMORY
+SR.RMR:	.BLKB	.	; S	; REGISTER MODIFICATION REFUSED
+SR.SPE:	.BLKB	.	; 7F2	; SERIAL BUS PARITY ERROR
+SR.UPE:	.BLKB	.	; 4,5	; UNIBUS PARITY ERROR
+SR.SC:	.BLKB	.	; S	; SPECIAL CONDITION
+
+.BSECT			; TCL	; XSTAT0 - EXTENDED STATUS REGISTER 0
+
+X0.EOT:	.BLKB	.	; S,2	; BEYOND END OF TAPE
+X0.BOT:	.BLKB	.	; S,3	; AT BEGINNING OF TAPE
+X0.WLK:	.BLKB	.	; S,3	; UNIT IS PHYSICALLY WRITE LOCKED
+X0.PED:	.BLKB	.	; S	; DRIVE IS 1600 BPI PHASE ENCODED
+X0.VCK:	.BLKB	.	; S	; VOLUME CHECK (DRIVE POWERED DOWN)
+X0.IE:	.BLKB	.	; S	; INTERRUPT ENABLE
+X0.ONL:	.BLKB	.	; S	; UNIT IS ON LINE
+X0.MOT:	.BLKB	.	; S	; TAPE IS MOVING
+X0.ILA:	.BLKB	.	; 3	; ILLEGAL ADDRESS
+X0.ILC:	.BLKB	.	; 3	; ILLEGAL COMMAND
+X0.NEF:	.BLKB	.	; 3	; NON-EXECUTABLE FUNCTION
+X0.WLE:	.BLKB	.	; 3,6	; WRITE LOCK ERROR
+X0.RLL:	.BLKB	.	; 2	; RECORD LENGTH LONG
+X0.LET:	.BLKB	.	; 2	; LOGICAL END OF TAPE
+X0.RLS:	.BLKB	.	; 2	; RECORD LENGTH SHORT
+X0.TMK:	.BLKB	.	; S,2	; TAPE MARK DECTECTED
+
+.BSECT			; TCL	; XSTAT1 - EXTENDED STATUS REGISTER 1
+
+X1.MTE:	.BLKB	.	; 4	; MULTI-TRACK ERROR.
+X1.UNC:	.BLKB	.	; 4	; UNCORRECTABLE DATA.
+X1.POL:	.BLKB	.	; 4	; POSTAMBLE LONG
+X1.EWT:			; S,4	; Early Warning mark hit on TK25	
+X1.POS:	.BLKB	.	; S,4	; POSTAMBLE SHORT
+X1.IED:	.BLKB	.	; 4	; INVALID END DATA
+X1.IPO:	.BLKB	.	; S,4	; INVALID POST AMBLE
+X1.SYN:	.BLKB	.	; 4	; SYNCHRONIZATION FAILURE
+X1.IPR:	.BLKB	.	; S,4	; INVALID PREAMBLE
+	.BLKB	.	; -	; NOT USED
+X1.SCK:	.BLKB	.	; 4	; SPEED CHECK
+X1.DBF:	.BLKB	.	; 4	; DESKEW BUFFER FAIL
+X1.TIG:	.BLKB	.	; 4	; TRASH IN GAP
+X1.CRS:	.BLKB	.	; 4	; CREASE DECTECTED
+X1.COR:	.BLKB	.	; S	; CORRECTABLE DATA
+	.BLKB	.	; -	; NOT USED
+X1.DLT:	.BLKB	.	; 4	; DATA LATE
+
+.BSECT			; TCL	; XSTAT2 - EXTENDED STATUS REGISTER 2
+
+	.BLKB	.	; -	; DEAD TRACK PARITY
+	.BLKB	.	; -	; DEAD TRACK PARITY
+	.BLKB	.	; -	; DEAD TRACK PARITY
+	.BLKB	.	; -	; DEAD TRACK PARITY
+	.BLKB	.	; -	; DEAD TRACK PARITY
+	.BLKB	.	; -	; DEAD TRACK PARITY
+	.BLKB	.	; -	; DEAD TRACK PARITY
+	.BLKB	.	; -	; DEAD TRACK PARITY
+	.BLKB	.	; -	; DEAD TRACK PARITY
+	.BLKB	.	; -	; NOT USED
+X2.WCF:	.BLKB	.	; 7	; WRITE BOARD IS FOOBAR
+	.BLKB	.	; -	; NOT USED
+X2.CAF:	.BLKB	.	; 7	; CAPSTAN ACCELERATION FAIL
+X2.BPE:	.BLKB	.	; 7F2	; SERIAL BUS PARITY ERROR AT DRIVE
+X2.SIP:	.BLKB	.	; 7F2	; SILO PARITY ERROR
+X2.OPM:	.BLKB	.	; S	; OPERATION IN PROGRESS
+
+.BSECT			; TCL	; XSTAT3 - EXTENDED STATUS REGISTER 3
+
+X3.RIB:	.BLKB	.	; 2	; REVERSE INTO BOT
+X3.LXS:	.BLKB	.	; -	; LIMIT SWITCH EXCEEDED ????
+X3.NOI:	.BLKB	.	; 6	; NOISE RECORD
+X3.DCK:	.BLKB	.	; S,6	; DENSITY CHECK
+X3.CRF:	.BLKB	.	; 7	; CAPSTAN RESPONSE FAIL
+X3.REV:	.BLKB	.	; S	; OPERATION WAS REVERSE DIRECTION
+X3.OPI:	.BLKB	.	; 6	; OPERATION INCOMPLETE
+X3.LMX:	.BLKB	.	; 6	; LIMIT EXCEEDED
+	.BLKB	.	; -	; MICRO DIAGNOSTIC ERROR CODE BIT
+	.BLKB	.	; -	; MICRO DIAGNOSTIC ERROR CODE BIT
+	.BLKB	.	; -	; MICRO DIAGNOSTIC ERROR CODE BIT
+	.BLKB	.	; -	; MICRO DIAGNOSTIC ERROR CODE BIT
+	.BLKB	.	; -	; MICRO DIAGNOSTIC ERROR CODE BIT
+	.BLKB	.	; -	; MICRO DIAGNOSTIC ERROR CODE BIT
+	.BLKB	.	; -	; MICRO DIAGNOSTIC ERROR CODE BIT
+	.BLKB	.	; -	; MICRO DIAGNOSTIC ERROR CODE BIT
+
+.BSECT		; Extended Status Register 4 (TSV05 only)
+
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+	.BLKB	.	;
+X4.HSP:	.BLKB	.	; Indicates unit operating at high speed
+
+;+
+; device specific characteristics bits
+;-
+
+CH.HSP = 40		;TSV05 Set speed High bit.
+
+.DSECT	7			; UNIT STATUS RETURNED
+
+UN.CMD:	.BLKB			; COMMAND
+UN.EXD:	.BLKB	.		; EXTENDED DENSITY
+UN.A16:	.BLKB	.		; UNIT ACCEPTS 1600 BPI DENSITY SETTING
+UN.OFF:	.BLKB	.		; UNIT IS OFFLINE
+UN.RLL:	.BLKB	.		; RECORD LENGTH WAS TOO LONG FOR BUFFER
+UN.TMK:	.BLKB	.		; TAPE MARK ENCOUNTERED
+UN.BOT:	.BLKB	.		; UNIT IS AT BOT
+UN.EOT:	.BLKB	.		; UNIT IS BEYOND END OF TAPE
+UN.WLK:	.BLKB	.		; UNIT IS PHYSICALLY WRITE LOCKED
+UN.PAR:	.BLKB	.		; PARITY IS EVEN
+UN.7TK:	.BLKB	.		; UNIT IS SEVEN TRACK
+	.BLKB	.		; DENSITY BIT
+	.BLKB	.		; DENSITY BIT
+UN.ERR:	.BLKB	.		; ERROR OCCURED ON LAST COMMAND
+
+UN.DEF	= UN.A16!UN.EXD		; DEFAULT VALUE FOR MSUNST
+UN.UPD	= UN.WLK!UN.BOT!UN.EOT!UN.OFF ; VALUES TO UPDATE FOR STATUS CALL
+
+.EQUATE	OP.RWU,	140412		;UNLOAD
+.EQUATE	OP.RD,	140001		;READ FORWARD
+.EQUATE	OP.WT,	140005		;WRITE FORWARD
+.EQUATE	OP.TMK,	140011		;WRITE TAPE MARK
+.EQUATE	OP.RWD,	142010		;REWIND
+.EQUATE	OP.SKP,	140010		;SKIP FORWARD
+.EQUATE	OP.BSP,	140410		;BACKSPACE
+.EQUATE	OP.CHR,	140004		;WRITE CHARACTERISTICS
+.EQUATE	OP.STS,	140017		;GET STATUS IMMEDIATE
+.EQUATE	OP.ERS,	140411		;ERASE TAPE
+.EQUATE	OP.INT,	140013		;INITIALIZE DRIVE
+
+.SBTTL	Design Notes
+
+;+
+;
+; Some Design Notes:
+;
+; This is the first driver in RSTS to handle true multi-queueing 
+; to tapes.  It was also optimized to issue new requests quickly 
+; enough when running asynchronously to hit the very small reinstruct
+; window required to keep tape drives like the TU80 streaming.
+;
+; All of this means that this is a strange driver.
+;
+; Queueing:
+;
+;		+---------------+
+;   MSAQUE----->|		|---------------------------------------+
+;   MSUMRQ	|		|					|
+;		|   DDB #0	|					|
+;		|		|	+-------+	+-------+	|
+;		|   MSQTSQ -----|------>|	|------>|	|	|
+;		|   MSDTSQ -----|---+	|  TSQ	|	|  TSQ	|	|
+;		|		|   |	|	|	|	|	|
+;		|		|   |	+-------+	+-------+	|
+;		|		|   |	+-------+	+-------+	|
+;		|		|   |	|	|	|	|	|
+;   MSDONQ----->|    MSDNE -----|-+ |	|  TSQ	|	|  TSQ	|	|
+;		|   		| | +-->|	|------>|	|	|
+;		|		| |	+-------+	+-------+	|
+;		+---------------+ |					|
+;				  |					|
+;	+-------------------------+					|
+;	|	+---------------+					|
+;	|	|		|<--------------------------------------+
+;	|	|		|
+;	|	|   DDB #1	|
+;	|	|		|	+-------+	+-------+
+;	|	|   MSQTSQ -----|------>|	|------>|	|
+;	|	|   MSDTSQ -----|--+	|  TSQ	|	|  TSQ	|
+;	|	|		|  | +->|	|	|	|
+;	|	|		|  | |	+-------+	+-------+
+;	|	|		|  | +-----------------------------+
+;	|	|		|  |	+-------+	+-------+  |
+;	|	|		|  |	|	|	|	|  |
+;	+------>|   MSDNE	|  |	|  TSQ	|	|  TSQ	|  |
+;		|   		|  +--->|	|------>|	|--+
+;		|		|	+-------+	+-------+
+;		+---------------+
+;
+
+;
+; This driver will handle multiple requests out to multiple units
+; using the basic queueing structure above.  The DDB contains all 
+; required job and device ownership information as well as the 
+; command and response packet for each TSxx type drive.
+;
+; Each TSQ contains only request related information including the
+; Work block or ASYWRK block for the job which originated the request.
+; 
+; MSQTSQ offset in the DDB is the root pointer to the queue of pending
+; or outstanding requests.  MSDTSQ is the root pointer to the queue of
+; requests waiting for Done service.
+;
+; A DDB is linked to a queue according to what service the unit is waiting
+; for. There are three queues: The MSUMRQ, MSAQUE, and MSDONQ. The DDB is
+; linked to the MSUMRQ only if the UMRs required for a given request are
+; unavailable.  It is linked to the MSAQUE if the unit is requesting new
+; service, and a DDB is linked to the MSDONQ whenever there are any completed
+; requests which need to be posted.
+;
+; When a request completes without error, the TSQ is delinked from the pending
+; queue, linked to the done queue, and the next request is issued if there
+; are any pending.  All of this is done at interrupt level to minimize the 
+; time between requests received by the tape unit.  If there is an error,
+; then the TSQ which completed in error is NOT removed from the pending
+; queue, but us linked to the Done queue (as for DDB #1 above).  No new
+; request is issued until the error has been handled by DNE$MS.
+;
+; Whne done processing is next entered for the driver, this error will be 
+; processed, and the TSQ will either be removed from both queues and answered,
+; or the request may be retried.
+;
+; If an error is unrecoverable, then it will be posted back to the user, and
+; any requests which have not been issued are returned with DEVHNG errors until
+; an ECA special function is received.
+;
+; Good asynchronous use of the driver will result in requests coming in fast 
+; enough at the Service entry point to keep MSQTSQ from becoming empty.  As
+; long as MSQTSQ is non-zero, then new requests will be issued to the unit
+; at interrupt time and Continuation service will not be requested for the 
+; unit.  CON$MS is only called when the pending queue for a TS11 unit
+; becomes non-empty.  It is used to 'start-up' processing which is essentially
+; event driven rather than L3Q driven.
+;
+
+;
+; the life of a request will be:
+;		SER$MS to create and queue the TSQ for service
+;		INT$MS where the last request will be delinked and
+;		       the new request will be issued, and
+;		DNE$MS where special conditions are handled, and the
+;		       WORK block is posted back.
+;
+; This life cycle is even true for MTU requests (unlike other tape drivers).
+;
+; The main exceptional condition to this processing rule happens when
+; an ANSI structured magtape hits the EOF/EOV marker.  At this point,
+; the driver must call MTU so that MTU can determine what the actual request
+; was.  In the process, MTU must issue tape motion commands.  These commands
+; are allowed to jump queue and are responded to before any other pending
+; requests are handled.  This state is called Error Check State.  Read the
+; code for more details on this.
+;
+; This is the basic idea.  Whether the current implementation actually 
+; looks or works anything like this is not guaranteed.
+;
+; Enjoy.
+;
+;-
+
+.SBTTL	Overview of Done Processing 
+
+;+
+; DONE PROCESSING
+;
+; DNE$MS is responsible for resolving errors on requests (including retries),
+; posting completions, and for handling tape .SPECs which don't require any
+; actual tape access.
+;
+; Some things to keep in mind while isolating problems with this code:
+;
+;	1) Most 'routines' in here are isolated sections of code, not
+;	   subroutines in the classic sense.  Normally, the stack is 
+;	   empty, but .SPEC functions contain one item.  All routing
+;	   is done through branching and jumping.
+;
+;	   The flow is generally expected to be like this:
+;		a) A DDB is picked off of MSDONQ
+;		b) if MSDONQ is not empty, queue DNE$MS for level 3 again
+;		c) A TSQ is picked off of MSDTSQ(R4)
+;		d) if no TSQs remain, exit from DNE$MS
+;		e) dispatch to handling routine through ERJTBL 
+;		   If the request is determined to be in error, then step f.
+;		   Else, request successful, go to HOKAY, (step g).
+;		f) errored request, jump into ERROUT.  ERROUT determines
+;	    	   whether ECA is required, and dumps the pending queue
+;		   if it should (using DMPQUE).  It then jumps into
+;		   MSAEND (step h) to perform posting.
+;		g) HOKAY sets up the returned parameters in the TSQ, and
+;		   jumps into MSAEND (next step).
+;		h) MSAEND does posting to MTU or user (synch or asynch).
+;		   if User posting, then MSAEND 'returns' to DNE$MS at step c.
+;		   if MTU posting, then MSAEND doesn't return to DNE service,
+;		   but queues level 3 DNE service if any requests are still
+;		   pending posting.
+;
+;	   Step e is the biggie.  Dispatch is made there to the seven 
+;	   termination class routines, as well as time out processing, retry
+;	   processing, and .SPECs which didn't require tape access.
+;
+
+;
+;	2) Rewinds are handled in a psuedo-asynchronous manner.  This means
+;	   that a rewind request is posted as successful as soon as it is
+;	   issued, and care has to be taken to ensure that no other requests
+;	   are attempted while the actual request completes. This is
+;	   completely different from the way other requests are handled, 
+;	   and between MTU and User originated rewinds, causes a lot of
+;	   trouble.  All rewind requests have a TSQ associated with them
+;	   until the rewind completes.  The typical rewind request gets 
+;	   into done processing twice: once to post success, and again,
+;	   to interrogate the DDB and TSQ on the actual status at rewind
+;	   completion.  DNE$MS must successfully handle TSQs for the following
+;	   rewind situations:
+;		a) Rewind outstanding, posting user request.
+;		b) Rewind complete, posting already completed for MTU or USER.
+;		   consideration must be made for both success and error.
+;		c) MTU rewind not even issued, receiving error.
+;		d) USER rewind not even issued, receiving error.
+;-
+
+.SBTTL	Overview of Rewind Processing 
+
+;+
+; MSDVR REWIND PROCESSING
+;
+;	Rewind processing is handled in a pseudo-asynchronous manner
+;	by all RSTS tape drivers.  For an Asynchronous tape driver it can
+;	be especially confusing.
+;
+;	In general, rewind requests are posted as successfully completed
+;	as soon as the request is actually issued.  If the rewind fails
+;	for some reason, then the error is saved in MSERR in the DDB, and 
+;	issued as an error on the next request to come into the driver.
+;
+;	In the asynchronous driver, this is handled by posting the user's
+;	XRB while retaining our TSQ.  The user receives success, and the 
+;	TSQ retains sequentiality within the driver, even on retries.
+;	When the rewind completes, the TSQ is thrown away at the very 
+;	end of done processing.  This is required to allow the driver to
+;	retain control of its queue structures and update status 
+;	appropriately.  MTU is different; read on.
+;
+;	Because TS11 protocol responds to a Rewind/offline request as
+;	successfully complete as soon as it is issued, but won't allow
+;	new requests into the unit for up to around three minutes,
+;	the Rewind/offline request is handled in two parts inside the
+;	driver:  an easily controlled rewind request, followed by the
+;	unpredictable rewind/unload.  Since the unit will be at BOT
+;	before the request is issued, it will only be in the unpredictable,
+;	Ready, but not really ready state for a few seconds, and the driver
+;	will be able to recover from this okay.
+;
+;	The only time that the user or MTU will see an error on a rewind
+;	request is when the rewind fails without ever being issued to
+;	the tape unit.  This can happen if a Write Characteristics request
+;	fails to succeed or complete.  In this case, DEVHNG is posted in the
+;	XRB, or TSQ to be returned.
+;
+;	The MTU interface to an asynchronous tape driver has the TSQ passed
+;	to the driver ready to go in R3 at SER$MS.  For most requests, we
+;	need only queue the TSQ to the pending queue and exit.  Rewinds are
+;	different.  In order to answer MTU rewind requests following
+;	our psuedo-asynchronous convention (clearly desirable), the TSQ
+;	must be returned as soon as the request is issued to the unit.
+;	We also need a TSQ to retain queue positioning until the rewind
+;	actually completes.  To do this, we build an additional TSQ for
+;	the request, and post back the original TSQ to MTU.  So, we have
+;	a TSQ, MTU gets back its TSQ, and everyone is moderately happy.
+;
+;	In principle, it's simple.  Unfortunately is costs quite a bit
+;	of code in the driver for various reasons, and causes unreasonable
+;	amounts of trouble.
+;
+;	This overview, coupled with wrestling with the code, will hopefully
+;	be sufficient to repair any problems encountered.
+;-
+
+;+
+;
+;  Points to ponder:
+;
+;	Whenever possible:
+;	  R3 -> TSQ
+;	  R4 -> DDB
+;
+;-
+
+	DEFORG	MSDVRM
+
+.SBTTL	**ASN$MS - DEVICE ASSIGNMENT SERVICE
+
+;+
+; ASN$MS - DEVICE ASSIGNMENT SERVICE FOR TS11
+;
+;	R0 =  JOB NUMBER OF ASSIGNER TIMES 2
+;	R1 -> DDB
+;
+;	...
+;
+;	RETURN		(WITH ALL REGISTERS PRESERVED)
+;
+;-
+
+	TMPORG	MSDINT,32						;014
+	 .WORD	ASN$MS							;014
+	UNORG								;014
+
+ASN$MS: MOV	#MSAPTR,MTRPTR+MTDDSP(R1); SET THE ROOT POINTER IN DDB
+	MOVB	MAGLBL,MTLBLI+MTDDSP(R1) ; SET THE LABELING DEFAULT
+	CLRB	MSERR+MTDDSP(R1)	; throw out any pending errors	;008
+	BIC	#<MS$FTL!MS$ECA!MS$LCK>,MSAINF+MTDDSP(R1) ; unlock Q
+					;but leave anything to do w/rewinds
+					;(Since we threw away any errors)
+					;Clear ECA and FTL states	;030
+	CLRB	MSRWP+MTDDSP(R1)	; Clear infinite I/O count	;011
+	CLRB	MSHITS+MTDDSP(R1)	; and R/W hits for TS05		;011
+	BIC	#CH.HSP,MSCHAR+10+MTDDSP(R1) ; start up at low speed 	;010
+	CLRB	MTFLAG+MTDDSP(R1)	; CLEAR DENSITY/PARITY => 1600 BPI
+	MOV	R0,-(SP)		; SAVE R0
+	MOV	R1,R0			; COPY A REGISTER
+	ADD	#MSCMD+MTDDSP,R0	; POINT R0 AT COMMAND BUFFER
+	ADD	#3,R0			; ADD IN A HANDY CONSTANT
+	BIC	#3,R0			; CLEAR NON-MOD 4 ADDRESS BITS
+	MOV	R0,MSPTR+MTDDSP(R1)	; SAVE POINTER TO COMMAND BUFFER
+	MOV	R1,R0			; COPY THE DDB POINTER AGAIN
+	ADD	#MSCHAR+MTDDSP,R0	; POINT TO THE CHARACTERISTICS BUFFER
+	MOV	R1,(R0)			; POINT TO BEGINNING OF DDB
+	ADD	#MSHDR+MTDDSP,(R0)+	; SET LOCATION OF END PACKET BUFFER
+	CLR	(R0)+			; CLEAR THE MSB OF THE ADDRESS
+	MOV	#16,(R0)+		; SET THE LENGTH (7 WORDS)
+	CLR	(R0)+			;  AND CLEAR THE CHARACTERISTICS WORD
+	MOV	(SP)+,R0		; RESTORE R0
+	.BR	DEA$MS			;  AND FALL THROUGH TO RETURN
+
+GLOBAL	<MAGLBL,MSAPTR>							;016
+
+.SBTTL	**DEA$MS - DEVICE DEASSIGNMENT SERVICE
+
+;+
+; DEA$MS - DEVICE DEASSIGNMENT SERVICE FOR TS11
+;
+;	R1 -> DDB
+;
+;	...
+;
+;	RETURN		(WITH ALL REGISTERS PRESERVED)
+;
+;-
+
+	TMPORG	MSDINT,36						;014
+	 .WORD	DEA$MS							;014
+	UNORG								;014
+
+DEA$MS: RETURN			;EXIT
+
+.SBTTL	**TMO$MS - TIME OUT ENTRY POINT
+
+;+
+; TMO$MS - TIME OUT ENTRY POINT FOR TS DRIVES
+;
+;	R0 =  UNIT NUMBER * 2
+;	R1 -> DDB
+;	R3 -> CSR
+;
+;	PRIORITY:  PR5
+;
+;	...
+;
+;	RETURN
+;
+;-
+
+	TMPORG	MSDINT,22						;014
+	 .WORD	TMO$MS							;014
+	UNORG
+
+TMO$MS: ADD	#MTDDSP,R1	;;POINT PAST COMMON DDB STUFF		;005
+	MOV	R1,R4		;;COPY THE DDB POINTER
+	ADD	#MSAINF,R1	;;ADD IN OFFSET TO STATUS WORD		;005
+	TSTB	(R1)		;;ARE WE WAITING FOR SOMETHING?		;005
+.ASSUME	MS$OUT	EQ	200
+	BPL	30$		;;NOPE, IGNORE THE TIMEOUT		;005
+	MOV	MSQTSQ(R4),R3	;;R3 -> TSQ for current request		;028
+	BEQ	50$		;;Oops, no TSQ - go die!!		;033
+	TST	(R1)		;;IS IT A LONG OPERATION?		;005
+.ASSUME	MS$LOP	EQ	100000
+	BPL	20$		;; no, so its a real timeout
+	TSTB	@CSR.MS(R0)	;; long op, so check SSR (best available)
+.ASSUME	SR.SSR	EQ	200
+	BPL	10$		;; It's not ready			;028
+	BIT	#MS$TM1,(R1) 	;; did this happen a second ago?
+	BNE	20$		;; yes, so unit didn't interrupt, its broke
+	BIS	#MS$TM1,(R1) 	;; first time, give it a second to interrupt
+	BR	40$		;; and wait to see what happens
+
+10$:	DEC	TSQLOP(R3)	;; Count the seconds away		;028
+	BNE	40$		;; It's still got time, wait for it	;028
+20$:	BIS	#<MS$TMO!MS$LCK>,(R1)	;;LOCK THE DRIVE AND SET TIMEOUT;005
+	BIC	#MS$OUT,(R1)	;;SET CONTROLLER NOT BUSY		;005
+	MOV	@CSR.MS(R0),TSSR(R4)	;;SAVE THE TSSR IN THE DDB	;028
+	BICB	#TS$OUT,TSQSTS(R3) ;; mark TSQ no longer outstanding	;008
+	BISB	#TS$ERR,TSQSTS(R3) ;;SIGNAL AN ERROR IN THE TSQ		;005
+	MOVB	#HNGDEV,TSQCEV(R3) ;;Put in a hard error code.		;032
+	CALL	QDNREW		;;AND CALL END PROCESSING		;005
+30$:	CLR	TIM.MS(R0)	;;CLEAR ANY OUTSTANDING TIMEOUTS	;005
+40$:	RETURN			;; AND RETURN				;005
+	
+50$:	CRASH			;;We got a timeout with no TSQ.		;033
+
+GLOBAL	<TIM.MS>
+
+.SBTTL	**ERL$MS - ERROR LOGGING ENTRY POINT
+
+;+
+; ERL$MS - ERROR LOGGING ENTRY POINT FOR TS DRIVES
+;
+;	REGISTERS:  SAME AS AT TIME OF LOG$MS CALL
+;	PRIORITY:   PR7
+;
+;	...
+;
+;	RETURN:
+;
+;	R5 -> CONTROL TABLE FOR ERROR LOGGER
+;
+;-
+
+	TMPORG	MSDINT,12						;014
+	 .WORD	ERL$MS							;014
+	UNORG
+
+ERL$MS: MOV	R4,R1		;;;COPY DDB POINTER FOR ERLDVR
+	SUB	#MTDDSP,R1	;;;RESET THE POINTER
+	CLR	R3		;;;DON'T BOTHER THE TS CONTROLLER
+	CALLX	ERLDVR,R5	;;;PASS THE INFORMATION REQUESTED
+	  .BYTE	ERC$MS		;;;ERROR CODE
+	  .BYTE	DDS.MS		;;;SIZE OF THE DDB
+	  .BYTE	0,0		;;;END OF LIST
+	BIT	#MS$TMO,MSAINF(R4)	;;;WAS THERE A TIMEOUT?
+	BEQ	10$		;;;NOPE
+	COMB	(R0)		;;;YES, SET THE TIMEOUT FLAG
+10$:	MOV	MTACB(R4),(R1)	;;;FILL IN THE DDB EXTENSION (ACB)
+	BEQ	20$		;;;SKIP IF NO ACB
+	MOV	#2*400+16.,-(R1);;;FILL IN 16 WORDS OF FIELD 2
+20$:	MOV	R4,(R2)		;;;GET POINTER TO THE DDB
+	ADD	#MSHDR,(R2)+	;;;ADD IN THE OFFSET TO THE MESSAGE PACKET;005
+	MOV	#4*400+9.,-4(R2);;;FILL IN 9. WORDS OF FIELD 4		;018
+	MOV	MSQTSQ(R4),2(R2);;;FILL IN THE TSQ POINTER		;005
+	BEQ	30$		;;;NO TSQ FOR THIS REQUEST		;005
+	MOV	#6*400+<TSQSIZ/2>,(R2) ;;;FILL IN TSQ SIZE OF FIELD 6	;005
+	MOV	#-1,4(R2)	;;;TERMINATE TABLE			;005
+30$:	RETURN			;;; AND RETURN TO CALLER
+
+GLOBAL	<DDS.MS,CSR.MS>
+
+.SBTTL	**SPC$MS -  special function service
+
+;+
+; SPC$MS - SPECIAL FUNCTION SERVICE FOR TS11
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB/FCB
+;	R2 =  SPECIAL FUNCTION CODE
+;	R3 -> XRB
+;	R4 =  CALLING JOB NUMBER TIMES 2
+;	R5 -> (MAPPED) XRB
+;
+;	...
+;
+;	JMP	RTI3
+;
+;	-OR-
+;
+;	ERROR	CODE
+;-
+
+.ENABL	LSB
+
+	TMPORG	MSDINT,26						;014
+	 .WORD	SPC$MS							;014
+	UNORG								;014
+
+SPC$MS: CMP	R2,#<GBF.MT-1>-2; IS THE SPECIAL FUNCTION OUT OF RANGE	;007
+.ASSUME	<XDN.MT+1> EQ GBF.MT						;007
+	BLOS	10$		; NOPE, GO PROCESS IT
+	ERROR	NOTMTA		; ILLEGAL MAGTAPE FUNCTION
+
+10$:	BIS	#JFPOST,@JOBF	; MAKE SURE USER GETS INFO POSTED BACK
+	CLR	JBSTAT(R4)	; PUT THE JOB INTO AN I/O STALL
+	MOV	#JS.MS,JBWAIT(R4); FOR TS11 COMPLETION
+	ADD	#MTDDSP,R1	; offset to DDB link word
+	CALLX	BLDTSQ		; get R3 -> TSQ small buffer		;023	
+	BCS	20$		; no smalls, try again (no asynch .SPECs) 
+	MOV	XRBC(R3),TSQCNT(R4) ; SET THE FUNCTIONS COUNT		
+	TST	R2		; IS THIS FUNCTION CODE ZERO?
+	BEQ	80$		; YES, LET THROUGH UNSCATHED
+	CMPB	(R2)+,(R2)+	; ELSE ADD 2 TO THE FUNCTION CODE
+	BR	80$		;  AND GO PROCESS IT
+
+20$:	BIS	#JSBUF,JBWAIT(R4) ; set buffer stall			
+	JMPX	IOREDO		; and set it up for a retry		
+
+GLOBAL	<JBSTAT,JBWAIT,JS.MS>
+
+.SBTTL	**SER$MS - user level service
+
+;+
+; SER$MS - USER LEVEL READ/WRITE SERVICE FOR TS11
+;
+; On Normal entry:
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	R1 -> DDB/FCB
+;	R2 =  2 (.READ)
+;	      4 (.WRITE)
+;	R3 -> XRB
+;	R4 =  CALLING JOB NUMBER TIMES 2
+;	R5 -> USER'S BUFFER (THROUGH KISAR6)
+;	IF Z=1 OR C=0 THEN THIS IS THE FIRST CALL
+;	IF Z=0 OR C=1 THEN THIS IS A "REDO" CALL
+;
+; For Calls from MTU:
+;	R2 = -1
+;	R3 -> TSQ from MTU
+;
+; NOTES:
+;
+;	1) ACCESS RIGHTS HAVE BEEN VERIFIED.
+;	2) DIRECTIONAL RIGHTS HAVE BEEN VERIFIED.
+;
+;-
+
+	TMPORG	MSDINT,16						;014
+	 .WORD	SER$MS							;014
+	UNORG
+
+SER$MS:	ADD	#MTQPTR+MTDDSP,R1 ; get to offset 0 in MTDDB		
+	CMP	#-1,R2		; Calling from MTU?			
+	BNE	30$		; No, so set up the request.		
+	TST	R3		; Yes, is this an error check completion? ;013
+	BEQ	23$		; Looks that way, so cope.		;013
+	MOV	SP,TSQASY(R3)	; Flag normal MTU request
+	BITB	#MT.ECK,MTFLAG(R1) ; Are we in error check state?	;006
+	BEQ	25$		; No, so just continue on normal like	;006
+23$:	JMP	JMPQUE		; yes, let the request jump the queue	;006
+
+25$:	MOV	R3,R4		; set TSQ pointer in R4 to merge with code
+	BR	90$		; just MTU, all set up, let's process	
+
+30$:	CALLX	BLDTSQ		; get R3 -> TSQ small buffer		;023	
+	BCS	60$		; no small buffer, we gotta handle this 
+	CLR	XRBLK(R3)	; clear the block numbeR
+	CLRB	XRBLKM(R3)	;  and high byte.
+	MOV	XRLOC(R3),TSQMAL(R4) ; record tHE uSERS virtual bufFER ADDRESS
+	BIT	#1,TSQMAL(R4)	; is the buffer address odd?		
+	BNE	40$		; yes, extremely
+	MOV	XRLEN(R3),TSQCNT(R4) ; set count as buffer length	
+	ASR	R2		; make 2/4 into 1/2
+	MOVB	TSQJOB(R4),R0	; get the job number of the owner	;022
+	MOV	TSQMAL(R4),R5	;set user's virtual buffer address	
+	PUSH	<R3,R2>		; save XRB pointer and command
+	CLR	R3		; no stall bits.  We're in line here
+	CALLX	FNDJOB		;try to find job
+	CRASH			; error in job residency, crash		;027
+				; we should always be resident (we are JOB)
+	MOVB	R2,TSQMAM(R4)	; set the extended memory address	;011
+	MOV	R3,TSQMAL(R4)	;set memory address			;011
+	TSTB	MSRWP(R1)	; any Reads/Writes already outstanding?	;010
+	BEQ	35$		; no, so this is first, leave job locked ;010
+	CALLX	UNLOC0		; yes, so already locked, don't inc lock count
+				; (drop one cause FNDJOB already inc'd it) ;010
+35$:	POP	<R2,R3>		; restore XRB pointer and command	;011
+	INCB	MSRWP(R1)	; and increment the outstanding R/W counter;010
+	BGE	39$		; less than 128 requests outstanding, go ahead;010
+	DECB	MSRWP(R1)	; oh-oh, too many out there, dec the R/W count
+	CALL	130$		; return small buffers			;011
+	ERROR	INUSE		; and return directive error INUSE	;010
+
+39$:	CMP	R2,#.WRITE&377/2; IS THIS A WRITE REQUEST?
+	BNE	70$		; NO, READ.
+	MOV	XRBC(R3),TSQCNT(R4) ; WRITE COUNT IS SUPPLIED BY COUNT	
+	CMP	TSQCNT(R4),#14.	; 14. BYTE IS MINIMUM RECORD SIZE
+	BGE	80$		; EVERYTHING IS OKAY. GO QUEUE IT
+40$:	CALL	130$		; return the small buffers		;011
+	DECB	MSRWP(R1)	; This request is no longer outsanding	;018
+	BNE	45$		; Lock count didn't change		;018
+	CALLX	UNLOC0		; Unlock the job			;018
+45$:	ERROR	BADCNT		; SET THE BUFFER LENGTH ERROR
+
+60$:	BIT	#1,XRBCRA(R3)	; asynchronous request?			
+	BEQ	20$		; No, go into a buffer stall		;022
+	MOV	R3,R4		; get ASYWRK pointer into R4		;009
+	BUFFER	RETSML		; and return it.			;009
+	ERROR	NOBUFS		; asynchronous, so lose it		
+
+70$:	BIT	TSQCNT(R4),#1	; IS READ BUFFER ODD?
+	BNE	40$		; YES, THAT IS AN ERROR
+80$:	MOVB	R2,TSQCMD(R4)	; SET THE COMMAND IN THE TSQ		
+	MOV	#RTI3,-(SP)	; Asynchronous requests exit via RTI3	;029
+90$:	SPLC	5		;; bump priority to 5 for queueing	
+	MOV	R1,R0		;; get a DDB pointer
+	ADD	#MSQTSQ,R0	;; offset to pending Q root		
+	CALLX	QUEUE0,R5	;; and queue up the TSQ on the DDB Q	
+	BCC	100$		;; if not first, then don't Queue CON$MS
+QUECON:	PUSH	<R4>		;; save the TSQ pointer
+	MOV	R1,R4		;; get the DDB thread in R4	
+	CALLX	QUEL3Q		;; and QUEUE IT UP FOR CON$ SERVICE	;002
+	POP	<R4>		;; restore the TSQ pointer
+100$:	SPLC	3		; restore priority to normal
+	BITB	#TS$ECK,TSQSTS(R4) ; Error check completion?
+	BNE	110$		; Yes, so return to MTA			;029
+	TSTB	TSQSTS(R4)	; asynch request?			
+.ASSUME TS$ASY EQ 200
+	BMI	110$		; Yes, so return to RTI3		;029
+	BITB	#MT.OPN,TSQMTO(R4) ; From MTU?				;028
+	BEQ	110$		; Yes, so return to MTA			;029
+	MOV	#DMPJOB,(SP)	; Synchronous request, so dump the job	;029
+110$:	RETURN			; Get out of here appropriately		;029
+
+;Routine to return small buffer(s) on an errored request		;011
+
+130$:	BUFFER	RETSML		; return the little TSQ			;010
+	BIT	#1,XRBCRA(R3)	; asynchronous request?			;010
+	BEQ	140$		; No, so don't return the WORK block	;010
+	MOV	R3,R4		; asynchronous, get ASYWRK in R4	;010
+	BUFFER	RETSML		; return that buffer			;010
+140$:	RETURN								;011
+
+GLOBAL	<RTI3,DMPJOB>							;029
+.DSABL	LSB
+
+.SBTTL	 JMPQUE - Error check queue jumper from MTU
+
+;+
+; Branch here when a request from MTU (the monitor) arrives while 
+; in the special error check state.
+;
+; R2 = -1
+; R3 => TSQ (or zero if completion of error check)
+; R1 => DDB at MTQPTR (offset = 0)
+;
+; Puts the request coming in first in the pending queue, and issues it.
+; The request which required an error check is next in the pending queue.
+;
+; for completion.  We move MTLCEV(R1) into MSERR in the DDB.  This sets up
+; a sequence of events that queues the TSQ in the DNE queue, gets ECA
+; set, posts the error to the user, and dumps any pending requests.
+;
+; We move the TSQ pointer for the request into R4 to merge with SER$MS
+; code to queue the request for processing.
+;
+;	NOTE: THIS ROUTINE IS NOT PREPARED TO HANDLE REWINDS ISSUED
+;	FROM AN ERROR CHECK STATE.  DOING SO IS RATHER DIFFICULT DUE
+;	TO THE PSEUDO-ASYNCHRONICITY OF REWINDS.  IF ERROR CHECK SUPPORT
+;	IS EVER EXPANDED TO REQUIRE REWINDS OR ASYNCHRONOUS REQUESTS, THIS
+;	WILL REQUIRE EXTENSIVE REWORKING.
+;-
+
+JMPQUE:	TST	R3	; we got a TSQ?					;006
+	BEQ	20$	; no TSQ means set up for completion		;006
+	MOV	MSQTSQ(R1),(R3) ; got a TSQ, so put in front of Q 	;006
+	MOV	R3,MSQTSQ(R1)	; and get set to issue it		;006
+	MOV	R3,R4		; Set up TSQ pointer			;006
+10$:	SPLC	5		; boost priority to merge 		;006
+	BR	QUECON		;; and branch back up to issue from SER$ ;006
+
+20$:	MOVB	MTLCEV(R1),MSERR(R1) ; use rewind error handling path to DNE$
+	BICB	#MT.ECK,MTFLAG(R1)   ; clear ECK, ECA will be set before exit
+	MOV	MSQTSQ(R1),R4	; finally posting the actual request
+	BR	10$		; 'Issue the request' (not really)
+
+
+.SBTTL	**UMR$MS - UMRs available entry
+
+;+
+; UMR$MS - ENTERED WHEN A UNIBUS MAPPING REGISTER BECOMES AVAILABLE.
+;
+;	ALL REGISTERS RANDOM
+;	PRIORITY IS PR5
+;
+;	RETURN		(PRIORITY STILL PR5)
+;
+;	all we need to do here is clear the controller waiting bit, and
+;	plunk the whole list onto the continuation queue
+;-
+
+	TMPORG	MSDINT,52						;014
+	 .WORD	UMR$MS							;014
+	UNORG								;014
+
+UMR$MS: TST	MSUMRQ		;;anybody WAITING FOR UMRS?		;016
+	BEQ	30$		;;NO, EXIT QUICKLY
+	PUSH	R4		;; save a work register
+	MOV	MSUMRQ,R4	;; get a DDB pointer			;016
+10$:	BIC	#MS$UMR,MSAINF(R4) ;; clear the waiting for UMRs bit	
+	MOV	(R4),R4		;; and get the next one			
+	BNE	10$		;; if there are any			
+	MOV	MSUMRQ,R4	;; get the head of the list (again)	;016
+	CALLX	QUEUER,R5,MSAQUE ;; queue UMR list onto the continuation Q ;016
+	CLR	MSUMRQ		;; clear out the UMR wait,		;016
+	POP	R4		;; restore R4				
+	L3QSET	QMSCON		;; Queue level three continuation	
+30$:	RETURN			;; AND RETURN TO CALLER
+
+GLOBAL	<MSAQUE,MSUMRQ>							;016
+
+
+.SBTTL	**CON$MS - Continuation Service entry point
+
+;+
+; CON$MS - ENTERED WHEN CONTINUATION SERVICE HAS BEEN REQUESTED
+;
+;	Continuation service will only be requested when a controller
+;	has no outstanding requests to cause interrupts.  It will be
+;	queued by SER$MS, DNE$MS, or UMR$MS. Requests can also be 
+;	issued (using ISSREQ) by INT$MS to minimize the time between
+;	requests being issued.  A key point is that when CON$MS is called,
+;	the unit in question is NEVER active.  This allows us to run ISSREQ
+;	at PR3 (jumping to PR5) without fear of munging the TSQ queues.
+;
+;	ALL REGISTERS RANDOM
+;	PRIORITY IS PR3
+;
+;	EXIT VIA RTI3
+;	NO REGISTERS NEED BE PRESERVED
+;-
+
+.ENABL	LSB
+
+	TMPORG	MSDINT,42						;014
+	 .WORD	CON$MS							;014
+	UNORG
+
+CON$MS: MOV	#RTI3,-(SP)	;RETURN TO RTI3
+	MOV	MSAQUE,R4	;GET THE DDB POINTER			;016
+	BNE	20$		;GOT SOMETHING				;001
+10$:	RETURN			;NOTHING, JUST RETURN			;001
+
+20$:	MOV	(R4),MSAQUE	; so, pop the DDB off the queue		;016
+	;TST	MSAQUE		; any more for CON$ processing?		
+	BEQ	25$		; nope.					
+	L3QSET	QMSCON		; yep, so set the CON$ L3Q bit		
+25$:	BIT	#<MS$ECA!MS$FTL>,MSAINF(R4) ; Error state? Drive ill?	;030
+	BEQ	ISSREQ		; no, so issue the next request		;018
+	ADD	#MSDNE,R4	; offset to done queue thread
+	MOV	#MSDONQ,R0	; and look through done queue		;016
+	SPLC	5		;; jump to PR5
+	CALL	QUEDDB		;; in the queue already - queue if not
+	BCS	40$		;; already queued, continue (already set)
+	L3QSET	QMSDNE		;; yes, make sure DNE$MS is setup
+40$:	SPLC	3		; and back to PR3
+	RETURN			; and return	
+
+GLOBAL	<MSAQUE,MSDONQ>							;016
+
+
+.SBTTL	ISSREQ - (pronounced Ish-wreck) Issue a request to a unit 
+
+;+
+;
+;  On entrance:
+;	Remember, this routine can be called at PR3, or at PR5, no SPLC 3ing.
+;	No requests currently outstanding to the Controller in question
+;	R4 -> DDB @ MTQPTR
+;	MSQTSQ(R4) -> pending TSQ.  Always.
+;	remember no requirement that a WORK block be associated (TSQASY)
+;
+;  CALL	ISSREQ
+;	
+;  On Exit:
+;	ISSREQ always succeeds
+;	First request in MSQTSQ is issued if possible
+;	  if it isn't issued, then the DDB is queued
+;	  for a retry or is added to MSUMRQ awaiting UMRs.
+;	  (failure to get UMRs will blow streaming)
+;
+;-
+
+ISSREQ:	MOV	MSQTSQ(R4),R3	; get a pointer to the TSQ to process	
+	TST	MTIDX(R4)	;DO DEFAULTS NEED SETTING?
+.ASSUME	DDSTAT	EQ	100000
+	BPL	50$		;NOPE, JUST GO DISPATCH REQUEST
+	BIC	#DDSTAT,MTIDX(R4); SAY DEFAULTS NO LONGER NEED SETTING
+	CLRB	MTFLAG(R4)	; CLEAR THE DDFLAG
+	MOVB	MTDUNI(R4),MTOFLG(R4) ; SET THE open flag in the DDB	
+	MOVB	MTOFLG(R4),TSQMTO(R3) ; get a copy in the TSQ 		
+50$:	CLR	TSQRET(R3)	; CLEAR THE RETURNED VALUE
+	CLRB	TSQCEV(R3)	; CLEAR THE RETURNED ERROR CODE
+	BIC	#^C<MS$RRC!MS$RP1!MS$WCH>,MSAINF(R4) ; clear all flags
+				; except maybe rewoff part 1, write char ;015
+				; or rewind error check 		;030
+	MOVB	MSERR(R4),TSQCEV(R3) ; get any error pending from rewind
+	BEQ	55$		; No error, great.			;018
+	BITB	#TS$ECK,TSQSTS(R3)	; Answer from MTU?		;027
+	BNE	505$			; Yes, don't do anything else	;026
+	BIT	#MS$RRC,MSAINF(R4)	; Error, have we looked into it	;018
+	BEQ	510$			; No, so go do so		;018
+	BIC	#MS$RRC,MSAINF(R4)	; and don't come back here again ;018
+	MOV	#X0.ONL!X0.BOT,-(SP)	; We only care about ONL & BOT	;018
+	BIC	XSTAT0(R4),(SP)+	; Compute the verdict		;018
+	BEQ	540$			; Both ONL & BOT, user recovered ;018
+505$:	CLRB	MSERR(R4)		; don't issue this error again	;027
+	BISB	#TS$ERR,TSQSTS(R3)	; Set an error			;026
+	BIS	#MS$LCK,MSAINF(R4)	; in the DDB, too.
+	CALLR	QDNREW			; queue it for DNE$ set up as an error.
+
+510$:	BIS	#MS$RRC,MSAINF(R4)	; Set rewind error check flag	;018
+	MOV	#OP.STS,R2		; Issue a Get Unit Status	;018
+	BR	70$			; Via the WCH mechanism		;018
+
+540$:	CLRB	TSQCEV(R3)	; No real error here, continue with req	;018
+	CLRB	MSERR(R4)	; don't issue this error again		;027
+55$:	MOVB	MTDUNI(R4),R0	; R0=UNIT NUMBER		;001	;018
+	ASL	R0		; GENERATE INDEX INTO DEV TABLE		;001
+	BIT	#MS$WCH,MSAINF(R4)	; Time for a speed change?	;015
+	BNE	60$		; Yes, so do it				;015
+	BIT	#SR.NBA,@CSR.MS(R0) ; NEED TO SET CHARACTERISTICS?	;001
+	BEQ	80$		; NO					;001
+	BIS	#MS$WCH,MSAINF(R4) ; Say Write Char. outstanding	;015
+	BIC	#CH.HSP,MSCHAR+10(R4) ; Make sure we're at low speed	;018
+60$:	MOV	#OP.CHR,R2	; Specify the set char command		;018
+70$:	MOV	MSPTR(R4),R5	; GET A POINTER TO THE COMMAND BUFFER	;015
+	MOV	R2,(R5)+	; Put command (WCH or STS) in buffer	;018
+	MOV	R4,(R5)		; SET THE BASE OF THE DDB		;018
+	ADD	#MSCHAR,(R5)+	; ADD IN THE OFFSET TO THE CHARACTERISTICS
+	CLR	(R5)+		; WITH A ZERO MSB
+	MOV	#12,(R5)+	; SET BUFFER EXTENT (+2 for TSV05 ext chr)
+	MOV	#4,R5		; TIME OUT IN 4 SECONDS
+	CALLR	STRTIW		; START UP THE I/O			;014
+
+80$:	MOV	MSPTR(R4),R5	; GET A POINTER TO THE COMMAND PACKET	;015
+	MOVB	TSQCMD(R3),R1	; GET THE COMMAND TO PROCESS		
+90$:	MOV	R1,R2		; Copy command into R2			;018
+	ASL	R1		; R1 = Command * 2			;018
+	CMP	R2,#UNT.MT	; Will the function require the controller ;018
+	BHI	100$		; No, so leave status and controller alone ;018
+	BEQ	95$		; Yes, but it doesn't change MSUNST	;030
+	CMP	R2,#DEN.MT	; Maybe, will it really require the ctrl? ;024
+	BEQ	100$		; Nope.					;018
+	BIC	#7,MSUNST(R4)	; CLEAR THE LAST COMMAND ISSUED IN STATUS
+	BIS	R2,MSUNST(R4)	; SET THIS COMMAND AS LAST
+95$:	MOV	120$(R1),(R5)+	; SET THE OPCODE IN THE COMMAND PACKET	;030
+100$:	JMP	@110$(R1)	;   AND DISPATCH TO PROPER ROUTINE
+
+GLOBAL	<RTI3,JOBTBL>
+
+.SBTTL	  --DISPATCH TABLE FOR COMMAND PROCESSORS
+
+110$:	.WORD	MTARWU		; 0. IS REWIND THEN OFFLINE
+	.WORD	MTARD		; 1. IS READ
+	.WORD	MTAWT		; 2. IS WRITE
+	.WORD	MTATMK		; 3. IS WRITE TAPE MARK
+	.WORD	MTARWD		; 4. IS REWIND
+	.WORD	MTASKP		; 5. IS SKIP FORWARD (SPACE)
+	.WORD	MTABSP		; 6. IS SKIP BACKWARD (BACKSPACE)
+	.WORD	MTDNE		; 7. IS SET DENSITY/PARITY
+	.WORD	MTAST		; 8. IS RETURN UNIT STATUS
+	.WORD	MTDNE		; 9. IS RETURN FILE CHARACTERISTICS
+	.WORD	MTDNE		;10. IS REWIND ON CLOSE
+	.WORD	MTDNE		;11. is EOV special function
+	.WORD	MTDNE		;12. is ECA special function (unsolicited)
+	.WORD	MTDNE		;13. is Extended Set Density function	;020
+	.WORD	MTDNE		;14. IS GET AN ANSI LABEL BUFFER
+.ASSUME	GBF.MT	EQ 14.
+
+;+
+; NOTE THAT ON DISPATCH TO REQUEST PROCESSING ROUTINES:
+;
+;	R1 =  COMMAND NUMBER TIMES 2
+;	R3 -> TSQ
+;	R4 -> DDB @ MTQPTR
+;	R5 -> COMMAND PACKET + 2
+;-
+
+.SBTTL	  --OPCODE TABLE FOR TAPE MOVEMENT COMMANDS
+
+120$:	.WORD	OP.RWD		; 0. IS OPCODE FOR REWIND AND OFFLINE
+				; but we start with a rewind (hack-hack) 
+	.WORD	OP.RD		; 1. IS OPCODE FOR READ
+	.WORD	OP.WT		; 2. IS OPCODE FOR WRITE
+	.WORD	OP.TMK		; 3. IS OPCODE FOR WRITE TAPE MARK
+	.WORD	OP.RWD		; 4. IS OPCODE FOR REWIND
+	.WORD	OP.SKP		; 5. IS OPCODE FOR SKIP FORWARD (SPACE)
+	.WORD	OP.BSP		; 6. IS OPCODE FOR SKIP BACKWARD (BACKSPACE)
+	.WORD	0		; 7. Is (SET DEN/PARITY) isn't a motion cmd ;018
+	.WORD	OP.STS		; 8. Is opcode for Get Unit Status	;018
+
+.DSABL	LSB
+
+.SBTTL	  --PROCESS WRITE REQUEST
+
+.ENABL	LSB
+
+MTAWT:	.BR	MTARD		; MERGE INTO READ CODE
+
+.SBTTL	  --PROCESS READ REQUEST
+
+MTARD:	BITB	#MT.OPN,TSQMTO(R3) ; IS IT FIP I/O?			
+	BEQ	70$		; Yes					;027
+	TSTB	TSQMTO(R3)	; No.  File structured user request?	;027
+.ASSUME	MT.FS	EQ 177600
+	BPL	20$		; NO
+	CMP	R1,#2		; YES, IS THE FUNCTION A READ?
+	BNE	20$		; NO, NOT A READ
+	BIT	#MTEOF,MTLCST(R4) ; FS READ, DID WE SEE EOF ON LAST?
+	BNE	40$		; Yes, give him last error (EOF/EOV)	;026
+20$:	MOVB	TSQMAM(R3),R1	; set the extended memory address
+	MOV	TSQMAL(R3),R2	; and the low order memory address
+	MOV	TSQCNT(R3),R0	;GET THE BYTE COUNT FOR THE XFER	
+	NEG	R0		; MAKE THE BYTE COUNT NEGATIVE
+	ROR	R0		; MAKE BYTE COUNT INTO WORD COUNT
+	TSTB	TSQMTO(R3)	; Is this a file-structured user I/O?	;031
+.ASSUME	MT.FS	EQ 177600						;031
+	BPL	25$		; No, so leave block count alone.	;031
+	CMPB	#MTRTCT,TSQTRY(R3) ; Are we doing a retry??		;033
+	BNE	25$		; Yes, so don't bump block count.	;033
+	INC	MTBCNT(R4)	; Increment block count for ANSI use.	;031
+25$:	MOV	@#PS,-(SP)	; save the current priority		;031
+	PUSH	<R4>		; save R4 (here to save instructions)
+	MOV	R3,R4		; use TSQ address to be unique
+	SPLC	5		;;RAISE PRIORITY
+	CALL	@GETUMR		;;GET UMRs
+	POP	R4		;; restore R4
+	BCC	55$		;; success, go ahead 
+	BIS	#MS$UMR,MSAINF(R4) ;; failed, mark it as  waiting for UMRs
+	CALLX	QUEUER,R5,MSUMRQ ;; STALL THIS REQUEST IN THE UMR QUE.	;016
+	MOV	(SP)+,@#PS	; and restore priority
+30$:	RETURN			;  AND RETURN
+
+40$:	MOVB	MTLCEV(R4),TSQCEV(R3)	; Set EOF/EOV error		;026
+50$:	JMP	QDNALL		; and queue it up for done processing
+
+55$:	MOV	(SP)+,@#PS	; restore old priority (from GETUMR call)
+60$:	MOV	MSPTR(R4),R5	; GET A POINTER TO THE COMMAND BUFFER AGAIN
+	TST	(R5)+		; BUMP PAST THE OPERATION
+	MOV	R2,(R5)+	; SET THE LSB OF THE ADDRESS
+	MOV	R1,(R5)+	; SET THE MSB OF THE ADDRESS
+	MOV	TSQCNT(R3),(R5)	; SET THE BYTE COUNT FOR THE XFER	
+	MOV	#25.,R5		; Timeout in 25. seconds...		;033
+	CALLR	STRTIO		; START UP THE OPERATION
+
+70$:	CLR	R1		; CLEAR THE MSB TO SHIP OUT		;027
+	MOV	TSQMAL(R3),R2	; GET THE LSB OF THE BUFFER		
+	BNE	60$		; IF THERE IS AN LSB GO TO IT
+	.BR	MTDNE		; No buffer, get it in DNE processing	;027
+
+GLOBAL	<GETUMR,FNDJOB,UNLOCK,QUEUER,MSUMRQ>				;016
+
+.DSABL	LSB
+
+.SBTTL	  --Process all non-tape motion operations
+
+.ENABL	LSB
+
+MTDNE:	BISB	#TS$NOP,TSQSTS(R3) ; No tape operation required
+	BIS	#MS$LCK,MSAINF(R4) ; and lock up the pending queue
+	CALLR	QDNREW		; queue TSQ for DNE$ (leave on pending)
+
+.SBTTL	  --PROCESS GET UNIT STATUS
+
+MTAST:	MOV	#2,R5		; TIMEOUT IN 2 SECONDS
+	BR	15$		;   AND START UNIT STATUS REQUEST
+
+.SBTTL	  --PROCESS BACKSPACE RECORD REQUEST
+
+MTABSP:	.BR	MTASKP		; COMMAND SET, JUST LOAD COUNT AND START
+
+.SBTTL	  --PROCESS SKIP RECORD REQUEST
+
+MTASKP:	MOV	TSQCNT(R3),(R5)	; SET THE COUNT FOR THE COMMAND		
+	BNE	10$		; IF A COUNT WAS SPECIFIED USE IT
+	DEC	(R5)		; If not, perform an 'infinite' skip	;030
+	DEC	TSQCNT(R3)	; Fudge parameter to ensure right count	;030
+10$:	MOV	#-1,R5		; SAY TIMEOUT EVERY SECOND UNTIL DONE
+	BIS	#MS$LOP,MSAINF(R4) ; AND NOTE THAT WE WILL BE DOING JUST THAT
+	MOV	#1500.,TSQLOP(R3) ;Wait up to (Ugh!) 25 minutes for it	;029
+	BR	15$		; START UP THE I/O OPERATION
+
+.SBTTL	  --PROCESS WRITE TAPE MARK REQUEST
+
+MTATMK:	MOV	#25.,R5		; Timeout in 25. seconds.		;033
+15$:	CALLR	STRTIO		; START THE I/O OPERATION
+
+.SBTTL	  --PROCESS REWIND AND OFFLINE TAPE REQUEST
+
+;+
+; The Rewind offline processing takes two instructions to complete
+; cleanly.  First a rewind which interrupts on completion (at BOT),
+; and then the Rewind-offline which completes instantly (whether it is
+; really done or not).  An Unload from BOT is short enough to keep 
+; new commands from failing to issue due to RMRs (old problem), whereas
+; doing it with miles of tape might take over two minutes.
+;-
+
+20$:	BIC	#MS$RP1,MSAINF(R4)	; clear the phase 1 bit		
+	BIS	#MS$RWD!MS$RP2,MSAINF(R4) ; set the phase 2 bit (among others)
+	MOV	#OP.RWU,@MSPTR(R4)	; really do a rewoff	now		
+	MOV	#10.,R5	   		; with a 10 second timeout		
+	BR	30$			; merge with common code (MTU already setup)
+
+MTARWU:	BIT	#MS$RP1,MSAINF(R4)	; have we been here before?		
+	BNE	20$			; yes, then we're at BOT, rewoff	
+	BIS	#MS$RP1,MSAINF(R4)	; otherwise, set part 1		;018
+	.BR	MTARWD			; and do a normal rewind first	;018
+
+.SBTTL	  --PROCESS REWIND TAPE REQUEST
+
+;+
+; We issue the response to a Rewind request when we issue the rewind,
+; but retain the TSQ so we know it is outstanding.  If it fails, then
+; the next request to the Tape will fail, reflecting that condition.
+; Rewoff comes thru here twice: once for rewind, once for unload.
+; That's why we have to test to see if we have already answered the request.
+;-
+
+MTARWD:	BIS	#<MS$RWD!MS$LOP>,MSAINF(R4) ; Say rewind in prog, long op ;018
+	MOV	#-1.,R5		; Start once a second timeouts		;018
+	MOV	#<10.*60.>,TSQLOP(R3)
+				; And, wait for up to 10 minutes.	;032
+	BITB	#MT.OPN,TSQMTO(R3) ; is this from MTU???
+	BEQ	50$		; yes, so we need 1 to return, 1 to keep
+30$:	CALL	STRTIO		; START UP THE I/O OPERATION
+	TST	TSQASY(R3)	; have we already answered this one?	
+	BEQ	35$		; yes, so just return
+	BMON	QDNREW		; If we're in the monitor, asynch games	;018
+35$:	RETURN			; Else we're in INIT - just go out thru RTI3	
+
+;+
+; Get a new TSQ for MTU rewind and rewoff processing.
+;
+; we need the spare to do pseudo-asynchronous rewinds to MTU.
+;
+; We do it here so we can simply exit and queue CON$ if it fails....
+; Okay, its a little ugly.
+;
+; It can be done at PR3 or PR5, so it makes exitting more exciting.
+;-
+
+50$:	BITB	#TS$RWD,TSQSTS(R3)	;Been throught here before?	;018
+	BEQ	30$			;Yes, already got a spare	;018
+	PUSH	R4		; save the DDB pointer as work register
+	BUFFER	GETSML,,15	; get a small buffer			
+	BVC	70$		; we got one, continue
+	POP	R4		; we didn't get one, bad news.
+	MOV	#MSAQUE,R0	; it will go back on the CON$ queue	;016
+	MOV	@#PS,-(SP)	; but at level 5
+	SPLC	5		;; no matter what it's at now.
+	CALL	QUEDDB		;; so put it on if it needs it
+	BCS	60$		;; and don't queue it if it doesn't need it
+	L3QSET	QMSCON,WAIT2T  ;; set up for continuation in 2 ticks.
+60$:	MOV	(SP)+,@#PS	; restore the priority
+	RETURN			; and leave the right way (INTSAV or RTI3)
+
+70$:	BICB	#TS$RWD,TSQSTS(R3)	;Clear first time through flag	;018
+80$:	MOV	(R3)+,(R4)+	; get a copy of the whole damn TSQ	
+	BIT	#40-1,R3	; end yet?
+	BNE	80$		; not quite, keep going
+	SUB	#TSQSIZ,R3	; and point back to the beginning
+	SUB	#TSQSIZ,R4	; of both TSQ's
+	MOV	R3,TSQASY(R4)	; and get a pointer to it in the new one
+	CLR	TSQASY(R3)	; clear the primary, this one we'll give back
+	MOV	R4,R3		; forget about the primary for now.
+	POP	R4		; from way back when
+	MOV	R3,MSQTSQ(R4)	; and since rewind is synch, we can do this
+	BR	30$		; start up the I/O and queue for done	;018
+
+.DSABL	LSB
+
+GLOBAL	<WAIT2T,MSAQUE>
+
+.SBTTL	*** TSQ/DDB queueing ***
+.SBTTL	QDNALL/QDNREW - get a TSQ on the Done queue
+
+;+
+;
+; QDNALL - for functions requiring no controller activity
+; QDNREW - for rewind/rewind-offline and for error done
+;	queueing.  This doesn't remove the request from
+;	the pending queue.
+;
+; R4 -> DDB at offset 0
+; R3 -> TSQ for function which is complete (or faking it)
+;
+; CALL QDNALL (or QDNREW)
+;
+; Registers not modified.
+; TSQ added to MSDTSQ for done processing
+; DDB added to MSDONQ (if not already there) for done processing
+; Done processing queued at level three
+;
+; QDNALL removes TSQ from pending list.  QDNREW doesn't
+; This routine protects the sequentiality of requests being returned.
+;-
+
+QDNALL:	MOV	(R3),MSQTSQ(R4)	; Dequeue the request			
+QDNREW:	PUSH	<R0,R4>		; save a couple registers...		
+	ADD	#MSDNE,R4	; offset to MSDONQ thread word		;016
+	MOV	#MSDONQ,R0	; get the done queue root		;016
+	MOV	@#PS,-(SP)	; save the current priority		
+	SPLC	5		;; make sure we're at PR5		
+	BITB	#TS$DNE,TSQSTS(R3)	;; Already on the done-Q?	;018
+	BNE	40$			;; Yes, don't put it on again!	;018
+	CALL	QUEDDB		;; queue for done processing, if not already
+	BCS	30$		;; failed to add it to the queue
+	L3QSET	QMSDNE		;; and queue for L3Q if not already	
+30$:	MOV	R4,R0		;; get DDB pointer (offset)
+	TST	-(R0)		;; get done TSQ list head
+.ASSUME	MSDTSQ EQ MSDNE-2
+	MOV	R3,R4		;; get the TSQ in R4			
+	ADD	#TSQDNE,R4	;; offset to the done queue thread	
+	CALLX	QUEUE0,R5	;; queue the TSQ for done processing	
+	BISB	#TS$DNE,TSQSTS(R3) ;; set on done queue bit.
+40$:	MOV	(SP)+,@#PS	; restore running priority
+	POP	<R4,R0>		; restore registers at entry,		
+	RETURN			; and go whereever we're goin'		
+
+GLOBAL	<MSDONQ>							;016
+
+.SBTTL   QUEDDB -- add a DDB to a queue (if not already)
+
+;+
+;  Should be called at PR5
+;
+;	R0 -> Queue Root
+;	R4 -> DDB at thread word offset
+;  CALL QUEDDB
+;	all registers preserved,
+;       Carry Set if DDB not added to queue
+;-
+
+QUEDDB:	TST	(R0)		;; end of the list?			
+	BEQ	20$		;; yep, so no match, add us in...	
+	MOV	(R0),R0		;; not the end, so get the next one	
+	CMP	R0,R4		;; see if DDB is already on the list	
+	BEQ	30$		;; it is! forget the rest of this...	
+	BR	QUEDDB		;; not us, not end, find one or the other 
+20$:	MOV	R4,(R0)		;; add this DDB to the list		
+	CLR	(R4)		;; make this the end			
+	;CLC			;; done by the clear command
+	RETURN			;; exit with carry clear
+
+30$:	SEC			;; else, already in Queue, don't add it
+40$:	RETURN			;; and return
+
+.SBTTL	  START UP A TS11 OPERATION
+
+;+
+; STRTIO - START AN OPERATION ON ITS WAY
+;
+;	R3 -> TSQ
+;	R4 -> DDB @ MTDDSP
+;	R5 =  TIMEOUT PARAMETER
+;
+;	CALL	STRTIO
+;
+;	R0 -> TSBA
+;	R5 -> PACKET
+;
+;	NOTE: THE IE BIT WILL BE SET IN THE COMMAND PACKET IF THIS
+;	MODULE IS ASSEMBLED IN WITH THE INITIALIZATION CODE.
+;
+;	STRTIW is called when issuing a Write Characteristics as there isn't
+;	a TSQ associated with the request.
+;-
+
+STRTIO:	BISB	#TS$OUT,TSQSTS(R3) ; set the outstanding bit in the TSQ	;001
+STRTIW:	MOVB	MTDUNI(R4),R0	; GET THE UNIT NUMBER OF THIS DRIVE
+	ASL	R0		; MULTIPLY BY TWO FOR WORD ADDRESSING
+	MOV	R5,TIM.MS(R0)	; SET THE TIME OUT VALUE
+	BIS	#MS$OUT,MSAINF(R4) ; SAY, command outstanding		
+	MOV	MSPTR(R4),R5	; GET A POINTER TO THE COMMAND PACKET
+	BIS	#IE*2,(R5)	; SET THE INTERRUPT ENABLE BIT IF NOT IN INIT
+	MOV	CSR.MS(R0),R0	; GET A POINTER TO THE CSR
+	MOV	R5,-(R0)	;  AND GIVE THE COMMAND PACKET TO THE TS11
+	RETURN			;    RETURN TO OUR CALLER
+
+GLOBAL	<IE,TIM.MS,CSR.MS>
+
+.SBTTL	  SETSTS - get status on receipt of each command
+
+;+
+; SETSTS - SET THE RETURNED STATUS WORD
+;
+;	R4 -> DDB @ MTDDSP
+;	END PACKET IN MESSAGE BUFFER
+;
+;	CALL	SETSTS
+;
+;	MSUNST AND MTLCST UPDATED APPROPRIATELY
+;-
+
+SETSTS:	MOV	R0,-(SP)	; SAVE R0
+	MOV	R1,-(SP)	;  AND R1
+	MOV	XSTAT0(R4),R0	; COPY THE XSTAT0 WORD FOR RAST ACCESS
+	CLR	R1		; CLEAR THE WORD TO RETURN AS MTLCST
+	CALL	BITBIS,R5	; CHECK THE FOLLOWING
+	  .WORD	X0.RLL,MTRLE	; RECORD LENGTH ERROR
+	  .WORD	X0.EOT,MTEOT	; BEYOND EOT CONDITION
+	  .WORD	X0.TMK,MTEOF	; TAPE MARK CONDITION
+	  .WORD	0
+	MOV	R1,MTLCST(R4)	; UPDATE THE MTCLST WORD
+	MOV	MSUNST(R4),R1	; GET THE FUNCTION CODE FOR THIS COMMAND
+	BIC	#^C<7>,R1	; MAKE THE RANGE LEGAL
+	BIS	#UN.DEF,R1	; SET IN DEFAULT BITS FOR EVERY TS11
+	TSTB	MTLCEV(R4)	; WAS THERE AN ERROR ON THIS COMMAND?
+	BEQ	10$		; NOPE, EVERYTHING IS SET
+	BIS	#UN.ERR,R1	; YES, SET THE ERROR BIT
+10$:	CALL	BITBIS,R5	; CHECK THE FOLLOWING
+	  .WORD	X0.RLL,UN.RLL	; RLE ON LAST COMMAND
+	  .WORD	X0.TMK,UN.TMK	; TAPE MARK ON LAST COMMAND
+	  .WORD	X0.BOT,UN.BOT	; AT BOT
+	  .WORD	X0.EOT,UN.EOT	; BEYOND EOT
+	  .WORD	X0.WLK,UN.WLK	; DRIVE HAS NO WRITE RING
+	  .WORD	0
+	ASLB	R0		; IS THE UNIT OFFLINE?
+.ASSUME	X0.ONL	EQ	100
+	BMI	20$		; NOPE
+	BIS	#UN.OFF,R1	; YES, RETURN OFF LINE STATUS
+20$:	MOV	R1,MSUNST(R4)	; NOW RETURN THIS AS THE STATUS
+	MOV	(SP)+,R1	; RESTORE R1
+	MOV	(SP)+,R0	;  AND R0
+	RETURN			;  AND RETURN TO OUR CALLER
+
+;+
+; BITBIS - TEST AND SET A BIT
+;
+;	R0 =  WORD TO TEST
+;
+;	CALL	BITBIS,R5
+;	  .WORD	TEST,SET	; TEST AND SET BITS
+;	  .WORD	TEST,SET	; TEST AND SET BITS
+;	     .....
+;	  .WORD	0		; END OF LIST
+;
+;	R1 =  RESULT
+;-
+
+BITBIS:	BIT	(R5)+,R0	; TEST FOR THE PROPER BIT PATTERN
+	BEQ	10$		; NOT THERE, JUST SKIP THIS WORD
+	BIS	(R5),R1		; SET THE RESULTANT
+10$:	TST	(R5)+		; POINT TO THE NEXT WORD
+	TST	(R5)		; ARE WE AT THE END OF THIS LIST YET?
+	BNE	BITBIS		; NOPE, DO IT AGAIN
+	TST	(R5)+		; BUMP FOR THE PROPER RETURN ADDRESS
+	RETURN	R5		;  AND RETURN TO THE CALLER
+
+.SBTTL	**INT$MS - Process interrupts at PR5
+
+.ENABL	LSB
+
+;+
+; INT$MS - INPUT INTERRUPTS FOR TS11
+;
+;	R0 =  UNIT NUMBER TIMES 2
+;	PRIORITY IS PR5
+;
+;    If the request finishing is not in error, and there are more
+;    pending IO requests, then we will call ISSREQ to issue the next
+;    request to the controller.  This should enable us to maintain
+;    streaming speeds.
+;
+;    Special cases:
+;	Any error results in Unit Q locked and not issuing next message
+;	Any rewind has to be handled gently as it may already have been 
+;	  answered.  Rewind-offline is done in two parts.  Rewind-offline 
+;	  part 1 gets special handling.
+;	Write Characteristics has no associated TSQ.  It requires special 
+;	  consideration.
+;	Finally consider high and low speeds for the TSV05.
+;
+;    On entry, we set up:
+;	R4 -> DDB 
+;	R3 -> TSQ
+;	and use R0 to hold the TSSR contents
+;
+;-
+
+	TMPORG	MSDINT,6						;014
+	 .WORD	INT$MS							;014
+	UNORG								;014
+
+INT$MS::MOV	DEV.MS(R0),R4	;;GET THE DDB POINTER
+	CLR	TIM.MS(R0)	;;MAKE SURE WE DON'T TIMEOUT
+	ADD	#MTQPTR+MTDDSP,R4 ;;set up MTDDB the way we expect it	
+	TSTB	MSAINF(R4)	;; ARE WE WAITING FOR AN INTERRUPT?
+.ASSUME	MS$OUT	EQ	200
+	BMI	5$		;; yeah, so process it
+	RETURN			;; otherwise, get out the quick way
+
+5$:	BIC	#MS$LOP!MS$OUT,MSAINF(R4) ;; whatever it was is done now...
+	BIT	#<MS$RRC!MS$WCH!MS$INT>,MSAINF(R4) ;; STS, WCH or INT?	;030
+	BEQ	10$		;; no, see what it was			
+	BIC	#<MS$WCH!MS$INT>,MSAINF(R4) ;; yes, not now. Any error will show
+	BR	30$		;; up when we try this I/O (go for it)	
+
+10$:	MOV	MSQTSQ(R4),R3	;; No Write Char.  Get the TSQ		
+	BICB	#TS$OUT,TSQSTS(R3) ;; and note its no longer outstanding
+	MOV	RBPCR(R4),TSQRET(R3) ;; save any residual count from req.
+	CMP	#UNT.MT,TSQCMD(R3) ;; was it a get unit status?
+	BEQ	15$		;; yes, so get last req status, not this one
+	CALL	SETSTS		;; get the request status in MTLCST
+15$:	MOVB	TSQCMD(R3),R2	;; okay, look at the command for a sec
+.ASSUME	RWO.MT EQ 0
+	BEQ	16$		;; rewoff? just go fix it
+	CMPB	R2,#WRT.MT	;; is it a Read or a Write (have UMRs?)
+	BGT	16$		;; no, it isn't.
+	PUSH	<R4>		;; yes, so save the DDB pointer
+	MOV	R3,R4		;; TSQ address made UMRs unique
+	CALL	@RELUMR		;; RELEASE ANY UMR WE MIGHT HAVE
+	POP	<R4>		;; and restore the DDB pointer.
+16$:	MOV	@CSR.MS(R0),R0	;; and the contents of the TSSR		
+	BMI	45$		;; SC is set, some kind of error...	
+	BIT	#MS$RP1,MSAINF(R4) ;; Rewind, part 1 of a Rewind-offline?
+	BNE	30$		;; yep, leave on pending Q, issue part 2
+				;; without end processing yet. (may be posted)
+20$:	BIT	#MS$BAK!MS$ERS,MSAINF(R4) ;; setting up for a retry?
+	BNE	50$		;; is a retry, treat like an error (almost)
+25$:	CALL	QDNALL		;; get TSQ from pending Q, add to DNE Q and Q unit 
+	BIT	#MS$LCK,MSAINF(R4) ;; is the unit queue locked?		
+	BNE	60$		;; yes, don't send out a request	
+	BITB	#MT.ECK,MTFLAG(R4) ;; error check in progress?		;006
+	BNE	60$		;; yes, don't issue anything else	;006
+30$:	TST	MSQTSQ(R4)	;; any pending requests?		
+	BEQ	60$		;; no, so remember that, and exit	
+	CMPB	MSTYP(R4),#$TSV05 ;; is this a TSV05???
+	BNE	40$		;; nope.				
+	INCB	MSHITS(R4)	;; yes, so inc pending count		
+	CMPB	MSHITS(R4),#6	;; should we go to HIGH SPEED?	
+..STRM 	==	.-2		;; variable selection for shifing gears
+	BNE	40$		;; Naah.				
+;Use characteristics packet for test since XSTAT4 seems unpredictable	;011
+;	TST	XSTAT4(R4)	;; 'tis, are we already at Hi speed?	
+;.ASSUME X4.HSP EQ 100000
+;	BMI	40$		;; yeah, so forget it.			
+	BIT	#CH.HSP,MSCHAR+10(R4) ;; 'tis, do we think we're at 100ips? ;011
+	BNE	40$		;; yeah, so forget it.			;011
+	BIS	#CH.HSP,MSCHAR+10(R4) ;; set up high speed bit in packet 
+	BIS	#MS$WCH,MSAINF(R4) ;; Tell ISSREQ to change speeds	;015
+40$:	CALLR	ISSREQ		;; pending reqs, no errors, go for it	
+	;RETURN			;; return via ishwreck exit		
+
+45$:	BISB	#TS$ERR,TSQSTS(R3) ;; and mark the TSQ as in trouble
+50$:	BIS	#MS$LCK,MSAINF(R4) ;; lock the queue for this unit, trouble! 
+	MOV	R0,TSSR(R4)	   ;; and save the TSSR for error handling
+55$:	CALL	QDNREW		;; queue unit and TSQ without removing from pending queue 
+60$:	CLRB	MSHITS(R4)	;; error or no pending Q, streaming blown 
+	CMPB	MSTYP(R4),#$TSV05 ;; is unit a TSV05?			
+	BNE	70$		;; no.					
+;Use characteristics packet for test since XSTAT4 seems unpredictable	;011
+;	TST	XSTAT4(R4) 	;; 'tis, are we at Hi speed?		
+;.ASSUME X4.HSP EQ 100000
+;	BPL	70$		;; no, so no problem			
+	BIT	#CH.HSP,MSCHAR+10(R4) ;; 'tis, do we think we're at 100ips? ;011
+	BEQ	70$		;; no, so no problem			;011
+	BIC	#CH.HSP,MSCHAR+10(R4) ;; clear the high speed char bit	
+	BIS	#MS$WCH,MSAINF(R4) ;; Tell ISSREQ to do a speed change	;015
+70$:	RETURN			;; whatever else happened, we're leaving 
+
+GLOBAL	<DEV.MS,TIM.MS,CSR.MS,MSDONQ>				;016
+
+.DSABL	LSB
+
+.SBTTL	**DNE$MS - done processing entry point (Via L3Q)
+;+
+;
+;	MSDONQ contains the list of DDBs requesting service
+;
+;  Called Via an L3Q bit set up during INT$MS processing or during
+;  CON$MS if the unit which the request is for is in an error locked state.
+;
+;-
+	TMPORG	MSDINT,46						;014
+	 .WORD	DNE$MS							;014
+	UNORG								;014
+
+	.ENABL	LSB
+
+DNE$MS:
+	MOV	MSDONQ,R4	; GET THE DDB TO SERVICE		;016
+	BEQ	EXRTI3		; Get out if there aren't any		;021
+	MOV	(R4),MSDONQ	; DEQUEUE THIS REQUEST			;016
+	BEQ	5$		; don't queue done unless you need it	;021
+	L3QSET	QMSDNE		;  AND REQUEST DONE PROCESSING FOR NEXT
+5$:	SUB	#MSDNE-MTQPTR,R4 ; offset to 0 in DDB			;021
+	BIT	#<MS$ECA!MS$FTL>,MSAINF(R4) ; Unit dead or presumed so?	;030
+	BEQ	NEXTSQ		; no, so don't panic			;021
+	JMP	DMPQUE		; Yes, dump any pending reqs
+
+NEXTSQ:	MOV	MSDTSQ(R4),R3	; get a TSQ from the done queue
+	BEQ	EXRTI3		; no more, so exit			;021
+	SPLC	5	 		  ;; boost to PR5
+	MOV	(R3),MSDTSQ(R4)		  ;; remove it from the done list
+	BICB	#TS$DNE,TSQSTS-TSQDNE(R3) ;; no longer in done queue
+	SPLC	3		; restore priority
+	SUB	#TSQDNE,R3	; now offset TSQ pointer to top of TSQ
+	TSTB	TSQCEV(R3)	; have we already got an error?
+	BEQ	10$		; nope.					;021
+	JMP	TFATAL		; Yes, so die.  			;021
+
+10$:	MOVB	TSQCMD(R3),R2	; Get the command issued		;018
+	CLR	R0		; Set up R0 for TC 0 dispatch
+	BITB	#TS$NOP,TSQSTS(R3) ; No tape OP?
+	BEQ	15$		; no, so we gotta check for errors	;021
+	MOV	#11*2,R0	; right, set up for special dispatch
+	BR	30$		; and do it
+
+15$:	BITB	#TS$ERR,TSQSTS(R3) ; some kind of error during request?	;021
+	BEQ	30$		; no, nothing logged, dispatch from here.
+	BITB	#MS$TMO,MSAINF(R4)	;Yes, was it a timeout?		;018
+	BEQ	18$		;No timeout processing			;021
+
+;+
+; We've lost control of the drive.  Try a soft initialize to get it back.
+; If that fails, we'll be forced to do a hard-initialize, which goes to BOT.
+;-
+	LOG$MS			; LOG THE TIMEOUT ERROR
+	BIT	#MS$INT,MSAINF(R4) ; Already tried to recover?		;030
+	BNE	17$		; Yep Hard-init and give ABORT		;030
+	PUSH	<R4,R3>		; Save a couple registers		;030
+	MOVB	MTDUNI(R4),R3	; Get the unit number			;030
+	ASL	R3		; ...times two for indexing		;030
+	MOV	#5,TIM.MS(R3)	; Time out in 5 seconds			;030
+	MOV	CSR.MS(R3),R3	; Get the CSR address			;030
+	MOV	#OP.INT!<IE*2>,@MSPTR(R4) ; Set the init operation	;030
+	BIS	#<MS$INT!MS$OUT>,MSAINF(R4) ; Say we're initializing	;030
+	MOV	MSPTR(R4),-(R3)	; Issue the function			;030
+	MOV	(SP),R4		; Get TSQ into R4 (our unique value)	;030
+	CALL	@RELUMR		; release any UMRs that may be in use	;019
+	POP	<R3,R4>		; Restore registers			;030
+	INCB	TSQTRY(R3)	; DECREMENT THE RETRY COUNT
+	BEQ	17$		; If no retrys left then report ABORT	;030
+	BIT	#MS$RRC!MS$RWD!MS$WCH,MSAINF(R4) ;RWD, WCH, or STS?	;018
+	BEQ	EXRTI3		; No, just reissue normally		;030
+	MOVB	#-1,TSQTRY(R3)	; Yes, try it only once more		;018
+EXRTI3:	JMPX	RTI3		; Wait for initialize to finish		;030
+
+17$:	JMP	MSDEAD		;   End this function			;030
+
+18$:	MOV	TSSR(R4),R0	; The DDB's TSSR copy is for this one.	;021
+	BIT	#SR.UPE!SR.SPE,R0 ; parity error?
+	BEQ	20$		; nope, so keep checking
+	MOV	#7*2,R0		; yes, so force death (fatal error)
+20$:	BIC	#^C<7*2>,R0	; clear all but the Termination Class
+	BEQ	30$		; no error, continue on....
+	BIT	#MS$BAK!MS$ERS,MSAINF(R4) ; ARE WE ATTEMPTING A RETRY?
+	BEQ	30$		; no retry, so dispatch with current R0
+	MOV	#10*2,R0	; YES, TREAT IT AS A SPECIAL CASE
+30$:	JMP	@ERJTBL(R0)	; Dispatch to proper routine to handle	;021
+
+GLOBAL	<CSR.MS,RTI3,IE,LOG$MS,RELUMR,MSDONQ>				;016
+
+.DSABL	LSB
+
+.SBTTL	  TERMINATION CLASS DISPATCH TABLE
+
+;+
+; NOTE THAT ON DISPATCH TO ERROR PROCESSING ROUTINES:
+;
+;	R0 =	TERMINATION CLASS CODE TIMES 2
+;	R2 =	Magtape command issued
+;	R3 ->	TSQ for the request
+;	R4 ->	DDB
+;	R1,R5 are available as work registers
+;-
+
+ERJTBL:	.WORD	TCLAS0		; 0  =  NORMAL TERMINATION
+	.WORD	TCLAS1		; 1  =  ATTENTION CONDITION (SHOULD NOT OCCUR)
+	.WORD	TCLAS2		; 2  =  TAPE STATUS ALERT
+	.WORD	TCLAS3		; 3  =  FUNCTION REJECT
+	.WORD	TCLAS4		; 4  =  RECOVERABLE ERROR TAPE ONE RECORD DOWN
+	.WORD	TCLAS5		; 5  =  RECOVERABLE ERROR TAPE NOT MOVED
+	.WORD	TFATAL		; 6  =  UNRECOVERABLE ERROR TAPE POSITION LOST
+	.WORD	TFATAL		; 7  =  FATAL CONTROLLER ERROR
+	.WORD	BSPCER		; ERROR ON CORRECTIVE BACKSPACE
+	.WORD	MTNOP		; no tape operation request go here
+
+.SBTTL	..Class 0 Termination - Success
+
+.ENABL	LSB
+
+;+
+; We may see three things in here:
+;	A successful end message
+;	A successful portion of an error retry
+;	An errored request with TCLAS0 code (Some RMR's and OFL's)
+;
+; A successful read operation will end up here IFF the length of the record
+; we just read was equal to the buffer size specified by the user.
+;-
+
+TCLAS0:	BITB	#TS$ERR,TSQSTS(R3) ; was this reported as an error?
+	BEQ	TRECVR		; No, so go on.				;034
+	JMP	TCLAS3		; Yes, maybe RMR or Offline, go see.	;034
+
+TRECVR:	MOV	MSAINF(R4),R1	; COPY CONTROLLER STATUS WORD
+	BIT	R1,#MS$BAK!MS$ERS ; DID WE JUST COMPLETE A CORRECTIVE ACTION?
+	BEQ	17$		; Nope, so just one more thing to check	;034
+	CMPB	#RED.MT,R2	; IS IT A READ COMMAND
+	BEQ	10$		; YES, SO BACKSPACE IS ONLY RECOVERY
+	BIT	#MS$BAK,R1	; DID WE JUST BACKSPACE ON A WRITE COMMAND
+	BNE	15$		; Yes, see if we should do an extended gap ;018
+				; Otherwise we just wrote the gap, so..	;018
+10$:	CLR	MSAINF(R4)	; SAY NOT BUSY				;001
+	CALLX	QUEL3Q		; Re-Queue original function		;021
+	JMPX	RTI3		; Go out through RTI3			;021
+
+15$:	BITB	TSQTRY(R3),#1	; IS IT TIME FOR AN EXTENDED GAP YET?
+..MSGP	==	.-2	;*PATCH* FREQUENCY OF ERASURES
+	BNE	10$		; NOPE, TRY TO WRITE AGAIN
+	MOV	#OP.ERS,@MSPTR(R4) ; SET THE ERASE OPCODE
+	BIC	#MS$LCK!MS$BAK,MSAINF(R4) ; unlock the unit and forget Bckspc
+	BIS	#MS$ERS,MSAINF(R4) ; we're doin' a erase!
+	MOV	#9.,R5		; SET TIMEOUT IN 9. SECONDS
+	CALL	STRTIO		; Start up the erase			;021
+	JMPX	RTI3		; Go out through RTI3			;021
+
+17$:	CMPB	#RED.MT,R2	;Was this a READ?			;034
+	BNE	20$		;No, so don't check record length.	;034
+	CALL	TCHK14		;See if record should be ignored.	;034
+20$:	JMP	HOKAY		;Request done - go finish up.
+
+
+.SBTTL	TCHK14 - See if record should be ignored.
+
+;+									;034+
+; This routine is used by both Class 0 and Class 2 termination.  It
+; checks to see if the length of the record just read is < 14. bytes.
+; If so, the read request will be requeued, causing the read that was
+; just completed to be ignored.
+;
+; If the record length is OK, we'll just return.
+; Otherwise, we'll go to 10$ above, which will requeue the request.
+;
+; No registers are used.
+;-									;034-
+
+TCHK14:	MOV	TSQRET(R3),-(SP);Get residual byte count from request.	;034
+	NEG	(SP)		;Make it negative.			;034
+	ADD	TSQCNT(R3),(SP)	;And add original requested count.	;034
+				;Now, (SP) = bytes read on this I/O.	;034
+	CMP	(SP)+,#14.	;Less than 14. ?			;034
+	BLO	21$		;Yup, so re-issue request.		;034
+	RETURN			;Otherwise, just go back.		;034
+
+21$:	TST	(SP)+		;Dump the CALL return address...	;034
+	BR	10$		; ...and go requeue request.		;034
+
+
+.SBTTL	..Class 2 Termination -- Tape Status Alert
+
+;+
+; TC 2 means EOT, BOT, TMK or something similiar.
+; It indicates an anomolous condition that may not be an error;
+; for example, a read operation which was otherwise successful will
+; end up here if the length of the record just read was less than the
+; buffer size specified by the user (which is probably the normal case!),
+; because this condition generates a "Record Length Short" (RLS) error.
+;
+; Note that we could be calling MTU to determine EOF/EOV on ANSI files.
+;-
+
+TCLAS2:	MOV	XSTAT0(R4),R1	; GET XSTAT0 INSTEAD OF TSSR
+	CMPB	R2,#RED.MT	; Was this a read function?		;018
+	BEQ	30$		; YES, SO GO DO READ ERROR PROCESSING
+	ASR	R1		; WAS THIS AN EOT ERROR?
+.ASSUME	X0.EOT	EQ	1
+	BCC	22$		; No.  Check for other possibilities	;024
+	CMPB	R2,#WRT.MT	; EOT it is.  But is it a write?	;024
+	BEQ	60$		; Yes, report error			;024
+	CMPB	R2,#EOF.MT	; Not a write. Is it a write tape mark?	;024
+	BEQ	60$		; Yes, same error			;024
+	BR	80$		; No real error occurred, resume I/O	;024
+
+22$:	CMPB	R2,#SKP.MT	; Was this a skip forward operation?	;018
+	BEQ	25$		; yes, so there's still a chance	;009
+	CMPB	R2,#BSP.MT	; How 'bout a backspace			;018
+	BEQ	25$		; yes, so there's still a chance	;018
+	JMP	MSHUNG		; not a skip, die with HNGDEV now	;030
+
+25$:	BIT	#X3.RIB,XSTAT3(R4) ; WAS THIS A REVERSE INTO BOT?	;009
+	BNE	80$		; YES, THEN NO ERROR HERE
+	ASL	R1		; WAS THIS A TAPE MARK SEEN?
+.ASSUME	X0.TMK	EQ	100000
+	BPL	35$		; NO, UNKNOWN ERROR CONDITION
+	BR	80$		; YES, NO ERROR HERE
+
+30$:	TST	R1		;WAS THERE A TAPE MARK?
+.ASSUME	X0.TMK	EQ	100000
+	BMI	50$		; YES, REPORT THAT ERROR
+	BIT	R1,#X0.RLL	;WAS THIS A RECORD LENGTH LONG?
+	BNE	40$		; YES, REPORT A MAGTAPE RECORD LENGTH ERROR
+	CALL	TCHK14		;See if record should be ignored.	;034
+	BIT	R1,#X0.RLS!X0.EOT ; WAS THIS A RECORD LENGTH SHORT OR EOT?
+	BNE	80$		; YES, THAT IS NO ERROR
+35$:	JMP	MSHUNG		;  Otherwise, don't know.  Call it hung	;030
+
+40$:	SETERR	MAGRLE,TSQCEV(R3) ; SET THE APPROPRIATE ERROR CODE
+	CLR	RBPCR(R4)	; CLEAR THE RESIDUAL BYTE COUNT
+	BR	70$		;  AND TERMINATE THE FUNCTION
+
+50$:	BITB	#MT.OPN,TSQMTO(R3) ; FIP request?			;007
+	BEQ	55$		; Yes, don't even think about an EOV	;007
+	TST	MTACB(R4)	; File-structured ANSI processing?	;007
+	BEQ	55$		; Nope, its DOS, so EOF is correct	;006
+	BISB	#TS$ECK,TSQSTS(R3) ; Set error check for this request	;006
+	BISB	#MT.ECK,MTFLAG(R4) ; Set error check flag in DDB	;006
+	MOV	R4,R1		; R1 -> DDB @ 0				;007
+	JMP	@#ASYECK	; And do the asynchronous error-check	;016
+
+55$:	SETERR	EOF,TSQCEV(R3)  ;  SET AN EOF ERROR
+	BR	70$		;  AND TERMINATE REQUEST
+
+60$:	SETERR	NOROOM,TSQCEV(R3) ; SET THE NO ROOM FOR USER ON DEVICE ERROR
+70$:	JMP	ERROUT		; Go to completion service		;021
+
+;+
+; We come here if the status condition is of no consequence,
+; so, clean up the queue, allow the request to go, and
+; respond to the request
+;-
+
+80$:	MOV	(R3),MSQTSQ(R4)	; dequeue request from the pending queue
+	BEQ	85$		; nothing more on the queue		;022
+	BITB	#MT.ECK,MTFLAG(R4) ; Is error check flag set in DDB?	;022
+	BNE	85$		; Yes, don't start a pending request!	;022
+	CALLX	QUEL3Q		; Start the next request		;022
+85$:	BIC	#MS$LCK,MSAINF(R4) ; clear unit locked state		;022
+	JMP	HOKAY		; and finish the request		;021
+
+	.WEAK	ASYECK		; Monitor only, INIT don't need them	;016
+
+.SBTTL	..Class 3 Termination -- Function Reject...
+
+TCLAS3:	MOV	TSSR(R4),R1	; get the TSSR contents into R1		;009
+	BIT	#SR.RMR,R1	; WAS THIS A REG MODIFY REFUSED?
+	BNE	TCLAS5		; YES - TRY AGAIN
+	BIT	#SR.OFL,R1	; DID THE UNIT GO OFFLINE?
+	BNE	90$		; YES, THAT IS A SELECT ERROR
+	MOV	XSTAT0(R4),R1	; GET THE XSTAT0 REGISTER INTO R1
+	BIT	#X0.WLK!X0.VCK!X0.ILC!X0.ILA,R1 ; HARD ERRORS?
+	BNE	MSHUNG		; YES, GIVE DEVICE HUNG			;030
+	BIT	#X0.NEF,R1	; WAS THIS A NON-EXECUTABLE FUNCTION?
+	BNE	80$		; YES, EVERYTHING IS OKAY THEN, NO ERROR
+
+90$:	LOG$MS			; Log the error for posterity		;021
+	SETERR	MAGSEL,TSQCEV(R3) ; SET THE ERROR CODE
+	JMP	ERROUT		;     AND END THE COMMAND
+
+	GLOBAL	<LOG$MS>
+
+.SBTTL	..Class 4 Termination -- Recoverable (1 record down)
+
+TCLAS4:	CMPB	#$TK25,MSTYP(R4) ; is this a TK25?
+	BNE	95$		; nope, so log it and go
+	BIT	#X1.EWT,XSTAT1(R4) ; yeah, end of track?
+	BNE	97$		; yes, so no error, just correct and retry
+95$:	LOG$MS			; LOG THE ERROR
+97$:	DECB	R2		; Make 0 (RWO) a 255			;018
+	CMPB	R2,#EOF.MT-1	; RD, WRT, or TMK?			;028
+	BHI	100$		; The op is not retryable		;018
+	INCB	TSQTRY(R3)	; INCREMENT THE RETRY COUNT
+	BEQ	100$		; OOPS, TOO MANY TIMES THROUGH HERE, ABORT
+	;BIC	#MS$LCK,MSAINF(R4) ; clear unit queue locked (Next ins)
+	MOV	#MS$BAK,MSAINF(R4) ; SET BACKSPACING STATUS
+	MOV	MSPTR(R4),R1	; GET POINTER TO COMMAND BUFFER
+	MOV	#OP.BSP,(R1)+	; SET A BACKSPACE OP TO REPOSITION TAPE
+	MOV	#1,(R1)+	; SET IN A SINGLE BACKSPACE
+	BICB	#^C<TS$ASY>,TSQSTS(R3) ; clear all status 'cept fer ASY
+	MOV	#9.,R5		; SET TIMEOUT IN 9. SECONDS
+	CALL	STRTIO		; Start the I/O operation		;021
+	JMPX	RTI3		; Go out through RTI3			;021
+
+100$:	SETERR	DATERR,TSQCEV(R3) ; SET AN ERROR CODE FOR RETRYABLE OP
+	JMP	ERROUT		; End the operation			;021
+
+	GLOBAL	<LOG$MS>
+
+.SBTTL	..Class 5 Termination - Recoverable, tape not moved
+
+TCLAS5:	LOG$MS			; THERE WAS A RECOVERABLE ERROR HERE
+	INCB	TSQTRY(R3)	; INCREMENT THE RETRY COUNT
+	BEQ	MSHUNG		; Oops, too many, give an error		;030
+	BICB	#^C<TS$ASY!TS$RWD>,TSQSTS(R3) ; Clean up TSQ status	;018
+	CLR	MSAINF(R4)	; CLEAR THE STATUS FOR OPERATION TO START
+	CALLX	QUEL3Q		; Re-Queue the operation for a retry	;021
+	JMPX	RTI3		; Go out through RTI3			;021
+
+	GLOBAL	<LOG$MS>
+
+.SBTTL	..Come here on Error on Recovery attempt
+
+110$:	BICB	#^C<TS$ASY>,TSQSTS(R3) ; clear all status 'cept ASY
+	JMP	TRECVR		; TRY FOR RECOVERY
+
+BSPCER:	BIT	#X3.RIB,XSTAT3(R4) ; WAS THIS A REVERSE INTO BOT?
+	BNE	110$		; YEP, NO REAL ERROR
+	MOV	XSTAT0(R4),R1	; GET THE XSTAT0 REGISTER
+	;TST	R1		; WAS THIS A MOVE INTO TAPE MARK ERROR?	;011
+.ASSUME	X0.TMK	EQ	100000
+	BMI	110$		; YES, NO ERROR
+	ASR	R1		; NO, WAS THIS A BEYOND EOT ERROR?
+.ASSUME	X0.EOT	EQ	1
+	BCS	110$		; YES, NO ERROR
+	LOG$MS			; Real error occurred, log it		;030
+	.BR	MSHUNG		; No, so call it a HNGDEV		;030
+
+.SBTTL	Severe, but not fatal errors
+
+MSHUNG:	SETERR	HNGDEV,TSQCEV(R3) ; Give device hung error for this	;030
+	JMP	ERROUT		; Go down post'n			;030
+
+.SBTTL	... Fatal Class Termination -- TC1, 6, & 7
+
+;+
+; Since we do not enable Attention Interrupts,
+; getting a Class 1 termination (Attention message)
+; means that the TSxx device is broken.  Report it
+; and run.
+;-
+
+TFATAL:	TSTB	TSQCEV(R3)	; we already got an error?
+	BNE	130$		; sure, you bet, issue it and not ABORT	;030
+TCLAS1:	LOG$MS			; LOG THE ERROR
+MSDEAD:	SETERR	ABORT,TSQCEV(R3) ; Set the error code			;030
+	MOVB	MTDUNI(R4),R2	; Get the unit number			;030
+	ASL	R2		; ...times two for indexing		;030
+	CLR	@CSR.MS(R2)	; Hard-Initialize the drive.		;030
+	BIS	#MS$FTL,MSAINF(R4) ; Say drive is dead			;030
+	JMP	ERROUT		; Then quit				;021
+
+;+
+; NOTE:	We'll only have an error preset in two cases:
+;
+;	1) Completion of error check state, MTU has given us the error code
+;				-or-
+;	2) Rewind failure.  We'll issue a success and bomb the next request
+;-
+130$:	BITB	#TS$ECK,TSQSTS(R3) ; Error check?
+	BEQ	140$		; Nope, bad rewind, bomb next request	;030
+	PUSH	R4		; save the DDB pointer
+	MOV	MTFQB(R4),R4	; get the dummy FIRQB to return
+	BUFFER	RETSML		; and return the lil faker
+	POP	R4		; restore the DDB pointer
+140$:	JMP	ERROUT		; Then quit				;030
+
+GLOBAL	<CSR.MS,BDNERR>							;020
+
+.DSABL	LSB
+
+.SBTTL	.. No Tape Operation Requests
+
+.ENABL	LSB
+
+MTNOP:	BICB	#^C<TS$ASY>,TSQSTS(R3)	; clean out the TSQSTS
+	SUB	#DEN.MT,R2	; ..correct the offset for non-motion
+	BMI	MTAGLB		; Read or write.  Do a GBF and re-queue	;027
+	ASL	R2		; ..times 2 for dispatch
+	CALL	@10$(R2)	; and process the request
+	BIC	#MS$LCK,MSAINF(R4)	; no error here, unlock queue
+	JMP	MSAEND		; and do down posting
+
+10$:	.WORD	MTAPD		; 7. is set density/parity
+	.WORD	15$		; 8. shouldn't see this here.
+	.WORD	MTACHR		; 9. is Return File Characteristics
+	.WORD	MTACRW		; 10. is rewind on close
+	.WORD	MTAEOV		; 11. is process EOV request
+	.WORD	MTAECA		; 12. is process ECA request
+	.WORD	MTAXDN		; 13. is Extended Set Density		;020
+	.WORD	MTAGBF		; 14. is get an ANSI label buffer
+.ASSUME	GBF.MT	EQ 14.
+
+15$:	CRASH			; so crash if we get a get unit status
+
+.SBTTL	  ....GET AN ANSI LABEL BUFFER
+
+MTAGBF:	MOVB	#UNT.MT,TSQCMD(R3) ;CHANGE THE FUNCTION TO 'UNIT STATUS'
+	TST	(SP)+		; Clean the stack for GETBIG		;027
+MTAGLB:	MOV	MTUBUF(R4),TSQMAL(R3) ; save whatever's in MTUBUF	;027
+	MOV	R3,MSHDR(R4)	; save R3 => TSQ			;027
+	CALLX	GETBIG,R5,MTULBF ; REQUEST A BIG I/O BUFFER
+	MOV	MSHDR(R4),R3	; restore R3 (MTUBUF holds buffer address) ;027
+	MOV	MTUBUF(R4),R2	; get the buffer address out of the DDB
+	MOV	TSQMAL(R3),MTUBUF(R4) ; restore MTU to whatever it was
+	MOV	R2,TSQMAL(R3)	; and set the buffer address into the TSQ
+	;BIC	#MS$LCK,MSAINF(R4) ; clear the lock bit rem: TSQ already on PQ
+	BIC	#^C<MS$INT>,MSAINF(R4)	; Clear controller status 'cept INT ;018
+	CALLX	QUEL3Q		; Re-queue for the I/O			;027
+	JMPX	RTI3		; And go out through RTI3		;027
+
+.SBTTL	  ....PROCESS ANSI FILE CHARACTERISTICS REQUEST
+
+MTACHR:	CLR	TSQRET(R3)	; clear the returned value		
+	MOV	MTACB(R4),R5	;GET ACB ADDRESS
+	BEQ	20$		; none, so this request is complete, Q it out 
+	MOV	(R5),TSQRET(R3)	;ONE, SET THE CHARACTERISTICS
+	BR	20$		; back to common exit
+
+.SBTTL	  ....PROCESS REWIND ON CLOSE
+
+MTACRW:	BICB	#MT.NRW,MTFLAG(R4) ; SAY REWIND ON CLOSE
+	BR	20$		; back to common exit
+
+.SBTTL	  ....PROCESS SET DENSITY/PARITY FUNCTION
+
+MTAPD:	TSTB	TSQMTO(R3)	; IS THE TAPE OPEN FILE STRUCTURED?
+	BPL	20$		; NOPE, so queue this one out		
+	MOV	TSQCNT(R3),TSQRET(R3) ; Yes, return the passed parameter ;018
+MTAECA:				; ECA is a nop unless in error state.
+20$:	MOV	(R3),MSQTSQ(R4) ; pull off pending queue, we're done
+	RETURN			; go out through common exit
+
+MTAEOV:	MOV	MTACB(R4),R2	; Get ACB pointer			;007
+	BNE	30$		; There is one, good!			;007
+	SETERR	NOTMTA,TSQCEV(R3) ; EOV .SPEC not allowed on a DOS tape	;007
+	JMP	SPCERX		; Return that error			;021
+
+30$:	MOV	#^REOV,2(R2)	; Say EOV label type			;007
+	BR	20$		; Finish up				;007
+
+.SBTTL	Process Extended Set Density function
+
+MTAXDN:	MOV	#1600.,R2		;Start by assuming 1600 BPI.	;020
+	CMPB	MSTYP(R4),#$TK25	;Is it a TK25?			;020
+	BNE	40$			;Nope, leave it at 1600 BPI.	;020
+	MOV	#8000.,R2		;TK25s are 8000 BPI (sort of).	;020
+40$:	MOV	R2,TSQRET(R3)		;Give 'em the density back.	;020
+	MOV	TSQCNT(R3),R5		;Find out what they really want.;020
+	BPL	20$			;If they just want density, OK.	;020
+	BIC	#100000,R5		;Don't let sign bit screw us up.;020
+	CMP	R5,#32767.		;Do they want highest set?	;020
+	BEQ	20$			;Yes, so just exit.		;020
+	CMP	R5,#1			;How about lowest?		;020
+	BEQ	20$			;I guess so, get out.		;020
+	CMP	R2,R5			;Is this density legal?		;020
+	BEQ	20$			;Yup - get out of here.		;020
+	MOVB	#BDNERR,TSQCEV(R3)	;Oops, bogus value!!		;020
+	JMP	SPCERX			;Go tell 'em what happened.	;021
+
+.DSABL LSB
+
+
+.SBTTL	*** Posting Services ***
+.SBTTL	HOKAY -- issue a successful end message
+
+;+
+; We come here if whatever command we are trying to done process
+; succeeded.  On entry TSQRET is the residual count from the request.
+; We set it up pretty according to what the user expects back right here.
+;
+; OP.STS will still get valid info 'cause we lock the queue to preserve
+; request status until it gets done processed and sent out.
+;
+;	Success exits:
+;	    Everything but read:
+;		TSQCEV(R3) = 0
+;		TSQRET(R3) = residual count (we don't have ta touch it!)
+;	    For Reads:
+;		TSQCEV(R3) = 0
+;		TSQRET(R3) = Count of bytes read (TSQCNT-RBPCR)
+;-
+
+.ENABL	LSB
+
+HOKAY:	CMPB	R2,#UNT.MT	; Was this a get unit status?		;018
+	BEQ	30$		; IF SO, DO SPECIAL STATUS PROCESSING
+	CLRB	TSQCEV(R3)	; success, so clear error flag
+	CMPB	R2,#RED.MT	; was it a read?			;018
+	BNE	20$		; nope, so we're done
+	NEG	TSQRET(R3)	; GPK says this is same effect (THINK, JIM)
+	ADD	TSQCNT(R3),TSQRET(R3) ; NOTE: TSQCNT - RBPCR = -RBPCR + TSQCNT
+20$:	JMP	MSAEND		; Go post it to the user		;021
+
+30$:	MOV	MSUNST(R4),R1	; GET THE CURRENT STATUS
+	BIC	#UN.UPD,R1	; CLEAR THE BITS TO UPDATE
+	MOV	XSTAT0(R4),R0	; GET XSTAT0
+	CALL	BITBIS,R5	; NOW SET THE APPROPRIATE BITS
+	  .WORD	X0.WLK,UN.WLK	; DRIVE IS PHYSICALLY WRITE LOCKED
+	  .WORD	X0.BOT,UN.BOT	; TAPE IS AT BOT
+	  .WORD	X0.EOT,UN.EOT	; TAPE IS BEYOND EOT
+	  .WORD	0
+	ASLB	R0		; IS THE UNIT ON LINE?
+.ASSUME	X0.ONL	EQ	100
+	BMI	40$		; YES, NOW RETURN THE STATUS
+	BIS	#UN.OFF,R1	; NO, MAKE SURE TO TELL THAT TO THE USER
+40$:	BIS	#UN.DEF,R1	; MAKE SURE DEFAULTS ARE SET IN STATUS WORD
+	MOV	R1,TSQRET(R3)	; SET CURRENT STATUS
+	BR	20$		;   AND RETURN TO THE USER
+
+.DSABL	LSB
+
+.SBTTL	  ERROUT -  Error Exit subroutine
+;+
+;
+;	R4 -> DDB @MTDDSP
+;	R3 -> TSQ at 0
+;
+; A call to ERROUT means that we have an
+; error, and implies that the status of the
+; message buffer has not changed.  We set up
+; the initial response packet from that, and
+; perform synchronous/asynchronous error handling.
+; A rewind request may error iff the error occurs prior to the issuing
+; of the rewind command.  e.g., A write char timing out to set up the drive
+;
+;-
+
+SPCERX:	TST	(SP)+	; On SPEC calls, clean up the stack first.	;020
+ERROUT:	MOV	(R3),MSQTSQ(R4)	; Dequeue req from pending Q - won't reissue
+	BIC	#^C<MS$FTL!MS$LCK!MS$RWD>,MSAINF(R4) ;Clear pending states ;030
+	MOVB	TSQCMD(R3),R2		;Rewind offline?		;018
+	BEQ	10$			;Yes, handle SPEC separately	;018
+.ASSUME	RWO.MT EQ 0
+	CMPB	R2,#WRT.MT		; Read or Write request		;018
+	BHI	10$			; no, handle SPECs separately
+;Assume RED.MT and WRT.MT are 1 and 2
+	BEQ	5$			; Write.  No further checking	;026
+	BIT	#MTEOF,MTLCST(R4)	; Read.  Did we see a TMK?	;026
+	BNE	7$			; Yes.  Return zero byte count	;026
+5$:	MOV	TSQCNT(R3),TSQRET(R3) ; yes, get the full count		;026
+	SUB	RBPCR(R4),TSQRET(R3)  ; and make it amount done.
+7$:	TSTB	TSQSTS(R3) 	;Asynch request? ASSUME .READA .WRITA	;026
+.ASSUME TS$ASY EQ 200		; are the only asynch reqs available
+	BPL	MSAEND		; no, go out through MSAEND
+	BIS	#MS$ECA,MSAINF(R4) ; yes, set Error condition acknowledged
+	BR	MSAEND		; and go out through MSAEND
+
+10$:	MOV	RBPCR(R4),TSQRET(R3) ; otherwise, drop in the residual count
+	BIT	#MS$RWD,MSAINF(R4) ; any kind of a rewind?
+	BEQ	MSAEND		; no, we're all set
+	MOVB	TSQCEV(R3),MSERR(R4) ; make sure next request dies badly
+	CLRB	TSQCEV(R3)	; yes, no errors reported on rewinds.
+	CLR	TSQRET(R3)	; none at all.
+	TST	MSQTSQ(R4)	; Is the next request already waiting?	;018
+	BEQ	MSAEND		; No, wait for it			;018
+	CALLX	QUEL3Q		; Yes, Q the DDB to give it the error	;018
+	.BR	MSAEND		; give info back to user
+
+.SBTTL	  MSAEND - Posting requests back to the calling program
+;+
+; still called MSAEND
+;	R4 -> DDB @MTDDSP
+;	R3 -> TSQ for response
+;
+;	TSQASY offset in TSQ=0 if this is a rewind or rewind offline
+;	that has already been posted.
+;
+;       R0,R2 destroyed during this processing.  If you want 'em
+;	to come back, better save 'em yourself
+;
+; All posting special cases handled here:
+;	1) Synchronous User Posting
+;	2) Asynchronous User Posting
+;	3) MTU posting, all synchronous
+;	
+;	Rewinds are always a special case (pseudo-asynchronous)
+;-
+
+MSAEND:	TST	TSQASY(R3)	; has this request already been answered?
+	BNE	5$		; no, so process it now
+	CALL	RETBUF		; yes, so its a spare TSQ, drop it, 
+	BR	20$		; and see what's up now
+
+5$:	BITB	#MT.OPN,TSQMTO(R3) ; was request issued from MTU?	;022
+	BEQ	30$		; yes, so return thataway		;022
+	MOVB	TSQJOB(R3),R0	; get the user's job number		;022
+	TSTB	TSQSTS(R3) 	; Asynchronous function?
+.ASSUME TS$ASY EQ 200
+	BMI	60$		; yeah, go post asynchronous answer
+
+;+
+; Synchronous posting, the same old stuff (almost)
+;-
+
+	PUSH	R4		; no, so post synchronously (save DDB)
+	MOV	R0,R4		; job number in R4,
+	CALLX	IOFIN4,R5,JS.MS	; and post completion to the user
+	POP	R4		; get R4 back
+	SPLC	5		;; if rewind, we can't race thru here
+	MOV	JOBTBL(R0),R2	;; Get the user's JDB pointer		;022
+	MOVB	TSQCEV(R3),JDIOST(R2) ;;post the error back....
+	MOV	TSQASY(R3),R2	;; get the user's XRB
+	CLR	TSQASY(R3)	;; clear the XRB pointer in case of rewind
+	MOV	TSQRET(R3),XRBC(R2) ;; and copy the returned parameter
+	TSTB	TSQCMD(R3)	;; rewind-offline?
+	BEQ	14$		;; yep, so don't unlock it.
+.ASSUME	RWO.MT EQ 0
+	CMPB	TSQCMD(R3),#WRT.MT  ;; no, is it a read or a write?
+	BHI	14$		;; nope, so its not locked anyway
+	DECB	MSRWP(R4)	;; decrement the Read/Write Pending count ;010
+	BNE	14$		;; don't unlock if more outstanding	  ;010
+	CALLX	UNLOCK		;; unlock the job, (number in R0)
+14$:	BITB	#TS$OUT!TS$DNE,TSQSTS(R3) ;; still going, or requeued?
+	BNE	15$		;; yep, so don't drop the TSQ
+	CALL	RETBUF		;; nope, so dump the buffer
+15$:	SPLC	3		; and restore our priority 
+20$:	JMP	NEXTSQ		; See if there are more TSQs to process	;021
+
+;+
+; MTU Completion - no return to DNE$ if posting required
+;-
+
+30$:	SPLC	5		;; pump it upto 5 just in case
+	TST	MSDTSQ(R4)	;; MTU completion, no return, more to Q?
+	BEQ	35$		;; nope, all set
+	PUSH	R4		;; yes, we should, so save DDB pointer	;018
+	MOV	#MSDONQ,R0	;; get done queue root			;016
+	ADD	#MSDNE,R4	;; offset DDB to done thread
+	CALL	QUEDDB		;; queue it for more action if not already
+	POP	R4		;; restore DDB pointer (no C-bit damage) ;018
+	BCS	35$		;; don't bother to queue it.
+	L3QSET	QMSDNE		;; make sure we're going to DNE$MS later
+35$:	SPLC	3		; and restore priority
+	MOV	TSQCMD(R3),R0	; is from MTU, rewind offline?		;018
+.ASSUME RWO.MT EQ 0
+	BEQ	40$		; yes, so rewind special handling	
+	CMPB	#REW.MT,R0	; not rewoff, is it a rewind?		;018
+	BNE	55$		; no, so just exit happy
+				; MTU reqs never locked.
+40$:	SPLC	5		;; punch it upto 5, no interrupts here
+	CLR	TSQASY(R3)	;; clear this for flagging INT$
+	BITB	#TS$OUT!TS$DNE!TS$RWD,TSQSTS(R3) ;; still in progress,
+					;; or requeued,
+					;; or MTU's original rewind TSQ? ;018
+	BNE	50$		;;yeah, so don't ditch the primary TSQ
+	CALL	RETBUF		;; no, ditch the TSQ
+50$:	SPLC	3		; now he can interrupt if he wants
+55$:	MOV	MTFQB(R4),R4	; get the FIRQB pointer for response	
+	JMP	@#FIPSYS	; Queue the response to FIQUE for MTU	;021
+
+;+
+; Asynchronous posting -- set up and use ASYDNE
+;-
+
+60$:	PUSH	R4		; save the DDB pointer, in case there's more
+	MOV	TSQASY(R3),R4	; and a pointer to the work block
+	MOVB	TSQCEV(R3),XRBUSE(R4) ; mov asynch error code into the low byte
+	MOV	TSQRET(R3),XRBC(R4)   ; and give him the returned parameter
+	CALL	ASYDNE		; via ASYDNE				;016
+	POP	R4		; restore the DDB pointer
+	DECB	MSRWP(R4)	; any pending Read/Write?		;010
+	BNE	70$		; something pending, don't unlock yet	;010
+	CALLX	UNLOCK		; nothing left, so undo the MS lock bit	;010
+70$:	CALL	RETBUF		; dump the small buffer back to free list ;021
+	BIT	#<MS$ECA!MS$FTL>,MSAINF(R4) ; Should we dump the queue?	;030
+	BEQ	20$		; No, try for more done processing	;021
+	.BR	DMPQUE		; Yes, go do it				;021
+
+.WEAK	ASYDNE,FIPSYS		; Monitor only, INIT don't need them	;007
+GLOBAL	<MSDONQ>							;016
+
+.SBTTL	  DMPQUE - Dump pending I/O queue (asynch error)
+;+
+;
+; DMPQUE
+;
+;	R4-> DDB at 0
+;
+;	Dump pending request to the user with errors.
+;
+;	If ECA required:
+;	When an Error Acknowledge comes in, we will clear the
+;	ECA, and issue it out.  Since its synchronous, we're guaranteed
+;	that nothing else is lying around to mess us up.
+;
+;	If drive is dead, all requests will get ABORTs unitl the
+;	drive has been deassigned and reassigned.
+;-
+
+DMPQUE:	MOV	MSQTSQ(R4),R3	; get an item from the pending Queue
+	BEQ	20$		; if there are any left,
+	MOV	(R3),MSQTSQ(R4)	; and remove it from the queue
+	CLR	TSQRET(R3)	; zero the returned parameter
+	BIT	#MS$FTL,MSAINF(R4) ; Is the drive in bad shape?		;030
+	BEQ	10$		; No, just your normal ECA state	;030
+	SETERR	ABORT,TSQCEV(R3) ; "He's dead, Jim"			;030
+	JMP	MSAEND		; Post it				;030
+
+10$:	CMPB	#ECA.MT,TSQCMD(R3) ; is this an Error Acknowledge?
+	BEQ	30$		; yeah, so no error, we're ready for biddness
+	SETERR	HNGDEV,TSQCEV(R3) ; no, set Device hung error
+	JMP	MSAEND		; Post to the calling program		;021
+
+20$:	JMPX	RTI3		; if not, go out through RTI3		;021
+
+30$:	CLR	MSAINF(R4) 	; Clear ECA and everything else		;030
+	MOVB	TSQCMD(R3),R2	; Set up for HOKAY			;018
+	JMP	HOKAY		; issue a different response, we're ok	;021
+
+.SBTTL	RETBUF - get rid of small buffer pointed at by R3
+;+
+;
+;	R3 -> TSQ small buffer to return
+;  CALL RETBUF
+; 	Return the TSQ small buffer (pointed to by R3)
+; 	without munging any registers
+;
+;-
+
+RETBUF:	PUSH	<R4>		; no, so dump it
+	MOV	R3,R4		; by moving it into R4, and...
+	BINIT	20$		; If INIT, we can't RETSML maybe no vector ;018
+	BUFFER	RETSML		; Monitor, return the TSQ small buffer
+10$:	POP	<R4>		; straighten out the Stack
+	RETURN			; and return
+
+;+
+; We stand on our heads here because INIT successfully emulates
+; GETSMLs and RETSMLs thru I/O traps unless reading the bootstrap in over
+; the vectors.  So, I set up the stack to perform a RETTSQ just as
+; though it were coming thru the trap -- in fact, it comes back via the trap.
+; 
+; This is all FM, so be real gentle.
+;-
+
+20$:	MOV	@#PS,-(SP)	; set up for the RTT we'll be returning thru
+	MOV	#10$,-(SP)	; set up to return at 10$ above		;017
+	CALL	RETTSQ,R0	; call into the ROOT, setting up R0 for return
+
+.WEAK	RETTSQ			; INIT only, monitor don't need it
+
+.END

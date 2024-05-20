@@ -1,0 +1,929 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:FLDEF/
+.INCLUDE /CMN:KBDEF/
+TITLE	CFG,<Set system and device parameters>,0B,21-JUN-91,SHL/BGN/GPK/FEK/KPH/TPT/DRP
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for CFG
+
+;+
+;
+;  001	SHL  25-Jan-84	CREATION - [RSTS V9.0]
+;  002  BGN  12-Mar-84	Cleanup
+;  004	GPK  20-Apr-84	Privilege name changes, remove clock setup
+;  005	FEK  15-May-84	Cleanup and make modem/local work on DH's
+;  006	KPH  25-Jun-84	Bugfixes
+;  007	FEK  26-Jun-84	Bugfixes
+;  008	TPT  28-Jun-84	Fix stomping on low core bug (MODEM/LOCAL);bugfixes
+;  009	FEK  15-AUG-84	More bugfixes and star date
+;  010	KPH  02-Oct-84	Add load resident overlay code
+;  011	KPH  26-Oct-84	Add list resident overlay function
+;  012	DRP  02-Nov-84	Fix /MODEM bug
+;  013	KPH  10-Dec-84	Return overlay size in list overlay
+;  014	GPK  08-Feb-85	Bugfixes in BSTCL
+;
+;			[RSTS V9.1]
+;  015  KPH  14-May-85	New format magtape density
+;			Add EMT logging control
+;  016  KPH  10-Jun-85	Bugfix in CFGLP (call GUNMNT with R5)
+;  017	DRP  29-Jul-85	Distinguish between disabled and owned terminals
+;			in Modem/Local function.
+;
+;			[RSTS V9.3]
+;  018  KPH  12-Jan-86	Add support for calling drivers on enable/disable
+;			Misc. bugfixes and cleanup
+;  019  KPH  08-May-86	Preserve registers around driver call
+;
+;			[RSTS V9.6]
+;  020  KPH  12-Oct-87	Update for new terminal driver mapping
+;			Re-write modem/local code to be easier to understand
+;  021	DRP  31-Dec-87	Fix bug in MODLOC to enable/disable modem handling
+;			on the correct subline.
+;  022  KPH  19-Feb-88	Online stats control
+;
+;			[RSTS V9.7]
+;  023  WRM  10-Oct-88	Add set Dynamic region system wide memory quota
+;  024	FEK  05-Dec-88	Add Answerback message setting
+;
+;			[RSTS V10.0]
+;  025	DRP  17-Mar-90	Make call driver dispatch instruction in disable
+;			a device routine a global subroutine callable by
+;			TRM.
+;-
+
+.SBTTL	CFG local data definitions
+
+FQFSRT	CFG
+
+	ARGMAX	=:7			; Assign the argument maximum	;024
+	MAXLPF	=255.			; Assign maximum LP form length
+	PWRMAX	=300.			; Assign maximum for POWERFAIL_DELAY
+
+
+.SBTTL	CFG Flag word/bit definitions
+
+; Bit assignments in flag word at FQPPN for CFG$DV subfunction:
+
+	.BSECT				; in FQPPN
+C$ENDS:	.BLKB	.			; Enable/disable change flag
+C$PNOP:	.BLKB	.			; Priv/nopriv change flag
+C$LCLM:	.BLKB	.			; Local/modem change flag
+	.BLKB	.			; Reserved
+	.BLKB	.			; Reserved
+	.BLKB	.			; Reserved                          
+	.BLKB	.			; Reserved
+	.BLKB	.			; Reserved
+EN.DS:	.BLKB	.			; Enable/disable switch
+P.NOP:	.BLKB	.			; Priv/nopriv switch
+LCL.M:	.BLKB	.			; Local/modem switch
+	.BLKB	.			; Reserved
+	.BLKB	.			; Reserved
+	.BLKB	.			; Reserved
+	.BLKB	.			; Reserved
+	.BLKB	.			; Reserved
+
+.BSECT				; In FQERNO, EMT logging subfunction
+
+EL$FIP:	.BLKB	.		;If set, CALFIP directive, else .UUO	;015
+EL$CHA:	.BLKB	.		;If set, making a change		;015
+EL$ENA:	.BLKB	.		;New value for logging (set = enable)	;015
+	.BLKB	.		;Reserved				;015
+	.BLKB	.		;Reserved				;015
+	.BLKB	.		;Reserved				;015
+	.BLKB	.		;Reserved				;015
+	.BLKB	.		;Reserved				;015
+
+	UNORG				; Back to reality...
+
+.SBTTL	Control EMT Logging
+
+;+
+;	R0 =  JOB # * 2
+;	R4 -> FIRQB
+;		FQFUN  = UU.CFG
+;		FQFIL  = Type of CFG call
+;		FQSIZM = Function flags:
+;			   1 -> If set, CALFIP, if clear, .UUO
+;			   2 -> If set, change current value
+;			   4 -> New current value (set to enable)
+;		FQPPN  = CALFIP or .UUO number to change
+;
+;	Data returned:
+;
+;	       FQNAM1 = 1 if EMT Logging enabled, else zero
+;
+;-
+
+CFGEML::CMP	#EMLTBL,#N$G$$D	;EMT logging selected at SYSGEN?	;015
+	BEQ	80$		;No, so don't allow this call		;015
+	MOVB	FQSIZM(R4),R1	;Get the flags				;015
+	BIT	#EL$CHA,R1	;Making a change?			;015
+	BEQ	10$		;No, anyone can do lookups		;015 
+	TSTPRV	SWCTL,@#FIPRVM	;Allowed to control the software?	;015
+	BEQ	NOPRV		;No, not this time			;015
+
+10$:	MOVB	FQPPN(R4),R2	;Get the function code			;015
+	MOVPIC	#PAIRTB,R3	;And point to the pair table		;015
+	MOV	#2,R0		;And set up the .UUO -> CALFIP offset	;015
+	BIT	#EL$FIP,R1	;CALFIP style request?			;015
+	BNE	20$		;Yes, go handle that			;015
+	CMPB	R2,#UU$MIN	;.UUO, is it legal?			;015
+	BLT	100$		;No, not this time			;015
+	CMPB	R2,#UU$MAX	;Maybe, is it too high?			;015
+	BGT	100$		;Yes, forget it				;015
+	ADD	#$UUOSN-UU$MIN,R2 ;Now point to the table entry		;015
+	BR	30$		;And join up				;015
+
+20$:	ASR	R2		;Get function code / 2			;015
+	BCS	100$		;Odd, forget that			;015
+	CMP	R2,#EMLMFQ/2	;Within range?				;015
+	BHI	100$		;No, forget it				;015
+	ADD	#$EMLFQ,R2	;Legal, point to the table entry	;015
+	TST	(R3)+		;And update the pair pointer for CALFIP	;015
+	NEG	R0		;And update the pair offset value	;015
+30$:	BIT	#EL$CHA,R1	;Making a change?			;015
+	BEQ	60$		;No, not this time			;015
+	BITB	#EMLQNV,(R2)	;Is this function changable?		;015
+	BNE	NOAVL		;No, so forget it			;015
+	MOV	#PAIRSZ,R5	;Get size of pair table			;015
+40$:	CMP	R2,(R3)		;Found our entry?			;015
+	BEQ	50$		;Yes, sure did				;015
+	CMP	(R3)+,(R3)+	;No, update to the next entry		;015
+	SOB	R5,40$		;And loop for all the pairs		;015
+50$:	ADD	R0,R3		;Point to other entry in pair		;015
+	MOV	(R3),R3		;Now get the paired address		;015
+	BICB	#EMLQNL,(R2)	;Guess at enabling function		;015
+	BICB	#EMLQNL,(R3)	;In both places				;015
+	BIT	#EL$ENA,R1	;Good guess?				;015
+	BNE	60$		;Yes, all set				;015
+	BISB	#EMLQNL,(R2)	;No, disable it				;015
+	BISB	#EMLQNL,(R3)	;In both places				;015
+60$:	CLR	FQNAM1(R4)	;Guess that logging is disabled		;015
+	BITB	#EMLQNL,(R2)	;Good guess?				;015
+	BNE	70$		;Yes, sure is				;015
+	INC	FQNAM1(R4)	;No, it is enabled			;015
+70$:	RETURN			;All done...				;015
+
+80$:	ERROR	ERRERR		;EMT logging not available in monitor	;015
+
+100$:	ERROR	NODEVC		;Invalid .UUO or CALFIP function	;015
+
+NOPRV:	ERROR	PRVIOL		;Need SWCTL privilege			;015
+
+NOAVL:	ERROR	NOTAVL		;Function is not logable		;015
+
+; The following is the pair table. Some functions exist as both .UUO
+; and CALFIP functions. This table contains pointers to the cells
+; which must be treated as paired. The table contains the .UUO function
+; followed by the comparable CALFIP function.
+
+.MACRO	PAIR	FUN
+	.WORD	$UUOSN+<UU.'FUN'-UU$MIN>,<$EMLFQ+<'FUN'FQ/2>>
+.ENDM	PAIR
+
+PAIRTB:	PAIR	ASS		;Set up UU.ASS, ASSFQ pair		;015
+	PAIR	DEA		;Set up UU.DEA, DEAFQ pair		;015
+	PAIR	DAL		;Set up UU.DAL, DALFQ pair		;015
+	PAIR	LOK		;Set up UU.LOK, LOKFQ pair		;015
+PAIRSZ	=	<.-PAIRTB>/4	;Number of paired entries		;015
+	.WORD	JUNK,JUNK	;Junk entry for non-paired entries	;015
+
+GLOBAL	<FIPRVM,EMLTBL,$UUOSN,JUNK>					;015
+
+.WEAK	$EMLFQ								;015
+
+.SBTTL	UU.CFG SET DEVn: CHARACTERISTICS function
+
+;+
+;	R0 =  JOB # * 2
+;	R4 -> FIRQB
+;		FQFUN = UU.CFG
+;		FQFIL = Type of CFG call
+;		FQPPN = Word containing bit flags for various 
+;			operations (See .BSECT)
+;		  C$ENDS = 0 for no change; 
+;			   1 to change ENABLED/DISABLED status
+;		  C$PNOP = 0 for no change; 
+;			   1 to change PRIV/NOPRIV ownership
+;		  C$LCLM = 0 for no change; 
+;			   1 to change LOCAL/MODEM KB control
+;		   EN.DS = 0 for ENABLE; 
+;			   1 for DISABLE DEVn:
+;		   P.NOP = 0 for Non-restricted access; 
+;			   1 for Restricted access
+;		   LCL.M = 0 for LOCAL; 
+;			   1 for MODEM line control
+;		FQDEV = Device on which to perform operation
+;
+;	On RETURN:
+;	        FQPPN+1 = Byte containing bit flags indicating returned status
+;		  EN.DS = 0 if device enabled and free; 1 if disabled or in use
+;		  P.NOP = 0 if nopriv'd; 1 if you must be privledged to own it
+;		  LCL.M = 0 if KB is LOCAL; 1 if under MODEM control; RANDOM if
+;				FQDEV is not a KB
+;	       FQNAM1 = 0 if EN.DS is 0; 3 if device was disabled through the
+;   			use of this call (and therefore can be re-enabled by
+;   			this call); any even integer is device owner's job
+;   			number * 2; or any odd integer indicates that the
+;   			device was disabled by the monitor and cannot be
+;   			re-enabled. 
+;-              
+
+CFGDEV::CALLX	GUNMNT,R5	;Get the DDB address			;004
+10$:	 ERROR	PRVIOL		;Unit is a disk; error
+	MOVB	FQJOB(R4),R0	;Get job number again			;004
+	BIT	#^C<C$ENDS>,FQPPN(R4) ;Other than enable/disable?	;004
+	BEQ	20$		;No, skip				;004
+	CALLX	CHKPRV,R4	;Yes, those are HWCFG privilege		;004
+	 .BPRIV	HWCFG		; ...					;018
+	BCS	10$		;Error if not				;004
+20$:	BIT	#C$ENDS,FQPPN(R4) ;Enable/disable change bit set?	;004
+	BEQ	100$		;No, get info for returned status	;004
+	CALLX	CHKPRV,R4	;Yes, check for HWCTL privilege		;004
+	 .BPRIV	HWCTL		; ...					;004
+	BCS	10$		;Error if not				;004
+	MOVPIC	#160$,R3	;Point to table of device indexes	;018
+30$:	CMPB	(R3)+,(R1)	;Does this device want to be called?	;018
+.ASSUME	DDIDX	EQ	0
+	BEQ	40$		;Yes, set flag for later		;018
+	TSTB	(R3)		;No, more to do?			;018
+	BPL	30$		;Yes, go for it				;018
+	MOV	(PC)+,R3	;No, set flag for no driver calling	;018
+40$:	 CLR	R3		;Indicate driver wants to be called	;018
+	MOV	#CFGJOB,R0	;Pick up our special job number		;018
+	BIT	#EN.DS,FQPPN(R4) ;Enable or disable?			;018
+	BNE	70$		;Disable, go do it
+	CMPB	DDJBNO(R1),R0	;Enable, did we disable it?		;018
+	BEQ	50$		;Yes, so go enable it now
+	CMPB	DDJBNO(R1),#1	;No, what is the state of the device?	;018
+	BHI	75$		;In use, report that			;018
+	BLO	100$		;Free, so it is already enabled		;018
+	ERROR	NOTAVL		;Disabled by INIT, report that		;018
+
+; Enable a device
+;
+; R0 =  CFG system job number
+; R1 -> DDB of device to enable
+; R3 =  Flag: If 0, call driver at $DEATBL; else don't call driver
+                                    
+50$:	TST	R3		;Enable, did the driver want to be called? ;018
+	BNE	60$		;No, not this time			;018
+	MOV	R1,-(SP)	;Yes, save DDB pointer			;019
+	MOV	R4,-(SP)	;And the FIRQB pointer			;019
+	CALLX	DVRDSP,R4,<$DEATBL> ;Yes, call driver at DEA$xx		;018
+	MOV	(SP)+,R4	;Restore FIRQB pointer			;025
+	BR	85$		;And join up				;018
+                
+60$:	CLRB	DDJBNO(R1)	;Mark device as free			;018
+	BR	100$		;And join up				;018
+
+; Disable a device
+;
+; R0 =  CFG system job number
+; R1 -> DDB of device to disable
+; R3 =  Flag: If 0, call driver at $DEATBL; else don't call driver
+
+70$:	TSTB	DDJBNO(R1)	;Disable, is the device free?		;018
+	BEQ	80$		;Yes, it sure is			;018
+75$:	ERROR	INUSE		;No, give an error			;018
+
+80$:	TST	R3		;Should we call the driver to do this?	;018
+	BNE	90$		;No, we can do it ourselves		;018
+	MOV	R1,-(SP)	;Yes, save DDB pointer			;019
+	CALL	DSBLDV		; and go disable the device		;025
+85$:	MOV	(SP)+,R1	;Restore the DDB pointer		;025
+	BR	100$		;And join up				;018
+
+90$:	MOVB	R0,DDJBNO(R1)	;Disable by assigning to the system	;018
+                
+100$:	BIC	#EN.DS,FQPPN(R4)	; Indicate device is free in flag word
+	CLRB	FQNAM1(R4)		; Clear job number in returned status
+	TSTB	DDJBNO(R1)		; Is it free?
+	BEQ	110$			; Yes, continue
+	BIS	#EN.DS,FQPPN(R4)	; No, set "owned or disabled" flag
+	MOVB	DDJBNO(R1),FQNAM1(R4)	; Put owning job number in FQNAM1
+110$:	BIT	FQPPN(R4),#C$PNOP	; Priv/nopriv change bit set?
+	BEQ	120$			; No, get info for returned status
+	BIS	#DDPRVO,(R1)		; Make device ownership privledged
+	BIT	FQPPN(R4),#P.NOP	; Did user want it priv'd (1) or non?
+	BNE	120$			; Yes, go get info for returned status
+	BIC	#DDPRVO,(R1)		; Make device ownership nonprivledged
+120$:	BIS	#P.NOP,FQPPN(R4)	; Indicate ownership is priv'd
+	BIT	#DDPRVO,(R1)		; Is it?
+	BNE	130$			; Yes, continue
+	BIC	#P.NOP,FQPPN(R4)	; Indicate device ownership is non-priv
+130$:	CMPB	(R1),#IDX.KB	;Is this a terminal?			;018
+	BNE	150$		;No, skip the local/modem stuff		;018
+	BIT	FQPPN(R4),#C$LCLM	; Local/modem change bit set?
+	BEQ	140$			; No, return
+	FCALL	MODLOC			;GO FINISH MODEM STUFF		;007
+140$:	BIC	#LCL.M,FQPPN(R4)	; Indicate KB is local in returned info
+	BIT	#TTMODM,TTINTF(R1)	; Is it?
+	BEQ	150$			; Yes, return
+	BIS	#LCL.M,FQPPN(R4)	; Indicate KB is under modem control
+150$:	RETURN				; Return
+
+; Table of devices which want to be called at their assign and deassign
+; entry points when they are enabled and disabled
+
+160$:	.BYTE	IDX.KB		;Terminal driver wants to be called	;018
+	.BYTE	IDX.XE		;UNA driver wants to be called		;018
+	.BYTE	IDX.XH		;QNA driver wants to be called		;018
+	.BYTE	-1		;End of table				;018
+
+.EVEN	;in the quietest moments
+
+	;+								;025
+	; R0  = CFG system job						;025
+	; R1 -> DDB							;025
+	;-								;025
+
+DSBLDV::MOV	R4,-(SP)	;Save the FIRQB pointer			;025
+	CALLX	DVRDSP,R4,$ASNTBL ;Disable by assigning to the system	;025
+	MOV	(SP)+,R4	;Restore FIRQB pointer			;025
+	RETURN			; and return to our caller		;025
+
+GLOBAL	<$DEATBL,$ASNTBL,IDX.KB,IDX.XE,IDX.XH>				;020
+
+FQFEND          
+
+FQFSRT
+
+.SBTTL	UU.CFG SET DEVn: CHARACTERISICS (MODEM/LOCAL) function              
+
+MODLOC:	MAP	TERAP6,APR=6,CODE,DATA,PIC ;Map the terminal driver	;020
+	MOVB	DDUNT(R1),R0	;Pick up the keyboard's unit number	;020
+	ASL	R0		; times two				;020
+	MOV	CSR.KB(R0),R3	;Get CSR address			;020
+	CALLX	SUBLIN		;Get subline number			;020
+	ASR	R2		;..and make it subline # * 1		;021
+	MOVB	TTINTF(R1),R5	;Pick up interface type code		;020    
+	BIT	#LCL.M,FQPPN(R4) ;Setting this to a local line?		;020
+ 	BEQ	20$		;Yes, go for it				;020
+	BIT	#TTMODM,TTINTF(R1) ;Already a dialup line?		;020
+	BNE	50$		;Yes, thats a nop			;020
+	MOVPIC	#10$,-(SP)	;Set a return address			;020
+	ADD	R5,PC		;And dispatch in a PIC way		;020
+	 ERROR	ERRERR		;Can't do the console			;020
+.ASSUME	TTKL11	EQ	0
+	 CRASH			;Don't know about DC11s anymore		;020
+.ASSUME	TTDC11	EQ	TTKL11+2
+	 ERROR	ERRERR		;Can't do DL11s				;020
+.ASSUME	TTDL11	EQ	TTDC11+2
+	 BR	DEMODM		;Handle this DL11E			;020
+.ASSUME	TTDE11	EQ	TTDL11+2                                     
+	 ERROR	ERRERR		;Can't do pseudo keyboards!		;020
+.ASSUME	TTPK11	EQ	TTDE11+2
+	 ERROR	ERRERR		;Can't do DJ11s				;020
+.ASSUME	TTDJ11	EQ	TTPK11+2
+	 BR	DHMODM		;Handle this DH line			;020
+.ASSUME	TTDH11	EQ	TTDJ11+2
+	 RETURN			;Nothing to do for DZ lines...		;020
+.ASSUME	TTDZ11	EQ	TTDH11+2
+	 BR	VHMODM		;Handle this DHV/DHU line		;020
+.ASSUME	TTVH11	EQ	TTDZ11+2
+	 ERROR	ERRERR		;Can't do LAT terminals			;020
+.ASSUME	TTLT11	EQ	TTVH11+2
+.ASSUME	TTINTM	EQ	TTLT11+2                                   
+                         
+10$:	BIS	#TTMODM,TTINTF(R1) ;;Enable modem control		;020
+	MOV	#TTDSBL,MODCLK(R1) ;;And mark line as unanswered	;020
+	BR	40$		;;And exit				;020
+
+20$:	BIT	#TTMODM,TTINTF(R1) ;Already a local line?		;020
+	BEQ	50$		;Yes, nothing to do			;020
+	MOVPIC	#30$,-(SP)	;No, set a return address		;020
+	SPLC	5		;Lock out interrupts			;020
+	ADD	R5,PC		;;And dispatch in a PIC way		;020
+	 CRASH	 		;;Can't do the console			;020
+.ASSUME	TTKL11	EQ	0
+	 CRASH			;;Don't know about DC11s anymore   	;020
+.ASSUME	TTDC11	EQ	TTKL11+2
+	 CRASH			;;Can't do DL11s       			;020
+.ASSUME	TTDL11	EQ	TTDC11+2
+	 BR	DELOCL		;;Can't do DL11Es			;020
+.ASSUME	TTDE11	EQ	TTDL11+2                                     
+	 CRASH			;;Can't do pseudo keyboards!		;020
+.ASSUME	TTPK11	EQ	TTDE11+2
+	 CRASH			;;Can't do DJ11s       			;020
+.ASSUME	TTDJ11	EQ	TTPK11+2
+	 BR	DHLOCL		;;Handle this DH line			;020
+.ASSUME	TTDH11	EQ	TTDJ11+2
+	 BR	DZLOCL 		;;Handle this DZ line			;020
+.ASSUME	TTDZ11	EQ	TTDH11+2
+	 BR	VHLOCL		;;Handle this DHV/DHU line		;020
+.ASSUME	TTVH11	EQ	TTDZ11+2
+	 ERROR	ERRERR		;;Can't change it for LAT		;020
+.ASSUME	TTLT11	EQ	TTVH11+2
+.ASSUME	TTINTM	EQ	TTLT11+2
+
+30$:	BIC	#TTMODM,TTINTF(R1) ;;Mark as a local line		;020
+	CLR	MODCLK(R1)	;;And mark it as answered		;020
+40$:	SPLC	3		;;Enable interrupts			;020
+50$:	MAP	FIP,CODE,DATA	;Restore FIP mapping			;020
+	RETURN			;And exit				;020
+                
+GLOBAL	<TERAP6,CSR.KB>							;020
+
+.SBTTL	DEMODM	DL11E set modem service
+                                                                            
+;+                                
+; DEMODM - DL11E set modem service
+;               
+;	R0 =  Unit # * 2
+;	R1 -> DDB          
+;	R3 -> CSR
+;	R4 -> FIRQB
+;
+;	CALL	DEMODM
+;-                                
+
+DEMODM:	SPLC	5		;Lock out interrupts			;020
+	BIS	#40,(R3)	;;Enable dataset interrupts		;020
+	BIC	#100!1,4(R3)	;;Disable the output side		;020
+	RETURN			;;And we're done			;020
+
+.SBTTL	DHMODM	DH11 set modem service
+                                                                            
+;+                                
+; DHMODM - DH11 set modem service
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB          
+;	R2 =  Subline number
+;	R3 -> CSR
+;	R4 -> FIRQB
+;
+;	CALL	DHMODM
+;-                                
+                                                                    
+DHMODM:	MOV	@#CSR.BB,R5	;Point to DM11BB CSR table		;020
+	BEQ	20$		;None, give an error			;020
+	ADD	R0,R5		;Find CSR for this unit			;020
+	MOV	(R5),R5		;And get the actual address		;020
+	BEQ	20$		;None, give an error			;020
+	SPLC	5		;Lock out interrupts			;020
+	BIC	#^C<100!17>,(R5) ;;CLEAR ALL BUT IE AND SUBLINE		;005
+10$:	BIT	#20,(R5)	;;IS IT READY??				;005
+	BNE	10$		;;NO, SO WAIT				;005
+	BIC	#1000!17,(R5)	;;CLEAR SUBLINE AND MAINT		;005
+	BIS	R2,(R5)		;; select line IN DM11BB		;005
+	MOV	#1,2(R5)	;; enable scan on this line		;005
+	MOV	#140,(R5)	;; enable DM11BB			;005
+	RETURN			;;And exit				;020
+        
+20$:	ERROR	ERRERR		;No DM11BB for this DH11		;020
+
+GLOBAL	<CSR.BB>							;020
+
+.SBTTL	VHMODM	DHU11/DHV11 set modem service
+                                
+;+     
+; VHMODM - DHU11/DHV11 set modem service
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB          
+;	R2 =  Subline number
+;	R3 -> CSR
+;	R4 -> FIRQB
+;                     
+;	CALL	VHMODM            
+;-
+
+VHMODM:	BISB	#100,R2		;Be sure to include receive IE in subline ;020
+	SPLC	5		;Lock out interrupts			;020
+	MOVB	R2,(R3)		;; select line				;008
+	BIS	#400,10(R3)	;; set link type = modem		;002
+	RETURN			;;And we're done			;020
+
+.SBTTL	DELOCL	DL11E set local service
+
+;+                                
+; DELOCL - DL11E set local service
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB          
+;	R3 -> CSR
+;	R4 -> FIRQB
+;
+;	CALL 	DELOCL            
+;-     
+
+DELOCL:	BIC	#40!4!2,(R3)	;;Clear Dataset-IE, RQS, and DTR	;020
+	RETURN			;;And we're done                  	;020
+
+.SBTTL	DHLOCL	DH11 set local service
+
+;+                                
+; DHLOCL - DH11 set local service
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB          
+;	R2 =  Subline number
+;	R3 -> CSR
+;	R4 -> FIRQB
+;
+;	CALL 	DHLOCL            
+;-     
+                                                                            
+DHLOCL:	MOV	@#CSR.BB,R5	;;Get pointer to DM11BB CSR table	;020
+	ADD	R0,R5		;;Point to cell for this unit		;020
+	MOV	(R5),R5		;;Now get the CSR itself   		;020
+	BIC	#^C<100!17>,(R5) ;;CLEAR ALL BUT IE AND SUBLINE		;005
+10$:	BIT	#20,(R5)	;;IS IT READY??				;005
+	BNE	10$		;;NO, SO WAIT				;005
+	BIC	#1000!17,(R5)	;;CLEAR SUBLINE AND MAINT		;005
+	BIS	R2,(R5)		;; select line IN DM11BB		;005
+	CLR	2(R5)		;; HANGUP & disable scanning		;005
+	MOV	#140,(R5)	;; enable DM11BB			;005
+	RETURN			;;And exit				;020
+
+GLOBAL	<CSR.BB>							;020
+
+.SBTTL	DZLOCL	DZ11 set local service
+                                                                            
+;+
+; DZLOCL - DZ11 set local service
+;
+;	R0 =  Unit # * 2                                 
+;	R1 -> DDB          
+;	R2 =  Subline number
+;	R3 -> CSR
+;	R4 -> FIRQB   
+;               
+;	CALL	DZLOCL
+;-
+
+DZLOCL:	BICB	BITBYT(R2),5(R3) ;;Hang up the line			;020
+	RETURN			;;And we're done   			;020
+
+GLOBAL	<BITBYT>
+
+.SBTTL	VHLOCL	DHV11/DHU11 set local service
+
+;+
+; VHLOCL - DHV11/DHU11 set local service
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB          
+;	R2 =  Subline number
+;	R3 -> CSR
+;	R4 -> FIRQB
+;
+;	CALL	VHLOCL
+;-              
+                                  
+VHLOCL:	BISB	#100,R2		;;MAKE SURE RX I.E. IS SET		;008
+	MOVB	R2,(R3)		;; select line				;008
+	BIC	#1400,10(R3)	;; HANGUP AND set type = local		;005
+	RETURN			;;And we're done			;020
+
+FQFEND     
+
+FQFSRT
+        
+.SBTTL	Load and unload FIP overlays
+                                                                            
+;+
+; CFGLOD - Load and unload a FIP overlay
+;                       
+;	R4 -> FIRQB
+;		+ FQPPN  = Operation flag; 0 = load, 1 = unload, 2 = check
+;			   if loaded or not
+;		+ FQNAM1 = Overlay name to load, in RAD-50
+;
+; Data returned:
+;
+;	FIRQB + FQPPN = Amount of XBUF used, in bytes
+;-
+
+CFGLOD::TSTPRV	SWCFG,@#FIPRVM	;Privileged to alter the software configuration?
+	BNE	20$		;Yes, so go for it
+10$:	ERROR	PRVIOL		;No, forget this			;011
+
+20$:	MOV	FQPPN(R4),-(SP)	;Save the operation flag
+	CMP	(SP),#2		;Legal function code?			;011
+	BHI	10$		;No, forget it				;011
+	MOV	FQNAM1(R4),-(SP) ;Save the overlay name
+	CALLX	WRITEC		;Be sure FIBUF is written out
+	MOVB	#-1,@#FIBUNT	;And invalidate it
+	MOV	#<<2000/1000>*4>,R5 ;Read the OVR table into FIBUF. The FBB
+	ADD	@#OVBASE,R5	; for the table is at virtual 2000 in OVBASE.
+	MOV	#1000,R1	;Set up for a one block read
+	CLR	R2		;Clear MSB of address
+	MOV	#FIBUF,R3	;Upon return from RDBLK, R3 will point to
+	CALL	RDBLK		; the beginning of the OVR table.
+	CMP	(R5)+,(R5)+	;Point to the FBB of the first overlay.
+.ASSUME	FBBSIZ	EQ	4
+	MOV	R3,R4		;Copy the OVR table pointer.
+	TST	(R4)		;Do we know about this table format?
+.ASSUME	OTHFOR	EQ	0
+	BEQ	30$		;Yes, that's good			;011
+	ERROR	BADDIR		;Invalid overlay format table		;011
+
+30$:	ADD	@#FIBUF+OTHSIH,R4 ;Point past the OVR table header.	;011
+	
+;
+; Search for the overlay specified by our caller
+;
+
+40$:	TST	(R4)		;Is there a module or the end of list?
+.ASSUME	OTMNAM	EQ	0
+	BEQ	110$		;A zero word means the end of list.
+	MOV	OTMNUM(R4),R0	;Get the number of overlays for this module.
+	CMP	(R4),(SP)	;Is this the overlay the user asked about?
+	BEQ	50$		;Yes, it sure is
+.ASSUME	OTMNAM	EQ	0
+	ADD	@#FIBUF+OTHSIM,R4 ;Point to first overlay descriptor.
+	MOV	@#FIBUF+OTHSIO,R1 ;Get the number of bytes in each overlay
+	MUL	R0,R1		; and multiply by number of overlays.
+	ADD	R1,R4		;Add this to point to next module.
+	ASH	#2,R0		;Get the number of overlays * FBBSIZ
+.ASSUME	FBBSIZ	EQ	4
+	ADD	R0,R5		;And point past the FBBs for this module.
+	BR	40$		;Process the next module.
+
+; We have located the table entry for the overlay to load.
+; We will now calculate the size of the overlay in bytes, and
+; allocate it from XBUF.
+;
+;	R0 = Number of overlays
+;	R4 -> Module header for this overlay
+;	R5 -> FBB for first overlay of module
+;	SP -> Overlay name, function word
+
+50$:	TST	(SP)+		;Dump the module name
+	MOV	(SP)+,R1	;Is this a load?			;011
+	BNE	150$		;No, unload or list
+	TST	OTMFLG(R4)	;Can this overlay be loaded?
+.ASSUME	OTFLOD	EQ	100000	
+	BPL	120$		;No, not this time, forget it
+	TST	(R5)		;Yes, but is it already loaded?
+	BMI	130$		;Yes, forget it
+	ADD	@#FIBUF+OTHSIM,R4 ;Point to first overlay descriptor.
+	MOV	R4,-(SP)	;Save pointer to table start
+	MOV	R0,-(SP)	;Save the number of overlays
+	CLR	R1		;R1 will hold size of overlay
+60$:	ADD	(R4),R1		;Account for the length of this overlay
+	ADD	@#FIBUF+OTHSIO,R4 ;And advance to the next overlay
+	SOB	R0,60$		;Now loop for all the overlays
+
+; We have now calculated the size of the overlay. We will now add the
+; space for the saved FBBs (so we can restore them to make the overlay
+; non-resident).
+;
+;	R1 = Size of overlay in bytes
+;	R5 -> FBB for first overlay
+;	SP -> Number of overlays, Address of overlay table
+
+	MOV	(SP),R0		;Get the number of overlays again
+	ASL	R0		;And make it times two
+	ASL	R0		;Now make it times four for FBB storage
+	ADD	#2,R0		;And add two for BF.SIZ
+	ADD	R0,R1		;Now we have the total size to get from XBUF
+	CALLX	BUFFR2,R5,<-1,LRGPOL> ;Get some XBUF for this overlay
+	BCS	140$		;No XBUF to load overlay
+
+; We have now allocated the XBUF. Write the amount of XBUF used into the
+; caller's work block.
+
+	MOV	@#FIQUE,R0	;Pick up the work block pointer
+	MOV	R1,FQPPN(R0)	;And return the XBUF actually allocated
+	ADD	R1,@#USETBL+UT.OVR ;And update resident overlay usage	;011
+
+; We will now save the FBB table.
+
+	CALLX	MAPBUF		;Go and map the buffer
+	TST	(R3)+		;And advance past BF.SIZ
+	MOV	(SP),R0		;Get the number of overlays
+	ASL	R0		;And make it times two for the FBB size
+.ASSUME	FBBSIZ	EQ	4
+	MOV	R5,-(SP)	;And save the FBB pointer
+70$:	MOV	(R5)+,(R3)+	;Save a word from the FBB
+	SOB	R0,70$		;And loop for the whole thing
+	MOV	(SP)+,R5	;Restore FBB pointer
+	MOV	(SP)+,R0	;And restore number of overlays
+	MOV	(SP)+,R4	;Restore table pointer
+
+; We have now set up the header area in XBUF. We will now calculate
+; the 22-bit address to load the overlay into.
+;
+;	R0 = Number of overlays to load
+;	R3 -> Next free byte (virtually through DPAR6) in XBUF load area
+;	R4 -> Overlay table @ first overlay entry for module to load
+;	R5 -> FBB for first overlay to load
+
+	MOV	R3,R1		;Get the offset into XBUF into a safe place
+	SUB	#140000,R1	;R1 = size of XBUF we have used
+	MOV	@#DPAR6,R3	;Pick up the pointer to MMU address of XBUF
+	MOV	(R3),R3		;Now we have the MMU address of XBUF
+	MOV	R3,-(SP)	;Save the MMU address of the buffer
+	MAP	FIPPOL		;Re-map FIP pool
+	CLR	R2		;Set up for our 22-bit address
+	ASHC	#6,R2		;Now make it a physical address	
+	ADD	R1,R3		;Account for XBUF overhead
+	ADC	R2		;Double precision
+	MOV	SP,@#FIPESP	;Save the SP for errors
+	MOVPIC	#100$,R1		;Get PIC error address
+	MOV	R1,@#FIPERX	;And set up our error exit
+	MOV	R0,-(SP)	;Save the overlay count
+	MOV	R5,-(SP)	;Save the initial FBB pointer
+	MOV	R4,-(SP)	;Save the table pointer
+	MOV	R3,-(SP)	;Save LSB of memory address
+	MOV	R2,-(SP)	;And save MSB of memory address
+
+; We have allocated the space from XBUF. We will now load the overlays
+; into memory.
+;
+;	R0 = Number of overlays to load
+;	R2 = MSB of memory address to load overlay
+;	R3 = LSB of memory address to load overlay
+;	R4 -> Overlay descriptor for first overlay
+;	R5 -> FBB for overlays to load
+;	SP -> MSB address, LSB address, overlay table pointer, FBB pointer,
+;	      MMU address of table start
+
+80$:	MOV	(R4),R1		;Get the size of the module.
+.ASSUME	OTOLEN	EQ	0
+	CALL	RDBLK		;Read the block into memory.
+	ADD	(R4),R3		;Update the memory pointer.
+.ASSUME	OTOLEN	EQ	0
+	ADC	R2
+	ADD	@#FIBUF+OTHSIO,R4 ;Point to the next overlay
+	CMP	(R5)+,(R5)+	;And advance to the next FBB
+.ASSUME	FBBSIZ	EQ	4
+	SOB	R0,80$		;On to the next overlay.
+
+; Now we have loaded all the overlays. We can now update the FBB table
+; to reflect the MMU address. We do the FBB table update last so that
+; there is no chance of leaving a synchronous FIP function partially
+; loaded.
+
+	MOV	(SP)+,R2	;Restore the MSB of the memory address
+	MOV	(SP)+,R3	;Restore the LSB of the memory address
+	MOV	(SP)+,R4	;Restore the pointer to the overlay table
+	MOV	(SP)+,R5	;Restore the initial FBB pointer
+	MOV	(SP)+,R0	;Restore the count of overlays
+	TST	(SP)+		;Junk the saved MMU address
+
+90$:	MOV	R3,R1		;Copy the LSBs of the memory address,
+	BIC	#^C<77>,R1	; find the offset from the MMU boundry,
+	ADD	#120000,R1	; add the APR5 base address,
+	MOV	R1,(R5)+	; and update the FBB.
+	PUSH	<R2,R3>		;Save the current address.
+	ASHC	#-6,R2		;Make it an MMU address.
+	MOV	R3,(R5)+	;Put the APR5 mapping value in the FBB.
+	POP	<R3,R2>		;Restore the memory address.
+	ADD	(R4),R3		;Update the memory pointer.
+.ASSUME	OTOLEN	EQ	0
+	ADC	R2
+	ADD	@#FIBUF+OTHSIO,R4 ;Point to the next overlay
+	SOB	R0,90$		;On to the next overlay.
+	RETURN			;And we're done
+
+; We get here if an error occured loading the overlay. We will pop the
+; MMU address of the table off the stack, and join the code to return
+; the buffer to XBUF.
+
+100$:	MOV	@#FIPESP,SP	;Restore the stack pointer
+	MOV	(SP)+,R5	;Restore the MMU address of table start
+	MAP	R5,APR=6,DATA,PIC ;And be sure the table is mapped	;011
+	BR	180$		;And join the remove code
+
+110$:	ERROR	NOSUCH		;Overlay not found
+
+120$:	ERROR	NODEVC		;Overlay can not be loaded
+
+130$:	ERROR	INUSE		;Overlay has already been loaded
+
+140$:	ERROR	NOBUFS		;No XBUF available for overlay
+
+GLOBAL	<FIPRVM,FIBUNT,OVBASE,FIBUF,FIPERX,FIPESP,LRGPOL,FIQUE,USETBL>	;011
+
+; This is the remove or list overlay code
+;
+;	R0 = Number of overlays in this module
+;	R1 = 1 for unload or 2 for check if loaded or not
+;	R4 -> Module header for this module
+;	R5 -> FBB for first overlay
+
+150$:	DEC	R1		;Is this the list function?		;011
+	BNE	200$		;Yes, go for it				;011
+	TST	(R5)		;Is this overlay loaded?
+	BPL	190$		;No, can't unload it then
+	MOV	R0,R4		;Save the number of overlays
+	ASL	R0		;Get the number of overlays times two
+	ASL	R0		;Now we have number of overlays times four
+.ASSUME	FBBSIZ	EQ	4
+	ADD	#2,R0		;Now add in two for BF.SIZ
+	MOV	2(R5),R3	;Pick up MMU address of first overlay
+	CLR	R2		;And get ready to calculate physical address
+	ASHC	#6,R2		;Get physical address of first overlay
+	MOV	(R5),R1		;Pick up offset from APR5 virtual base
+	SUB	#120000,R1	;Now we have offset from MMU base
+	ADD	R1,R3		;Now correct physical overlay base
+	ADC	R2		;Double precision
+	SUB	R0,R3		;Now get base of the XBUF area
+	SBC	R2		;Double precision
+	BIT	#77,R3		;Are we really at the start of XBUF?
+	BEQ	160$		;Yes, that's good
+	CRASH			;No, something is wrong!
+
+160$:	ASHC	#-6,R2		;Get MMU base address of XBUF area
+	MAP	R3,APR=6,DATA,PIC ;And map it through DPAR6
+
+; At this point, we will unload the overlay
+;
+;	R4 = Number of overlays
+;	R5 -> FBB for first overlay
+;	XBUF is mapped through DPAR6
+	
+	MOV	#140000+2,R3	;R3 -> First saved FBB in XBUF
+	ASL	R4		;Get the number of FBB words to move
+.ASSUME	FBBSIZ	EQ	4
+170$:	MOV	(R3)+,(R5)+	;Restore a word from the FBB
+	SOB	R4,170$		;For the whole thing
+
+; Now we've restored the FBBs. We can now return the XBUF
+
+	MOV	@#DPAR6,R5	;Pick up the pointer to XBUF
+	MOV	(R5),R5		;Now R5 has MMU address of XBUF to return
+180$:	SUB	@#140000+BF.SIZ,@#USETBL+UT.OVR ;Update the XBUF usage	;011
+	MOV	R5,R4		;R4 and R5 have MMU address for conversion
+	ASHC	#7,R4		;Convert MMU address to contorted address
+	BUFFER	RETURN		;Go return the buffer to the pool
+	BR	210$		;And we're done				;013
+
+190$:	ERROR	NOTMNT		;Overlay hasn't been loaded
+
+; This is the check if loaded function
+
+;	R5 -> FBB for first overlay
+
+200$:	MOV	@#FIQUE,R4	;Pick up work block pointer		;011
+	CLR	FQPPN(R4)	;Guess that the overlay is not loaded	;011
+	TST	(R5)+		;Is this overlay loaded?		;013
+	BPL	220$		;No, good guess				;013
+	MAP	(R5),APR=6,DATA,PIC ;Go and map the overlay		;013
+	MOV	@#140000,FQPPN(R4) ;Return the size			;013
+210$:	MAP	FIPPOL		;Restore FIP pool mapping		;013
+220$:	RETURN			;And we're done				;011
+
+GLOBAL	<FIQUE,USETBL>							;011
+
+.SBTTL	RDBLK  -- I/O routine for loading resident overlays
+
+;+
+;	RDBLK	--	Read a disk block into memory
+;
+;	Inputs:		R1 =	Byte count to transfer.
+;			R2,R3	MSB/LSB pair of memory address to read into.
+;			R5 ->	FBB of block to read
+;
+;			CALL	RDBLK
+;
+;	Outputs:	All registers preserved
+;
+;-
+
+RDBLK:	REGSCR			;Save the world
+	MOVB	R2,@#FIPAR+DSQMAM ;Build the address of where to read
+	MOV	R3,@#FIPAR+DSQMAL ; into the DSQ.
+	MOV	(R5)+,R3	;Get the LSBs of the table in the SIL
+	MOV	(R5)+,R2	; the MSBs and the FUN.
+.ASSUME	FBBSIZ	EQ	4
+	MOVB	R3,@#FIPAR+DSQUNT ;Put the FUN in the DSQ,
+	CLRB	R3		; separate the MSBs from the FUN
+	SWAB	R3		; R2/R3 is now set up for PARSEX.
+	MOV	#<-1*400+RFUN>,@#FIPAR+DSQFUN ;Indicate a high priority read.
+	ASR	R1		;Make the byte count into a word count.
+	MOV	R1,@#FIPAR+DSQCNT ;Set up size of read.
+	CALLX	FIPIOE,R5	;Read the block (DSQCNT set by PARSEX).
+	RETURN			;No error on read.
+	MOVB	@#FIPAR+DSQERR,R0 ;Pick up error code from read
+	JMPX	ERROR		;And exit returning the error code
+
+GLOBAL	<FIPAR>
+
+FQFEND
+
+.END

@@ -1,0 +1,578 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:FLDEF/
+.INCLUDE /CMN:LPDEF/
+TITLE	CF1,<Set system and device parameters>,0C,19-JUL-91,FEK
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	Edit history for CF1
+
+;+
+;
+;			[RSTS V10.1]
+;  001	FEK  21-Jan-91	Creation from CFG.MAC
+;-
+
+	IONLY			;Request I-only versions of FIP macros
+
+FQFSRT	CF1,LODABL
+
+.SBTTL	CF1 local data definitions
+
+	ARGMAX	=:7			; Assign the argument maximum
+	MAXLPF	=255.			; Assign maximum LP form length
+	PWRMAX	=300.			; Assign maximum for POWERFAIL_DELAY
+
+
+.SBTTL	UU.CFG SET SYSTEM_DEFAULTS function
+
+;+
+;	RO =  JOB # * 2
+;	R4 -> FIRQB
+;		FQFUN = UU.CFG
+;		FQFIL = Type of CFG call
+;		FQPPN = 0 = no change
+;			n = new value for POWERFAIL_DELAY (PWRMAX=max)
+;	       FQNAM1 = 0 = no change
+;			2 = STARDATES
+;			1 = NUMERIC date format
+;		       -1 = ALPHA
+;	     FQNAM1+1 = 0 = no change
+;			1 = 24 hr time format
+;		       -1 = 12 hr (AM/PM)
+;	     FQNAM1+2 = 0 = no change
+;			1 = DOS MAGTAPE_LABEL
+;		       -1 = ANSI
+;	        FQEXT = 0 = no change
+;			n = New value for density                           
+;		FQSIZ = 0 = no change
+;			n = Dynamic Region Quota in K words
+;		       -1 = Set Dynamic region quota to zero
+;
+;	On RETURN:
+;		FQPPN = Value for POWERFAIL_DELAY
+;	       FQNAM1 = 1 for Numeric date format; -1 for ALPHA
+;			0 for Star dates
+;	     FQNAM1+1 = 1 for 24 hr time format; -1 for 12 hr
+;	     FQNAM1+2 = 1 for DOS MAGTAPE_LABEL; -1 for ANSI
+;	        FQEXT = System default density
+;		FQSIZ = System wide Dynamic region quota in K words
+;-
+
+NOPRV:	ERROR	PRVIOL			; No privileges
+
+CFGSD:	TST	FQEXT(R4)		; Setting density?
+	BEQ	10$			; No
+	BMI	120$			; Yes, but to an invalid value
+	MOV	(PC)+,R5		;check for
+	 .BPRIV	HWCFG			; HWCFG priv
+	CALLX	CHKPR5,R4		;  from a resident overlay
+	BCS	NOPRV			; Error if not
+10$:	MOVB	FQNAM1+2(R4),R1		; Get label-default change flag
+	BIS	FQNAM1(R4),R1		; Merge in date/time flags
+	BIS	FQPPN(R4),R1		;  and powerfail delay
+	BIS	FQSIZ(R4),R1		;  and dyn region quota
+	BEQ	20$			; Skip if none are changing
+	MOV	(PC)+,R5		;check for
+	 .BPRIV	SWCFG			; this privilege
+	CALLX	CHKPR5,R4		;  from a resident overlay
+	BCS	NOPRV			; Error if no privs
+20$:	ADD	#FQPPN,R4		;POINT TO POWER FAIL SPOT
+	TST	(R4)			; Change powerfail delay?
+	BEQ	40$			; No, get returned info
+	CMP	(R4),#PWRMAX		; Have we got a valid value?
+	BHI	120$			;ERROR, SO TELL THEM
+30$:	MOV	(R4),@#$$PWRP		; Deposit value in powerfail word
+40$:	MOV	@#$$PWRP,(R4)+		; Return value in PWRP word
+	MOV	#1,R0			; Put a 1 in R0 to use as constant
+	MOV	#-1,R2			;GET ANOTHER HANDY CONSTANT
+	TSTB	(R4)			; Anything there, FQNAM1?
+	BEQ	50$			; No, no change
+	MOV	R0,@#DATCNV		; Deposit a 1 into DATCNV
+	CMPB	(R4),R0			; Is that what he wanted?
+	BEQ	50$			; Yes, continue
+	DEC	@#DATCNV		;NO, TRY 0 (FOR STARDATES)
+	CMPB	(R4),#2			;DID THEY WANT STARDATES?
+	BEQ	50$			;YES, SO LEAVE IT
+	MOV	R2,@#DATCNV		; No, make it a -1
+50$:	MOVB	@#DATCNV,(R4)+		; Return value of DATCNV in DATCNV byte
+	TSTB	(R4)			; Change TIME format?
+	BEQ	60$			; No, no change
+	MOV	R0,@#TIMCNV		; Deposit a 1 into TIMCNV
+	CMPB	(R4),R0			; Is that what he wanted?
+	BEQ	60$			; Yes, continue
+	MOV	R2,@#TIMCNV		; No, make it a -1
+60$:	MOVB	@#TIMCNV,(R4)+		; Return value of TIMCNV in TIMCNV byte
+	MOV	#MAGLBL,R1		;GET ADDRESS OF MAGTAPE LABEL CELL
+	TSTB	(R4)			; Change MAGTAPE LABEL?
+	BEQ	70$			; No, no change
+	CLR	(R1)			; Zero MAGLBL, making it DOS
+	CMPB	(R4),R0			; Is that what he wanted?
+	BEQ	70$			; Yes, continue
+	MOV	R2,(R1)			; No, make it a -1 (ANSI)
+70$:	MOVB	(R1),(R4)		; Return value of MAGLBL
+	BNE	80$			; Non, so it's ANSI
+	MOVB	R0,(R4)+		; It's 0, but 1 means DOS
+	BR	90$			; Go check TAPDEN
+
+80$:	MOVB	R2,(R4)+		; Ensure -1 to indicate ANSI
+90$:	MOV	#TAPDEN,R1		; Create pointer to TAPDEN
+	INC	R4			; And point to cell in FIRQB
+	TST	(R4)			; Change MAGTAPE DENSITY?
+	BEQ	100$			; No, no change
+	MOV	(R4),(R1)		; Yes, so set it now
+100$:	MOV	(R1),(R4)+		; Be sure we return density
+	TST	(R4)			; Is there a dyn region quota
+	BEQ	110$			; no, no change
+	INC	(R4)			; Is the value a -1?
+	BEQ	105$			; Yes- leave it converted to 0
+	DEC	(R4)			; No- return to the org value n
+105$:	MOV	(R4),@#REGMAX		; store to value in the quota
+110$:	MOV	@#REGMAX,(R4)+		; return dyn region quota value
+	RETURN				; Return
+
+120$:	ERROR	FIXERR			; > MAX, SO error
+
+GLOBAL	<$$PWRP,DATCNV,TIMCNV,MAGLBL,TAPDEN,REGMAX>
+
+.SBTTL	Re-entry dispatch code for Async UU.CFG functions
+
+.ENABL	LSB
+
+;+
+;	R0 =  JOB # * 2
+;	R4 -> FIRQB
+;		FQFUN = UU.CFG
+;		FQFIL = Type of CFG call
+;		FQDEV,FQDEVN = Device name/number
+;
+;	UU.CFG is used to set device and system characteristics and
+;	defaults which in the past could only be changed through INIT.
+;
+;-
+
+.ENABL	LSB
+
+ASYIN:	NOP				; For DEBUG purposes...
+	MOVB	FQFIL(R4),R3		; Get type of CFG call
+	CMPB	R3,#ARGMAX		; Check range
+	BHI	90$			; Valid subfunction?
+	ASL	R3			; Convert to an even number
+10$:	ADD	R3,PC			; Index into branch table
+	BR	20$			; SET DEVn: CHARACTERISTICS function
+	BR	50$			; SET LP CHARACTERISTICS function
+	BR	CFGSD			; SET SYSTEM_DEFAULTS function
+	BR	BSTCL			; BIT SET/CLEAR function
+	BR	30$			; Load/unload FIP overlay
+	BR	40$			; Control EMT logging
+	BR	60$			; Goto it
+	BR	ANSBCK			; Set/Return the Answerback
+
+;	The following entries are in the non-resident CFG module
+
+20$:	FJMP	CFGDEV			;Device characteristics
+
+30$:	FJMP	CFGLOD			;Load overlay function
+
+40$:	FJMP	CFGEML			;go do the EMT logging control
+
+;	The following entries are in this module
+
+50$:	FJMP	CFGLP			; go do the LP function
+
+60$:	FJMP	CFGST			; go do the Statistics functions
+
+70$:	JMP	CFGSD			; go do system defaults
+
+80$:	CMP	SP,#SYSTAK		; FIP stack or SYSTEM stack?
+	BHI	10$			; FIP, so go do it now.
+	MOV	#ASYIN,FQADDR(R4)	; This is where we re-enter from FIP
+	MOVB	#DSPFQ,FQFUN(R4)	; Change it to the Async function
+	TST	(SP)+			;  and don't return, but...
+	JMPX	FIPSTL			;   go queue it for FIP later
+
+90$:	ERROR	BADFUO			; Subfunction too high error
+
+GLOBAL	<CFGDEV,CFGLOD,CFGEML,SYSTAK>
+
+.SBTTL	UU.CFG Entry point for all CFG functions
+
+	UUOENT	CFG,,SYNC,LOGABL
+
+	NOP				; For DEBUG purposes...
+	MOVB	FQFIL(R4),R3		; Get type of CFG call
+	CMPB	R3,#ARGMAX		; Check range
+	BHI	90$			; Valid subfunction?
+	ASL	R3			; Convert to an even number
+	ADD	R3,PC			; Index into branch table
+	BR	80$			; SET DEVn: CHARACTERISTICS
+	BR	50$			; SET LP CHARACTERISTICS
+	BR	70$			; SET SYSTEM_DEFAULTS function
+	BR	BSTCL			; BIT SET/CLEAR function
+	BR	80$			; Load/unload FIP overlay
+	BR	80$			; Control EMT logging
+	BR	60$			; Goto it
+	.BR	ANSBCK			; Set/Return the Answerback
+
+.DSABL	LSB
+
+.SBTTL	Define and return the system answerback message
+
+;	R4 -> FIRQB
+;		FQFUN = UU.CFG
+;		FQFIL = Type of CFG call (7.)
+;		FQSIZM= Minus - return message, Positive  - set message
+;		FQPPN = Beginning of the message text
+;			continues till the end of the FIRQB
+;
+
+.ENABL	LSB
+
+ANSBCK:	MOV	(PC)+,R5	;check for
+	 .BPRIV	SWCTL		; this privilege
+	CALLX	CHKPR5,R4	;  from a resident overlay
+	BCS	60$		;No, not this time
+	MOV	R4,R1		;Move the FIRQB pointer
+	MOV	@#ANSMSG,R4	;Get the message buffer pointer
+	ADD	#FQSIZM,R1	;point to the flag
+	TSTB	(R1)+		;Check flag and bump to message
+	BMI	20$		; minus for return only
+	TST	R4		;Is there one aleady (replace it)?
+	BNE	10$		; Yes, so skip the get.
+	BUFFER	GETSML,,60.	;Get the buffer leaving 60.
+	BVS	50$		; OH NO!!!
+10$:	MOV	(R1)+,(R4)+	;store the message away
+	BIT	#37,R1		;Are we done yet?
+	BNE	10$		; No, so move more data over
+	CLR	-(R4)		;the last word is trash (dispatch)
+	BIC	#37,R4		;get back to the top of the buffer
+	MOV	R4,@#ANSMSG	;Now, tell the monitor where it is
+	RETURN			; and exit
+
+20$:	TST	R4		;Is there one to return?
+	BEQ	70$		; No, so sorry.
+30$:	MOV	(R4)+,(R1)+	;Move from the buffer to the FIRQB
+	BIT	#37,R1		;End of the FIRQB yet?
+	BNE	30$		; No, so give um some more.
+	RETURN			;All done for now
+
+50$:	ERROR	NOBUFS		;Sorry, no buffers to store it into
+
+60$:	ERROR	PRVIOL		;Not enough privileges
+
+70$:	ERROR	NOTAVL		; Nothing available to return
+
+GLOBAL	<ANSMSG>
+
+
+.SBTTL	UU.CFG BIT SET/CLEAR function
+
+;	FEATURE PATCH MASK PEEK AND POKE SYSCALL
+;
+;	R0 =  JOB # * 2
+;	R4 -> FIRQB
+;	FQPPN = BITS TO SET PART 1
+;	+2    = BITS TO CLEAR PART 1
+;	+4    = BITS TO SET PART 2
+;	+6    = BITS TO CLEAR PART 2
+;
+;	TOTAL OF 32 BITS AVAILABLE TO SET/CLEAR FOR FEATURE PATCH
+;		REPLACEMENTS
+
+BSTCL:	ADD	#FQPPN+10,R4		;POINT TO THE CHANGE LIST
+	MOV	-(R4),R3		;ANY CHANGE HERE?
+	BIS	-(R4),R3		;ANY CHANGES IN THIS WORD
+	BIS	-(R4),R3		;THIS WORD?
+	BIS	-(R4),R3		;LAST CHANCE FOR A FAILURE
+	BEQ	100$			; No, skip
+	MOV	(PC)+,R5		;check for
+	 .BPRIV	SWCFG			; this privilege
+	CALLX	CHKPR5,R4		;  from a resident overlay
+	BCS	60$			; Error if no privs
+100$:	MOV	#FETPAT,R1		;FEATURE PATCH MASK WORDS
+	BIS	(R4)+,(R1)		;SET BITS IN THE FIRST WORD
+	BIC	(R4)+,(R1)+		;CLEAR BITS IN FIRST WORD
+	BIS	(R4)+,(R1)		;SET BITS IN SECOND WORD
+	BIC	(R4),(R1)		;CLEAR BITS IN SECOND WORD
+	TST	-(R4)			;Back up to FQNAM1
+	MOV	(R1),-(R4)		;RETURN SECOND WORD
+	MOV	-(R1),-(R4)		;NOW RETURN THE FIRST WORD
+	RETURN
+
+GLOBAL	<FETPAT>                                                    
+
+.DSABL	LSB
+
+FQFEND
+
+FQFSRT
+
+.SBTTL	CFGST	Configure statistics
+
+;+
+;	R0 =  JOB # * 2
+;	R4 -> FIRQB
+;      		FQFUN  = UU.CFG                                              
+;		FQFIL  = Type of CFG call (6 for statistics)
+;		FQSIZM = Statistics option
+;			0 = Enable statistics
+;			1 = Disable statistics
+;			2 = Clear statistics
+;			3 = Return statistics on/off status
+;-
+
+.ENABL	LSB
+
+10$:	ERROR	PRVIOL
+
+20$:	ERROR	BADFUO
+
+CFGST: 	MOVB	FQSIZM(R4),R3	;Pick up requested function code
+	CMPB	R3,#3		;Legal code?
+	BHI	20$		;No, error
+	BEQ	STLIST		;Yes, and it is (non-privileged) list
+	MOV	(PC)+,R5	;check for
+	 .BPRIV	SWCTL		; this privilege
+	CALLX	CHKPR5,R4	;  from a resident overlay
+	BCS	10$		;No, give them an error
+      	ASL	R3		;Make subfunction a word index
+	ADD	R3,PC		;And dispatch based on subfunction
+	 BR	STENAB		;Enable statistics
+	 BR	STDISA		;Disable statistics
+	 .BR	STCLEA		;Clear statistics
+
+.DSABL	LSB
+
+.SBTTL	STCLEA	Clear statistics
+
+;+
+; STCLEA - Clear statistics
+;
+;	CALL	STCLEA
+;                 
+;	R1 =  Undefined
+;	R2 =  Undefined
+;	R3 =  Undefined
+;
+; This routine is used to clear the monitor statistics that have previously
+; been accumulated. If statistics have never been enabled, this call is a NOP.
+;-
+
+STCLEA:	MOV	@#DSTPTR,R3	;Get MMU address of statistics area
+	BEQ	50$		;None, nothing to do
+	MAP	R3,APR=6,DATA,PIC ;Map disk statistics
+	MOV	#140000,R2	;And point to the table
+    	MOVB	#MAXUNT+1,(R2)+	;Set up the number of units sysgenned
+	CLRB	(R2)+		;And indicate table has been cleared
+	MOV	#DSTSIZ-1,R1	;Get number of words in table
+20$:	CLR	(R2)+		;Clear a word
+	CMP	R2,#157700	;Time to re-map buffer?
+	BLO	30$		;No, not this time
+	ADD	#<157700-140000>/100,R3 ;Update the mapping
+	MAP	R3,APR=6,DATA,PIC ;And set it in the MMU
+	MOV	#140000,R2	;Now update the virtual address
+30$:	SOB	R1,20$		;Loop for all the words
+	MAP	FIPPOL		;Now remap FIP
+	MOV	#JSTCTL+2,R2	;Get pointer to statistics area
+	MOV	#JSTATE-<JSTCTL+2>/2,R3 ;Set number of words to clear
+40$:	CLR	(R2)+		;Clear a word of statistics
+	SOB	R3,40$		;Loop for the whole thing
+	COM	@#JSTATF	;Make the minimum free count very large
+50$:	RETURN			;And we're done
+
+GLOBAL	<DSTPTR,MAXUNT,DSTSIZ,JSTCTL,JSTATE,JSTATF>
+
+.SBTTL	STENAB	Enable statistics
+
+;+                  
+; STENAB - Enable statistics
+;                         
+;	CALL	STENAB
+;
+;	R1 =  Undefined
+;	R2 =  Undefined
+;	R3 =  Undefined
+;	R4 =  Undefined
+;
+; This routine is used to enable statistics. First, we will assure that
+; the number of ticks per second is set for statistics reading programs
+; to get (this could be done in INIT, but is done here since this is
+; overlaid code anyway, and the old statistics code worked in a similar
+; fashion). Next, we will verify that there is a disk statistics block
+; allocated. If not, we will allocate one and clear it out. Finally,
+; we will set the JSTATS pointer cell to enable statistics gathering.
+;
+; This routine is a NOP if statistics are already enabled.
+;-
+
+STENAB:	TST	@#DSTPTR	;Do we need a statistics block?
+	BNE	10$		;No, we already have one
+	BIC	#030000,@#PS	;Set previous mode to kernel
+	MFPI	@#$$CCNT	;Get number of interrupts per tick
+	MOV	(SP)+,R3	; ...
+	MFPI	@#$$TICK	;And number of ticks per second
+	MUL	(SP)+,R3	;Calculate interrupts per second
+	MOV	R3,@#JSTCTL	;Now set it for programs to see
+	MOV	#DSTSIZ*2,R1	;R1 = Size of disk statistics table
+	MOV	#-1,R2		;Don't ever use the monitor's pool
+	MAP	PUSH,APR=5,DATA,PIC	;Save the current APR5 data APR
+	MAP	@#KISAR5,APR=5,DATA,PIC ;overmap our I & D for BUFFER
+	CALLX	BUFFER,R5,<LRGPOL>	;Go and get a statistics buffer
+	MOV	(SP)+,R3		;Get our saved APR5 D mapping
+	MAP	R3,APR=5,DATA,PIC	; back into the APR.
+	BCS	20$		;No XBUF; don't turn on statistics
+	MOV	R4,R3		;Copy contorted address of buffer
+	ASHC	#-7,R3		;Convert it into a MMU address
+	MOV	R3,@#DSTPTR	;Now set the MMU address
+	CALL	STCLEA		;Clear out the statistics area
+10$:	MOV	#GOSTAT,@#JSTATS ;Enable statistics
+	RETURN			;And we're done
+
+20$:	ERROR	NOBUFS		;No XBUF for disk stats block
+
+GLOBAL	<$$CCNT,$$TICK,JSTCTL,DSTPTR,LRGPOL,GOSTAT,JSTATS>
+
+.SBTTL	STDISA	Disable statistics
+
+;+
+; STDISA - Disable statistics
+;
+; This routine is used to disable statistics. Since disabling statistics
+; does not imply the loss of the data, all this routine needs to do is
+; to change the statistics vector.
+;
+; This routine is a NOP if statistics aren't enabled.
+;-
+
+STDISA:	MOV	#RTSPC,@#JSTATS	;Disable statistics
+	RETURN			;Now, that was very easy
+
+GLOBAL	<RTSPC,JSTATS>
+
+.SBTTL	STLIST	Return statistics status
+
+;+
+; STLIST - Return statistics status
+;
+;	R4 -> FIRQB
+;
+;	CALL	STLIST
+;
+;	FIRQB+FQSIZM will contain a zero if stats enabled; 1 if disabled
+;
+; This routine is used to determine whether statistics are enabled or
+; disabled.
+;-
+
+STLIST:	CLRB	FQSIZM(R4)	;Assume that stats are enabled
+	CMP	#GOSTAT,@#JSTATS ;Good guess?
+	BEQ	10$		;Yes, all done
+	INCB	FQSIZM(R4)	;No, set that stats are disabled
+10$:	RETURN			;All done here
+
+GLOBAL	<GOSTAT,JSTATS>
+
+.SBTTL	UU.CFG SET LP CHARACTERISTICS function
+
+;+
+;	R0 =  JOB # * 2
+;	R4 -> FIRQB
+;		FQFUN = UU.CFG
+;		FQFIL = Type of CFG call
+;		FQPPN = 0 for no change or new value for LP width
+;		FQPPN+1 = 0 for no change or
+;			  new value for default form length (LPTDFL)
+;	       FQNAM1 = 0 for no change or 
+;			word containing bits to set in LPTCHR
+;	     FQNAM1+2 = 0 for no change or 
+;			word containing bits to clear in LPTCHR
+;			(See .BSECT in LPDEF.MAC for bit position assignments)
+;		FQEXT = 0 for no change or 1 to indicate a change in LPTSPC
+;	      FQEXT+1 = New value for LPTSPC (note: 0 is a legal value)
+;		FQDEV = Device name ("LP" in this case)
+;
+;	On RETURN:
+;		FQPPN = Current width of the LP
+;	      FQPPN+1 = DEFAULT FORM LENGTH
+;	       FQNAM1 = Current LPTCHR flag word
+;			(See .BSECT in LPDEF.MAC for bit position assignments)
+;	      FQEXT+1 = Value of LPTSPC
+;		FQSIZ = Value of default form length (LPTDFL)
+;-
+
+CFGLP:	CALLX	GUNSUB,R5	;Get the DDB address
+10$:	 ERROR	NODEVC		;Invalid device, forget it
+	ASL	R2		; Get unit # * 2
+	ADD	DEVPTR(R0),R2	; and then the DDB pointer
+	CMP	R0,#DEVOKB	;Is this a disk?
+	BLT	10$		; YES!
+	MOV	(R2),R1		;Get the DDB pointer
+	CMPB	(R1),#IDX.LP	;Legal device, is it a LP device?
+.ASSUME	DDIDX	EQ	0
+	BNE	10$			;No, forget it
+	MOVB	FQJOB(R4),R0		; Get job number again
+	MOV	FQPPN(R4),R2		; Get change flags
+	BIS	FQNAM1(R4),R2		;  and some more
+	BIS	FQNAM1+2(R4),R2
+	BIS	FQEXT(R4),R2
+	BEQ	20$			; Nothing at all changes
+	MOV	(PC)+,R5		;check for
+	 .BPRIV	HWCFG			; this privilege
+	CALLX	CHKPR5,R4		;  from a resident overlay
+	BCS	70$			; Error if no privs
+	TSTB	FQPPN(R4)		; Change width?
+	BEQ	20$			; No, get returned status
+	MOVB	FQPPN(R4),R0		; Store new width
+	INC	R0			; Add 1
+	MOVB	R0,DDHORC(R1)		; Deposit this value in DDHORC
+20$:	MOVB	DDHORC(R1),R0		; Get returned status and store it
+	DEC	R0			; Subtract 1 to get real value
+	MOVB	R0,FQPPN(R4)		; Return value in FIRQB
+	TSTB	FQPPN+1(R4)		; Change lowercase status?
+	BEQ	30$			; No, get returned info
+	MOVB	FQPPN+1(R4),LPTDFL(R1)	;IF CHANGING, THEN STORE IT
+30$:	MOVB	LPTDFL(R1),FQPPN+1(R4)	;AND THEN RETURN IT
+	MOV	LPTCHR(R1),R2		; Get a copy of CURRENT LPTCHR
+	BIS	FQNAM1(R4),R2		; Set REQUESTED bits in LPTCHR
+	BIC	FQNAM1+2(R4),R2		; Clear REQUESTED bits in LPTCHR
+	BIT	#LPTRBS,R2		; Is "real <BS>" bit set?
+	BEQ	40$			; No, we're okay
+	BIT	#LPTNBS,R2		; Yes, is "no <BS>" set?
+	BEQ	40$			; No, okay anyway
+	ERROR	BDNERR			; You just can't have everything; error
+
+40$:	MOV	R2,LPTCHR(R1)		; Replicate R2 in LPTCHR
+	MOV	R2,FQNAM1(R4)		; Return value in FQNAM1
+50$:	TSTB	FQEXT(R4)		; Change LPTSPC?
+	BEQ	60$			; No, go get returned value
+	MOVB	FQEXT+1(R4),LPTSPC(R1)	; Yes, change to specified value
+60$:	MOVB	LPTSPC(R1),FQEXT+1(R4)	; Return value in FQEXT+1
+	RETURN				; Bye, bye...
+
+70$:	ERROR	PRVIOL			; No privs
+
+GLOBAL	<DEVPTR,DEVOKB>
+
+.WEAK	IDX.LP
+
+FQFEND          
+
+.END

@@ -1,0 +1,2004 @@
+TITLE	MTDSMT,<DCL DISK MOUNT,DISMOUNT>,0I,31-JAN-92,SDL/FRL/BGN/FEK
+
+;
+;		COPYRIGHT (c) 1974, 1992 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR MTDSMT 
+;+
+;
+;			    [RSTS V8.0]
+;
+;  000  SDL  03-Sep-82	Created to handle DCL MOUNT and DISMOUNT of disks 
+;  001  SDL  28-Oct-82  Replaced /OWNER=argument terminology with /PRIVATE
+;		        and /PUBLIC for MOUNT command
+;  002  SDL  01-Nov-82  Removed non-privileged user's ability to specify a
+;                       logical name on MOUNT command
+;  003  SDL  04-Nov-82  Added /[NO]SHARE feature to MOUNT for non-shared disk 
+;		        access by a job
+;  004  SDL  09-Nov-82  Fixed bug of not setting explicit unit number flag on
+;                       an OPNFQ
+;  005  SDL  12-Nov-82  Moved CUI command tables and keyword definitions into
+;			MNTCUI.MAC module to help in overlaying code
+;  006  SDL  22-Nov-82  Added code to handle Software write protected disks
+;			(disks initialized as read-only)
+;  007  SDL  23-Nov-82  Moved FIBUF buffer from ONLCLN to root MTDSMT
+;  008  SDL  15-Dec-82  Don't lock a disk when a dismount of it fails due to 
+;                       open files 
+;  009  SDL  20-Dec-82  Allow the dismount of a spun down disk
+;
+;				[RSTS V9.0]
+;  010  FRL  22-Aug-83  Added code to inform user that DISMOUNTed disk is
+;			dual-ported.
+;  011  FRL  26-Aug-83  Made RSX compatible
+;  012  FRL  04-Apr-84  V9.0 logicals
+;  013  FRL  09-Apr-84  Allowed /NOSHAREABLE qualifier to specify a job number
+;  014  FRL  18-Jun-84  If DCL invoked, .NAME to $MOUNT
+;  015  FRL  01-Jul-84  Allow lower case input on pack-id and/or logical name
+;  016  FRL  02-Jul-84  New qualifiers: /RESTRICT, /NORESTRICT and /[NO]QUOTA.
+;			 Also, the term 'lock' has been changed to 'restrict'.
+;  017  FRL  03-Jul-84  On DISMOUNT, pack-id is optional for all users
+;  018  FRL  05-Jul-84  Does not check for write-prot if /NOWRITE is present
+;  019  FRL  01-Nov-84  Special check for non-mount of SY0:
+;  020  FRL  11-Jan-85  Follow conventions for errors and warnings
+;  021  FRL  04-Feb-85  Add /OVERRIDE qualifier
+;  022  FRL  27-Mar-85  New line after errors are printed
+;  023  FRL  02-Apr-85  Check revision level
+;  024  FRL  06-Sep-85  Fix problem with mode word being trashed
+;
+;				[RSTS V9.0]
+;  025  FRL   5-Feb-85	Fix problems with /NOWRITE of already mounted disk
+;
+;				[RSTS V9.4]
+;  026  BGN   9-Apr-87  Fix mount/rebuild problem
+;
+;				[RSTS V9.7]
+;  027  WRM  27-Oct-88	Fix cache entry blocking dismount on spun down disk
+;
+;				[RSTS V10.1]
+;  028	FEK  30-Dec-91	Allow clean/remount of dirty system disk and fix
+;			bug in /NOSHARE=nnn
+;-
+
+.SBTTL	DEFINITIONS AND MACROS
+
+
+	DEFORG	MTDISM
+	DEFORG	MTTEXT
+
+
+	.MCALL	EXIT$S							;011
+	.MCALL	$CUI		;Invoke $CUI macro 
+	.MCALL	CALBX		;Include the call support 
+	$CUI			;Define offsets				;011
+	TMPORG	MTDISM		;Back to data section			;011
+	$CUI	ALLOC		;Allocate storage for CUI
+				;  (this defines the address of CUI
+				;   COMMON, U.CMN)
+
+
+
+
+; Setup needed for CUI of parameters allowed on the DCL MOUNT command
+
+	.DSECT			;Define odd values for the 'MOUNT' 
+				;  command parameters
+	.BLKB			;
+DEVN.P::.BLKB	2		;Device-name parameter
+LABL.P::.BLKB	2		;Pack-id label parameter
+LOGN.P::.BLKB	2		;Logical-name parameter
+	UNORG			;Return to previous DEFORG
+
+
+; Disk file open modes (as defined in FLDEF.MAC)
+
+	.BSECT
+
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+OP$BLK:	.BLKB	.		;Non-file structured block mode
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+	.BLKB	.		;
+OP$RR:	.BLKB	.		;Read-regardless
+OP$RO:	.BLKB	.		;Read-only  (NFS)
+	.BLKB	.		;
+OP$MOD:	.BLKB	.		;Mode is real
+
+;**********  IMPORTANT !!!!!  *****************				;007
+;									;007
+; The following is the FIBUF .PSECT and it 				;007
+; must lie on a 1000 byte boundary. 					;007
+;									;007
+;**********************************************				;007
+
+	DEFORG	FIBUF 		;Force FIBUF on a 1000 byte boundary 	;007
+
+FIBUF::	.BLKB	760		;Buffer for reading disk label block	;007
+FIBMAP::.BLKW			;					;007
+FIBENT::.BLKW	7		;					;007
+FIBUFL==.-FIBUF			;Buffer length				;007
+FIBEND::			;					;007
+
+
+
+
+
+	ORG	MTDISM
+
+; Miscellaneous variables
+
+WRPFLG:	.WORD	0		;Flag to indicate if the drive the user wants 
+				;  to mount a disk on is write protected
+				;  ( =0 --> not write protected
+				;    =1 --> is write protected
+				;    =2 --> this is a dummy value (a kluge) to
+				;           indicate not to use the logical name
+				;           field on the MOUNT command when
+				;	    determining if the drive is write
+				; 	    protected)
+				;
+ENT.TY:	.WORD	0		;Entry type (into this program):
+				;  0   --> program invoked by RUN command
+				;  1.  --> program invoked by CCL command
+				;  2.  --> program invoked by a CHAIN from 
+				;	     another program
+				;  16. --> program invoked by a DCL command 
+				;	     other than RUN
+
+FRCEDM::.WORD	0		;Force Dismount on error exit flag	;027
+JOBNUM:	.BYTE	0		;Job number to use for /NOSHAREABLE	;028
+MYJOB:	.BYTE	0		; and my job number			;028
+LOGICL:	.BLKW	3		;Logical name specified on MOUNT	;012
+DEVNAM:	.BLKW	3		;Device specified on a MOUNT to pass to ONLCLN ;026
+MNTPRV:	.WORD	0		;0 --> User does not have MOUNT privilege ;017
+REVLVL:	.WORD	0		;Revision level of disk just mounted	;023
+SYSMNT::.WORD	0		; Clean/remount of SY0: if = -1		;028
+FILNAM:	.ASCII	/[0,1]SATT.SYS/	;Storage allocation table 	
+NAMLNG=.-FILNAM			;Length of file string
+	.EVEN
+
+
+
+
+
+
+.MACRO	I.MESS			;Needed for the MESSAGE macro
+	TMPORG	MTTEXT		;
+.NLIST	BEX			;Control listing of binary extensions
+.ENDM	I.MESS
+
+
+
+.SBTTL	INITIALIZATION
+.ENABL	LSB
+;
+;
+;	Determine how ONLCLN was invoked.  Either a user wished to rebuild
+;	a disk and specified 'RUN $ONLCLN' or the user wanted to mount or
+;	dismount a disk (using DCL).  DCL passes a nonzero parameter word 
+;	in low core and issues a .RUN.
+;
+;
+MTDSMT::			;Entry point for:
+				;  RUN $ONLCLN,
+				;  DCL MOUNT,
+				;  DCL DISMOUNT
+	BIT 	#16384.,@#30	;Test the parameter word in low
+				;  core to see if it's DCL
+	BNE	DCL		;Yes, it was DCL that called ONLCLN
+	JMPX	ONLCLN		;No, it was a 'RUN $ONLCLN'
+
+; The command string line as passed by DCL in core common is now 
+; analyzed.
+
+DCL:
+	MOV	#^R$MO,FIRQB+FQNAM1	;Since DCL inoked, change name	;014
+	MOV	#^RUNT,FIRQB+FQNAM1+2	;  to $MOUNT			;014
+	.NAME								;014
+	MOV	#16.,ENT.TY	;Initialize entry type = DCL entry
+				;  (program was invoked by a DCL command)
+	CALBX	U.INI <#U.CMN,#ENT.TY> ;Initialize the common user interface
+				; (pass command table address, entry type)
+10$:	CALBX	U.DIA 		;Read a command line
+	TST	U.CMN+U.STAT	;Test status code that CUI returns 
+	BEQ	20$		;If = 0, then we got a command (good)
+	CMP	U.CMN+U.STAT,#EOF ;Was it an 'end of file'?  (no more commands)
+	BNE	10$		;No, it was another error (so try again)
+	JMP	DONE		;Yes, so exit from this program
+
+20$:	CALLX	CLRXRB		;Clear out the XRB			;017
+	MOV	#JFSYS,XRB	;Set JFSYS in the keyword location	;017
+	.CLEAR			;Drop temporary privileges 		;017
+	CALLX	U$CHKE		;No error is expected, but if one 	;017
+				;  occurs then abort. CUI returns:	;017
+				;  "?Program failure in <program name>"	;017
+	CALLX	CLRFQB		;Clear out the FIRQB			;017
+	MOVB	#UU.CHK,FIRQB+FQFUN ;Set function = privilege check	;017
+	MOVB	#1,FIRQB+FQFIL	;					;017
+	MOV	#"MO,FIRQB+FQNAM1 ; Checking for MOUNT privilege	;017
+	MOV	#"UN,FIRQB+FQNAM1+2 ;	...				;017
+	MOVB	#'T,FIRQB+FQNAM1+4 ;	...				;017
+	.UUO			;  Do it				;017
+	CALLX	U$CHKE		;No error is expected, but if one 	;017
+				;  occurs then abort the program	;017
+	TSTB	FIRQB+FQFIL	;Is the user privileged ?		;017
+	BNE	30$		;No, 30$				;017
+	MOV	#1,MNTPRV	;Yes, indicate user has MOUNT privilege	;017
+30$:	CALLX	CLRXRB		;Clear out the XRB			;017
+	MOV	#JFSYS,XRB	;Set JFSYS (for temporary privileges)	;017
+	.SET			;Regain temporary privileges 		;017
+	CALLX	U$CHKE		;No error is expected, but if one occurs ;017
+				;  then abort the program		;017
+	CMP	U.CMN+U.CMDC,#1	;Was the command a 'MOUNT' ?
+	BEQ	MNTDSK		;Yes, MNTDSK
+	JMP	DISDSK		;No, DISDSK - it had to be a 'DISMOUNT'
+				;  (CUI errors if it was neither and
+				;   control will not reach here) 
+;
+; It should be noted that U.DIA is not called a 2nd time after the processing 
+; of the command line is complete (to check for an EOF) because of the way the
+; logic is designed.
+;
+
+GLOBAL	<EOF>
+
+.DSABL	LSB
+
+.SBTTL	ANALYZING THE MOUNT COMMAND
+
+.ENABL	LSB
+
+;+
+;
+;	The user issued some form of a 'DCL MOUNT' of a disk:
+;	
+;		MOUNT device-name[:] label [logical-name[:]][/qualifier ...]
+;
+;	ENTRY: 	JMP MNTDSK
+;
+;		INPUTS:   the user's DCL 'MOUNT' command line must be in core
+;			  common (for CUI to reference)
+;
+;		INPUT ASSUMPTIONS:
+;
+;		      The device name is a required parameter on the MOUNT
+;		      command and if it is not provided by the user CUI fails.
+;		      Therefore, when this routine finally gets control, a
+;		      good command line has been supplied.  The pack-id label
+;		      is optional when the OVERRIDE qualifier is present (MOUNT
+;		      privilege required). The logical name and the qualifiers 
+; 		      are optional, and therefore, may or may not be present
+; 		      on the command line.
+;
+;	Terminology:
+;
+;		     'clean' ---> disk was logically dismounted prior to this 
+;			          MOUNT command
+;		     'dirty' ---> disk was not logically dismounted prior to 
+;		       	          this MOUNT command
+;		'non-shared' ---> disk is accessible only to the job that mounts
+;			          it (it is owned by it and cannot be shared)
+;		    'shared' ---> synonymous with mounting a disk as 'private'
+;
+;	A non-privileged user:
+;
+;		1. Can mount a 'clean' private disk as non-shared.
+;		2. Cannot mount a disk initialized as public.
+;		3. Cannot mount a private disk as public (/PUBLIC).
+;		4. Cannot mount a 'dirty' disk or rebuild a disk (/REBUILD).
+;		5. Cannot mount a disk without the pack-id (/OVERRIDE).
+;		6. Can specify a logical name on the mount command, but its
+;		     presence is ignored (the pack-id label is not assigned as 
+; 		     a system wide logical either).
+;
+;	A privileged user:
+;
+;		1. Can mount a private or a public disk as private (/PRIVATE)
+;		     or as non-shared (/NOSHAREABLE).
+;		2. Can mount a public disk as public (/PUBLIC).
+;		3. Cannot mount a private disk as public (/PUBLIC).
+;		4. Can mount a disk and rebuild it if it's 'clean' by forcing 
+;		     the rebuilding process (/REBUILD).
+;		5. Can mount a disk that is 'dirty' and suppress the rebuilding
+;		     process (/NOREBUILD).  The disk is then mounted as
+;		     read-only and restricted.  Note: a 'dirty' disk means that the
+;		     disk was not logically dismounted.
+;		6. Can mount a disk that is 'dirty' and have the rebuilding of
+;		     it performed (/REBUILD or by specifying neither /[NO]REBUILD).
+;		7. Can specify an alternate logical name when mounting the disk.
+;		8. Can mount a disk without the pack-id (/OVERRIDE).
+;
+;	The legal qualifiers are:
+;						
+;		/PRIVATE  - allows non-privileged users to mount a private disk
+;			    as private; lets privileged users mount a public or
+;			    a private disk as private.
+;		/PUBLIC   - allows privileged users to mount a public disk as 
+;			    public.
+;		/SHAREABLE    - same definition as /PRIVATE.
+;		/NOSHAREABLE  - lets non-privileged users mount a private disk as
+;			    non-shared and thus, disk access is limited to that
+;			    job only; lets a privileged user mount a public or
+;			    a private disk as non-shared.
+;
+;		     Note:  if neither /PRIVATE, /PUBLIC nor /[NO]SHAREABLE are present,
+;		            then the default action is to mount the disk as private
+;			    (shared).
+;		
+;		/REBUILD  - allows a privileged user to force a rebuild of the
+;			    the disk, regardless of whether it's clean or dirty.
+;		/NOREBUILD - this is ignored if specified by a non-privileged
+;			     user; allows privileged users to choose not to 
+;			     rebuild the disk even if it's dirty.
+;
+;		     Note:  if neither /[NO]REBUILD are present the default action
+;		            is to rebuild the disk only if it is dirty.
+;
+;		/WRITE    - allows privileged or non-privileged users to mount a
+;			    disk as write enabled. 
+;		/NOWRITE  - allows privileged or non-privileged users to mount a
+;			    disk as read-only.
+;
+;		     Note:  if neither /[NO]WRITE are present the default action
+;		            is:
+;				 1. Disks initialized as read/write:  to mount 
+;				     the disk with write access unless the drive 
+;		                     is write protected or the disk is remaining
+;				     dirty, in which case it's mounted with read-
+;				     only access.
+;				 2. Disks initialized as read-only:  to mount 
+;				     the disk with read-only access.
+;  
+;		/OVERRIDE - allows privileged users to mount a disk without
+;			    specifying the pack-id. 
+;		/NOOVERRIDE - this is ignored if specified by a non-privileged
+;			     user; allows privileged users to choose to
+;			     require the pack-id.
+;
+;		     Note:  if neither /[NO]OVERRIDE are present the default
+;		            action is require the pack-id.
+;  
+;
+;
+;	This section does preliminary analysis on the following items before 
+;	issuing a 'CALL MOUNT' (which checks the device name, pack-id label 
+;	and logical name, and then actually attempts to mount the disk):
+;
+;		   1. User - privileged or non-privileged 
+;		   2. Disk - initialized as private or public and as read-only
+;			     or read/write, is clean or dirty 
+;		   3. Qualifiers - /PRIVATE, /PUBLIC, /SHAREABLE, /NOSHAREABLE,
+;				   /[NO]REBUILD, /[NO]WRITE, or none 
+;
+;	Note:  the device name and number are kept in R1,R2 respectively
+;	       throughout this routine.  R0 is destroyed by CUI.
+;
+;	Registers used: R0-R5
+;-
+
+MNTDSK:
+	CALL	GETDEV		;Get the device name and make sure it's valid
+				;  (required parameter), return with:
+				;  R1 = device name, 
+				;  R2 = device number and flag
+	BCC	5$		;Error occur ?   No,5$			;025
+	JMP	FSSERR		;Yes,FSSERR (R0 = error code)
+
+5$:	CLR	SYSMNT		;Flag NOT a system disk clean/remount	;028
+	CALLX	CLRFQB		;Get disk status:	clear FIRQB	;025
+	MOVB	#UU.ATR,FIRQB+FQFUN ;	code='Read/Write Attributes'	;025
+	MOVB	#-4,FIRQB+FQFIL	;	subfunction = 'Read Pack Attributes' ;025
+	MOV	R1,FIRQB+FQDEV  ;	valid device name		;025
+	MOV	R2,FIRQB+FQDEVN ;	valid device number and flag	;025
+	.UUO			;	Do it				;025
+	CMPB	FIRQB,#NOTMNT	;If error is disk not mounted,		;025
+	BEQ	10$		; then that's good			;025
+	TSTB	FIRQB		;If no error,				;025
+	BEQ	7$		; then that's an error			;025
+	JMP	ERRPRT		;Print any other error and exit		;025
+
+7$:	CMPB	FIRQB+FQPFLG+1,#1 ; The system disk?			;028
+	BEQ	8$		; Yes, so proceed anyway.		;028
+	MESSAGE <"?Disk pack is already mounted"<200>>			;025
+	BR	BYEBYE 		;No errors, give error and exit		;025
+
+8$:	DEC	SYSMNT		;Turn on system disk clean/remount	;028
+	CALL	SYSNAM		; Get the real name of SY0:		;028
+10$:	CALBX	FET.CQ <#OVER.Q> ;Fetch qualifier /OVERRIDE		;021
+	TST	U.CMN+U.PRES	;Is it there ?				;021
+	BEQ	20$		;No, 20$				;021
+	TST	U.CMN+U.NO	;Yes,is it really /NOOVERRIDE ?		;021
+	BNE	20$		;Yes, 20$				;021
+	TST	MNTPRV		;No, is user privileged?		;021
+	BNE 	20$		;Yes, 20$				;021
+	MESSAGE <"?MOUNT privilege required to override pack-id"<200>>	;021
+				;No, print fatal error			;021
+	BR	BYEBYE 		;Exit 					;021
+
+20$:	CALBX	FET.CQ <#WRIT.Q> ;Fetch qualifier /WRITE		;018
+	TST	U.CMN+U.PRES	;Is it there ?				;018
+	BEQ	25$		;No,25$  (neither /[NO]WRITE)		;018
+	TST	U.CMN+U.NO	;Yes,is it really /NOWRITE ?		;018
+				;  (does it have '/NO' prefix ?)	;018
+	BEQ	23$		;No, 23$  (it is /WRITE)     		;018
+	MOV	#1,WRPFLG	;Yes, it is /NOWRITE 			;018
+	BR	30$		;	so do not check			;018
+
+23$:				; (check immediately to eliminate case	;018
+				;  where user specified /WRITE but 	;018
+				;  drive is write protected)		;018
+	CALL	WRTPRT		;Is the drive write protected?		;018
+				;  (return only if no error occurred)	;018
+	TST	WRPFLG		;(upon returning, if the flag WRPFLG:	;018
+				;   = 0, device is not write protected, ;018
+				;   = 1, device is write protected)	;018
+	BEQ	30$		;No,30$					;018
+	MESSAGE <"?Device write protected"<200>> ;Yes, so print an error ;018
+	BR	BYEBYE 		;Exit 					;018
+
+25$:	CALL	WRTPRT		;Determine if the drive is write protected,
+				;  and return only if no error occurred
+				;(upon returning, if the flag WRPFLG:
+				;   = 0, device is not write protected,
+				;   = 1, device is write protected)
+30$:	CALL	DISKRD		;Read the disk label block - and return only
+				;  if no error occurred (else program exits)
+	BIT	#UC.PRI,FIBUF+PSTAT ;Is disk initialized as private ?     ;007
+			         ;   (=0,public       =1,private)
+	BEQ	40$		 ;No,40$ - it's public
+ 	CALBX	FET.CQ <#PUBL.Q> ;Yes, fetch command qualifier /PUBLIC
+	TST	U.CMN+U.PRES	;Is it there ?
+	BEQ	40$		;No,40$   
+	MESSAGE <"?Can't mount a private disk as public"<200>> ; 
+				;Yes, print fatal error since /PUBLIC was
+				;  present and isn't allowed for a priv'd 
+				;  or non-privileged user
+	BR	BYEBYE		;Exit  
+
+40$:	CLR	R3		;Initialize mode word for mount		;016
+	CALBX	FET.CQ <#QUOT.Q> ;Fetch qualifier /QUOTA		;016
+	TST	U.CMN+U.PRES	;Is /QUOTA present ?			;016
+	BEQ	45$		;No,45$ (neither /[NO]QUOTA was present);016
+	TST	U.CMN+U.NO	;Yes, is it really /NOQUOTA ?		;016
+				;  (does it have '/NO' prefix ?)	;016
+	BEQ	45$		;No, /QUOTA is the default, so skip	;016
+	BIS	#400,R3		;Yes, it's /NOQUOTA so set mode bit	;016
+45$:	TST	MNTPRV		;Is user privileged?			;016
+	BEQ 	46$		;No, continue				;016
+	JMP	USRPRV		;Yes, USRPRV				;016
+
+; The user who issued the DCL MOUNT is non-privileged
+
+46$:									;016
+	CALBX	FET.CQ <#REBU.Q> ;Fetch command qualifier /REBUILD
+	TST	U.CMN+U.PRES	;Is /REBUILD present ?
+	BEQ	50$		;No,50$
+	TST	U.CMN+U.NO	;Yes, is it really /NOREBUILD ?
+				;  (does it have '/NO' prefix ?)
+	BNE	50$		;Yes, 50$    (no harm, so ignore it)   
+	MESSAGE	<"?MOUNT privilege required to rebuild a disk"<200>>	;021
+				;Print fatal error (it was /REBUILD)
+BYEBYE:	JMP	GETOUT		;Exit 
+									
+50$:	BIT	#UC.PRI,FIBUF+PSTAT ;Is disk initialized as public ?      ;007
+			        ;     bit 14   (=0,public    =1,private)
+	BNE	60$		;No,60$  (was initialized as private)
+	MESSAGE	<"?MOUNT privilege required to mount a public disk"<200>> ;021
+				;Print fatal error
+	BR	BYEBYE		;Exit 
+
+60$:				;A non-privileged user wants to mount a
+				;  private disk as private or non-shared
+	BIT	#UC.MNT,FIBUF+PSTAT ;Is 'dirty' bit set on the disk ?     ;007
+				; (bit 15=1 --> disk not logically 
+				;                dismounted)
+	BEQ	INTPRI		;No,INTPRI  yes
+	MESSAGE	<"?Disk needs rebuilding but you do not have MOUNT privilege"<200>>
+				;Print fatal error			;021
+	BR	BYEBYE		;Exit 
+
+; The disk was initialized as private and the user who issued the MOUNT
+; command is either privileged or non-privileged, so he's mounting it 
+; either as private or non-shared.
+
+INTPRI: BIS	#UC.PRI,R3	;Assume mode word = 'mount private' 	 ;016
+				;  which is needed for CALL MOUNT
+	CALBX	FET.CQ <#NOSH.Q> ;No, fetch qualifier /NOSHAREBLE	 ;013
+	TST	U.CMN+U.PRES	;Is /NOSHAREABLE present ?		 ;013
+	BEQ	65$		;No, 65$ - so default (default is mount	 ;013 
+				;  it private which = shared)		 ;013
+	BIS	#UC.NSH,R3	;Yes, /NOSHAREABLE is present so set 'no-share' ;016
+        BIC	#UC.PRI,R3	;  bit in mode word and clear 'private'	;016
+	CALBX	FET.A		;Check argument				;013
+	MOVB	U.CMN+U.LOW,JOBNUM ;Retrieve specified job number	;013
+	TST	U.CMN+U.PRES	;Job number specified?			;013
+	BNE	65$		;Yes, 65$		 		;013
+	CLR	JOBNUM		;No, default to caller's job		;013
+65$:	CALBX	FET.CQ <#WRIT.Q> ;Fetch qualifier /WRITE		;003
+	TST	U.CMN+U.PRES	;Is /WRITE present ?
+	BEQ	75$		;No,75$  (neither /[NO]WRITE was present) ;023
+	TST	U.CMN+U.NO	;Yes, is it really /NOWRITE ?
+				;  (does it have '/NO' prefix ?)
+	BEQ	68$		;No, 68$  (it's /WRITE)     		;006
+	BIS	#UC.WLK,R3	;Yes, /NOWRITE is present so 
+                                ;  set 'read-only' bit in mode word 
+	BR	70$		;Mount it				;006
+
+68$:	BIS	#UC.ORO,R3	;Set 'override read-only pack' in	;006
+				;  case disk is initialized read-only
+70$:	CALL	MOUNT		;Mount disk as either private or non-shared, 
+				;  and either write enabled or read-only, 
+				;  as appropriate, using flag combination 
+				;  in R3
+	TSTB	FIRQB		;Error occur ?
+	BEQ	71$		;No, check write access			;023
+	CMPB	FIRQB,#PRVIOL	;Yes, was it a privilege violation?	;016
+	BNE	RTNERR		;No, print the error			;016
+	MESSAGE	<"?MOUNT privilege is required"<200>> ;Yes, print error	;016
+	JMP	GETOUT		;Exit this program			;016
+
+71$:	BIT	#UC.ORO,R3	;/WRITE requested?			;023
+	BEQ	USRBYE		;No, exit				;023
+	TST	REVLVL		;Yes, RDS0 disk?			;023
+	BNE	USRBYE		;No, exit				;023
+	CALL	DISMNT		;Yes, dismount the disk	ignoring errors	;023
+	MESSAGE	<"?Disk of this revision level can not be write-enabled"<200>> ;Print error ;023
+	JMP	GETOUT		;Exit this program			;023
+
+;
+; /WRITE and /NOWRITE were not present, so we now have to determine how 
+; the disk was initialized.  If the disk was initialized as read-only, 
+; then mount the disk as read-only.  Whereas, if the disk was initialized 
+; as read/write, then the default action is to mount the disk write 
+; enabled (/WRITE) as long as the drive is not write protected.  If it 
+; is write protected, then the disk is mounted read-only (/NOWRITE).
+;
+
+75$:	BIT	#UC.RO,FIBUF+PSTAT ;Disk initialized as read-only ?	;023
+	BNE	90$		;Yes,90$				;006
+	TST	WRPFLG		;No,was initialized as read/write
+				;  Is the device write protected ?
+	BEQ	80$		;No,80$ to mount it write enabled and 	;023
+				;  either private or non-shared
+	BIS	#UC.WLK,R3	;Yes,set 'read-only' flag 
+	CALL	MOUNT		;Mount the disk read-only and either 
+				;  private or non-shared for this 
+				;  non-privileged user
+	TSTB	FIRQB		;Error occur ?
+	BEQ	85$		;No,85$					;006
+	CMPB	FIRQB,#PRVIOL	;Yes, was it a privilege violation?	;016
+	BNE	RTNERR		;No, print the error			;016
+	MESSAGE	<"?MOUNT privilege is required"<200>> ;Yes, print error	;016
+	JMP	GETOUT		;Exit this program			;016
+
+80$:	CALL	MOUNT		;Mount disk as write enabled		;023
+				;  and either private or non-shared, 	;023
+	TSTB	FIRQB		;Error occur ?
+	BNE	83$		;Yes, 83$				;023
+	TST	REVLVL		;No, RDS0 disk?				;023
+	BEQ	91$		;Yes, inform user of read-only access	;023
+	BR	USRBYE		;Exit					;028
+
+83$:	CMPB	FIRQB,#PRVIOL	;Was it a privilege violation?		;023
+	BNE	RTNERR		;No, print the error			;023
+	MESSAGE	<"?MOUNT privilege is required"<200>> ;Yes, print error	;023
+	JMP	GETOUT		;Exit this program			;023
+
+RTNERR:	JMP	ERRPRT		;Yes,ERRPRT - print error on user's console
+
+85$:	MESSAGE <"%Device write protected"<200>> ;Send a warning    	;016
+				;  since drive is write protected, to 
+				;  tell user of his limited (read-only) 
+				;  access to the disk
+	BR	USRBYE		;Exit					;006
+
+90$:	BIS	#UC.WLK,R3	;Set 'read-only' flag			;006
+	CALL	MOUNT		;Mount it as read-only and private or 	;006
+				;  non-shared
+	TSTB	FIRQB		;Error occur ?				;006
+	BEQ	91$		;No, 91$				;016
+	CMPB	FIRQB,#PRVIOL	;Yes, was it a privilege violation?	;016
+	BNE	RTNERR		;No, print the error			;016
+	MESSAGE	<"?MOUNT privilege is required"<200>> ;Yes, print error	;016
+	BR	93$		;Exit this program			;028
+
+91$:	MESSAGE	<"%Disk is mounted read-only"<200>> ;Warn the user	;006
+				;  of his type of access
+USRBYE:	TSTB	JOBNUM		;Must we give it to someone else?	;028
+	BEQ	93$		; NO					;028
+	CMPB	JOBNUM,MYJOB	; Is it for me?				;028
+	BEQ	93$		; Yes - then I already OWN it!		;028
+	CALLX	CLRFQB		;Start with a clean FIRQB		;028
+	MOVB	#UU.ASS,FIRQB+FQFUN ; Reassign ownership function	;028
+	MOVB	JOBNUM,FIRQB+FQNAM1 ; to this job number		;028
+	MOV	R1,FIRQB+FQDEV	;     of this device			;028
+	MOV	R2,FIRQB+FQDEVN	;     and this unit number		;028
+	.UUO			;Go let the monitor do the transfer	;028
+	TSTB	FIRQB		;Did we transfer ownership?		;028
+	BEQ	93$		; Yes - so all is well			;028
+	MESSAGE	<"%/NOSHARE could not be set to requested job.">	;028
+93$:	JMP	GETOUT 		;Exit 
+
+; The user who issued the DCL MOUNT is privileged.  
+									
+USRPRV:
+	BIT	#UC.MNT,FIBUF+PSTAT ;Is the 'dirty' bit set on the disk    ;007
+				;  indicating disk needs to be rebuilt ?
+				;  (1st block of MFD has already been read)
+	BEQ	95$		;No,95$
+	JMP	NOTCLN		;Yes,NOTCLN   
+
+; The user is privileged and the disk is 'clean' (that is, the disk WAS
+; logically dismounted the last time it was logically mounted and therefore, 
+; a rebuild of the disk does not NEED to be done).
+
+95$:	CALBX	FET.CQ <#REBU.Q> ;Fetch command qualifier /REBUILD
+				;  (the disk doesn't need to be rebuilt,
+				;   but maybe the user wants to 'force' 
+				;   a rebuild at this time)
+	TST	U.CMN+U.PRES	;Was /REBUILD present ?
+	BEQ	110$		;No,110$  (neither /[NO]REBUILD)
+	TST	U.CMN+U.NO	;Was it really /NOREBUILD ?
+	BNE	110$		;Yes, it was /NOREBUILD 
+	TST	WRPFLG		;Is the device write protected ?
+	BEQ	100$		;No, 100$
+	MESSAGE	<"?Can't rebuild disk because device is write protected"<200>> ;
+				;Yes, print fatal error 
+	BR	93$		;Exit from this program 		;028
+
+100$:				;The device is not write protected
+	MOV	R3,-(SP)	;Save mode word				;024
+	MOV	R1,DEVNAM	;Set up ASCII device name
+	CMPB	R2,#10.		;Single or double digit unit #		;026
+	BLT	103$		;Single					;026
+	MOVB	#'1,DEVNAM+2	;Leading "1"				;026
+	SUB	#10.,R2		;Get second digit			;026
+	MOVB	R2,DEVNAM+3	;Second digit				;026
+	ADD	#10.,R2		;Restore r2				;026
+	BISB	#'0,DEVNAM+3	;Make it ascii				;026
+	BR	104$							;026
+
+103$:	MOVB	R2,DEVNAM+2	;Set up device number			;026
+	ADD	#'0,DEVNAM+2	;Make it ASCII for ONLCLN		;026
+104$:	MOV	#DEVNAM,R1	;Set up address of string for ONLCLN	;026
+	MOV	#^RONL,FIRQB+FQNAM1	;About to clean disk, change 	;014
+	MOV	#^RCLN,FIRQB+FQNAM1+2	;  name to ONLCLN		;014
+	.NAME								;014
+	CALLX	ONLCL2   	;Disk is not marked 'dirty' but go and rebuild
+				;  the disk (is public or private) since user 
+				;  specified /REBUILD to force it, then return 
+	MOV	#^R$MO,FIRQB+FQNAM1	;Change name back		;014
+	MOV	#^RUNT,FIRQB+FQNAM1+2	;  to $MOUNT			;014
+	.NAME								;014
+	CALL	GETDEV		;Restore the device name and number into R1,R2
+	BCC	105$		;Error occur ?  No,105$
+	JMP	FSSERR		;Yes,FSSERR (R0 = error code)
+				;  print the fatal error and exit
+105$:	CALL	DISKRD		;Read the disk label block again - return only
+				;  if no error occurred (else program exits)
+	MOV	(SP)+,R3	;Get back mode word			;024
+110$:	BIT	#UC.PRI,FIBUF+PSTAT ;Was disk initialized as private ?     ;007
+				;    (=0,public)        (=1,private)
+	BEQ	INTPUB		;No,INTPUB - it is public		;013
+	JMP	INTPRI		;Yes,INTPRI - it is private		;013
+				;  (go mount it)
+
+; The disk was initialized as public and the user who issued the MOUNT
+; command is privileged.
+
+INTPUB:	CALBX	FET.CQ <#WRIT.Q> ;Fetch /WRITE qualifier 		;016
+	TST	U.CMN+U.PRES	;Is it there ?
+	BEQ	120$		;No,120$ (neither /[NO]WRITE was present)
+	TST	U.CMN+U.NO	;Yes, was it really /NOWRITE ?
+	BNE	130$		;Yes,set 'read-only' flag in mode word	;006   
+	BIS	#UC.ORO,R3	;No,it was /WRITE so set 'override	;006
+				;  read-only pack' in case disk was
+				;  initialized as read-only
+	BR	135$		;Continue				;006
+
+120$:				;Neither /WRITE nor /NOWRITE were 
+				;  specified
+	BIT	#UC.RO,FIBUF+PSTAT ;Disk initialized as read-only ?	;006
+	BNE	130$		;Yes,do setup				;006
+	TST	WRPFLG		;No,was initialized as read/write
+				;  Is the device write protected ?
+	BEQ	135$		;No, so leave it as write enabled 
+130$:	BIS	#UC.WLK,R3	;Set 'read-only' flag
+135$:	CALBX	FET.CQ <#PUBL.Q> ;Fetch command qualifier /PUBLIC
+	TST	U.CMN+U.PRES	;Is it there ?
+	BNE	145$		;Yes,145$ - mount public disk as public
+	CALBX	FET.CQ <#NOSH.Q> ;No, fetch command qualifier /NOSHAREABLE ;013
+	TST	U.CMN+U.PRES	;Is it there ?				;003
+	BEQ	140$		;No,140$ mount the public disk as private ;013
+	BIS	#UC.NSH,R3	;Yes,set flag indicating 'no share'	;003
+				;  (mount the public disk as non-shared)
+	CALBX	FET.A		;Check argument				;013
+	MOVB	U.CMN+U.LOW,JOBNUM ;Retrieve specified job number	;013
+	TST	U.CMN+U.PRES	;Job number specified?			;013
+	BNE	145$		;Yes, 145$		 		;013
+	CLR	JOBNUM		;No, default to caller's job		;013
+	BR	145$		;Skip around				;013
+
+140$:	BIS	#UC.PRI,R3	;No,set flag to mount it 'private'
+145$:	CALL 	MOUNT		;Go mount it, using flag combination in R3
+	TSTB	FIRQB		;Error occur ?
+	BEQ	146$		;No, continue				;023
+	CMPB	FIRQB,#BADNAM	;Yes, was it a revlvl conflict?		;023
+	BNE	RSTERR		;No, print the monitor error		;023
+	MESSAGE	<"?Disk of this revision level can not be public"<200>> ;Print error ;023
+	JMP	GETOUT		;Exit this program			;023
+
+; The mount worked, so now determine if any warning messages need to be
+; returned to the user.
+
+146$:	CALBX	FET.CQ <#WRIT.Q> ;Fetch /WRITE qualifier 		;023
+	TST	U.CMN+U.PRES	;Is it there ?
+	BEQ	147$		;No, 147$				;023
+	BIT	#UC.ORO,R3	;Yes, /WRITE requested?			;023
+	BEQ	150$		;No, continue				;023
+	TST	REVLVL		;Yes, RDS0 disk?			;023
+	BNE	150$		;No, continue				;023
+	CALL	DISMNT		;Yes, dismount the disk	ignoring errors	;023
+	MESSAGE	<"?Disk of this revision level can not be write-enabled"<200>> ;Print error ;023
+	JMP	GETOUT		;Exit this program			;023
+
+147$:	TST	REVLVL		;RDS0 disk?				;023
+	BEQ	148$		;Yes, warn him				;023
+	BIT	#UC.RO,FIBUF+PSTAT ;No,is disk initialized as read-only ? ;006
+	BEQ	149$		;No,149$ - it's initialized as read/write ;006
+148$:	MESSAGE	<"%Disk is mounted read-only"<200>> ;Yes, warn the user   ;023
+				; of his type of access
+	BR	150$		;Continue				  ;006
+
+149$:	TST	WRPFLG		;Is the device write protected ?	  ;006
+	BEQ	150$		;No,150$
+	MESSAGE <"%Device write protected"<200>> ;Send a warning since 
+				;  drive is write protected and user 
+				;  specified neither /WRITE nor /NOWRITE
+150$:	CALBX	FET.CQ <#PUBL.Q> ;Fetch command qualifier /PUBLIC
+	TST	U.CMN+U.PRES	;Is it there ?
+	BNE	BYEAGN		;Yes,BYEAGN - exit this program
+	CALBX	FET.CQ <#PRIV.Q> ;Fetch command qualifier /PRIVATE
+	TST	U.CMN+U.PRES	;Is it there ?
+	BNE	BYEAGN		;Yes,BYEAGN - exit 
+	CALBX	FET.CQ <#SHAR.Q> ;Fetch command qualifier /SHAREABLE	;013
+	TST	U.CMN+U.PRES	;Is it there ? 				;003
+	BNE	BYEAGN		;Yes,BYEAGN - exit 			;003
+	CALBX	FET.CQ <#NOSH.Q> ;Fetch command qualifier /NOSHAREABLE	;013
+	TST	U.CMN+U.PRES	;Is it there ?				;013
+	BNE	BYEAGN		;Yes,BYEAGN - exit			;013
+	MESSAGE <"%Public disk mounted as private"<200>> ;Send a 
+				;  warning since user did not specify 
+				;  how to mount the disk
+	BR	BYEAGN		;Exit 
+
+RSTERR:	JMP	ERRPRT		;ERRPRT (print the monitor error)	;023
+
+; The disk is 'dirty', which means that the disk was not logically 
+; dismounted from the drive the last time it was logically mounted.  
+; The user is privileged, and the disk is either initialized public 
+; or private. 
+
+NOTCLN:	TST	WRPFLG		;Is the device write protected ?
+	BEQ	200$		;No,200$
+	CALBX	FET.CQ <#REBU.Q> ;Yes, fetch qualifier /REBUILD 
+	TST	U.CMN+U.PRES	;Is /REBUILD present ?
+	BEQ	190$		;No, neither /REBUILD nor /NOREBUILD
+				;  (the mount fails)
+	TST	U.CMN+U.NO	;Is it really /NOREBUILD ?
+	BEQ	180$		;No,180$ (just /REBUILD)
+				;  (the mount fails)
+160$:	CALBX	FET.CQ <#NORE.Q> ;Yes, fetch /NORESTRICT qualifier	;016
+	TST	U.CMN+U.PRES	;Is /NORESTRICT present ?		;016
+	BEQ	161$		;No, 161$ (continue)			;016
+	MESSAGE <"?Disk needs rebuilding, so it can not be NORESTRICT"<200>> ;016
+	JMP	GETOUT		;Disk is dirty and both /NOREBUILD and 	;028
+				;  /NORESTRICT were requested		;016
+161$:	MOV	#<UC.PRI+UC.WLK>,R3 ;Assume 'private' and 'read-only'
+				    ;   bits (ignore /[NO]QUOTA)	;016
+	CALBX	FET.CQ <#NOSH.Q> ;Fetch the qualifier /NOSHAREABLE	;013
+	TST	U.CMN+U.PRES	;Is it present ?			;003
+	BEQ	165$		;No,165$  - so default			;013
+	MOV	#<UC.NSH+UC.WLK>,R3 ;Yes,set 'no share' and 'read-only' ;003
+				    ;  bits in mode word, thus 
+				    ;  overriding 'private'
+	CALBX	FET.A		;Check argument				;013
+	MOVB	U.CMN+U.LOW,JOBNUM ;Retrieve specified job number	;013
+	TST	U.CMN+U.PRES	;Job number specified?			;013
+	BNE	165$		;Yes, 165$		 		;013
+	CLR	JOBNUM		;No, default to caller's job		;013
+165$:	CALL	MOUNT		;Mount read-only and either private or 	;003
+				;  non-shared
+	TSTB	FIRQB		;Error occur ?     
+	BEQ	170$		;No,170$
+	CMPB	FIRQB,#PRVIOL	;Yes, was it a privilege violation?	;016
+	BNE	166$		;No, check if dirty			;016
+	MESSAGE	<"?MOUNT privilege is required"<200>> ;Yes, print error	;016
+	JMP	GETOUT		;Exit this program			;016
+
+166$:	CMPB	FIRQB,#INTPAK	;Does the error = "Disk pack needs REBUILDing"?
+				;  (when the disk is dirty and we mount it
+				;   read-only, the error 'INTPAK' still occurs 
+				;   but it is ignored - it is left restricted to
+				;   make it accessible to privileged users only
+				;   since it's remaining dirty)
+	BNE	RSTERR		;No, print the monitor error		;023
+
+;
+; The mount succeeded but the disk needs rebuilding (it is dirty) and 
+; the user did not want to rebuild it at this time.  Therefore, we left 
+; the disk restricted to prevent access by non-privileged users and only 
+; gave the privileged users 'read-only' access (even if he specified 
+; /WRITE on the mount).  Warning messages are then sent to the user's 
+; console.
+;
+; Note:  in the case of a 'dirty' public disk where the user specified 
+;        /PUBLIC on the mount, the disk is mounted as /PRIVATE.
+
+170$:	MESSAGE <"%Disk needs rebuilding"<200>> ;Issue 1st warning message
+	CALBX	FET.CQ <#NOSH.Q> ;Fetch the qualifier /NOSHAREABLE	;013
+	TST	U.CMN+U.PRES	;Is it present ?			;003
+	BNE	177$		;Yes,177$  (we know it was mounted 	;003
+				;           as non-shared then)
+175$:	MESSAGE <"%Disk is restricted and mounted private, read-only"<200>> ;
+				;Issue 2nd warning message
+	BR	BYEAGN		;Exit (the mount succeeded)
+
+177$:	MESSAGE <"%Disk is restricted and mounted non-shared, read-only"<200>> ;
+				;Issue 2nd warning message		;003
+	BR	BYEAGN		;Exit (the mount succeeded)		;003
+
+180$:	MESSAGE <"?Can't rebuild disk because device is write protected"<200>> ;
+	JMP	GETOUT		;Exit (the mount failed)		;028
+
+190$:	MESSAGE <"?Disk needs rebuilding but device is write protected"<200>> ;
+	JMP	GETOUT		;Exit (the mount failed)
+
+BYEAGN:	JMP	USRBYE		;Exit (and reassign disk if needed)	;028
+
+; The disk is 'dirty', which means that the disk was not logically 
+; dismounted from the drive the last time it was logically mounted.  
+; The user is privileged, the disk is either initialized public or 
+; private, and the drive is NOT write protected. 
+
+200$:	CALBX	FET.CQ <#REBU.Q> ;Fetch the qualifier /REBUILD 
+	TST	U.CMN+U.PRES	;Is it present ?
+	BEQ	210$		;No,210$  neither /REBUILD nor /NOREBUILD
+	TST	U.CMN+U.NO	;Is it really /NOREBUILD ?
+	BNE	160$		;Yes,160$ 
+210$:	MOV	R1,DEVNAM	;Set up ASCII device name
+	CMPB	R2,#10.		;Single or double digit unit #		;026
+	BLT	212$		;Single					;026
+	MOVB	#'1,DEVNAM+2	;Leading "1"				;026
+	SUB	#10.,R2		;Get second digit			;026
+	MOVB	R2,DEVNAM+3	;Second digit				;026
+	ADD	#10.,R2		;Restore r2				;026
+	BISB	#'0,DEVNAM+3	;Make it ascii				;026
+	BR	213$							;026
+
+212$:	MOVB	R2,DEVNAM+2	;Set up device number			;026
+	ADD	#'0,DEVNAM+2	;Make it ASCII for ONLCLN		;026
+213$:	MOV	#DEVNAM,R1	;Set up address of string for ONLCLN	;026
+	MOV	R3,-(SP)	;Save mode word				;016
+	MOV	#^RONL,FIRQB+FQNAM1	;About to clean disk, change 	;014
+	MOV	#^RCLN,FIRQB+FQNAM1+2	;  name to ONLCLN		;014
+	.NAME								;014
+	CALLX	ONLCL2		;The disk is marked 'dirty' and either the user
+				;  specified /REBUILD or neither /[NO]REBUILD 
+				;  so rebuild it (by default we rebuild it if 
+				;  'dirty') and then return here
+	MOV	#^R$MO,FIRQB+FQNAM1	;Change name back		;014
+	MOV	#^RUNT,FIRQB+FQNAM1+2	;  to $MOUNT			;014
+	.NAME								;014
+	CALL	GETDEV		;Restore the device name and number into R1,R2
+	BCC	215$		;Error occur ?  No,215$
+	JMP	FSSERR		;Yes,FSSERR (R0 = error code)
+				;  print the fatal error and exit
+215$:	CALL	DISKRD		;Read the disk label block again - return only 
+				;  if no error occurred (else program exits)
+	MOV	(SP)+,R3	;Get back mode word			;016
+	BIT	#UC.PRI,FIBUF+PSTAT ;Was disk initialized as private ?     ;007
+				;    (=0,public)        (=1,private)
+	BEQ	220$		;No,INTPUB  (it's public) -  go mount it
+	JMP	INTPRI		;Yes,INTPRI - go mount it
+
+220$:	JMP	INTPUB		;
+
+
+GLOBAL	<INTPAK,PRIV.Q,PSTAT,PUBL.Q,REBU.Q,SHAR.Q,NOSH.Q,WRIT.Q>	;013
+GLOBAL	<PRVIOL,QUOT.Q,NORE.Q,OVER.Q,NOTMNT>				;025
+
+.DSABL	LSB
+
+.SBTTL	ANALYZING THE DISMOUNT COMMAND
+
+.ENABL	LSB
+
+;+
+;
+;
+;	The user issued some form of a 'DCL DISMOUNT' of a disk:
+;	
+;		DISMOUNT device-name[:] [label][/qualifier] 
+;
+;	ENTRY: 	JMP DISDSK
+;
+;		INPUTS:  the user's DCL 'DISMOUNT' command line must be in 
+;			 core common (for CUI to reference)
+;
+;		INPUT ASSUMPTIONS:
+;
+;	 	      The device name is a required parameter for privileged 
+;	              and non-privileged users on the DISMOUNT command and if 
+; 		      it is not provided by the user then CUI fails. Therefore,
+; 		      when this routine finally gets control, a good command 
+; 		      line has been supplied.  The pack-id label is an optional
+;		      parameter for a all users.
+;
+;
+;	Terminology:
+;
+;		     'clean' ---> disk was logically dismounted prior to this 
+;			          MOUNT command
+;		     'dirty' ---> disk was not logically dismounted prior to 
+;		       	          this MOUNT command
+;		'non-shared' ---> disk is accessible only to the job that mounts
+;			          it (it is owned by it and cannot be shared)
+;
+;
+;       A non-privileged user:
+;	
+;		1. Can dismount a disk initialized as private and mounted as
+;		     private.
+;		2. Can dismount a disk initialized as private and mounted as 
+;		     non-shared provided the mount and dismount are performed
+;		     from within the same job.  He cannot access or dismount a
+;		     private disk which was mounted as non-shared by another 
+;		     job.
+;		3. Cannot dismount a disk initialized as public, regardless
+;		     of how it was mounted.
+;
+;	A privileged user:
+;
+;		1. Can dismount a disk initialized as public and mounted 
+;		     public only by specifying /PUBLIC.
+;		2. Can dismount a disk initialized as public and mounted 
+;		     private.
+;		3. Can dismount a disk initialized as private and mounted 
+;		     private.
+; 		4. Can dismount a private or public disk that was mounted 
+;		     as non-shared by a user who was either privileged or 
+;		     non-privileged, as long as there's no open files, but 
+;		     he can never access the disk.
+;
+;		  (Note: a disk initialized as private can never be mounted 
+;		         as public so we don't worry about this case.)
+;
+;	The only legal qualifier is:
+;						
+;	        /PUBLIC   - for privileged users only, to be able to dismount 
+;			    a disk that was initialized and mounted as public.
+;			    If this qualifier is not present, then the disk 
+;			    had to have been mounted as private or non-shared 
+;			    for the dismount to work.
+;  
+;
+;	Note:  the device name and number are kept in R1,R2 respectively
+;	       throughout this routine.  R0 is destroyed by CUI.
+;
+;	Registers used: R0-R5
+;
+;-
+DISDSK:
+	CALL	GETDEV		;Get device name and make sure it's valid
+				;  (required parameter), return with:
+				;  R1 = device name, 
+				;  R2 = device number and flag
+	BCS	10$		;Error occur ?  Yes,10$
+
+; Open the SATT.SYS file to find out how the disk was mounted, and then open
+; the disk non-file structured to see how it was initialized.
+
+	CALBX	U$FSS <#NAMLNG,#FILNAM> ;Convert filename to RAD50
+				;  (pass string length, address)
+	BCC	15$		;Error occur ?  No,15$
+10$:	JMP	FSSERR		;Yes,FSSERR (R0 = error code)
+				;  (print fatal error and exit)
+
+15$:	MOV	FIRQB+FQNAM1,-(SP) ;Save 1st word of filename temporarily
+	MOV	FIRQB+FQNAM1+2,-(SP) ;Save 2nd word of RAD50 filename
+	MOV	FIRQB+FQEXT,-(SP) ;Save filename extension
+	CALLX	CLRFQB		;Clear the FIRQB
+	MOVB	#OPNFQ,FIRQB+FQFUN ;Function code = 'Open a channel'
+	MOVB	#2*2,FIRQB+FQFIL ;Set up channel 2
+	MOV	#1+<0*400>,FIRQB+FQPPN ;Set account number = [0,1]
+	MOV	(SP)+,FIRQB+FQEXT ;Restore filename extension
+	MOV	(SP)+,FIRQB+FQNAM1+2 ;Restore 2nd word of filename
+	MOV	(SP)+,FIRQB+FQNAM1 ;Restore 1st word of filename
+	MOV     #OP$MOD!OP$RO!OP$RR,FIRQB+FQMODE ;Mode = 'real mode',	
+				;  'read-only'and 'read regardless' 
+	MOV	R1,FIRQB+FQDEV 	;Load up device name
+	MOV	R2,FIRQB+FQDEVN ;Load up device unit number and flag
+	CALFIP			;Open [0,1]SATT.SYS since this file is 	;011
+				;  present on every disk (to make sure 
+				;  the disk is mounted before we try to
+				;  dismount it)
+	TSTB	FIRQB		;Error occur ?
+	BEQ	20$		;No,20$					   ;003
+	CMPB	FIRQB,#INUSE	;Yes, error = 'Account or device in use' ? ;003
+;
+; Note: you will get the INUSE error if a job other than the one that 
+;       mounted the disk as non-shared is now trying to dismount it.  
+;	Whereas, if the same job is doing both, then this error won't 
+;	occur and there will be no way of telling that it was mounted 
+;	as non-shared.
+;
+	BEQ	18$		;Yes,18$   No	 			;009
+	CMPB	FIRQB,#HNGDEV	;Error = 'Device hung or write locked'? ;009
+	BEQ	17$		;Yes, proceed  				;010
+	JMP	ERRRTN		;No, ERRRTN - print it and exit		;010
+17$:									;010
+;
+; Note: the channel is opened and if a HNGDEV error occurs, then we	;009
+;	know that someone has spun down the mounted disk and we must    ;009
+;	dismount it, as requested.  There IS a recognized timing  	;009
+;	window here in that if no error occurs on the open and the user	;009
+;       spins down the disk after this operation (resulting in a 	;009
+;	subsequent error, maybe on the close), then the dismount will   ;009
+;	fail.  In this case, the user will have to issue a 2nd dismount ;009
+;	command and this will succeed.  No checks are done on the 	;009 
+;	pack-id label specified because we can't read the spun down     ;009
+;	disk's label.							;009
+;
+	MOVB	FIRQB,-(SP)	;Yes,save error code til after we 	;009
+				;  dismount the disk in order to send   ;009
+				;  out 2 warning messages to user	;009
+	BR	80$		;Go dismount the spun down disk    	;009
+
+18$:	TST	MNTPRV		;Is the user privileged ?		;016
+	BEQ	19$		;No,19$					;016
+	CLR	FIBUF+PCKID	;Yes, remind ourselves we can't check pack-id ;016
+	BR	40$		;He can attempt to dismount this	;016
+				;  non-shared disk (we can't determine 
+				;  if it's initialized as private or 
+				;  public though)		
+
+19$:	JMP	ERRRTN		;Return the error (the disk is    	;016
+				;  mounted as non-shared and this 
+				;  non-priv'd user cannot dismount it) 
+				;  - a user who does the mount and
+				;  dismount in same job won't get this error
+
+20$:	MOVB	FIRQB+FQDEVN+1,R3 ;Save flag byte returned on the 'open'
+				;   indicating how the disk was mounted
+	INC	FRCEDM		;set force dismount on error flag	;027
+	CALLX	CLRFQB		;Zero out the FIRQB
+	MOVB	#CLSFQ,FIRQB+FQFUN ;Code = 'Close an open channel'
+	MOVB	#2*2,FIRQB+FQFIL ;Set up channel 2 for close
+	CALFIP			;Close it				;011
+	TSTB	FIRQB		;Error occur ?
+	BNE	ERRRTN		;Yes,ERRRTN
+	CALL	DISKRD		;Read the disk label block - return only if
+				;  no error occurred (else program exits)
+
+; Determine whether the disk was initialized as private or as public, and
+; also if the qualifier /PUBLIC was specified on the dismount command.
+									
+	BIT	#UC.PRI,FIBUF+PSTAT ;Was disk initialized as private ?  ;007
+				;    (=0,public)    ( =1,private)   
+	BNE	40$		;Yes, disk was initialized as private 
+				;  and therefore mounted as private 
+	TST	MNTPRV		;No, it was initialized as public	;016
+				;  - is the user privileged ? 
+	BNE	30$		;Yes, 30$  
+	MESSAGE <"?MOUNT privilege required to dismount a public disk"<200>> ;021
+				;No, print fatal error 
+	BR	LEAVE		;Exit from this program
+
+30$:				;The user is privileged and the disk is 
+				;  initialized public
+	BITB	#1,R3		;Is the disk mounted public ?
+				;  (is it in the public structure ?)
+				;  (=0,public)    (=1,private)
+				; R3 = flag byte as returned from 1st OPNFQ
+	BNE	40$		;No,40$ - the public disk was mounted as 
+				;  private 
+	CALBX	FET.CQ <#PUBL.Q> ;Yes,fetch command qualifier /PUBLIC
+	TST	U.CMN+U.PRES	;Is it there ?
+	BNE	50$		;Yes,50$ (/PUBLIC)
+	MESSAGE <"?Disk is mounted public"<200>> ;No,print fatal error - 
+				;  a privileged user can dismount a public 
+				;  disk that was mounted as public only if 
+				;  he specified /PUBLIC on dismount and 
+				;  nothing was specified here
+	BR	LEAVE 		;Exit from this program
+
+40$:	CALBX	FET.CQ <#PUBL.Q> ;Fetch command qualifier /PUBLIC
+	TST	U.CMN+U.PRES	;Is it there ?
+	BEQ	50$		;No,50$   Yes
+
+;
+; Print a fatal error because:
+;
+;  1. A non-privileged user attempted to dismount a private disk that was
+;     mounted as private by specifying /PUBLIC on the dismount, or
+;  2. A non-privileged user attempted to dismount a private disk that was
+;     mounted as non-shared by specifying /PUBLIC on the dismount (all from
+;     within the same job), or
+;  3. A privileged user attempted to dismount a private disk that was mounted 
+;     as private or non-shared by specifying /PUBLIC on the dismount, or
+;  4. A privileged user attempted to dismount a public disk that was mounted 
+;     as private or non-shared by specifying /PUBLIC on the dismount.
+
+	CMPB	FIRQB,#INUSE	;Was disk mounted as non-shared AND the    ;003
+				;  job doing the dismount is different 
+				;  than the one that mounted it ?
+	BNE	45$		;No,45$ (it is either mounted as private,  ;003
+				;  or as non-shared but from within same job)
+	MESSAGE <"?Disk is mounted non-shared"<200>> ;Yes, we errored in   ;003
+				;  opening the disk, so print fatal error 
+				;  since /PUBLIC was specified (job trying 
+				;  to dismount the non-shared disk did not 
+				;  mount it)
+	BR	LEAVE 		;Exit from this program			   ;003
+
+45$:	MESSAGE <"?Disk is mounted private or non-shared"<200>> ;	   ;003
+				;No, it was mounted as private, or 
+				;  non-shared but from within same job
+				;  (we could open and read the disk) so print 
+				;   fatal error since /PUBLIC was specified 
+	BR	LEAVE 		;Exit from this program
+
+;
+; To reach here, either: 
+;
+;  1. A public disk was mounted as private or as non-shared, and the 
+;     user is privileged, or 
+;  2. A public disk was mounted as public, the user is privileged, 
+;     and /PUBLIC was specified on the dismount command, or
+;  3. A private disk was mounted as private or as non-shared, and the 
+;     user is privileged, or 
+;  4. A private disk was mounted as private, and the user is non-privileged.
+;  5. A private or public disk was mounted and has been spun down by a
+;     privileged or non-privileged user.  We must proceed with the
+;     dismount request.
+;
+
+50$:	CALBX	FET.P <#LABL.P> ;Fetch the pack-id label the user specified 
+				;  on the DISMOUNT command line (this is an
+				;  optional parameter)			;017
+	TST	U.CMN+U.PRES	;Is it there ?
+	BEQ	78$		;No ,78$				;017
+60$:	CALL	PACK		;Convert it to RAD50			;012
+	BCS	70$		;Error occur ?  yes,70$ 
+	CMP	FIBUF+PCKID,(R5)+ ;1st word of RAD50 labels match ?	;012
+					 ; (does the user specified label 
+					 ;  = the label on the disk ?)
+	BNE	70$		;No,70$
+	CMP	FIBUF+PCKID+2,(R5) ;2nd word of labels match ?		;012
+	BEQ	78$		;Yes, the pack-id labels matched            ;009
+70$:	TST	FIBUF+PCKID	;Is our reminder set?			;016
+	BEQ	75$		;Yes, 75$				;016
+	MESSAGE <"?Pack-id labels don't match"<200>> ;No, print fatal error 
+				;  since a privileged user gave a bad label 
+	BR	LEAVE 		;Exit 
+
+75$:	MESSAGE	<"?Disk is NOSHARE to another job; can't verify pack-id"<200>> ;016
+	BR	LEAVE		;Exit, asked to check something we can't  ;016
+
+FORCED::	nop		;entry from error print			;027
+78$:	CLRB	-(SP)		;Initialize flag to indicate the mounted    ;009
+				;  disk was not spun down		    ;009 
+80$:	CALL	DISMNT		;Attempt to dismount the disk pack 
+	MOV	FIRQB+FQERNO,R1 ;Save status of dual-port flag		     ;010
+	TSTB	FIRQB		;Error occur ?
+	BEQ	90$		;No,90$ - disk was dismounted successfully   ;010
+	TSTB	(SP)+		;Yes,pop flag off the stack (a no-op)	     ;009
+	CMPB	FIRQB,#HNGDEV	;Error = 'Device hung or write locked'?      ;009
+				;  (this occurs when disk was mounted	     ;009
+				;   read/write and has been spun down)	     ;009
+	BEQ	100$		;Yes, warn the user		       	     ;010   
+	CMPB	FIRQB,#PRVIOL	;No, was it a privilege violation?	;019
+	BEQ	81$		;Yes, print new error			;019
+	CMPB	FIRQB,#BADFUO	;No, was it an invalid SY0: operation?	;019
+	BEQ	82$		;Yes, print new error			;019
+	JMP	ERRRTN		;No, print the returned error		;019
+81$:	MESSAGE	<"?MOUNT privilege is required"<200>> ;Print error	;019
+	JMP	GETOUT		;Exit this program			;016
+82$:	MESSAGE	<"?Invalid operation on system disk"<200>> ;Print error	;019
+	JMP	GETOUT		;Exit this program			;019
+
+;
+; Note: two things to check for here i) when a disk is mounted read-only     ;009
+;  	and then spun down, ii) when a disk is dual-ported. No error occurs  ;010
+;	on the dismount function but warnings still need to be sent out.     ;010
+;
+90$:	CMPB	(SP)+,#HNGDEV	;Was the disk spun down ?                    ;009
+	BNE	110$		;No, continue   		             ;010
+100$:	MESSAGE <"%Device hung or write locked"<200>> ;Yes,warn the user     ;009
+				; - the disk was spun down, but we still     ;009
+				;   logically dismounted it		     ;009
+	MESSAGE <"%Dismount will proceed as requested"<200>> ; 		     ;009
+110$:	CMP	#-1,R1		;Is disk dual-ported?		             ;010
+	BNE	LEAVE		;No, exit				     ;010
+	MESSAGE <"%Dual-ported disk, may still be mounted on another system"<200>> ;020
+				;Yes, print warning			     ;010
+	BR	LEAVE		;Exit					     ;010
+
+ERRRTN:	JMP	ERRPRT		;Print error on user's console
+
+LEAVE:	JMP	GETOUT		;Exit from this program
+
+GLOBAL	<HNGDEV,INUSE,PCKID,PSTAT,PUBL.Q,PRVIOL,BADFUO>			;019
+
+.DSABL	LSB
+
+.SBTTL	Translate SY0: into real Device name
+
+.ENABL	LSB
+
+;+
+;	This routine will change the device name from SY0: into the
+;	real device name for the system disk.
+;
+;	Entry:	CALL	SYSNAM
+;
+;		INPUTS:  None
+;
+;	EXIT:   RETURN
+;	            R1 = device name
+;	            R2 = device unit number and flag
+;
+;		DESTROYS: (nothing)
+;
+;-
+
+SYSNAM:	CALLX	CLRFQB		;Get SWAP.SYS disk name	(clear FIRQB)	;028
+	MOVB	#UU.SWP,FIRQB+FQFUN ;	code='Get swapfile status'	;028
+	MOVB	#2,FIRQB+FQFIL	;	swap file # = SWAP.SYS		;028
+	MOVB	#-1,FIRQB+FQSIZM;	function = list			;028
+	.UUO			;	Do it				;028
+	TSTB	FIRQB		;If no error,				;028
+	BEQ	10$		; then continue with the work		;028
+	JMP	ERRPRT		;Print any other error and exit		;028
+
+10$:	MOV	FIRQB+FQDEV,R1	;Reset the real device name		;028
+	MOV	FIRQB+FQDEVN,R2	;Reset the real device unit number	;028
+	RETURN			;All done, so back home again		;028
+
+.DSABL	LSB
+
+.SBTTL  GET A DEVICE NAME
+
+.ENABL	LSB
+
+;+
+;
+;       This routine fetches the device name from the user's MOUNT or DISMOUNT
+;	command line in core common, places a colon on the end of the string
+;	and then calls CUI's FSS routine to check to see if this device 
+;	specification is valid.
+;
+;
+;	ENTRY:  CALL GETDEV
+;
+;		INPUTS:  the user's DCL 'MOUNT' or 'DISMOUNT' command line 
+;			 must be in core common (for CUI to reference)
+;
+;
+;	EXIT:   RETURN
+;		C = 0, device name is valid,
+;		       and:
+;		            R1 = device name
+;		            R2 = device unit number and flag
+;	 	C = 1, device name is not valid
+;		       and:
+;			    R0 = error code (returned by the FSS call)
+;
+;		DESTROYS: R0,R1,R2,R3,R4
+;
+;-
+
+GETDEV:	CALBX	FET.P <#DEVN.P>	;Get device name that user specified
+
+; The device name returned by CUI does not have a ':' on the end, so 
+; add it for the FSS call.
+
+	SUB	#10.,SP		;Allocate 10-character buffer on the stack ;012
+	MOV	SP,R1		;R1 points to the buffer
+ 	MOV	#U.CMN+U.STR,R2 ;R2 points to the device name
+	MOV	U.CMN+U.LEN,R3	;Get number of characters in device name
+	CMP	R3,#9.		;Is device name longer than 9 characters?  ;012
+	BLOS	10$		;No,10$ (it was <= 9)			;012
+	MOV	#9.,R3		;Yes, so set maximum characters in device ;012
+				;  name = 9				;012
+10$:	MOV	R3,R4		;Save character count away for now
+20$:	MOVB	(R2)+,(R1)+	;Move the name onto the stack
+	SOB	R3,20$		;Until done
+	MOVB	#':,(R1)+	;Move a colon to the end of the device name
+	INC	R4		;Add 1 to character count to account for ':'
+	MOV	SP,R3		;R3 points to buffer with the name string
+	CALBX	U$FSS <R4,R3>	;Check for a valid device
+				;  (pass string length,address)
+	ROL	R3		;Save C-bit around 'add' instruction
+	MOV	FIRQB+FQDEV,R1	;Load up the valid device name 
+	MOV	FIRQB+FQDEVN,R2	;Load up the valid device unit number 	 ;004
+				;  and flag
+	ADD	#10.,SP		;Get rid of buffer on the stack		;012
+	ROR	R3		;Restore C-bit so we can give to caller
+	RETURN			;Return to caller with .FSS's status 
+
+
+.DSABL	LSB
+
+.SBTTL  DETERMINE IF A DRIVE IS WRITE PROTECTED
+
+.ENABL	LSB
+
+;+
+;       This routine attempts to mount a disk to determine if the drive 
+;	specified on the user's MOUNT command line is write protected or
+;	not.  The disk is mounted (CALL MOUNT), and then dismounted 
+;	(CALL DISMNT) before control is returned to the caller.  Those 
+;	routines analyze the device name and the pack-id label, and if 
+;	an error occurs as a result of one of those directive calls, then 
+;	the error is printed on the user's console and the program exits.  
+;	No distinction is made in this subroutine between privileged and 
+;	non-privileged users or between disks initialized as private or 
+;	as public.
+;
+;
+;	ENTRY:  CALL WRTPRT
+;
+;		INPUTS:  the user's DCL 'MOUNT' command line must be in 
+;			 core common (for CUI to reference)
+;
+;			 R1 = valid device name
+;			 R2 = valid device unit number and flag
+;
+;	EXIT:   RETURN  (if no error occurred)
+;
+;		with flag 'WRPFLG' initialized as follows:
+;		  = 0, drive is NOT write protected
+;	 	  = 1, drive is write protected or is hung
+;
+;		 R1 = valid device name
+;		 R2 = valid device unit number and flag
+;
+;		DESTROYS: R0,R3,R4,R5
+;
+;-
+WRTPRT:	TST	SYSMNT		; System disk clean/remount?		;028
+	BNE	OUTNOW		;   YES					;028
+	MOV	#<UC.NSH+UC.ORO>,R3 ;Set mode word = mount 'non-shared'	;006
+				;  and 'override read-only pack' (in 
+				;  case disk is initialized as read-only)
+	CLR	JOBNUM		;Use caller's job number		;013
+	MOV	#2,WRPFLG	;Set a 'dummy' flag = 2 (ignore trying 
+				;  to install a logical name on this 
+				;  'trial' mount)
+	CALL	MOUNT		;Mount it non-shared, write enabled
+				;  (with R1= device name, 
+				;        R2= device number and flag)
+	CLR	WRPFLG		;Set flag = 0 (assume drive is not
+				;  write protected)
+	TSTB	FIRQB		;Error occur on the mount ?
+	BEQ	30$		;No,30$ - dismount the disk now
+	CMPB	FIRQB,#PRVIOL	;Yes, was it a privilege violation?	;016
+	BNE	5$		;No, check if dirty			;016
+	MESSAGE	<"?MOUNT privilege is required"<200>> ;Yes, print error	;016
+	JMP	GETOUT		;Exit this program			;016
+
+5$:	CMPB	FIRQB,#HNGDEV	;Does error = 'Tried to mount a disk
+				;  that is not write enabled' ?
+				;  (note: if a drive is write protected AND 
+				;   the disk is 'dirty', then HNGDEV error 
+				;   is returned before INTPAK is by UU.MNT)
+	BNE	10$		;No, 10$
+	ADD	#1,WRPFLG	;Yes, set flag indicating drive is 
+				;  write protected
+	BR	OUTNOW		;Return to the caller
+
+10$:	CMPB	FIRQB,#INTPAK	;Error = "Disk pack needs REBUILDing" ?
+				;  (the disk is dirty)
+	BEQ	30$		;Yes,the disk has been mounted and left 
+				;  restricted - go dismount the disk
+
+	CMPB	FIRQB,#INUSE	;Error = "Account or device in use" ?
+				;  (there's already a disk mounted?)
+	BEQ	PRTERR		;Yes,print it and exit
+	CMPB	FIRQB,#BADFUO	;No, error = "Tried to mount a disk 
+				;  that is already mounted" ?
+	BEQ	PRTERR		;Yes,print it and exit
+	CMPB	FIRQB,#WRGPAK	;No, does error = "Pack Ids don't match" ?
+	BNE	20$		;No,20$  (some other error)
+	MESSAGE <"?Pack-id labels don't match"<200>> ;Yes, print error 
+	JMP	GETOUT		;Exit this program
+
+20$:				;An error occurred on the mount that may 
+				;  just be a warning (ex. "Disk pack needs 
+				;  REBUILDing") and so the disk could still 
+				;  be mounted - go dismount it
+	MOVB	FIRQB,-(SP)	;Save the mount error code temporarily
+	CALL	DISMNT		;Dismount the disk (in case it was 
+				;  mounted) and ignore any error
+	MOVB	(SP)+,FIRQB	;Restore error code from mount
+	BR	PRTERR		;Print the error and return
+
+30$:	CALL	DISMNT		;Dismount the disk immediately
+	TSTB	FIRQB		;Error occur ?
+	BEQ	OUTNOW		;No,OUTNOW
+	CMPB	FIRQB,#PRVIOL	;Yes, was it a privilege violation?	;016
+	BEQ	40$		;Yes, print new error			;019
+	CMPB	FIRQB,#BADFUO	;No, was it an invalid SY0: operation?	;019
+	BNE	PRTERR		;No, print the returned error		;019
+	MESSAGE	<"?Invalid operation on system disk"<200>> ;Print error	;019
+	JMP	GETOUT		;Exit this program			;019
+
+40$:	MESSAGE	<"?MOUNT privilege is required"<200>> ;Print error	;019
+	JMP	GETOUT		;Exit this program			;016
+
+PRTERR:	JMP 	ERRPRT		;Go print the error on the user's console
+				;  which occurred from the mount or dismount
+
+OUTNOW:	RETURN			;Return to the caller with drive's 
+				;  status set up in WRPFLG cell 
+GLOBAL	<BADFUO,HNGDEV,INTPAK,INUSE,WRGPAK,PRVIOL,BADFUO>		;019
+
+.DSABL	LSB
+
+.SBTTL  READ THE DISK LABEL BLOCK
+
+.ENABL	LSB
+
+;+
+;       This routine opens a channel, reads the disk label block and then 
+;	closes the channel to determine how the disk was initialized and  
+;	whether it is dirty.  If an error occurs as a result of a directive 
+;	call, then control is transferred to the error printing routine
+;	where the error is printed on the user's console and the program 
+;	exits; the caller of 'DISKRD' does not get control back.
+;
+;
+;	ENTRY:  CALL DISKRD
+;
+;		INPUTS:  R1 = valid device name
+;			 R2 = valid device unit number and flag
+;
+;	EXIT:   RETURN   (if no error occurred)
+;
+;		 R1 = valid device name
+;		 R2 = valid device unit number and flag
+;
+;		DESTROYS:  R0
+;
+;
+;-
+DISKRD:
+	CALLX	CLRFQB		;Zero out the FIRQB
+	MOVB	#OPNFQ,FIRQB+FQFUN ;Function code = 'Open a channel'
+	MOVB	#2*2,FIRQB+FQFIL ;Load up channel number 2
+				 ; (ONLCLN uses channel #1 for i/o)
+	MOV	#OP$MOD!OP$BLK,FIRQB+FQMODE ;Mode = 'real mode' and
+				;  'non-file structured block mode'
+	MOV	R1,FIRQB+FQDEV  ;Load up device name 
+	MOV	R2,FIRQB+FQDEVN ;Load up device unit number and flag
+	CALFIP			;Open the disk non-file structured	;011
+	TSTB	FIRQB		;Error occur ?
+	BNE	GIVERR		;Yes,GIVERR (print the error)
+	CALLX	CLRXRB		;No, zero out the XRB
+	MOV	#FIBUFL,XRB+XRLEN ;Set up input buffer size in bytes	;007
+	MOV	#FIBUF,XRB+XRLOC  ;Starting address of the buffer	;007
+	MOV	#2*2,XRB+XRCI	;Set channel 2 for input
+				;  (was previously opened)
+				;  (MSB of block number = 0)
+	MOV	#1,XRB+XRBLK	;LSB of block number (device cluster #
+				;  of where the read is to begin)
+	.READ			;Read block 1 of the disk 		;011
+				;  (MFD label entry on old disks, but
+				;   pack label entry on new disks)
+	TSTB	FIRQB		;Error occur ?
+	BEQ	10$		;No, ok just close and exit		;027
+	MOVB	FIRQB,-(SP)	;Save the error for reporting		;027
+	CALL	10$		;Do the anyway but return here		;027
+	MOVB	(SP)+,FIRQB	;Restore orginal error			;027
+GIVERR:	JMP	ERRPRT		;Yes,ERRPRT (print the error)
+
+10$:	CALLX	CLRFQB		;Zero out the FIRQB
+	MOVB	#CLSFQ,FIRQB+FQFUN ;Code = 'Close an open channel'
+	MOVB	#2*2,FIRQB+FQFIL ;Set up channel 2 for close
+	CALFIP			;Close it				;011
+	TSTB	FIRQB		;Error occur ?
+	BNE	GIVERR		;Yes,GIVERR
+	RETURN			;No,return to the caller
+
+.DSABL	LSB
+
+.SBTTL  MOUNT A DISK PACK
+
+.ENABL	LSB
+
+;+
+;       This routine attempts to mount a disk for a privileged and for a
+;     	non-privileged user.  It analyzes the device name, the pack-id label 
+;	and the logical name.  No distinction is made in this code between 
+;	disks initialized as private or public.   All of that checking has
+;	already been performed by 'MNTDSK' and this code only knows it has 
+;	a legal combination to work with.
+;
+;
+;	ENTRY:  CALL MOUNT
+;
+;		INPUTS:  the user's DCL 'MOUNT' command line must be in 
+;			 core common (for CUI to reference)
+;
+;			 R1 = valid device name
+;			 R2 = valid device unit number and flag
+;		         R3 = flag bits for mode word (how to mount the disk)
+;			      (ex. private, no-share and/or read-only)
+;
+;			 if the flag WRPFLG = 2, then the caller of 'MOUNT' 
+;			    was 'WRTPRT' so don't attempt to install the 
+;			    logical name since that routine is only trying  
+;			    to determine if the drive is write protected
+;
+;	EXIT:   RETURN
+;
+;		FIRQB+0 = return status from .UUO directive call
+;
+;		R1 = valid device name
+;		R2 = valid device unit number and flag
+;		R3 = mode requested					;023
+;
+;		DESTROYS: R0,R4,R5					;023
+;
+;	Note:   if an error has resulted from a .FSS call or from an attempt
+;		to pack a string locally into RAD50, then control 
+;		is transferred to the error printing routine immediately 
+;		where the program exits and NOT back to the caller of this 
+;		'MOUNT' subroutine. 
+;
+;-
+MOUNT: 
+	MOV	R3,-(SP)	;Save mode flags
+	CALBX	FET.P <#LABL.P> ;Fetch pack-id label (optional parameter) ;021
+	CLR	-(SP)		;Clear 1st word for label		;021
+	CLR	-(SP)		;Clear 2nd word for label		;021
+	TST	U.CMN+U.PRES	;Is it there ?				;021
+	BEQ	5$		;No,5$					;021
+	CALL	PACK		;Convert it to RAD50			;012
+	BCS	10$		;Error occur ?  yes,10$			;012
+	MOV	(R5)+,2(SP)	;Save 1st word of pack-id label		;021
+	MOV	(R5),(SP)	;Save 2nd word of label			;021
+5$:	CLR	R3		;Set flag word = 0 (assume no logical name)
+	CMP	#2,WRPFLG	;Did WRTPRT call this subroutine ?
+	BEQ	35$		;Yes, so ignore trying to install a 	;016
+				;  logical name and keep privs
+	MOV	#LOGICL,R4	;Blank logical name			;012
+	CLR	(R4)+		;Set 1st word of logical name = 0	;012
+	CLR	(R4)+		;Set 2nd word of logical name = 0	;012
+	CLR	(R4)		;Set 3rd word of logical name = 0	;012
+	TST	MNTPRV		;Is the user privileged ?		;016
+	BEQ	27$		;No,so install a logical name of '______' ;002
+				;  for him in case he specified a logical 
+				;  name on the mount (also his pack-id 
+				;  label won't become a system wide 
+				;  logical this way)
+	CALBX	FET.P <#LOGN.P> ;Fetch logical name (optional parameter)
+	TST	U.CMN+U.PRES	;Was this opt'l parameter specified by user ?
+	BEQ	30$		;No,30$ (so go on)
+	CALL	PACK		;Convert it to RAD50			;012
+	BCC	20$		;Error occur ?   no,20$
+10$:	JMP	ERRPRT		;Yes, ERRPRT (print error on user's console) ;012
+
+20$:	MOV	#LOGICL,R4 	;No, save logical name			;012
+	MOV	(R5)+,(R4)+	; 1st word,				;012
+	MOV	(R5)+,(R4)+	; 2nd word,	 			;012
+	MOV	(R5),(R4)	; 3rd word				;012
+27$:	DEC	R3		;Set flag indicating to use logical name  ;002
+30$:	CALLX	CLRXRB		;Clear out the XRB			;016
+	MOV	#JFSYS,XRB	;Set JFSYS in the keyword location	;016
+	.CLEAR			;Drop temporary privileges 		;016
+	CALLX	U$CHKE		;No error is expected, but if one 	;016
+				;  occurs then abort the program	;016
+35$:	CALLX	CLRFQB		;Clear the FIRQB			;016
+	MOV	R3,FIRQB+FQEXT 	;Setup flag word to use logical (=177777)
+				;  or the pack-id (=0)
+	TST	R3		;Was there a logical name specified ?
+	BEQ	40$		;No,40$
+	MOV	#LOGICL,R4	;Yes, restore logical name		;012
+	MOV	(R4)+,FIRQB+FQSIZ ; 1st word,				;012
+	MOV	(R4)+,FIRQB+FQSIZ+2 ; 2nd word,				;012
+	MOV	(R4),FIRQB+FQFLAG ; 3rd word				;012
+40$:	MOVB	#UU.MNT,FIRQB+FQFUN ;Code = 'Disk pack and terminal status'
+				    ;  (action flag = 0 = 'mount a disk pack')
+	MOV	(SP)+,FIRQB+FQNAM1+2 ;Restore 2nd word of pack-id label
+	MOV	(SP)+,FIRQB+FQNAM1 ;Restore 1st word of pack-id label
+	BNE	45$		;Pack-id supplied?	Yes-45$		;021
+	BIS	#UC.OVR,(SP)	;No, override pack-id check		;021
+45$:	MOV	(SP),FIRQB+FQMODE ;Get mode word (how to mount the disk) ;023
+	BIS	#100000,FIRQB+FQMODE ;Make the mode real
+	MOV	R1,FIRQB+FQDEV  ;Restore device name
+	MOV	R2,FIRQB+FQDEVN ;Restore device number and flag
+	.UUO			;Issue the mount 			;011
+				;  (note: if a drive is write protected and 
+				;   disk is 'dirty', then HNGDEV error is 
+				;   returned before INTPAK error by UU.MNT)
+	MOVB	FIRQB+FQJOB,MYJOB ;Get my job number (from MOUNT)	;028
+	ASRB	MYJOB		;   but only * 1			;028
+	MOVB	FIRQB,R4	;Save error code			;023
+	MOV	FIRQB+FQSIZ,R5	;Save logical assigned flag		;023
+	CALLX	CLRXRB		;Regain privs:   clear out the XRB	;016
+	MOV	#JFSYS,XRB	;     set JFSYS in the keyword location	;016
+	.SET			;     aquire temporary privileges	;016
+	CALLX	U$CHKE		;     no error is expected, but if one	;016
+				;     occurs then abort the program	;016
+	MOVB	R4,FIRQB	;Restore error code, error occur?	;023
+	BEQ	50$		;No,so continue on
+	CMPB	FIRQB,#INTPAK	;Yes,does error = "Disk pack needs REBUILDing" ?
+				;  (disk will still be mounted)
+	BNE	75$		;No,return to caller with the error
+
+; The mount succeeded, so determine if a logical name had been specified 
+; by the privileged user and if so, whether it was installed.  If it 
+; wasn't installed, then warn the user.  Also, if a non-privileged user 
+; specifies an alternate logical name, then warn him too that it does not 
+; get installed.  If we're trying to determine if the drive is write-protected,
+; then don't check for the successful installation of a logical name.
+
+50$:	CALLX	CLRFQB		;Get pack revision level: clear FIRQB	;023
+	MOVB	#UU.ATR,FIRQB+FQFUN ;	code='Read/Write Attributes'	;023
+	MOVB	#-4,FIRQB+FQFIL	;	subfunction = 'Read Pack Attributes' ;023
+	MOV	R1,FIRQB+FQDEV  ;	restore device name		;023
+	MOV	R2,FIRQB+FQDEVN ;	restore device number and flag	;023
+	.UUO			;	Do it				;023
+	CALLX	U$CHKE		;	no error is expected, but if	;023
+				;	one occurs abort the program	;023
+	MOV	FIRQB+12,REVLVL	;	Get it				;023
+	MOVB	R4,FIRQB	;Restore error code from mount		;023
+	CMP	#2,WRPFLG	;Are we trying to determine if the drive   ;016
+				;  is write protected?
+	BEQ	75$		;Yes,75$ - so ignore logical name checks   ;016
+	TST	MNTPRV		;No,is the user privileged ?		   ;016
+	BNE	55$		;Yes,check for installation of logical name ;002
+	CALBX	FET.P <#LOGN.P> ;No,get logical name from mount command line ;002
+	TST	U.CMN+U.PRES	;Did he specify one ? (is ignored anyways)  ;002
+	BEQ	70$		;No, 70$ (return)			    ;002
+	MESSAGE <"%Logical name has not been assigned"<200>> ;Yes,warn him  ;002
+				;  since it is ignored for non-priv'd guys  ;002
+	BR	70$		;Exit					    ;002
+
+55$:	TST 	R3		;If R3 = 0, then no logical name was specified
+	BEQ	60$		;None specified, so exit
+	TST	R5		;Logical name installed ?		;023
+	BNE	60$		;Yes,60$  
+	MESSAGE <"%Logical name has not been assigned"<200>> ;No, warn the user
+60$:	CMPB	FIRQB,#INTPAK	;Did error on mount (if one occurred)
+				;  = "Disk pack needs REBUILDing" ?
+	BEQ	75$		;Yes,leave disk restricted since it's remaining 
+				;  dirty at the user's choosing (/NOREBUILD)
+				;  (it has still been mounted as either 
+				;   private or non-shared)
+70$:	CALBX	FET.CQ <#REST.Q> ;Fetch /RESTRICT qualifier		;016
+	TST	U.CMN+U.PRES	;Is /RESTRICT present ?			;016
+	BNE	75$		;Yes, so do not unrestrict		;016
+	CALL	UNREST		;No, unrestrict the disk pack and return to 
+				;  caller with status
+75$:	MOV	(SP)+,R3	;Return requested flag bits		;023
+	RETURN			;Return to caller 
+
+GLOBAL	<INTPAK,REST.Q>							;016
+
+.DSABL	LSB
+
+.SBTTL  DISMOUNT OR UNRESTRICT A DISK PACK
+
+.ENABL	LSB
+
+;+
+;
+;	This routine has two different entry points depending upon what
+;	action is desired - unrestricting or dismounting a disk.
+;
+;       1. 'UNREST' attempts to unrestrict a mounted disk for a privileged 
+;	   or a non-privileged user, otherwise the newly mounted disk 
+;	   would remain accessible to privileged users only.  
+;
+;	 	ENTRY:  CALL UNREST 
+;
+;			INPUTS:  the user's DCL 'MOUNT' command line must 
+;			         be in core common (for CUI to reference)
+;
+;				 R1 = valid device name
+;				 R2 = valid device unit number and flag
+;
+;		EXIT:   RETURN
+;
+;			FIRQB+0 = return status from .UUO call
+;			R1 = valid device name
+;			R2 = valid device unit number and flag
+;
+;			DESTROYS: R0,R3,R4,R5
+;
+;       2. 'DISMNT' attempts to dismount a disk for a privileged or for a
+;     	   non-privileged user.
+;
+;		ENTRY:  CALL DISMNT
+;
+;			INPUTS:  the user's DCL 'DISMOUNT' command line must 
+;			         be in core common (for CUI to reference)
+;
+;				 R1 = valid device name
+;				 R2 = valid device unit number and flag
+;
+;		EXIT:   RETURN
+;
+;			FIRQB+0 = return status from .UUO call
+;			R1 = valid device name
+;			R2 = valid device unit number and flag
+;
+;			DESTROYS: R0,R3,R4,R5
+;
+;-
+UNREST:	MOVB	#6,R3 		;Set action flag = 'Unrestrict (unlock) a disk pack'
+	BR	10$		;Skip around setup for 'dismounting'
+
+DISMNT:	MOVB	#2,R3		;Set action flag = 'Dismount a disk pack'
+10$:	CLR	FRCEDM		;clear force dismount flag to not interate  ;027
+	CALBX	FET.P <#LABL.P> ;Fetch pack-id label (optional parameter)
+	CLR	R4		;Clear 1st word for label
+	CLR	R5		;Clear 2nd word for label
+	TST	U.CMN+U.PRES	;Is it there ?
+	BEQ	30$		;No,30$
+	CALL	PACK		;Convert it to RAD50			;012
+	BCC	20$		;Error occur ?  no,20$  (and R0 = 0)
+	JMP	ERRPRT		;Yes, ERRPRT (print error on user's console) ;012
+
+20$:	MOV	(R5)+,R4	;Save 1st word of RAD50 pack-id label	;012
+	MOV	(R5),R5		;Save 2nd word of label 		;012
+30$:	CMP	#2,R3		;Is this a DISMOUNT?			;016
+	BNE	35$		;No, do the UNRESTRICT (UNLOCK)		;016
+	CALLX	CLRXRB		;Yes, drop privs:     clear out the XRB	;016
+	MOV	#JFSYS,XRB	;     set JFSYS in the keyword location	;016
+	.CLEAR			;     drop temporary privileges		;016
+	CALLX	U$CHKE		;     no error is expected, but if one	;016
+				;     occurs then abort the program	;016
+35$:	CALLX	CLRFQB		;Clear the FIRQB
+	MOVB	#UU.MNT,FIRQB+FQFUN ;Code = 'Disk pack and terminal status'
+	MOVB	R3,FIRQB+FQERNO ;Restore action flag 
+				;  (= 'Dismount a disk pack', or
+				;     'Unrestrict (unlock) a disk pack')
+	MOV	R4,FIRQB+FQNAM1	;Restore 1st word of pack-id label
+	MOV	R5,FIRQB+FQNAM1+2 ;Restore 2nd word of label
+	MOV	R1,FIRQB+FQDEV  ;Restore device name 
+	MOV	R2,FIRQB+FQDEVN ;Restore device number and flag
+	.UUO			;Issue the dismount or the unrestrict	;011
+	MOVB	FIRQB,R3	;Save error code			;016
+	CALLX	CLRXRB		;Regain privs:   clear out the XRB	;016
+	MOV	#JFSYS,XRB	;     set JFSYS in the keyword location	;016
+	.SET			;     aquire temporary privileges	;016
+	CALLX	U$CHKE		;     no error is expected, but if one	;016
+				;     occurs then abort the program	;016
+	MOVB	R3,FIRQB	;Restore error code			;016
+40$:	RETURN			;Return to caller with error code 
+				;  (caller should analyze the status)
+
+.DSABL	LSB
+
+.SBTTL	PACK ASCII STRING INTO RAD50
+
+;+									;012
+; PACK - PACK ASCII STRING (UP TO NINE CHARACTERS) INTO RADIX 50	;012
+;									;012
+; CALL:	INFORMATION IN CUI						;012
+;	CALL	PACK							;012
+;									;012
+; BACK:	R5 -> RAD50 CHARACTERS (IN FIRQB STARTING AT FQEXT)		;012
+;	SCAN STOPS AT FIRST ILLEGAL CHARACTER, OR AFTER 9		;012
+;		CHARACTERS HAVE BEEN PACKED				;012
+;									;012
+;	C = 0  THEN PACKING WAS SUCCESSFUL				;012
+;	C = 1  THEN PACKING WAS TERMINATED BY AN ILLEGAL CHARACTER	;012
+;									;012
+; REGISTERS SAVED							;012
+;-									;012
+.ENABL	LSB								;012
+									;012
+PACK:	CALLX	CLRFQB		;CLEAR FIRQB				;012
+	CALLX	SAVREG,R5	;SAVE REGISTERS				;012
+	MOV	U.CMN+U.LEN,R1	;R1 = LENGTH OF ASCII STRING		;012
+	CMP	R1,#9.		;LENGTH <= 9 ?				;012
+	BLOS	3$		;YES, GO ON				;012
+	MOV	#9.,R1		;NO, IGNORE EXCESS			;012
+3$:	MOV	#U.CMN+U.STR,R4	;R4 -> ASCII STRING			;012
+	CMPB	(R4),#'$	;IS FIRST CHARACTER "$" ?		;012
+	BNE	4$		;NO, GO ON				;012
+	MOVB	#BADNAM,FIRQB	;YES, RETURN ERROR			;012
+	BR	9$							;012
+									;012
+4$:	MOV	#FIRQB+2,R3	;R3 -> ASCII AREA IN FIRQB		;012
+5$:	MOVB	(R4)+,(R3)+	;GET ASCII STRING INTO FIRQB		;012
+	SOB	R1,5$		;					;012
+	MOV	#FIRQB+2,R1	;R1 -> ASCII 				;012
+	MOV	#FIRQB+FQEXT,R4	;R4 -> RAD50 AREA IN FIRQB		;012
+	CALL	10$		;PACK 1st THREE CHARACTERS 		;012
+	TSTB	FIRQB		;ERROR?					;012
+	BEQ	6$		;NO, GO ON				;012
+	BR	9$		;YES, EXIT				;012
+									;012
+6$:	CALL	10$		;PACK 2nd THREE CHARACTERS 		;012
+	TSTB	FIRQB		;ERROR?					;012
+	BEQ	7$		;NO, GO ON				;012
+	BR	9$		;YES, EXIT				;012
+									;012
+7$:	CALL	10$		;PACK LAST THREE CHARACTERS 		;012
+	TSTB	FIRQB		;ERROR?					;012
+	BEQ	8$		;NO, GO ON				;012
+	BR	9$		;YES, EXIT				;012
+									;012
+8$:	MOV	#FIRQB+FQEXT,5*2+2(SP)	;RETURN UPDATED R5		;012
+	TST	(PC)+		;C=0					;012
+9$:	SEC			;C=1					;012
+	RETURN								;012
+									;012
+10$:	CALL	20$		;PACK 1st CODE				;012
+	CALL	20$		;PACK 2nd CODE				;012
+	CALL	20$		;PACK 3rd CODE				;012
+	TST	(R4)+		;NOW INDEX THE POINTER			;012
+	RETURN			; AND EXIT				;012
+									;012
+20$:	MOV	#R50TBL,R5	;ADDRESS THE LOGICAL CONVERSION TABLE	;012
+	MOVB	(R1)+,R2	;GET THE CHARACTER			;012
+	BEQ	70$		;NONE, USE CODE 0			;012
+30$:	CMPB	R2,(R5)+	;SPECIAL CODE CHARACTER MATCH?		;012
+	BEQ	60$		;YEP					;012
+	TSTB	(R5)+		;NOPE, REALLY END OF TABLE?		;012
+	BNE	30$		;THERE'S MORE TO GO, LOOP FOR IT...	;012
+40$:	INC	R5		;SKIP A CONVERSION BIAS			;012
+	CMPB	R2,(R5)+	;IS CHARACTER TOO LOW?			;012
+	BLO	80$		;YES, THAT'S AN ERROR			;012
+	CMPB	R2,(R5)+	;IS CHARACTER TOO HIGH?			;012
+	BHI	40$		;YES, GO SKIP CONVERSION AND TRY NEXT RANGE ;012
+60$:	MOVB	(R5),R5		;GET THE CONVERSION BIAS		;012
+	ADD	R5,R2		; AND ADD IT IN				;012
+70$:	MOV	(R4),R5		;GET OLD VALUE				;012
+	MUL	#50,R5		;* 50 PLEASE				;012
+	ADD	R2,R5		;ADD IN NEW VALUE			;012
+	MOV	R5,(R4)		; THEN PUT IT BACK			;012
+	RETURN			; AND EXIT				;012
+									;012
+80$:	MOVB	#BADNAM,FIRQB	;RETURN ERROR				;012
+	RETURN								;012
+									;012
+R50TBL:	.BYTE	'$, 33-'$	;DOLLAR SIGN IS CODE 33			;012
+	.BYTE	 0, 0, 0	;**END OF SPECIAL CODES**		;012
+	.ASCII	/09/<^R  0-'0>	;NUMERIC RANGE CHECK AND CONVERSION BIAS ;012
+	.ASCII	/AZ/<^R  A-'A>	;ALPHABETIC RANGE CHECK AND CONVERSION BIAS ;012
+	.ASCII	/az/<^R  A-'a>	;LOWER CASE RANGE CHECK AND CONVERSION BIAS ;015
+	.BYTE	-1		;**END OF RANGE CHECK CODES**		;012
+									;012
+	.EVEN								;015
+									;015
+GLOBAL	<BADNAM>							;012
+									;012
+.DSABL	LSB								;012
+
+.SBTTL	PRINT AN ERROR MESSAGE AND EXIT
+
+.ENABL	LSB
+
+;+
+;
+;	This routine has three different entry points depending upon 
+;	what action is desired - printing an FSS error on the user's 
+;	console and then exiting, printing any other RSTS/E error 
+;	message on the user's console and then exiting, or just exiting.
+;
+;	1. Control reaches 'FSSERR' when an .FSS error occurred in attempting 
+;	   to MOUNT, DISMOUNT or UNRESTRICT a disk pack and the error that was 
+;	   returned by CUI in R0 is the text that this routine will print 
+;	   on the user's console.  After the RSTS/E error message is printed, 
+; 	   this program exits.
+;
+;  	   ENTRY:  JMP FSSERR     
+;
+;		   INPUTS:   R0 = error to print on the user's console
+;			          (was returned in R0 as a result of 
+;			           issuing a CALBX U$FSS)
+;
+;          (Note: this additional entry point is necessary because CUI's 
+;	          U$FSS returns additional errors other than what a .FSS 
+;                 returns, and therefore, FIRQB+0 will not always have the 
+;		  correct error code).
+;
+;   
+;	2. Control reaches 'ERRPRT' when an error occurred in attempting 
+;	   to MOUNT, DISMOUNT or UNRESTRICT a disk pack and the error that 
+;	   was returned in FIRQB+0 is the text that this routine will 
+;	   print on the user's console.  After the RSTS/E error message 
+; 	   is printed, the program exits.
+;
+;  	   ENTRY:  JMP ERRPRT  
+;		
+;		   INPUTS:   FIRQB+0 = error to print on user's console 
+;    				       (had occurred on a Monitor call)
+;
+;
+;	3. Control reaches 'GETOUT' after all processing has been 
+;	   completed, whether it is normal processing or error handling, 
+;	   and it is time to exit the program.
+;
+;  	   ENTRY:  JMP GETOUT
+;		
+;		   INPUTS:   none
+;
+;
+;
+;-
+FSSERR:
+	MOVB	R0,FIRQB	;The FSS call returned the error code 
+				;  in R0 so put it back into FIRQB+0
+ERRPRT:	
+	MOV	FIRQB,R3	;Save error code temporarily
+	CALLX	CLRFQB		;Clear the FIRQB
+	MOVB	#UU.ERR,FIRQB+FQFUN ;Function code = 
+				    ;  'Return error message text'
+	MOV	R3,FIRQB+FQERNO ;Put error code into FIRQB
+	.UUO			;Issue the call 			;011
+	CALLX	U$CHKE		;No error is expected, but if one occurs
+				;  then CUI returns the error
+				;  "?Program failure in <program name>"
+	CALLX	CLRXRB		;Clear out the XRB
+	MOV	#28.,XRB+XRLEN  ;Length of output buffer in bytes
+	MOV	#28.,XRB+XRBC	;Number of bytes to write 
+	MOV	#FIRQB+4,XRB+XRLOC ;Starting address of output buffer
+			           ;  (write to channel 0)
+	.WRITE			;Print error text on user's console	;011
+	TSTB	FIRQB		;Error occur ?
+	BNE 	ABORT		;Yes					;022
+	MESSAGE <<200>>		;No, new line				;022
+	TST	FRCEDM		;is dismount force set?			;027
+	BEQ	10$		;No - leave drive as is			;027
+	JMP	FORCED		;go force dismount			;027
+
+10$:	BR	GETOUT		;Leave					;022
+
+abrt2::
+ABORT:	nop
+	HALT			;Fatal program abort			;022
+
+GETOUT: 
+	CALLX	CLRXRB		;Clear out the XRB
+	MOV	#JFSYS,XRB	;Set JFSYS in the keyword location
+	.CLEAR			;Drop temporary privileges 		;011
+	CALLX	U$CHKE		;No error is expected, but if one 
+				;  occurs then abort the program
+DONE:	EXIT$S			;Reset channels and Exit		;011
+
+.DSABL	LSB
+
+				;'MTDSMT::' is the starting address 
+	.END	MTDSMT 		;  and not 'ONLCLN::'
+

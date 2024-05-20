@@ -1,0 +1,1004 @@
+	.INCLUDE /CMN:COMMON/
+	.INCLUDE /CMN:KERNEL/
+	.INCLUDE /CMN:FLDEF/
+TITLE	RAD,<ACCOUNTING DATA READ/RESET>,0A,10-MAY-91,MHB/JTC/FEK/GPK/AWL/DRP/KPH
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	EDIT HISTORY FOR RAD
+
+;+
+;
+;  000	RRF  06-MAR-81	CREATION - COPIED FROM V7.0-07
+;  001	JC   10-Feb-81	Allow optional quota lookup
+;
+;				[RSTS V8.0]
+;  002	FEK  22-SEP-82	handle new disks (move some to 'DIR')
+;  003	FEK  29-Sep-82	Add DOUSAG entry for logout quota checks
+;  004	GPK  12-Oct-82	New disk structure, self-kill for non-privileged
+;  005  AWL  17-Dec-82  Removed non-privileged self-kill
+;  006	GPK  19-Feb-83	Bugfix in setting ?????? as password
+;
+;				[RSTS V9.0]
+;  007	GPK  25-Mar-83	Multiple privileges
+;  008	GPK  20-Sep-83	Long/encrypted passwords
+;  009	GPK  19-Nov-83	Bugfix in setting short passwords
+;  010  GPK  29-Nov-83	Split ACNT into GACNT/WACNT
+;  011	GPK  12-Jan-84	Lookup/nolookup passwords and other account flags
+;  012	DRP  02-Feb-84	Added support for logged-in quotas
+;  013	DRP  16-Mar-84	Only allow changing of logout quota if old format
+;			of UU.CHU
+;			Fix NEWRAD to return the logged-in and open counts
+;			from the QTB
+;  014	GPK  17-Apr-84	Privilege name changes
+;  015	GPK  25-Apr-84	Suppress password length check if SYSMOD privs
+;  016	GPK  09-May-84	Disallow passwords on [0,*] except [0,1];
+;			force password hashing on for [0,1]
+;  017	DRP  17-May-84	Allow changing of detached job quota in UU.CHU
+;  018	DRP  21-May-84	Add code to verify quota for old style disks
+;  019	GPK  02-Aug-84	Make setting of /LOOKUP passwords upcase the
+;			supplied password
+;  020	KPH  29-Aug-84	Remove call to NXTUNC
+;  021	GPK  30-Oct-84	Fix GACNT privilege check
+;  022	KPH  10-Dec-84	Return UFD size
+;  023	KPH  06-Feb-85	Bugfix on 022
+;  024	DRP  11-Mar-85	Bugfix on 018
+;  025	GPK  15-Apr-85	Truncate /lookup passwords to 6 characters
+;
+;			[RSTS V9.2]
+;  026  KPH  09-Aug-85	Add job control region
+;-
+
+
+FQFSRT	RAD
+
+.ENABL	LSB
+
+;+
+;
+;
+;	MORRAD	-	CALLED AS A CONTINUATION FROM THE 'DIR' MODULE
+;
+;	R2 =  FIPUNT and FIPGEN
+;	R3 =  Link to UFD name entry
+;	R4 -> THE CALLERS FIRQB @ FQPPN
+;	R5 =  Pointer into GFD name entry
+;	SP -> Password mask			(Set by 'DIR' module)	;012
+;	      Reset accounting data mask	(Set by 'DIR' module)	;012
+;
+;-
+
+MORRAD::MOV	R2,@#FIPUNT	;RESTORE FIPUNIT AND FIPGEN
+	MOVB	R2,R2		;Get just the FIP unit number
+	ASL	R2		;Make it FUN * 2
+	CMP	(R5)+,(R4)+	;SKIP LINK AND POINT TO FQNAM1
+	MOV	(R5)+,(R4)+	;MOVE IN PPN
+	TST	UNTLVL(R2)	;New pack?
+	BEQ	30$		;No, so proceed
+	MOV	R4,-(SP)	;Save current R4
+	MOV	R3,-(SP)	;Save link to Name entry
+	CMP	UNTLVL(R2),(PC)+ ;Check level				;011
+	 .BYTE	1,1		;V8.0 style?				;011
+	BEQ	5$		;Yes, so no hashed password support	;011
+	MOV	#AA.DAT,R0	;Find date/time info			;011
+	CALLX	SAA		;Search for it				;011
+	BCS	3$		;It's not there, error			;015
+	BIT	#AT.NLK,AT.PTI(R5) ;Lookup allowed?			;011
+	BEQ	5$		;Yes, skip				;011
+3$:	MOV	#-1,4(SP)	;No, so return zeroes instead		;015
+5$:	MOV	(SP),R3		;Get name block link back		;011
+	MOV	#AA.PAS,R0	;Get password attributes
+	CALLX	SAA		;Search for it
+	MOV	(SP)+,R3	;Restore link to name entry
+	MOV	#R50WRK,R4	;Point to Rad50 work buffer
+	BCC	10$		;Found password, convert it
+	CLR	(R4)+		;Missing password is returned as blank	;015
+	CLR	(R4)+		; (two words)				;015
+	BR	20$		;Now move it
+
+10$:	MOV	R5,R1		;Copy attribute pointer
+	ADD	#UADAT,R1	;Point to string
+	CALL	SCANPK		;Convert one word
+	TST	(R4)+		;Skip to next word
+	CALL	SCANPK		; and another
+20$:	MOV	#R50WRK,R5	;Point to where password lives
+	MOV	(SP)+,R4	;Restore work block pointer
+30$:	MOV	(R4),R2		;GET THE FLAG WORD
+	MOV	(R5)+,(R4)	;MOVE IN
+	BIC	(SP),(R4)+	; PASSWORD
+	MOV	(R5)+,(R4)	;  CLEARING IT IF
+	BIC	(SP)+,(R4)+	;   NON-PRIV'D CALLER
+	CALLX	RDE		;Re-read name entry in case of new disk
+	MOV	UAR(R5),R1	;UFD START HERE
+	MOV	R2,-(SP)	;Save the flag word			;023
+	MOV	R3,-(SP)	;Save the name entry link		;012
+	MOV	UAA(R5),R3	;Get accounting entry link		;022
+	CALLX	UNPLNK		;Unpack the link			;022
+	MOV	R2,-(SP)	;Save MSB of FBN			;022
+	MOV	R3,-(SP)	;Save LSB of FBN			;022
+	MOV	R1,R2		;Get the UFD start DCN			;022
+	BEQ	34$		;None, so size is zero			;022
+	CALLX	READUF		;Now read the start of the UFD		;022
+	CLR	R2		;R2 will hold size of UFD		;022
+	MOV	#FIBENT,R3	;R3 -> Cluster map for UFD		;022
+32$:	TST	(R3)+		;Is this cluster in use?		;022
+	BEQ	34$		;No, so we're done			;022
+	INC	R2		;Yes, so count it			;022
+	BIT	#1000-1,R3	;More to do?				;022
+	BNE	32$		;Yes, go for it				;022	
+34$:	MOVB	R2,FQFUN-FQSIZ(R4) ;Set up the size			;022
+	MOV	@#FIJBDA,R2	;Get pointer to JDB			;022
+	MOVB	#ERRFQ,JDPOST(R2) ;And be sure that FQFUN is posted	;022
+	MOV	(SP)+,R3	;Restore LSB of accounting entry	;022
+	MOV	(SP)+,R2	;Restore MSB of accounting entry	;022
+	CALLX	READ		;READ THE A.E.				;022
+	MOV	(SP)+,R3	;Restore the name entry link		;012
+	MOV	(SP)+,R2	;And restore the flag word		;023
+	TST	(R5)+		;SKIP LINK
+	MOV	#5,R0		;NOW DO 5 ITEMS
+40$:	MOV	(R5),(R4)+	;MOVE AN ACCOUNTING ITEM
+	BIC	(SP),(R5)+	;THEN DO THE RIGHT THING
+	SOB	R0,40$		;LOOPING...
+	BISB	(SP)+,@#FIBMOD	;MARK BUFFER IF NEEDED
+	CMP	(R4)+,(R4)+	;SKIP THE FQDEV,FQDEVN WORDS
+	MOV	(R5)+,(R4)	;Set the logged-out quota		;012
+	MOV	(R5)+,2(R4)	; and the UFD clustersize		;012
+	MOV	R2,-(SP)	;Save the flag word			;012
+	MOV	R4,-(SP)	;Copy the FIRQB pointer			;012
+	ADD	#FQNAM1-FQCLUS,(SP) ; and point to the PPN		;012
+	CMP	@(SP),(PC)+	;Account [0,1]?				;012
+	 .BYTE	1,0							;012
+	BEQ	80$		;Yes, no disk quota blockette		;012
+	MOVB	@#FIPUNT,R0	;Get the FUN				;012
+	ASL	R0		; and make it FUN * 2			;012
+	CMP	UNTLVL(R0),(PC)+ ;Support Quota Blocks (QTBs)?		;012
+	 .BYTE	2,1							;012
+	BLO	80$		;No, then we're all set			;012
+	TST	DSKQPT(R0)	;Any QTBs for this unit?		;012
+	BEQ	50$		;No, then perform a disk lookup		;012
+	MOV	(SP),R0		;Get the pointer to the PPN		;012
+	CALLM	SERQTB,OPNAP5	;Is there a QTB for this PPN?		;012
+	BCC	60$		;Yes, then use the data from the QTB	;012
+50$:	MOV	#AA.QUO,R0	;Specify we want the quota blockette	;012
+	CALLX	SAA		; and go get it				;012
+	BCS	95$		;Not there, issue error			;012
+60$:	CLR	(R4)		;Assume unlimited quota			;012
+	TSTB	AQ.LOM(R5)	;Logged out quota greater than 65535?	;012
+.ASSUME	AQ.LOM EQ QTBLOM
+	BNE	70$		;Yes, that's unlimited 			;012
+	MOV	AQ.LOL(R5),(R4)	;Otherwise, get the log'd-out quota	;012
+.ASSUME	AQ.LOL EQ QTBLOL
+	BNE	70$		;Return it if not zero			;012
+	INC	(R4)		;Otherwise say it's at least one block	;012
+70$:	MAP	FIP,DATA,PIC	;Make sure that FIP is mapped		;012
+80$:	ADD	#FQPPN-FQCLUS,R4 ;NOW POINT R4 TO DISK OWNED SPOT	;012
+	CLR	(R4)		; AND SAY INITIALLY OWNS NO DISK
+	MOV	(SP)+,R0	;Restore the PPN pointer		;012
+	ASR	(SP)+		;CHECK FLAG FOR DISK ALLOCATION
+;.ASSUME 000001	EQ ;THE FLAG TO NOT COLLECT DISK ALLOCATION
+	BCS	110$		; WE ARE NOT RETURNING DISK ALLOCATION
+	MOV	R1,R2		;Pick up the DCN of caller's UFD	;012
+90$:	MOV	@#FIPUNT,R1	;Save FIPUNT and FIPGEN			;012
+	FCALL	GETUSG		;Go compute the usage			;012
+	BCS	120$		;Some type of I/O error occurred	;012
+	TST	R2		;Usage greater than 65535		;012
+	BEQ	100$		;No, good then return what we have	;012
+	MOV	#-1,R1		;Otherwise, make it 65535 exactly	;012
+100$:	MOV	R1,(R4)		; and return it				;012
+110$:	RETURN			;Return back to our caller		;012
+
+120$:	JMPX	FIEXIT		;Exit FIP				;012
+
+95$:	ERROR	BADDIR		;Attribute blockette missing		;012
+
+GLOBAL	<FIPUNT,UNTLVL,R50WRK,FIBMOD,FIBUF,FIPGEN,DSKQPT,FIBENT,FIJBDA>	;022
+
+.DSABL	LSB
+
+;+
+; SCANPK - PACK RAD50.
+;
+;	R1 -> CHARACTERS TO PACK
+;	R4 -> PLACE TO STORE THE RAD50 WORD
+;
+;	CALL	SCANPK
+;
+;	R1 -> JUST BEYOND THE THREE (3) PACKED CHARACTERS
+;	R4 -> PLACE RAD50 WORD STORED
+;-
+
+SCANPK:	MOV	R2,-(SP)	;RELEASE R2 FOR LOCAL USE
+	CLR	(R4)		;CLEAR OUR RAD50 BUCKET
+	CALL	10$		;PACK 1ST AND 2ND CODES
+	CALL	20$		;PACK 3RD CODE
+	MOV	(SP)+,R2	;NOW RESTORE R2
+	RETURN			; AND EXIT
+
+10$:	MOV	PC,-(SP)	;SET TO PACK 2ND CODE, DROP FOR 1ST CODE
+20$:	MOV	R5,-(SP)	;GET A WORKING REGISTER
+	MOVB	(R1)+,R2	;GET THE CHARACTER
+	BEQ	80$		;NONE, USE CODE 0
+30$:	MOVPIC	#FSSCVR,R5	;ADDRESS THE CONVERSION TABLE
+	CMPB	R2,#'*		;Star?
+	BNE	50$		;No
+	DEC	R1		;Yes, read it again next time
+40$:	MOV	#'?,R2		; and use ? instead
+	BR	30$		;Process that
+
+50$:	CMPB	R2,(R5)+	;SPECIAL CODE CHARACTER MATCH?
+	BEQ	70$		;YEP
+	TSTB	(R5)+		;NOPE, REALLY END OF TABLE?
+	BNE	50$		;THERE'S MORE TO GO, LOOP FOR IT...
+60$:	INC	R5		;SKIP A CONVERSION BIAS
+	CMPB	R2,(R5)+	;IS CHARACTER TOO LOW?
+	BLO	40$		;Yes, use ? as a substitute
+	CMPB	R2,(R5)+	;IS CHARACTER TOO HIGH?
+	BHI	60$		;YES, GO SKIP CONVERSION AND TRY NEXT RANGE
+70$:	MOVB	(R5),R5		;GET THE CONVERSION BIAS
+	ADD	R5,R2		; AND ADD IT IN
+80$:	MOV	(R4),R5		;GET OLD VALUE
+	MUL	#50,R5		;* 50 PLEASE
+	ADD	R2,R5		;ADD IN NEW VALUE
+	MOV	R5,(R4)		; THEN PUT IT BACK
+	MOV	(SP)+,R5	;RESTORE THE WORKING REGISTER
+	RETURN			; AND EXIT
+
+;	HANDY TABLE FOR RAD50 CONVERSIONS
+
+FSSCVR:	.BYTE	'?, 35-'?	;WILD SINGLE CHARACTER IS CODE 35
+	.BYTE	'$, 33-'$	;DOLLAR SIGN IS CODE 33
+	.BYTE	'., 34-'.	;DOT IS CODE 34
+	.BYTE	 0, 0, 0	;**END OF SPECIAL CODES**
+	.ASCII	/09/<^R  0-'0>	;NUMERIC RANGE CHECK AND CONVERSION BIAS
+	.ASCII	/AZ/<^R  A-'A>	;ALPHABETIC RANGE CHECK AND CONVERSION BIAS
+	.ASCII	/az/<^R  A-'a>	;ALPHABETIC RANGE CHECK AND CONVERSION BIAS
+	.BYTE	-1		;**END OF RANGE CHECK CODES**
+	.EVEN
+
+FQFEND
+
+.SBTTL	CHANGE PASSWORD/QUOTA, KILL JOB, DISABLE TERMINAL
+
+FQFSRT
+
+;+
+; UU.CHU - CHANGE PASSWORD/QUOTA, KILL JOB, DISABLE TERMINAL.
+;
+;	FOR CHANGE PASSWORD/QUOTA:
+;
+;	Old Format
+;
+;	R4 -> FIRQB
+;		FQSIZM   =  0 (Old format)				;012
+;		FQNAM1   =  PPN (0=>SELF)
+;		+12      =  NEW PASSWORD (2 WORDS RAD50) OR 0 FOR NO CHANGE
+;		FQSIZ	 =  Logout quota
+;		FQBUFL	 =  New expiration date or 0 if no change	;008
+;		FQPROT-1 =  0   => NO QUOTA CHANGE
+;		            <>0 => QUOTA CHANGE
+;		FQDEV,FQDEVN = DEVICE TO USE
+;		FQCLUS	 =  0
+;		FQCLUS+1 =  0
+;
+;	New Format
+;
+;	R4 -> FIRQB
+;		FQFIL	 =  Dteached job quota				;017
+;		FQSIZM   =  Flag Byte					;012
+;				1 = Change logout quota			;012
+;				2 = Change logged-in quota		;012
+;				4 = Change reserve quota		;012
+;				8 = Change detached job quota		;017
+;			      128 = New format				;012
+;		FQPPN    =  Reserve quota (LSB)				;012
+;		FQNAM1   =  PPN (0=>SELF)
+;		+12      =  NEW PASSWORD (2 WORDS RAD50) OR 0 FOR NO CHANGE
+;		FQSIZ    =  Logged-out quota (LSB)			;012
+;		FQBUFL	 =  New expiration date or 0 if no change	;008
+;		FQMODE   =  Logged-in quota (LSB)			;012
+;		FQFLAG   =  Logged-in quota (MSB)			;012
+;		FQFLAG+1 =  Logged-out quota (MSB)			;012
+;		FQPROT-1 =  0   => NO QUOTA CHANGE
+;		            <>0 => QUOTA CHANGE
+;		FQPROT   =  Reserve quota (MSB)				;012
+;		FQDEV,FQDEVN = DEVICE TO USE
+;		FQCLUS	 =  0
+;		FQCLUS+1 =  0
+;
+;	Alternatively to change long passwords:
+;
+;	R4 -> FIRQB
+;		FQPPN	 =  PPN (0=>SELF)				;008
+;		FQNAM1	 =  NEW PASSWORD (16 bytes ASCII) or 0 to clear	;008
+;		FQDEV,FQDEVN = DEVICE TO USE
+;		FQCLUS	 =  377
+;		FQCLUS+1 =  0
+;
+;	FOR KILL JOB:
+;
+;	R4 -> FIRQB
+;		FQFIL    =  JOB NUMBER
+;		FQCLUS   =  0
+;		FQCLUS+1 =  377
+;
+;	FOR DISABLE TERMINAL:
+;
+;	R4 -> FIRQB
+;		FQFIL    =  KB NUMBER
+;		FQCLUS   =  377
+;		FQCLUS+1 =  377
+;-
+
+	UUOENT	CHU,,,LOGABL,DOLOG	;CHANGE PASSWORD/QUOTA		;007
+
+.ENABL	LSB
+
+	TSTB	FQCLUS+1(R4)	;PASSWORD/QUOTA, KILL JOB, OR DISABLE TERMINAL?
+	BEQ	60$		;IT IS PASSWORD/QUOTA
+	MOVB	FQFIL(R4),R0	;GET JOB/KEYBOARD NUMBER
+	CMPB	FQCLUS(R4),#-1	;IS IT DISABLE TERMINAL?
+	BEQ	50$		;YES
+	TSTPRV	JOBCTL,@#FIPRVM	;Privileged to do it to jobs?		;014
+	BEQ	40$		;No, error				;014
+	CMP	R0,#JOBMAX	;CORRECT SIZE?
+	BHI	40$		;NOGO
+	ASL	R0		;GET JOB NUMBER TIMES 2
+	BNE	10$		;One was specified, use it
+	MOVB	@#FIJOB,R0	;Get caller's job number * 2
+10$:	MOV	JOBTBL(R0),R2	;THEN GET JOB DATA AREA POINTER
+	BEQ	40$		;NO JOB IS ERROR
+	BIS	#JFSPCL,JDFLG(R2) ;SET SPECIAL CONDITION AS
+	BISB	#JFKILL,JDFLG2(R2) ; JOB KILL
+	TST	JBWAIT(R0)	;DETACHED TYPE WAIT?
+	BNE	20$		;NOPE, WILL RUN SOON
+	MOV	#JS.KB,JBWAIT(R0) ;IF SO, THEN SET WAIT CONDITION
+20$:	BIS	#JSALL,JBSTAT(R0) ;MAKE RUNNABLE
+	CALLX	MAPJCR		;Map the JCR entry			;026
+	MOVB	#127.,JCPRI(R1)	;Set a really high priority		;026
+	MAP	FIPPOL		;Restore mapping			;026
+	CMPB	R0,@#JOB	;CURRENT JOB?
+	BNE	30$		;NOPE
+	L3QSET	QDUMP		;YEP, FORCE JOB NOT TO BE "JOB" BEFORE "QSCHED"
+30$:	RETURN			;THEN EXIT
+
+40$:	ERROR	BADFUO		;ERROR
+
+50$:	TSTPRV	HWCTL,@#FIPRVM	;Privileged to control hardware?	;014
+	BEQ	40$		;No, error				;014
+	MOV	@#$UUOTBL+<UU.HNG-UU$MIN*2>,R5 ;GO TO THE
+	SUB	#2,R5		; ALTERNATE ENTRY
+	BIC	#1,R5		; (EVEN, PLEASE)
+	FJMP	(R5)		;  FOR DISABLE TERMINAL
+
+GLOBAL	<JOBMAX,FIJOB,FIPRVM,FIJBDA,JOBTBL,JBWAIT,JSALL,JBSTAT,$UUOTBL>	;007
+
+60$:	TSTB	FQCLUS(R4)	;Specifying long password?		;008
+	BNE	80$		;Yes					;008
+	MOV	R4,R0		;Copy FIRQB pointer			;008
+	ADD	#FQPPN,R0	;Point to where PPN belongs		;008
+	MOV	(R0),FQNENT(R4)	;Save the reserved quota		;012
+	MOV	#3,R1		;Set word count to move			;016
+70$:	MOV	2(R0),(R0)+	;Move a word down			;008
+	SOB	R1,70$		;Loop until PPN/password moved		;008
+80$:	TST	FQPPN(R4)	;PPN defaulted?				;008
+	BNE	90$		;No					;008
+	MOV	@#FIUSER,FQPPN(R4) ;Yes, supply caller's		;008
+90$:	MOV	FQPPN(R4),R0	;Get PPN to operate on			;021
+	CALLX	CHKACC		;Check access rights			;021
+	TST	R0		;Have accounting rights?		;021
+	BPL	40$		;No, error				;021
+.ASSUME	DDSTAT LT 0							;021
+100$:	CALLX	GUN,R5		;CHECK DEVICE TYPE
+	 BR	140$		;IT IS DISK
+	ERROR	DEVNFS		;OTHER IS ERROR
+
+110$:	ERROR	NOROOM		;No room to create password blockette
+
+120$:	ERROR	NOSUCH		;ACCOUNT NOT FOUND
+
+130$:	ERROR	PRVIOL		;UNIT IS WRITE LOCKED
+
+140$:	BIT	#UC.WLO,(R1)	;IS THE UNIT WRITE LOCKED?
+	BNE	130$		;YES, ERROR
+	MOV	R4,R0		;SET UP PARAMS FOR SEARCH
+	ADD	#FQPPN,R0	;Point to PPN				;008
+	CALLX	SDM		;LOOK IT UP
+	BCS	120$		;ERROR IF NOT FOUND
+	MOVB	@#FIPUNT,R1	;Get FIP unit number
+	ASL	R1		; times 2
+	TST	UNTLVL(R1)	;New disk?				;008
+	BEQ	130$		;If not that's an error			;008
+	TSTB	FQCLUS(R4)	;Long password?
+	BNE	200$		;Yes, process that
+	TSTB	FQPFLG(R4)	;CHANGING QUOTA?			;012
+	BEQ	150$		;NOPE					;008
+	TSTB	FQSIZM(R4)	;New format?				;013
+	BMI	145$		;Yes, then leave the flag byte alone	;013
+	MOVB	#1,FQSIZM(R4)	;Otherwise, only changing logout quota	;013
+145$:	ASR	R1		;Make it just FUN			;013
+	FCALL	SETQT2		; and go set the quotas			;018
+	MOVB	R1,@#FIPUNT	;Restore the FIPUNT			;012
+150$:	MOV	FQBUFL(R4),R1	;Get new expiration date if any		;012
+	BEQ	160$		;None, move on				;008
+	MOV	R3,-(SP)	;Save name entry link			;008
+	MOV	#AA.DAT,R0	;Set type code				;008
+	CALLX	SAA		;Find the blockette			;008
+	BCS	120$		;Not found, error			;008
+	MOV	R1,AT.EXP(R5)	;Set new expiration date		;008
+	MARK	FIBUF		;Mark the buffer			;008
+	MOV	(SP)+,R3	;Restore link to name entry		;008
+160$:	TST	FQNAM1(R4)	;Password specified?			;008
+	BEQ	220$		;No, done				;008
+170$:	CMP	FQNAM1(R4),(PC)+ ;Yes, setting password to ??????	;008
+	 .RAD50	<35><35><35>
+	BNE	180$		;No
+	CMP	FQNAM1+2(R4),(PC)+ ;Match on both words?		;008
+	 .RAD50	<35><35><35>
+	BEQ	210$		;Yes, so delete any password
+180$:	MOV	R4,R2		;Copy FIRQB pointer			;008
+	ADD	#FQNAM1+3,R2	;Point to where name part 2 goes	;008
+	MOV	FQNAM1+2(R4),R0	;Get second half of password		;008
+	CALLX	R50ASC		;Convert to ASCII			;008
+	MOVB	(R0)+,(R2)+	;Move it into place			;008
+	MOVB	(R0)+,(R2)+						;008
+	MOVB	(R0)+,(R2)+						;008
+	SUB	#6,R2		;Point to start of FQNAM1 field		;008
+	MOV	(R2),R0		;Get part 1 of password			;008
+	CALLX	R50ASC		;Convert it				;008
+	MOVB	(R0)+,(R2)+	;Move it too				;008
+	MOVB	(R0)+,(R2)+						;008
+	MOVB	(R0)+,(R2)+						;008
+	ADD	#3,R2		;Point to end of converted string	;008
+	MOV	#<16.-6>/2,R0	;Count of words to clear		;009
+190$:	CLR	(R2)+		;Zero-fill the rest			;008
+	SOB	R0,190$		; until all done			;008
+200$:	TSTB	FQNAM1(R4)	;Setting or clearing?			;008
+	BEQ	210$		;Clearing, get rid of it
+	MOVB	@#FIPUNT,R0	;Get FIP unit number back		;008
+	FJMP	SETPW2		;Continue in next overlay		;011
+
+210$:	MOV	R3,-(SP)	;Save link to name entry
+	MOV	#AA.PAS,R0	;Search for password
+	CALLX	SAA		;Is it there?
+	BCS	240$		;No, nothing to do			;009
+	MOV	(R5),-(SP)	;Save link out of this one
+.ASSUME	ULNK EQ 0
+	CALLX	ZDE		;Free up this blockette
+	MOV	R2,R3		;Copy link to previous
+	CALLX	RDE		;Read it
+	MOV	(SP)+,(R5)	;Update link word
+.ASSUME	ULNK EQ 0
+	MARK	FIBUF		;Make sure it's written back
+	MOV	(SP)+,R3	;Restore name entry link
+	MOV	#AA.DAT,R0	;Type wanted is date/time logging data
+	CALLX	SAA		;Get it					;008
+	BCS	230$		;If we can't, error			;008
+	CLR	AT.PDA(R5)	;No password -> no date			;014
+	BIC	#AT.MSK,AT.PTI(R5) ;Clear out previous time		;011
+	MARK	FIBUF		;Mark buffer for write			;008
+220$:	RETURN								;008
+
+230$:	ERROR	NOSUCH		;Attribute block not found		;008
+
+240$:	TST	(SP)+		;Clean the stack			;009
+	RETURN								;009
+
+;+									;008
+; Entry here occurs from the "create account" UUO when the password	;008
+; was specified as non-null.						;008
+;									;008
+;	R0 ->	FIRQB @ FQNAM1	(ppn, password as 2 words RAD50)	;008
+;	R1 =	FIPUNT							;008
+;	R3 =	Link to name entry					;008
+;-									;008
+
+SETPAS::MOVB	R1,@#FIPUNT	;Restore FIP unit number
+	MOV	R0,R4		;Retrieve FIRQB pointer
+	TST	(R0)+		;Point to password field		;008
+	MOV	(R0)+,(R4)+	;Move password down			;008
+	MOV	(R0),(R4)	; and the second word			;008
+	BIC	#40-1,R4	;Unbias FIRQB pointer			;008
+	CALLX	RDE		;Make sure we have the name entry
+	BR	170$		; and go set that password		;008
+
+.DSABL	LSB
+
+GLOBAL	<FIPRVM,UNTLVL,FIUSER,FIPUNT,DATE,TIME>				;008
+
+FQFEND
+
+FQFSRT
+
+SETPW2:	MOVB	R0,@#FIPUNT	;Restore FIP unit number		;011
+	MOV	R3,-(SP)	;Save name block link			;011
+	MOV	#AA.DAT,R0	;Type to find				;011
+	CALLX	SAA		;Go find date/time info			;011
+	BCS	150$		;Error if not there			;011
+	TSTB	FQPPN+1(R4)	;Setting group 0?			;016
+	BNE	20$		;No, skip				;016
+	CMP	FQPPN(R4),#1	;Yes, but [0,1]?			;016
+	BEQ	10$		;Yes, skip				;016
+	ERROR	PRVIOL		;Can't set others in group 0		;016
+
+10$:	BIT	#AT.NLK,AT.PTI(R5) ;Marked as hashed password?		;016
+	BNE	20$		;Yes, skip				;016
+	BIS	#AT.NLK,AT.PTI(R5) ;No, so force it on			;016
+	MARK	FIBUF		; and have that written to disk		;016
+20$:	MOV	#16.,R3		;Count of bytes to check		;011
+	MOV	R4,R2		;Copy FIRQB pointer			;011
+	ADD	#FQNAM1+16.,R2	;Point beyond password			;011
+30$:	TSTB	-(R2)		;Still trailing null?			;011
+	BNE	40$		;No					;011
+	SOB	R3,30$		;Count down password length		;011
+	CRASH			;Can't get here				;011
+
+40$:	INC	R2		;Bump character pointer			;011
+	TSTPRV	SYSMOD,@#FIPRVM	;Skip length check?			;015
+	BNE	50$		;Yes					;015
+	CMP	R3,#6		;Check minimum password length		;011
+..MPWD	==	.-2	;** PATCH ** Minimum password size		;011
+	BLO	160$		;Too short, error			;011
+50$:	MOV	R2,-(SP)	;Save pointer				;015
+	MOV	R3,-(SP)	; and count				;015
+60$:	CMPB	-(R2),#'?	;Question mark in password?		;015
+	BEQ	160$		;Yes, that's an error			;015
+	SOB	R3,60$		; and loop until done			;015
+	MOV	(SP)+,R3	;Restore count				;015
+	MOV	(SP)+,R2	; and pointer				;015
+	MOVB	@#FIPUNT,R0	;Get FIP unit number			;011
+	ASL	R0		; times 2				;011
+	CMPB	UNTLVL(R0),(PC)+ ;Check disk rev level			;011
+	 .BYTE	1,1							;011
+	BLOS	70$		;1.1 or below, implies "lookup"		;011
+	BIT	#AT.NLK,AT.PTI(R5) ;Allowing lookup on account?		;011
+	BNE	100$		;No, skip extra check			;011
+70$:	CMPB	-(R2),#'0	;Legal digit?				;011 
+	BLO	160$		;No, error				;011
+	CMPB	(R2),#'9	;Really a digit?			;011
+	BLOS	90$		;Yes, good				;011
+	CMPB	(R2),#'A	;Uppercase letter?			;011
+	BLO	160$		;No, error				;011
+	CMPB	(R2),#'Z	;Really a letter?			;011
+	BLOS	90$		;Yes, that's good			;019
+	CMPB	(R2),#'A+40	;Lowercase?				;019
+	BLO	90$		;No, error				;019
+	CMPB	(R2),#'Z+40	;Last chance on lowercase		;019
+	BHI	160$		;No, error				;011
+	BICB	#40,(R2)	;Convert to uppercase			;019
+90$:	SOB	R3,70$		;Scan the whole password		;011
+	ADD	#6,R2		;Point past meaningful password		;025
+.REPT	<<14.-6>/2>		;Null out past 6th character		;025
+	CLR	(R2)+							;025
+.ENDR									;025
+100$:	MOV	(SP)+,R3	;Restore name entry link		;011
+	MOVB	@#FIPUNT,R0	;Get FIP unit number			;011
+	MOV	#-1,FQDEV(R4)	;Tell HASHPW to set date/time		;016
+	FCALL	HASHPW		;Hash the password			;008
+	MOVB	R0,@#FIPUNT	; and restore FUN			;008
+	ADD	#AT.PDA,R5	;Point to password date/time attribute	;008
+	MOV	FQDEV(R4),(R5)+	;Set password change date		;008
+	BIC	#AT.MSK,(R5)	;Clear out old password time		;011
+	BIS	FQDEVN(R4),(R5)	;Set new time
+	MARK	FIBUF		;Mark FIBUF for writing			;008
+	ADD	#FQNAM1,R4	;Point to hashed data			;008
+	MOV	#AA.PAS,R0	;Password is the one to find
+	CALLX	SAACR		;Find or create it
+	BCS	170$		;No room, sorry
+	MOV	R4,R3		;Copy FIRQB password pointer		;008
+	ADD	#UADAT,R5	;Point to data field
+110$:	MOVB	(R4)+,(R5)+	;Move a byte
+	BIT	#20-1,R5	;Blockette full?
+	BNE	110$		;No
+.ASSUME	<20-UADAT> LE <FQDEV-FQNAM1-2> ;Blockette fills up first
+120$:	CLRB	(R3)+		;Clear it out				;008
+	BIT	#40-1,R3	;Done?					;008
+	BNE	120$		;Not yet				;008
+130$:	MARK	FIBUF		;Mark buffer for write			;008
+140$:	RETURN								;008
+
+150$:	ERROR	BADDIR		;Entry not found			;011
+160$:	ERROR	BADNAM		;Invalid password length/chars		;011
+170$:	ERROR	NOROOM		;No space to allocate password		;011
+
+GLOBAL	<FIPUNT,UNTLVL,HASHPW>						;011
+FQFEND
+
+FQFSRT
+;+									;018
+;	SETQT2 - Validate and set quotas (Called by UU.CHU)		;018
+;									;018
+;	R1 =  Fip Unit Number						;018
+;	R3 =  Name entry link						;018
+;	R4 -> FIRQB							;018
+;	R5 -> Name entry						;018
+;									;018
+;	CALL	SETQT2							;018
+;									;018
+;	All registers are preserved					;018
+;-									;018
+
+SETQT2::REGSCR			;Save all current register values	;018
+	MOVB	R1,@#FIPUNT	;Restore the FUN			;018
+	CALL	VALQTA		;New format old disk, validate the quotas ;018
+10$:	CALL	SETQTA		;Now go set them			;018
+	RETURN			;Now back to our caller			;018
+
+GLOBAL	<FIPUNT>							;018
+
+;+									;018
+;	VALQTA - Validate quota data					;018
+;									;018
+;	R1 =  Fip Unit Number						;018
+;	R4 -> FIRQB							;018
+;									;018
+;	CALL VALQTA							;018
+;									;018
+;	All registers are preserved					;018
+;									;018
+;	This routine is used to validate the quotas being set by	;018
+;	user. The only instance that we care about is when the user	;018
+;	is issuing the new format of the UU.CHU or UU.PAS directives	;018
+;	on an RDS1.1 or later unit. Note: if the logout quota passed	;018
+;	is all one's (unlimited new format), then we set the quota to	;018
+;	zero which is unlimited on old style disks.			;018
+;-									;018
+
+VALQTA::REGSCR			;Save all current register values	;018
+	MOVB	R1,@#FIPUNT	;Restore the FUN			;018
+	ASL	R1		;Now make it FUN * 2			;018
+	CMP	UNTLVL(R1),(PC)+ ;Support extended disk quotas?		;018
+	 .BYTE	2,1							;018
+	BHIS	30$		;Yes, then no validation needed		;018
+	MOVB	FQSIZM(R4),R2	;Get the flag word			;024
+	BPL	30$		;Old format, no validation needed	;024
+	ASR	R2		;Changing logged-out quota?		;024
+	BCC	20$		;No, then skip validation		;024
+	MOV	R4,R0		;Copy the FIRQB pointer			;018
+	ADD	#FQSIZ,R0	; and point to the logout quota		;018
+	MOVB	FQFLAG+1(R4),R1	;Any logout quota MSB?			;018
+	BNE	10$		;Yes					;018
+	TST	(R0)		;No, what about logout quota LSB?	;018
+	BEQ	40$		;No, that's illegal			;018
+	BR	20$		;Yes, fine check logged-in and reserve	;018
+
+10$:	INC	R1		;Unlimited new format?			;018
+	BNE	40$		;No, that's illegal			;018
+	INC	(R0)		;Yes, all 24 bits (0 old style)?	;018
+	BNE	40$		;No, that's illegal			;018
+20$:	ASR	R2		;Changing logged-in quota?		;024
+	BCC	25$		;No, skip validation of logged-in quota	;024
+	CMP	#-1,FQMODE(R4)	;Unlimited logged-in quota LSB?		;018
+	BNE	40$		;No, that's illegal			;018
+	CMPB	#-1,FQFLAG(R4)	;Yes, MSB part also?			;018
+	BNE	40$		;No, again that's illegal		;018
+25$:	ASR	R2		;Changing reserved quota?		;024
+	BCC	30$		;No, skip validation of reserved quota	;024
+	TST	FQNENT(R4)	;Reserve quota LSB specified?		;018
+	BNE	40$		;Yes, that's not right either		;018
+	TSTB	FQPROT(R4)	;No, MSB part also?			;018
+	BNE	40$		;Yes, illegal				;018
+30$:	RETURN			;Return to our caller			;018
+
+40$:	ERROR	ERRERR		;Illegal quota data specified		;018
+
+GLOBAL	<FIPUNT>							;018
+
+;+									;012
+;	SETQTA - Set quotas						;012
+;									;012
+;	R1 =  Fip Unit Number						;012
+;	R3 =  Name entry link						;018
+;	R4 -> FIRQB							;012
+;	R5 -> Name entry						;018
+;									;012
+;	CALL  SETQTA							;012
+;									;012
+;	All registers are preseved					;012
+;									;012
+;-									;012
+
+SETQTA::REGSCR			;Save all registers			;012
+	MOVB	R1,@#FIPUNT	;Restor the Fip Unit Number		;012
+	ASL	R1		;Make it FUN * 2			;012
+	MOVB	FQSIZM(R4),R2	;Get the flag byte			;013
+	MOV	R4,R0		;Copy the FIRQB pointer			;012
+	ADD	#FQPPN,R0	; and point to the PPN			;012
+	CMP	(R0),(PC)+	;Account [0,1]?				;012
+	 .BYTE	1,0							;012
+	BEQ	10$		;Yes, no disk quota blockette		;012
+	CMP	UNTLVL(R1),(PC)+ ;Support Quota Blocks (QTBs)?		;012
+	 .BYTE	2,1							;012
+	BHIS	20$		;Yes, then new form of quotas		;012
+10$:	CALLX	RAE		;No, then old form so get A.E.		;012
+	MOV	FQSIZ-FQPPN(R0),MDPER(R5) ; and set the logged-out quota ;012
+	BR	40$		;Return to our caller			;012
+
+20$:	MOV	#-1,R5		;Set up an unlimited quota mask		;013
+	CMP	R2,#1		;New format or changing logout quota?	;013
+	BLT	30$		;New format, leave quotas unchanged	;013
+	BEQ	22$		;Changing logout quota only		;013
+	MOV	R5,FQMODE(R4)	;Creating, unlimited logged-in quota (LSB) ;013
+	MOVB	R5,FQFLAG(R4)	; and MSB portion			;012
+	CLR	FQNENT(R4)	;No reserved quota (LSB)		;012
+	CLRB	FQPROT(R4)	; and MSB portion			;012
+22$:	CLRB	FQFLAG+1(R4)	;Loqout quota should never be > 65535	;013
+	TST	FQSIZ(R4)	;Unlimited logout quota?		;012
+	BNE	30$		;No, then we're done go set the quotas	;013
+24$:	MOV	R5,FQSIZ(R4)	;Yes, set the logout quota to unlimited	;012
+	MOVB	R5,FQFLAG+1(R4) ; in both fields			;012
+30$:	MOV	R2,-(SP)	;Save the flag byte			;013
+	MOV	R0,-(SP)	; and the PPN pointer			;013
+	MOV	#AA.QUO,R0	;Set the type code we're looking for	;012
+	CALLX	SAA		;Find the blockette			;012
+	BCS	50$		;Not found, issue error			;012
+	MOV	(SP)+,R0	;Restore the PPN pointer		;012
+	MOV	(SP),R2		;Restore the flag byte			;013
+	CALL	100$		;Set quotas in the disk blockette	;012
+	MOV	(SP)+,R2	;Again restore the flag byte		;013
+	TST	DSKQPT(R1)	;Any QTBs for this unit?		;012
+	BEQ	40$		;No, then we're done			;012
+	CALLM	SERQTB,OPNAP5	;Is there a QTB for this user?		;012
+	BCS	40$		;No, then nothing else to do		;012
+	CALL	100$		; and go update it with the new quotas	;012
+	MAP	FIP,DATA,PIC	;Remap FIP				;012
+40$:	MARK	FIBUF		;Make sure it gets written out		;012
+	RETURN			;Return to our caller			;012
+
+50$:	ERROR	BADDIR		;Disk Quota blockette not found		;012
+
+100$:	ASR	R2		;Changing logged out quota?		;012
+	BCC	110$		;No, then we won't			;012
+	MOV	FQSIZ(R4),AQ.LOL(R5) ;Set the logged out quota		;012
+.ASSUME	AQ.LOL EQ QTBLOL
+	MOVB	FQFLAG+1(R4),AQ.LOM(R5) ; all 24 bits worth		;012
+.ASSUME	AQ.LOM EQ QTBLOM
+110$:	ASR	R2		;Changing the logged in quota?		;012
+	BCC	120$		;No, then we won't			;012
+	MOV	FQMODE(R4),AQ.LIL(R5) ;Set the logged in quota		;012
+.ASSUME	AQ.LIL EQ QTBLIL
+	MOVB	FQFLAG(R4),AQ.LIM(R5) ; all 24 bits worth		;012
+.ASSUME	AQ.LIM EQ QTBLIM
+120$:	ASR	R2		;Changing the reserve quota		;012
+	BCC	130$		;No, then we won't			;012
+	MOV	FQNENT(R4),AQ.RSL(R5) ;Set the reserve quota		;012
+.ASSUME	AQ.RSL EQ QTBRSL
+	MOVB	FQPROT(R4),AQ.RSM(R5) ; all 24 bits worth		;012
+.ASSUME	AQ.RSM EQ QTBRSM
+130$:	ASR	R2		;Changing detached job quota?		;017
+	BCC	140$		;No					;017
+	MOVB	FQFIL(R4),AQ.DJB(R5) ;Yes, set the new DJB quota	;017
+.ASSUME AQ.DJB EQ QTBDJB
+140$:	RETURN			;Return to our caller			;012
+
+GLOBAL	<FIPUNT,FIBUF,DSKQPT>						;012
+
+FQFEND
+
+FQFSRT
+;+									;012
+;									;012
+;	NEWRAD	- Called as a continuation from the 'DIR' module	;012
+;		  to return the new form of disk quota information	;012
+;									;012
+;	R2 =  FIPUNT and FIPGEN						;012
+;	R3 =  Link to Name Entry					;012
+;	R4 -> FIRQB @ FQPPN						;012
+;	R5 =  Pointer to the Name Entry					;012
+;	SP -> Password mask (unused)		(Set by 'DIR' module)	;012
+;	      Reset accounting data mask	(Set by 'DIR' module)	;012
+;									;012
+;-									;012
+
+NEWRAD::MOV	R2,@#FIPUNT	;Restore the FUN			;012
+	MOVB	R2,R2		;Just the Fip Unit Number		;012
+	ASL	R2		; and make it FUN * 2			;012
+	CLR	(R4)+		;Point to FQNAM1			;012
+	MOV	UNAM(R5),(R4)+	; and return the PPN			;012
+	MOV	UAR(R5),R1	;Get the starting DCN of the UFD	;012
+	MOV	R3,(SP)		;Save the link to the Name Entry	;012
+	CALLX	RAE		;Read the accounting entry		;012
+	MOV	(SP)+,R3	;Restore the link pointer		;012
+	TST	(R5)+		;Skip the link word			;012
+	MOV	#5,R0		;Do five items				;012
+10$:	BIC	(SP),(R5)+	;Apply accounting mask to an item in the A.E. ;012
+	SOB	R0,10$		;Next item				;012
+	BISB	(SP),@#FIBMOD	;Mark the buffer if needed		;012
+	MOV	(R4),(SP)	;Save the flag word			;012
+	CLR	FQPFLG-<FQNAM1+2>(R4) ;No logged-in or open count yet	;013
+	MOV	R4,-(SP)	;Copy the FIRQB pointer			;012
+	ADD	#FQNAM1-<FQNAM1+2>,(SP) ; and point to the PPN		;012
+	CMP	@(SP),(PC)+	;Account [0,1]?				;012
+	 .BYTE	1,0							;012
+	BEQ	15$		;Yes, no disk quota blockette		;012
+	CMP	UNTLVL(R2),(PC)+ ;Support Quota Blocks (QTBs)?		;012
+	 .BYTE	2,1							;013
+	BHIS	30$		;Yes					;013
+15$:	MOV	#377,R3		;Set log'd-in MSB, not sure about log'd-out MSB ;012
+	MOV	(R5),R0		;Get the log'd-out disk quota		;012
+	BNE	20$		;Use it if it's not unlimited		;012
+	COM	R0		;Otherwise, return the maximum		;012
+	MOVB	R3,R3		; of all 24 bits set			;012
+20$:	MOV	R0,(R4)+	;Set the log'd-out quota (LSB) part	;012
+	MOV	#-1,(R4)+	; Log'd-in quota (unlimited)		;012
+	MOV	R3,(R4)+	; and the MSB of log'd out/log'd in	;012
+	CLR	(R4)+		;Clear the MSB of usage/reserve quota	;012
+	CLR	(R4)+		; and LSB of reserve quota		;012
+	BR	50$		;Go return usage if requested		;012
+
+30$:	TST	DSKQPT(R2)	;Any QTBs for this unit?		;012
+	BEQ	35$		;No, then lookup on disk		;012
+	MOV	(SP),R0		;Get the saved PPN pointer		;012
+	CALLM	SERQTB,OPNAP5	;Is there a QTB for this PPN?		;012
+	BCS	35$		;No match found, have to go to disk	;012
+	MOV	QTBOPN(R5),FQPFLG-<FQNAM1+2>(R4) ;Return logged-in and open count ;013
+	BR	38$		;Go return the quota data		;013
+
+35$:	MOV	#AA.QUO,R0	;Look for the quota attribute blockette	;012
+	CALLX	SAA		;Go read it in				;012
+	BCS	70$		;Entry not found, error			;012
+38$:	MOV	R5,R0		;Copy the attribute blockette pointer	;012
+	ADD	#AQ.LOL,R0	; and point at the quotas		;012
+	MOV	#5,R2		;We want to move five words		;012
+40$:	MOV	(R0)+,(R4)+	;Move a word to the user's FIRQB	;012
+.ASSUME	AQ.LOL EQ QTBLOL
+.ASSUME AQ.LIL EQ QTBLIL
+.ASSUME	AQ.LIM EQ QTBLIM
+.ASSUME AQ.LOM EQ QTBLOM
+.ASSUME	AQ.RSM EQ QTBRSM
+.ASSUME	AQ.CRM EQ QTBCRM
+.ASSUME	AQ.RSL EQ QTBRSL
+.ASSUME	AQ.CRL EQ QTBCRL
+	SOB	R2,40$		;Loop until all five are done		;012
+	CLRB	<FQBUFL+1>-FQFLAG(R4) ;Clear the usage count (MSB) part	;012
+	MAP	FIP,DATA,PIC	;Make sure that FIP is mapped		;012
+50$:	CLR	(R4)		;Clear the LSB part of the usage	;012
+	MOV	(SP)+,R0	;Restore the pointer to the PPN		;012
+	ASR	(SP)+		;Does the caller want the usage?	;012
+	BCS	60$		;No, then simply return			;012
+	MOV	R1,R2		;Copy the DCN of the UFD for GETUSG	;012
+	MOV	@#FIPUNT,R1	;Save FIPUNT and FIPGEN			;012
+	CALL	GETUSG		;Go compute the usage			;012
+	BCS	100$		;Some type of I/O error occurred	;012
+	MOVB	R2,<FQBUFL+1>-FQFLAG(R4) ;Return the MSB part of the usage ;012
+	MOV	R1,(R4)+	; along with the LSB part		;012
+60$:	RETURN			;Return to our caller			;012
+
+100$:	JMPX	FIEXIT		;Exit FIP				;012
+
+70$:	ERROR	BADDIR		;Disk Quota blockette not found		;012
+
+GLOBAL	<FIPUNT,FIBMOD,UNTLVL,DSKQPT>					;012
+
+;+									;012
+; GETUSG - Return the usage in blocks as a 24 bit value			;012
+;									;012
+;	R0     -> PPN							;012
+;	R1     =  FIPUNT and FIPGEN					;012
+;	R2     =  DCN of UFD						;012
+;	R5     -> Disk Quota Blockette	   (RDS1.2 or later only)	;012
+;	          Quota Block (QTB)	   (RDS1.2 or later only)	;012
+;	QTCURR =  QT buffer address if we have a QTB, otherwise zero	;012
+;									;012
+;	CALL GETUSG							;012
+;									;012
+;	R1 = Usage in blocks (LSB)	(Random if C=1)			;012
+;	R2 = Usage in blocks (MSB)	(Random if C=1)			;012
+;									;012
+;	C = 0	Success							;012
+;	C = 1	Some type of I/O error occurred				;012
+;-									;012
+
+GETUSG::REGSCR			;Save current register contents		;012
+	MOV	R1,@#FIPUNT	;Restore FIPUNT and FIPGEN		;012
+	MOV	SP,@#FIPESP	;Save the current stack pointer		;012
+	MOVPIC	#100$,-(SP)	;Compute error recovery address		;012
+	MOV	(SP),@#FIPERX	; and set it				;012
+	CLR	(SP)		;Zero MSB of usage			;012
+	CLR	-(SP)		; along with the LSB portion		;012
+	MOVB	R1,R1		;Keep just the FUN			;012
+	ASL	R1		; and make it FUN * 2			;012
+	CMP	(R0),(PC)+	;Account [0,1]?				;012
+	 .BYTE	1,0							;012
+	BEQ	20$		;Yes, no disk quota blockette		;012
+	CMP	UNTLVL(R1),(PC)+ ;Support Quota Blocks (QTBs)?		;012
+	 .BYTE	2,1							;012
+	BLO	20$		;No, then old style of look up		;012
+	MOV	@#QTCURR,R4	;Get the QT buffer address		;012
+	BEQ	10$		;None, then the data is from disk	;012
+	CALLX	MAPBUF		;Otherwise, map the buffer		;012
+10$:	ADD	AQ.CRL(R5),(SP)	;Add in the LSB portion of the usage	;012
+.ASSUME	AQ.CRL EQ QTBCRL
+	ADC	2(SP)		;Take care of the possible overflow	;012
+	MOVB	AQ.CRM(R5),R1	;Get the MSB poriotn of the usage	;012
+.ASSUME	AQ.CRM EQ QTBCRM
+	ADD	R1,2(SP)	;Add that in				;012
+	MAP	FIP,DATA,PIC	;Make sure FIP is mapped		;012
+	BR	50$		;Go and check for another unit		;012
+
+20$:	TST	R2		;Do we have a DCN for the UFD		;012
+	BEQ	50$		;No, then go try another unit		;012
+	CALLX	READUF		;Yes, then read it			;012
+	MOV	@#FIBUF,R4	;Get the initial link			;012
+30$:	MOV	R4,R3		;Get the next link			;012
+	CALLX	RDECHK		;Read the name entry			;012
+	BEQ	50$		;End, try another unit			;012
+	MOV	(R5),R4		;Save the link for later		;012
+	BITB	USTAT(R5),#US.DEL!US.UFD!US.OUT ;Deleted, UFD, or out	;012
+	BNE	30$		;Yes, ignore this one			;012
+	CALLX	RAE		;Read the UFD accounting entry		;012
+	MOV	UCLUS(R5),R1	;Get the UFD clustersize		;012
+	DEC	R1		;Make it a mask (clustersize - 1)	;012
+	MOV	USIZ(R5),R2	;Get the filesize, LSB part		;012
+	CLR	R3		;Assume no MSB				;012
+	TST	URTS(R5)	;Is there a RTS name?			;012
+	BNE	40$		;Yes, good guess			;012
+	MOVB	URTS+2(R5),R3	;Otherwise, get the MSB portion		;012
+40$:	ADD	R1,R2		;Apply the clustersize mask (round up)	;012
+	ADC	R3		;Add the possible overflow to the MSB	;012
+	BIC	R1,R2		;Now round down				;012
+	ADD	R2,(SP)		;Add the LSB part to the total		;012
+	ADC	2(SP)		; and the possible overflow		;012
+	ADD	R3,2(SP)	;Now add the MSB part to the total	;012
+	BR	30$		;Onto the next file			;012
+
+50$:	TSTB	@#FIPGEN	;General unit?				;020
+	BEQ	70$		;No, so don't get another unit		;020
+	CALLX	NXTUNT,R1,<UC.MNT!UC.PRI!UC.NFS> ;Get the next unit 	;020
+	  BR	70$		;None, then return the usage		;012
+	MOV	R2,R1		;Save the FUN from SDM			;012
+	CALLX	SDM		;Find the account			;012
+	BCS	50$		;Go to another unit if it's not there	;012
+	ASL	R1		;Make it FUN * 2			;012
+	CMP	(R0),(PC)+	;Account [0,1]?				;012
+	 .BYTE	1,0							;012
+	BEQ	60$		;Yes, no disk quota blockette		;012
+	CMP	UNTLVL(R1),(PC)+ ;Support Quota Blocks (QTBs)?		;012
+	 .BYTE	2,1							;012
+	BLO	60$		;No, still the old way			;012
+	TST	DSKQPT(R1)	;Any QTBs for this unit?		;012
+	BEQ	55$		;No, then perform disk lookup		;012
+	CALLM	SERQTB,OPNAP5	;Is there a QTB for this PPN?		;012
+	BCC	10$		;QTB found, use the data		;012
+55$:	MOV	R0,-(SP)	;Save the pointer to the PPN		;012
+	MOV	#AA.QUO,R0	;Want the quota attribute blockette	;012
+	CALLX	SAA		; and read it in			;012
+	MOV	(SP)+,R0	;Restore the PPN pointer (carry unaffected) ;012
+	BCC	10$		;Got it, now go add in the usage	;012
+	ERROR	BADDIR		;Not there, bad directory then		;012
+
+60$:	MOV	UAR(R5),R2	;Get the DCN of the UFD			;012
+	BR	20$		; and go compute the usage		;012
+
+70$:	MOV	(SP)+,TOS.R1+2(SP) ;Return the LSB part of the usage	;012
+	MOV	(SP)+,TOS.R2(SP) ; and the MSB part			;012
+	CLR	@#FIPERX	;Clear the alternate error address	;012
+	;CLC			
+	RETURN			;Back to our caller			;012
+
+100$:	MOV	@#FIPESP,SP	;Reset the stack pointer		;012
+	CLR	@#FIPERX	;Clear the alternate error address	;012
+	SEC			;Return failure indicator		;012
+	RETURN			;Return to our caller			;012
+
+GLOBAL	<FIPESP,FIPERX,FIBUF,FIPUNT,UNTLVL,QTCURR,DSKQPT>		;012
+
+FQFEND
+
+.END

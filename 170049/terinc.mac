@@ -1,0 +1,1888 @@
+.INCLUDE /CMN:COMMON/
+.INCLUDE /CMN:KERNEL/
+.INCLUDE /CMN:KBDEF/
+TITLE	TERINC,<Input character processing>,0H,20-DEC-91,KPH/DRP/FEK/JFM
+
+;
+;		COPYRIGHT (c) 1974, 1991 BY
+;	DIGITAL EQUIPMENT CORPORATION, MAYNARD, MASS.
+;
+; THIS SOFTWARE IS FURNISHED UNDER A LICENSE AND MAY BE USED AND  COPIED
+; ONLY  IN  ACCORDANCE  WITH  THE  TERMS  OF  SUCH  LICENSE AND WITH THE
+; INCLUSION OF THE ABOVE COPYRIGHT NOTICE.  THIS SOFTWARE OR  ANY  OTHER
+; COPIES  THEREOF MAY NOT BE PROVIDED OR OTHERWISE MADE AVAILABLE TO ANY
+; OTHER PERSON.  NO TITLE TO AND OWNERSHIP OF  THE  SOFTWARE  IS  HEREBY
+; TRANSFERRED.
+;
+; THE INFORMATION IN THIS SOFTWARE IS SUBJECT TO CHANGE  WITHOUT  NOTICE
+; AND  SHOULD  NOT  BE  CONSTRUED  AS  A COMMITMENT BY DIGITAL EQUIPMENT
+; CORPORATION.
+;
+; DIGITAL ASSUMES NO RESPONSIBILITY FOR THE USE  OR  RELIABILITY  OF ITS
+; SOFTWARE ON EQUIPMENT WHICH IS NOT SUPPLIED BY DIGITAL.
+;
+
+.SBTTL	TERINC EDIT HISTORY
+
+;+
+;
+;  000  KPH  08-Jun-87	Creation - extract from TTDVR.MAC
+;
+;			[RSTS/E V9.7]
+;  001	DRP  01-Nov-88	Fix bug in ^R processing where BELL is not sent
+;			when in Echo Control Mode.
+;  002	FEK  07-Dec-88	Send Answerback message when needed.
+;  003	DRP  20-Jan-89	Add APT support
+;
+;			[RSTS/E V10.0]
+;  004	JFM  10-Apr-89	Fix mode 33 bug, don't store XON/XOFF characters, 
+;			just process them and exit.  Added comments.
+;  005	JFM  18-Apr-89	Add escape sequence parsing for command line editing
+;			Change processing of control character deletions
+;  006	JFM  31-Aug-89	Locations of insert/overstrike and line recall bits
+;			moved in DDB.
+;  007	JFM  30-Oct-89	Locations of insert/overstrike and line recall bits
+;			moved in DDB again.  Use EDTOK routine for CTRL/D.
+;  008	JFM  14-Nov-89	Don't honor the "escape" terminal attribute at DCL
+;			or other run-time system level.
+;  009	JFM  17-Nov-89	Source clear MONITR.CMD patch from V9.7.  Pop happens
+;			1 instruction too late.
+;  010	JFM  18-Dec-89	Implement ECHO ON READ
+;  011	JFM  02-Jan-90	Fix sleep problem in STOREY; wake up job if delimiter
+;			typed.
+;  012	JFM  04-Jan-90	Clean up type ahead routine. Make TTDLMC a bit.
+;			Levels in CURLVL are bits
+;  013	JFM  08-Feb-90	Handle deletes better for scope terminals
+;			Fix CTRL/C "go to end of line" bug
+;			Wake up job in STOREY if DDT submode 
+;			Save/Restore register in LMARG
+;  014	JFM  13-Feb-90	Handle control characters in input stream during
+;			^R, ^U, delete, etc.
+;  015	JFM  16-Feb-90	Made TI$RUB global for delete word routine in TERLED
+;			Set or clear "AT END" bit if (not) at end of command
+;  016	JFM  18-Feb-90	DDFLG3 is now TTFLG3, CURLVL becomes TTRFLG, ATEND
+;			is now in TTRFLG, fix up use of ATEND.
+;			Added "lineup" routine, for CTRL/R.
+;			PREAD is not in TTRFLG
+;  017	JFM  23-Feb-90	Output a CRLF if at right margin after character display
+;			Retype command if it was an overstrike of a control char
+;			New TI$CI routine, handle TAB characters very special
+;  018	JFM  26-Feb-90	Don't handle TAB if special modes, or if not echoing
+;			Get rid of last char in LMARG for all terminal widths
+;  019	JFM  06-Mar-90	Clear prompt position if CTRL/C hit
+;			Clean up some comments
+;  020	JFM  13-Mar-90	Make CTRL/U wrap to previous line if at left margin
+;			Store character as type ahead if recall is in progress
+;			Print CRLF if needed to line up command
+;			Test retype needed BEFORE and after character output 
+;  021	JFM  25-Apr-90	Fix LINEUP bug - check to ensure CRLF made it out
+;  022	JFM  17-May-90	Move check for type pending (after a broadcast) up to
+;			before the processing of any characters
+;  023	JFM  21-May-90	Fix bug - clear ATEND if left margin wraps cursor
+;  024	JFM  22-May-90	Implement "binary mode process on read"
+;  025	JFM  25-May-90	CTRL/C clears pending read.  Move PMTPOS clear up.
+;  026	JFM  01-Jun-90	Check for console before putting chars in type ahead
+;
+;			[RSTS/E V10.1]
+;  027	JFM  10-Apr-91	Fix rubout mode - character deletions fail
+;  028	JFM  10-Apr-91	Don't wake job in STOREY if read pending
+;  029	JFM  08-May-91	Make user runnable differently if Teco mode CTRL/G
+;  030	JFM  26-Jul-91	Undo changes of 029
+;  031	JFM  30-Jul-91	Check for console when determining if binary mode 
+;			character should be processed right away.
+;  032	JFM  22-Jul-91	Move ESCPRC, CHKESC, ESCLST into TERCLS.  Made ESCPRC
+;			take a parameter (TTESCC or TTESCT).  As characters
+;			are put into type ahead buffer, wake up job only when
+;			the last character of escape is entered.
+;  033	JFM  16-Nov-91	Miscellaneous comments cleaned up.
+;  034	JFM  25-Nov-91	If in RUBOUT mode, allow multiple linefeeds to bahave
+;			like numberous deletes.
+;-
+
+.SBTTL	Define our .PSECTs
+
+	DEFORG	TERINC
+
+.SBTTL	KINICH	Process an input character
+ 
+;+
+; KINICH - Process an input character
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;	R2 =  Character
+;       
+;	CALL	KINICH
+;
+;	R3 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;-
+.ENABL	LSB
+
+	TMPORG	KINDSP,0
+	 .WORD	KINICH
+	UNORG
+
+KINICH:	ADD	#1,JSTATK	;;COUNT INCOMING CHARACTERS
+	ADC	JSTATK+2	;; (DOUBLE PRECISION)
+	BITB	#1,DDJBNO(R1)	;;IS LINE REALLY DISABLED?
+	BNE	150$		;;YES, SO FORGET IT ALREADY
+	TSTB	DDJBNO(R1)	;;DOES SOMEBODY OWN THIS LINE		
+	BNE	10$		;;YES, SKIP NEXT CHECK			
+	BIT	#TTDSBL!TTWRC,MODCLK(R1) ;;Hung up or waiting for carrier?
+	BNE	150$		;;Yes, ignore input for now
+	BIT	#TTNINT,TTCAPB(R1) ;;Non-interactive terminal?		
+	BNE	20$		;;Yes, so check for XON/XOFF		
+10$:	BIT	#TTPCOL!TTBIN,TTMODE(R1) ;;XON/XOFF PROTOCOL AND/OR BINARY?
+	BEQ	110$		;;NEITHER
+	BIT	#TTPCOL,TTMODE(R1) ;;CHECK INCOMING XON/XOFF PROTOCOL??
+	BEQ	70$		;;NOPE, SO DON'T
+
+; At this point, we know we are either in XON/XOFF mode (minimally)	;004
+; or we have received a character on a non-interactive/non-owned 	;004
+; keyboard.  In either of these cases, we check for XON/XOFF and	;004
+; if found, process the character and exit.				;004
+
+20$:	MOV	R2,-(SP)	;;Make a copy of the character		
+	BITB	#TT8BIT,TTFCNT(R1) ;;Is this an 8-bit terminal?		
+	BNE	30$		;;Yes, all set				
+	BIC	#^C<177>,R2	;;No, so junk the high bit		
+30$:	CMPB	R2,#'S-100	;;Is this an XOFF character?		
+	BNE	40$		;;No, not this time			
+	CALLX	DOXOFF		;;Yes, process it			
+	BR	50$		;;Restore character and exit		;004
+
+40$:	CMPB	R2,#'Q-100	;;Is this an XON character?		
+	BNE	60$		;;No, all set				;004
+	CALLX	DOXON		;;Yes, process it			
+50$:	MOV	(SP)+,R2	;;Restore the character			
+	BR	150$		;;And exit				;004
+
+60$:	MOV	(SP)+,R2	;;Restore the character			;004
+
+; We reach here for one of three reasons:
+;    1) We are in XON/XOFF mode (with or without binary mode) and the 	;004
+;	input character wasn't an XON or XOFF	       			;004
+;    2) The terminal is not open (thus no mode) and is set            	;004
+;	non-interactive and the input character was not an XON or XOFF	;004
+;    3) We are in binary mode without XON/XOFF mode.			;004
+;
+; In the first two cases, we exit without processing the character.	;004
+; In the case of binary mode, we process the character now if a .READ	;024
+; is outstanding, otherwise we store it in the type ahead buffer and	;024
+; wait for the next .READ.  The first check in ECHOIN is to see if the	;024
+; current mode is binary mode, and if so, it comes back here.		;024
+
+70$:	BIT	#TTBIN,TTMODE(R1) ;;Binary input mode?
+	BEQ	150$		;;No, just ignore the character
+	BIT	#DDCONS,DDCNT(R1) ;;Is this the console?		;031
+	BEQ	BIN		;;No, then process this character now	;031
+	CMP	TTINEC+EP(R1),TTINEC+FP(R1) ;;Any type-ahead already?	;024
+	BNE	100$		;;Yes, so store this character there	;024
+	BITB	#PREAD,TTRFLG(R1) ;;Is a read outstanding?		;024
+	BEQ	100$		;;No, store in type ahead buffer	;024
+BIN:	CALL	STOREX		;;Yes, store character in input buffer	;024
+	BCS	160$		;;Oops!  No can do, get out		;024
+	CALLX	DLMMSK		;;Is there a delimiter mask?		;024
+	BNE	80$		;;No, then wake up the job		;024
+	CALLX	CHKDLM		;;Yes, is this a private delimiter?	;024
+	BCC	160$		;;No, don't wake up job			;024
+80$:	BISB	#1,TTDLMC(R1)	;;Yes, then indicate so			;024
+90$:	JMP	TTIJSB		;; and go wake up the job		;024
+
+100$:	CALL	STOREY		;;Store character in the type ahead buf	;024
+	BCS	160$		;;Store failed, character dropped	;024
+	CALLX	DLMMSK		;;Is character a binary mode delimiter?	;024
+	BNE	90$		;;No, then wake up the job		;024
+	CALLX	CHKDLM		;;Yes, is this a private delimiter?	;024
+	BCS	90$		;;Yes, then wake up the job		;024
+	BR	160$		;;No, don't wake up the job		;024
+
+; At this point, we have determined that the user is not in binary mode
+; so we will process this input character.
+;
+; The first step is to turn 8 bit characters into 7-bit characters if
+; the user is not on an 8-bit terminal
+
+110$:	BITB	#TT8BIT,TTFCNT(R1) ;;8 BIT CHARACTER?			
+	BNE	120$		;;YES					
+	BIC	#^C<177>,R2	;;JUNK EXTRANEOUS BITS
+
+; Now, we will process input characters which require an immediate
+; response.
+
+120$:	CMPB	R2,#INPMAX	;;Is this in the special range?		
+	BHI	130$		;;No, skip calling the handler		
+	MOVB	R2,R3		;;Yes, copy the character code		
+	ASL	R3		;;Now get code # * 2			
+	CALL	@INPHND(R3)	;;And call the input handler		
+	BCC	160$		;;It finished processing it		
+
+; Next, we will translate 8-bit control characters into their 7-bit
+; equivilent.
+
+130$:	BIC	#^C<377>,R2	;;CLEAR HIGH BYTE			
+	CMPB	R2,#237		;;C1 control?				
+	BGT	140$		;;No, skip				
+	MOV	R2,-(SP)	;;Save the control			
+	MOV	#033,R2		;;Set up an escape			
+	CALL	KINICH		;;Process <ESC> as input		
+	MOV	(SP)+,R2	;;Restore original input		;009
+	BCS	160$		;;Dropped it, so forget it		;009
+	ADD	#100-200,R2	;;Convert C1 to ESC Fe			
+
+; At this point, we'll either buffer a character in the typeahead chain
+; or process it now.  See TYPAHD routine for details.
+
+140$:	CALL	TYPAHD		;;Store in type ahead buf if need be	;010
+	BCS	ECHOIN		;;Not stored, process it now		;010
+150$:	CLC			;;Indicate character was processed
+160$:	RETURN			;;And exit
+
+
+.DSABL	LSB
+
+GLOBAL	<JSTATK>
+
+.SBTTL	ECHOIN	Process an input character
+;+
+; ECHOIN - Process an input character
+;
+; 	R0 =  unit # * 2
+;	R1 -> DDB
+;	R2 =  character 
+;
+;	...
+;
+;	R3 =  undefined
+;	R4 =  undefined
+;	R5 =  undefined
+;
+; ECHOIN is entered via a branch from KINICH, above, when the character
+; should be put into the terminal input buffer.  If it isn't going to be 
+; processed RIGHT NOW, then the character was put into the type ahead buffer.
+; KINICH takes care of characters which require immediate handling like CTRL/C
+; and CTRL/T, and determined that the character should be processed now.
+;
+; ECHOIN is also called from the process type ahead routine to process the
+; current line.  This routine is called PROTYP in the KBDVR.MAC module.
+;-
+.ENABL	LSB
+
+ECHOIN::BIT	#TTBIN,TTMODE(R1) ;;In binary mode?			;024
+	BNE	BIN		;;Yes, process it in binary mode now	;024
+	BIT	#RUBOUT,DDFLAG(R1) ;;IN RUBOUT MODE ?
+	BEQ	10$		;;WE WEREN'T, SO DON'T BOTHER CHECKING
+	CMP	R2,#177		;;WE WERE, SHOULD WE REMAIN
+	BEQ	10$		;;THIS IS ANOTHER RUBOUT, SO WE SHOULD
+	CMP	R2,#12		;;Is character a linefeed character?	;034
+	BNE	5$		;;Not this time, end rubout mode	;034
+	CALLX	EDTOK		;;Line editing allowed now?		;034
+	BCC	10$		;;Yes, so don't end rubout mode		;034
+5$:	CALL	ENDRUB		;;End rubout mode			;034
+10$:	BIT	#TTDDT,DDFLAG(R1) ;;IS USER CURRENTLY IN DDT SUB-MODE?
+	BEQ	20$		;;NOPE--SCHEDULE ON BASIS OF DELIMITER
+	CALL	TTIJSB		;;CLEAR CLOCK AND MAKE USER RUNNABLE
+20$:	BITB	#TYPPEN,TTRFLG(R1) ;;Is a retype required before we 	;022
+				;; processes this character? (i.e. a 	;022
+				;; broadcast occured, but errored)	;022
+	BEQ	25$		;;No, not this time			;022
+	MOV	R2,-(SP)	;;Save the character to process		;022
+	CALLX	RETCU2		;;Yes, go redisplay line (clears TYPPEN);022
+	MOV	(SP)+,R2	;;Restore the character 		;022
+25$:	TSTB	TTESCC(R1)	;;Is esc seq coming in ?
+	BNE	30$		;;Yes, skip the private delimiter check
+	CALLX	CHKDLM		;;Is this a private delimiter?		
+	BCC	30$		;;No => go check against dispatch table	
+	TST	R4		;;Yes:  was it "the priv delim byte" ?	
+	BNE	45$		;;No (it was from mask) => go store it	;006
+	BIT	#TTTECO,TTMODE(R1) ;;Yes (from the byte):  TECO mode?	
+	BEQ	45$		;;Not TECO mode => go store		;006
+	MOV	#033,R2		;;TECO mode:  treat delimiter as <ESC>	
+	CALL	TTISJS		;;Store <ESC>, make user runnable	
+	BCC	TTINER		;;  and go do the echo			
+	BR	50$		;;Not stored, don't echo it
+
+30$:	MOVB	R2,R3		;;COPY CHARACTER...IS SIGN BIT SET?
+	BMI	40$		;;YES, NEVER SPECIAL		
+	ASL	R3		;;MAKE IT TIMES TWO
+	MOVB	R3,R3		;;SIGN EXTEND THE HIGH BYTE
+	CMPB	R3,#-3*2	;;IS IT <-3 (*2)
+	BLT	40$		;;NO
+	CMPB	R3,#37*2	;;IS IT >37 (*2)
+	BGT	40$		;;NO
+	CALL	@TTIDSP(R3)	;;CALL SPECIAL ROUTINE
+	BCC	50$		;;It processed it, all set
+40$:	TSTB	TTESCC(R1)	;;IS ESC SEQ COMING IN ?
+	BEQ	60$		;;NOPE
+	CALL	STOREX		;;YES, SO STORE THE INCOMING CHARACTER
+	BCS	50$		;;Dropped it, so forget the character
+	CALLX	ESCPRC,R5,TTESCC ;;Check the esc seq, input buffer	;032
+	  BR	50$		;;STILL WORKING ON IT
+	CALLX	LEDESC		;;Is this a line editing escape seq?	;005
+	BCC	50$		;;Yes, processed so all set		;005
+	MOV	#233,R2		;;SET TO STORE <233>
+45$:	JMP	TTISJS		;;Now store that character		;006
+
+50$:	RETURN			;;All done here
+
+60$:	BIT	#TTECTL,TTMODE(R1) ;;TERMINAL OPEN FOR ECHO CONTROL ?
+	BEQ	80$		;;NOPE, NORMAL CHARACTER
+	BIT	#177,EKOCTW(R1)	;;HAS THIS FIELD EXPIRED ?
+	BEQ	70$		;;YES, ECHO BELL AND TOSS CHARACTER
+	DECB	EKOCTW(R1)	;;COUNT THIS CHARACTER AGAINST HIS FIELD
+	BNE	80$		;;CONTINUE IF FIELD DID NOT EXPIRE
+	CALL	80$		;;Field expired, store the character
+	BCS	140$		;;Didn't fit, forget the <FF>
+	MOV	#'L-100,R2	;;Set up a <FF> character
+	CALL	TTISJS		;;And try to store it
+	BCC	140$		;;Worked, all set
+	CALL	TI$RUB		;;Didn't work, dump previous character as well
+	SEC			;;Indicate failure
+	BR	140$		;;And exit
+
+70$:	CALLX	OUTCHR,R5,<007>	;;Ring the bell				;013
+	BR	130$		;;And exit
+
+80$:	TST	TTCHAR(R1)	;;SHOULD WE CONVERT LC INTO UC?		
+	BMI	100$		;;NO, NO CONVERSION DESIRED		
+.ASSUME	TTLCIN	EQ	100000
+	CMPB	R2,#140		;;POSSIBLE LOWER CASE?
+	BLO	100$		;;NOPE
+	CMPB	R2,#176		;;YEP, BUT IS IT REAL LOWER CASE?
+	BLOS	90$		;;Yes, then see about converting	
+	CMPB	R2,#340		;;Possible lower case?			
+	BLO	100$		;;No					
+	CMPB	R2,#375		;;Really lower case?			
+	BHI	100$		;;No					
+90$:	BIC	#40,R2		;;YES, SO CONVERT IT ALREADY		
+100$:	CALL	STOREX		;;STORE IN INPUT BUFFER
+	BCS	140$		;;Didn't fit, drop it
+	.BR	TTINER		;;Now echo the character
+
+TTINER:	CMP	R2,#177		;;RUBOUT?
+	BEQ	130$		;;YES, NEVER ECHO IT
+	BIT	#NOECHO!TAPE,DDFLAG(R1) ;;SHOULD WE ECHO THIS		
+	BNE	110$		;;NO	
+	BIT	#LCLCPY,TTCAPB(R1) ;;SHOULD WE ECHO THIS?		
+	BEQ	120$		;;YES
+110$:	BIT	#LCLCPY,TTCAPB(R1) ;;NO, DID IT POSSIBLY ECHO ITSELF?	
+	BEQ	130$		;;NO WAY IT COULD HAVE ECHOED
+	BIT	R2,#140		;;PRINTABLE CHARACTER?
+	BEQ	130$		;;NO, SO NO POSITION CORRECTION
+	DECB	DDHORZ(R1)	;;YES, SO CORRECT POSITION
+	BNE	130$		;;POSITION STILL O.K.
+	INCB	DDHORZ(R1)	;;KEEP POSITION AT LEAST REASONABLE...
+	BR	130$		;;THEN CONTINUE
+
+120$:	CALLX	OUTRM		;;Output the character, and print 	;017
+				;;  CRLF if at right margin		;017
+	BITB	#TYPPEN,TTRFLG(R1) ;;Is a retype required NOW?		;017
+	BNE	125$		;;Yes, go do it				;017
+	TSTB	TTFLG3(R1) 	;;Are we doing insert editing? 		;016
+.ASSUME	TTEMOD	EQ 200							;007
+	BPL	130$		;;No, nothing special to do		;007
+	CALLX	CHKEOL		;;Set ATEND if at end of line		;016
+	CMP	TTINPT+FP(R1),TTIPTR(R1) ;;Are we inserting at the end?	;016
+	BEQ	130$		;;Yes, so no re-paint necessary		;016
+125$:	CALLX	RETCUR		;;No, so retype the rest of the line	;016
+130$:	CLC			;;Indicate character processed
+140$:	RETURN			;;All done here
+
+.DSABL	LSB
+
+.SBTTL	TYPAHD	Put character in type ahead buffer if we should
+;+
+; TYPAHD - Put character in type ahead buffer if we should
+;
+; 	R1 -> DDB
+;
+;	CALL	TYPAHD
+;
+;	C=0 if character put into type ahead buffer
+;	C=1 if not
+;
+; Note:  The test for DDCONS is a catch-all to test for things like when the
+; terminal is logged out and the user wishes to log in.  There is no read
+; active, but the characters should be put into the input buffer, and echoed
+; immediately.  This test catches that, among other things; like multi-tty
+; slave terminal input, which should not be subject to echo on read.
+;-
+.ENABL	LSB
+
+TYPAHD:	BIT	#TTFMS,TTMODE(R1) ;;Terminal open in FMS mode?		;010
+	BNE	30$		;;Yes, so go queue the DDB for service	;012
+	CMP	TTINEC+EP(R1),TTINEC+FP(R1) ;;Any type-ahead already?	;010
+	BNE	STOREY		;;Yes, so store this character there	;012
+	BIT	#TTECTL,TTMODE(R1) ;;Terminal open for echo control?	;010
+	BEQ	10$		;;No, don't worry about it then		;012
+	TST	EKOCTW(R1)	;;Any field active?			;010
+.ASSUME	TTACTV	EQ 100000
+	BPL	STOREY		;;No, store char in type ahead buffer	;012
+10$:	BITB	#1,TTDLMC(R1)	;;Any delimiters typed?			;012
+	BNE	15$		;;Yes, so store as type ahead if console;026
+	BITB	#TTRECP,TTFLG3(R1) ;;Is a recall pending?		;020
+	BNE	STOREY		;;Yes, so let it finish			;020
+	BITB	#PREAD,TTRFLG(R1) ;;No, is there a pending read?	;016
+	BNE	20$		;;Yes, process the character now	;012
+15$:	BIT	#DDCONS,DDCNT(R1) ;;Is this the console terminal?	;026
+	BNE	STOREY		;;Yes, so store character in type ahead	;012
+20$:	SEC			;;Indicate char NOT in type ahead buff	;012
+	RETURN
+
+30$:	CALLX	FMSQ		;;Yes, queue this DDB for service	;012
+	.BR	STOREY		;;And store char in type ahead buffer	;012
+
+.DSABL	LSB
+
+.SBTTL	STOREY	Store a character in the type ahead buffer
+;+
+; STOREY - STORE A CHARACTER IN THE ECHO CONTROL BUFFER.
+;
+;	R0 =  KEYBOARD NUMBER TIMES 2
+;	R1 -> DDB
+;	R2 =  CHARACTER
+;
+;	...
+;
+;	C = 0 if store succeeded
+;	C = 1 if store failed, terminal XOFFed, and bell rung
+;
+; Note concerning delimiter check: We make the user runnable because 	;011
+; if a SLEEP statement is issued, then a delimiter is what wakes the	;011
+; job up.   We have to base the delimiter on the current private 	;011
+; delimiter mask (which could change before the next read), but it's	;011
+; all we've got.  Also, that is the way it has worked in pre-V10.0.	;011
+;-
+.ENABL	LSB
+
+STOREY::CMP	TTINEC+BC(R1),#-2. ;;LOTS OF BUFFERS IN USE ?
+	BLE	30$		;;YES, SO DON'T LET STORE PASS
+	CALLX	STORE,R5,TTINEC+FP ;;STORE CHARACTER IN ECHO CHAIN
+	BCS	30$		;;IF FAILED EXIT RINGING BELL
+	CALLX	TTMODS		;;In special mode? (Binary, Teco, DDT)	;024
+	BNE	20$		;;Yes, so wake up this job		;024
+	BITB	#PREAD,TTRFLG(R1) ;;Is a read pending?			;028
+	BNE	50$		;;Yes, so just return			;028
+	CALLX	CHKDLM		;;Is the character a private delimiter?	;011
+	BCS	20$		;;Yes, make the job runnable		;011
+	BIT	#TTBIN,TTMODE(R1);;In binary mode?			;024
+	BNE	50$		;;Yes, get out (C=0 from above)		;024
+	TSTB	R2		;;Null character?			;011
+	BEQ	50$		;;Yes, ignore it (C=0 from TST)		;011
+	CMPB	R2,#015		;;Is character a carriage return?	;011
+	BEQ	20$		;;Yes, then make the job runnable	;011
+	CMPB	R2,#033		;;Is character an escape?		;032
+	BNE	5$		;;Not this time				;032
+	CALLX	CHKESC,R5	;;Esc sequences allowed right now?	;032
+	 BNE	20$		;;No, then wake the job now		;032
+	MOVB	#200,TTESCT(R1)	;;Yes, then set starting cell value	;032
+	BR	25$		;;And don't wake the job		;032
+	
+5$:	TSTB	TTESCT(R1)	;;Processing esc seq in type ahead buf?	;032
+	BEQ	7$		;;Not this time				;032
+	CALLX	ESCPRC,R5,TTESCT ;;Yes, see if this is the end		;032
+	 BR	25$		;;Not the end, don't wake up job	;032
+	BR	20$		;;Just saw the end, wake up job		;032
+
+7$:	MOV	#TTDLIM,R4	;;Get address of delimiter list		;032
+10$:	CMPB	R2,(R4)+	;;Delimiter?				;011
+	BLO	10$		;;No, keep looping (BLO=BCS)		;011
+	BHI	50$		;;No, not in list (C=0 from above)	;011
+20$:	CALLR	TTIJSB		;;Yes, then make user runnable		;011
+				;; C=0 from clear in TTIJSB		;011
+
+25$:	CLC			;;Exit with C=0				;032
+	RETURN			;;Get out				;032
+
+GLOBAL	<TTDLIM>							;011
+
+.SBTTL	STOREX	Store the character in the input buffer
+;+
+; STOREX - STORE INCOMING CHARACTER.
+;
+;	R0 =  KEYBOARD NUMBER TIMES 2
+;	R1 -> DDB
+;	R2 =  CHARACTER
+;
+;	...
+;
+;	R3 =  Undefined
+;	R4 =  Undefined
+;	R5 =  Undefined
+;       
+;	C = 0 if store succeeded
+;	C = 1 if store failed, bell is rung
+;-
+
+STOREX:	CALLX	STRCHR		;;Attempt to store the character	
+	BCC	50$		;;Success, exit smiling			
+30$:	TST	APTAP5		;;APT loaded				;003
+	BMI	40$		;;No, nothing to do for APT		;003
+	BIT	#DDAPT,(R1)	;;Owned by APT?				;003
+	BEQ	40$		;;No, normal processing			;003
+	CALLM	HSBUFO,APTAP5	;;Yes, call APT to shut off input	;003
+	BCC	40$		;;Feature was not enabled		;003
+	JMP	TTIJSB		;;Enabled, then go wake up the job	;003
+
+40$:	CALLX	OUTCHR,R5,<007>	;;Ring the bell to indicate failure	;013
+	SEC			;;Indicate failure
+50$:	RETURN			;;Exit
+
+.DSABL	LSB
+        
+GLOBAL	<APTAP5,HSBUFO>							;003
+
+.SBTTL	TI$CA	Handle Control/A (toggle insert/overstrike) on input
+;+      
+; TI$CA - Control/A on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+        
+TI$CA:	CALL	LINEDT,PC,TOGMOD ;;Toggle mode if line editing allowed
+	;RETURN			;;LINEDT does not return
+
+.DSABL	LSB
+
+GLOBAL	<TOGMOD>
+
+.SBTTL	TI$CB	Handle Control/B (recall previous line) on input
+;+      
+; TI$CB - Control/B on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TI$CB:	CALL	CMDREC,PC,EDTUP ;;Recall previous if command recall allowed
+	;RETURN			;;CMDREC does not return
+
+.DSABL	LSB
+
+GLOBAL	<EDTUP>
+
+.SBTTL	TI$CC	Handle Control/C on input
+;+
+; TI$CC - Handle Control/C on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TI$CC:	BITB	#TTCTRC,TTCTRL(R1) ;;Is Control/C a delimiter?		
+	BEQ	10$		;;No, not this time
+	CALL	TTISJS		;;Yes, store as a delimiter
+	TST	(PC)+		;;And indicate we processed it
+10$:	 SEC			;;Indicate character not processed
+	RETURN			;;And we're done
+
+.DSABL	LSB
+
+.SBTTL	TI$CE	Handle Control/E (go to end of line or answerback) on input
+;+
+; TI$CE - Control/E on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-      
+.ENABL	LSB
+
+TI$CE:	TSTB	DDJBNO(R1)	;;DOES SOMEBODY OWN THIS LINE		;002
+	BNE	10$		;;YES, do line editing			;002
+	BIT	#TTANSB,TTCAPB(R1) ;;Process an answerback request?	;002
+	BEQ	10$		;; NO					;002
+	TST	ANSMSG		;;Was there a message sent		;002
+	BEQ	10$		;;No, so just giveup			;002
+	CALL	TTISJS		;;Yes, store as a delimiter		;002
+	BCS	5$		;;Character could not be stored, get out;012
+	MOVB	#5,TTPDLM(R1)	;;Make ^E a delimiter			;002
+	BISB	#1,TTDLMC(R1)	;;And recognize it.  Note that TTISJS	;012
+				;;sets this, but NEWJOB clears it!	;012
+5$:	RETURN			;;And we're done			;012
+
+10$:	CALL	LINEDT,PC,EDTEOL ;;Go to end of line if line-editing
+	;RETURN			;;LINEDT does not return
+
+.DSABL	LSB
+
+GLOBAL	<EDTEOL,ANSMSG>
+
+.SBTTL	TI$CF	Handle Control/F (edit pointer right) on input
+;+
+; TI$CF - Control/F on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+        
+TI$CF:	CALL	LINEDT,PC,EDTRT	;;Go to right if line editing
+	;RETURN			;;LINEDT does not return
+
+.DSABL	LSB
+
+GLOBAL	<EDTRT>
+
+.SBTTL	TI$CG	Handle Control/G on input
+;+      
+; TI$CG - CTRL/G on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+        
+TI$CG:	BIT	#TTECTL,TTMODE(R1) ;;Echo control mode?
+	BNE	20$		;;Yes, set to ignore this character
+	BIT	#TTTECO,TTMODE(R1) ;;Teco mode?
+	BEQ	5$		;;No, nothing special to do		;030
+	CALL	TTIJSB		;;Yes, make the user runnable		;030
+5$:	SEC			;;Finish regular processing anyway	;030
+	RETURN			;;And exit
+
+.SBTTL	TI$CH	Handle Control/H (beginning of line) on input
+;+
+; TI$CH - Control/H on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+
+TI$CH:	CALLX	EDTOK		;;Is line editing allowed?		;007
+	BCS	10$		;;No, check local echo			;007
+	CALLX	EDTBOL		;;Yes, go to the beginning of the line
+	CLC			;;Indicate character was processed
+	RETURN			;;And exit
+
+10$:	BIT	#LCLCPY,TTCAPB(R1) ;;Are we using local echo?
+	BEQ	20$		;;No, no backspace correction now
+	CALLX	TTCKBS		;;Yes, fix our positioning
+20$:	JMP	TI$CON		;;And process like a control character
+
+.DSABL	LSB
+
+.SBTTL	TI$CI	Handle Control/I (tab character) on input
+;+      
+; TI$CI - Control/I (TAB) on input.
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+        
+TI$CI:	BIT	#LCLCPY,TTCAPB(R1) ;;Special terminal?
+	BEQ	10$		;;No, so normal
+	CALLX	TABSET,R5,CORPOS ;;Goto next tab stop
+	  NOP			;;Save <TAB> on completion
+10$:	CALL	TI$CON		;;See if we are in echo control mode	;017
+	BCC	40$		;;Yes, then we just rang a bell		;017
+	CALLX	TTISGL		;;In any special modes? (TTDDT, TECO)	;018
+	SEC			;;Assume we are				;018
+	BNE	40$		;;Yes, indicate character not processed	;018
+
+	; We handle things very differently if we are at the end of the
+	; line versus if we are in the middle.  The following ends up
+	; clearing the line twice (once in DELEOL and again in RETCUR).
+	; This is probably overkill, be we need to wipe out any characters
+	; on the line before we print the tab, which means the DELEOL call
+	; in RETCUR is not really needed.  If it weren't for the fact that
+	; RETCUR has everything ELSE that we want, I'd probably emulate it
+	; here.
+
+	CALL	STOREX		;;No, then store the character		;017
+	BCS	40$		;;Character dropped, get out		;017
+	BIT	#TAPE!NOECHO,DDFLAG(R1) ;;Are we echoing?		;018
+	BNE	40$		;;No, then exit with C=0		;018
+	CMP	TTINPT+FP(R1),TTIPTR(R1) ;;Are we at end of command? 	;017
+	BEQ	20$		;;Yes, so just store it and display it	;017
+	CALLX	DELEOL		;;Now delete to the end of the line	;017
+	CALLX	OUTCHR,R5,<'I-100> ;;Print TAB (R2 destroyed by DELEOL) ;017
+	CALLX	RETCUR		;;Retype the rest of the line		;017
+	BR	30$		;;And get out				;017
+
+20$:	CALLX	OUTRM		;;Output the tab, and print CRLF if at 	;017
+				;; right margin				;017
+30$:	CLC			;;Indicate character processed
+40$:	RETURN			;;All done here
+
+GLOBAL	<CORPOS>
+
+.DSABL	LSB
+
+.SBTTL	TI$CJ	Handle Control/J (line feed character) on input
+;+      
+; TI$CJ - Control/J (LINE FEED) on input.
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+        
+TI$CJ:	CALLX	EDTOK		;;Are we doing line editing?		;007
+	BCS	5$		;;No, it's a delimiter then		;007
+	CALLX	EDTDW		;;Yes, then delete a word		;007
+	BR	30$		;;Indicate character processed		;007
+
+5$:	CALL	TTISJS		;;Store the <LF> character
+	BCS	40$		;;No room, forget about this
+	BIT	#TTTECO!TTECTL,TTMODE(R1) ;;Using TECO or echo control mode?
+	BNE	10$		;;Yes, don't echo the <CR>
+	CALLX	ASCOUE,R5,<CR>	;;No, echo the <CR>
+10$:	BIT	#LCLCPY,TTCAPB(R1) ;;In local copy mode?
+	BNE	30$		;;Yes, don't echo the <LF> at all
+	BIT	#TTRSX2!TTRSX1,DDFLAG(R1) ;;In any RSX mode?
+	BEQ	20$		;;No, not this time
+	BIS	#TTRSX2!TTRSX1,DDFLAG(R1) ;;Yes, note that an <LF> is needed
+	BR	30$		;;And get out
+
+20$:	CALLX	ASCOUF,R5,<LF>	;;Echo the <LF> now
+30$:	CLC			;;Indicate we processed the character
+40$:	RETURN			;;All done
+
+GLOBAL	<LF>
+
+.DSABL	LSB
+
+.SBTTL	TI$CD	Handle Control/D (edit pointer left) on input
+;+
+; TI$CD - Control/D on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-      
+.ENABL	LSB
+
+TI$CD:	CALLX	EDTOK		;;Line editing allowed?			;007
+	BCS	EKODLM		;;No, echo as a delimiter if allowed	;007
+	CALLX	EDTLFT		;;Yes, go to the left			
+	CLC			;;Indicate character processed		;007
+	RETURN			;;And exit
+
+.DSABL	LSB
+
+.SBTTL	TI$CL	Handle Control/L (form feed character) on input
+;+      
+; TI$CL - Control/L (FORM FEED) on input.
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TI$CL:	.BR	EKODLM		;;Echo delimiter based on echo control
+
+.DSABL	LSB
+
+
+.SBTTL	EKODLM	Store and echo the delimiter
+;+
+; EKODLM - Store and echo the delimiter
+;
+;	R1 -> DDB
+;	R2 = character (a delimiter)
+;
+;	CALL	EKODLM
+;
+;	R1 unchanged
+;	R2 unchanged
+;	C = 0 to indicate successfully stored/process character
+;-
+.ENABL	LSB
+
+EKODLM:	CALL	TTISJS		;;First, store the delimiter
+	BCS	10$		;;No room, forget it
+	BIT	#TTECTL,TTMODE(R1) ;;Terminal open for echo control?
+	BNE	10$		;;Yes, so no echoing of delimiters
+	CALL	TTINER		;;No, echo the delimiter now
+10$:	CLC			;;Indicate we processed the character
+	RETURN			;;All done now
+
+.DSABL	LSB
+
+.SBTTL	TI$CM	Handle Control/M (carriage return character) on input
+;+
+; TI$CM - Control/M (Carriate return) on input.
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TI$CM:	MOV	TTINPT+FP(R1),TTIPTR(R1) ;;Set to store at line end	
+	CALL	STOREX		;;And store the carriage return
+	BIT	#LCLCPY,TTCAPB(R1) ;;Did the terminal echo it itself?
+	BEQ	10$		;;No
+	MOVB	DDHORC(R1),DDHORZ(R1) ;;Yes, so correct the position
+10$:	BCS	40$		;;Character dropped, forget processing
+	BIT	#TAPE,DDFLAG(R1) ;;Tape mode?
+	BNE	40$		;;Yes, just a <CR> will do
+	MOV	#012,R2		;;Set up to store the <LF> as well
+	CALL	TTISJS		;;And store it as a delimiter
+	BCC	20$		;;Worked, good
+	CALLX	TTGET		;;Failed, remove the <CR> we stored
+	BR	40$		;;And exit
+
+20$:	CALLX	ASCOUF,R5,CR	;;Echo the carriage return
+	BIT	#TTRSX2!TTRSX1,DDFLAG(R1) ;;In any RSX mode?
+	BNE	30$		;;Yep, so don't echo a <LF>
+	CALLX	ASCOUF,R5,LF	;;Echo the <LF>
+	BR	40$		;;Now go exit
+
+30$:	BIS	#TTRSX2!TTRSX1,DDFLAG(R1) ;;Set RSX mode of needing <LF>
+40$:	CLC			;;Indicate character was processed
+	RETURN			;;Now exit
+
+.DSABL	LSB
+
+GLOBAL	<LF>
+
+.SBTTL	TI$CN	Handle Control/N (go to next line) on input
+;+
+; TI$CN - Control/N on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TI$CN:	CALL	CMDREC,PC,EDTDWN ;;Recall next if command recall allowed
+	;RETURN			;;CMDREC does not return
+
+.DSABL	LSB
+
+GLOBAL	<EDTDWN>
+
+.SBTTL	TI$CR	Handle Control/R (retype all input) on input
+;+
+; TI$CR - Control/R on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TI$CR:	BIT	#TTECTL,TTMODE(R1) ;;In Echo Control Mode?		;001
+	BEQ	5$		;;No, do special processing		;001
+	JMP	TI$CON		;;  else, normal character processing	;001
+
+5$:	CALLX	TTISGL		;;Using TECO or DDT mode?
+	BNE	40$		;;Yes, make this a normal character
+	BITB	#TTCTRR,TTCTRL(R1) ;;Allowing retype function?
+	BEQ	40$		;;Nope, make a normal character		
+	BIT	#TAPE!NOECHO,DDFLAG(R1) ;;Should we ignore this?	
+	BNE	30$		;;Yes, just exit			
+	BIT	#TTSCOP,TTCHAR(R1) ;;Is terminal scope?			;007
+	BEQ	10$		;;No, do display as ^R			;007
+	BIT	#TTANSI,TTCAPB(R1) ;;Support ANSI escape sequences? 	;007
+	BEQ	10$		;;No, do display as ^R			;007
+	MOV	TTIPTR(R1),-(SP) ;;Yes, save position
+	CALLX	EDTBOL		;;Go to beginning of line
+	CALL	LINEUP		;;Make sure command lines up right	;016
+	MOV	(SP)+,TTIPTR(R1) ;;Restore editing pointer		;016
+	MOV	TTINPT+EP(R1),R5 ;;Redisplay from beginning of command	;016
+	CALLX	RETCU1		;;And retype the line as it now is	;013
+	BR	30$		;;And join up
+
+10$:	CALLX	ASCOUE,R5,TTICRC ;; Announce with "^R"<CR><LF>
+	MOV	TTINPT+EP(R1),R5 ;; Get the current empty pointer
+	CALLX	RETYPE		;;Retype the input buffer		
+30$:	TST	(PC)+		;;Indicate character was processed
+40$:	 SEC			;;Indicate character wasn't processed
+	RETURN			;;And exit				
+
+.DSABL	LSB
+
+.SBTTL	TI$CU	Handle Control/U (delete to deginning of line) on input
+;+
+; TI$CU - Control/U on input
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TI$CU:	TSTB	TTESCC(R1)	;;Are we in an escape sequence?
+	BNE	100$		;;Yes, ignore the Control/U
+	BIT	#TTTECO!TTTECS,TTMODE(R1) ;;Using teco or teco scope mode?
+	BNE	110$		;;Yes, so make ^U a delimiter
+	BIT	#TTDDT,DDFLAG(R1) ;;How about DDB submode?
+	BNE	110$		;;Yes, make that a delimiter
+	BIT	#TTECTL,TTMODE(R1) ;;Terminal open for echo control?
+	BEQ	20$		;;No, normal control/u's
+10$:	MOV	EKOCTW(R1),-(SP) ;;Save current field descriptor
+	CALL	TI$RUB		;; And do a rubout
+	CMP	EKOCTW(R1),(SP)+ ;;Did we delete anything?
+	BNE	10$		;;Yes, so loop for more
+	BR	100$		;;No, get out
+
+20$:	BIT	#TTSCOP,TTCHAR(R1) ;;Is terminal scope?			;007
+	BEQ	90$		;;No, do display as ^U			;007
+	BIT	#TTANSI,TTCAPB(R1) ;;Support ANSI escape sequences? 	;007
+	BEQ	90$		;;No, do display as ^U			;007
+	CMP	TTINPT+EP(R1),TTINPT+FP(R1) ;;Yes, is there a line here?
+	BEQ	100$		;;No, simply get out
+	CMPB	DDHORC(R1),DDHORZ(R1) ;;At left margin?			;020
+	BNE	25$		;;No, no special case			;020
+	CMP	TTINPT+FP(R1),TTIPTR(R1) ;;Are we at the end of line? 	;020
+	BNE	100$		;;No, ignore the CTRL/U!		;020
+	CALLX	TTGET		;;Yes, remove the previous character	;020
+	CALL	LMARG		;;And wrap back to previous line	;020
+25$:	MOV	TTIPTR(R1),-(SP) ;;Save current input pointer		;020
+	CALLX	EDTBOL		;;Go to the beginning of the line
+	MOV	TTIPTR(R1),R2	;;Get beginning of current line
+	MOV	(SP)+,R4	;;Get source of text to move
+30$:	CMP	R4,TTINPT+FP(R1) ;;Reached the buffer chain end?
+	BEQ	60$		;;Yes, go set the new end
+	BIT	#40-1,R4	;;No, end of the source buffer?
+	BNE	40$		;;No, pointer is OK
+	MOV	-40(R4),R4	;;Yes, get the pointer to the next buffer
+40$:	BIT	#40-1,R2	;;Time to update destination pointer?
+	BNE	50$		;;No, not this time
+	MOV	-40(R2),R2	;;Yes, update the pointer
+50$:	MOVB	(R4)+,(R2)+	;;Move a character
+	BR	30$		;;And loop
+
+; At this point, we must reclaim any buffer space at the end of the chain
+; and update the end-of-buffer pointer
+;
+; R2 -> Just past last character moved
+; R4 -> Just past last character in buffer chain
+
+60$:	MOV	R2,TTINPT+FP(R1) ;;Update the end pointer
+	DEC	R2		;;Ensure pointer is in buffer
+	BIC	#40-1,R2	;;Point to start of buffer
+	MOV	(R2),R4		;;Get pointer to next buffer
+	BEQ	80$		;;All done, that's easy
+	CLR	(R2)		;;Clear out the link to next
+70$:	TST	-(R4)		;;Skip past link to previous
+	MOV	-(R4),R2  	;;Get link to next
+	BUFFER	RETSML		;;Now return this buffer
+	INC	TTINPT+BC(R1)	;;Credit input buffer count		;006
+	MOV	R2,R4		;;Copy buffer pointer
+	BNE	70$		;;And loop if there is one
+80$:	CALLX	RETCUR		;;Re-type the line as it is now		;013
+	BR	100$		;;And get out
+
+90$:	CALLX	TTGET		;;Get most recent character
+	BCC	90$		;; Until we can't remove anything
+	CALLX	ASCOUF,R5,TTICUC ;;Now echo <^U,CR,LF>
+100$:	CLC			;;Indicate we processed it
+	RETURN			;;And exit
+
+110$:	JMP	EKODLM		;;Make this a delimiter
+
+.DSABL	LSB
+
+.SBTTL	TI$CZ	Handle Control/Z on input
+;+
+; TI$CZ - Control/Z on input.
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TI$CZ:	BIT	#TTECTL!TTTECO,TTMODE(R1) ;;Echo control or teco mode?
+	BNE	20$		;;Yes, treat CTRL/Z as delimiter
+	BIT	#TTDDT,DDFLAG(R1) ;;No, how about DDT mode?
+	BNE	20$		;;Yes, handle it special
+	CALL	TTISJS		;;No, try to store this delimiter
+	BCS	10$		;;Failed, forget processing
+	CALL	ASCOUE,R5,TTICZC ;;Worked, echo <^Z><CR><LF>
+10$:	CLC			;;Indicate character processed
+	RETURN			;;And get out
+
+20$:	JMP	EKODLM		;;Echo this delimiter if allowed
+        
+.DSABL	LSB
+
+GLOBAL	<TTICZC>
+
+.SBTTL	TI$RUB	Delete previous character
+;+
+; TI$RUB - Delete previous character
+;
+;	R0 =  unit # * 2
+;	R1 -> DDB
+; 	R2 =  character (DELETE=177)
+;	R3 =  ??
+;	R4 =  ??
+;	R5 =  scratch
+;
+;	CALL	TI$RUB (dispatched through TTIDSP table)
+;
+; 	C=0 to indicate character processed
+;	  R0 =  unit # * 2
+;	  R1 -> DDB
+;	  R2 =  random
+;	  R3-5  unknown
+;-
+.ENABL	LSB
+
+TI$RUB::BIT	#TAPE,DDFLAG(R1) ;;Tape mode?				;015
+	BNE	110$		;;Yes, ignore rubout
+	TSTB	TTESCC(R1)	;;Into an escape sequence?
+	BNE	110$		;;Yes, ignore a rubout
+	BIT	#TTDDT,DDFLAG(R1) ;;Using DDT mode?
+	BNE	90$		;;Yes, go store this character
+	BIT	#NOECHO,DDFLAG(R1) ;;Super secret confidential material?
+	BNE	40$		;;Yep, handle special
+	CMPB	DDHORC(R1),DDHORZ(R1) ;;At left margin?			;005
+	BNE	5$		;;No, no special case			;005
+	CMP	TTINPT+FP(R1),TTIPTR(R1) ;;Are we at the end of line? 	;005
+	BNE	110$		;;No, ignore the delete!		;005
+5$:	CALLX	TTGET		;;Remove the previous character 
+	BCS	80$		;;Nothing to remove, process that
+	BITB	#TTTECS!TTTECO,TTMODE(R1) ;;TECO or TECO scope mode(s)?
+	BGT	60$		;;Normal TECO, echo deleted character
+.ASSUME	TTTECO	LT	TTTECS
+.ASSUME	TTTECS	EQ	200
+	BIT	#TTSCOP,TTCHAR(R1) ;;Hardcopy terminal?
+	BEQ	50$		;;Yes, handle as such
+
+; The following is the handler for scope rubouts
+
+	MOV	#1,R5		;;Assume character size 1 (normal char)	;027
+	CMP	R2,#40		;;Is character a control character?	;027
+	BHIS	20$		;;No, so delete it the normal way	;027
+	TSTB	TTMODE(R1)	;;TECO scope (aka special rubout) mode? ;027
+	BMI	70$		;;Yes, let TECO handle the 'echo'
+.ASSUME	TTTECS	EQ	200
+	CALLX	CHRSIZ		;;Get size of the character		;013
+	BEQ	110$		;;Size is 0 (like ^G), nothing to do	;013
+
+	; The following code is performed R5 times (returned from CHRSIZ)
+
+20$:	CALL	LMARG		;;Do special stuff if at left margin	;005
+	BCC	30$		;;We were there, all done		;005
+	CALLX	OUTCHR,R5,<'H-100> ;;Output a backspace
+	MOVB	EKOPNT(R1),R2	;;Get <PAINT> from DDB
+	BIC	#^C<177>,R2	;; And trim off field active flag
+	CALLX	CHOUTE		;;Now output <PAINT> character
+	CALLX	OUTCHR,R5,<'H-100> ;;Output a backspace
+30$:	SOB	R5,20$		;;Loop for size of character		;012
+
+	CMP	TTINPT+FP(R1),TTIPTR(R1) ;;Are we at the end of the line? 
+	BEQ	110$		;;Yes, that's easy
+	CALLX	RETCUR		;;No, redisplay the end of the line	;013
+	BR	110$		;;All done 
+
+; The following is the handler for NOECHO rubouts
+
+40$:	BIT	#TTTECO!TTTECS,TTMODE(R1) ;Noecho mode, using TECO?
+	BNE	90$		;;Yes, store the rubout for TECO
+	CALLX	TTGET		;;No, remove the character
+	BR	110$		;;And exit
+
+; The following is the handler for hardcopy rubouts
+
+50$:	BIT	#RUBOUT,DDFLAG(R1) ;;Hardcopy terminal, in rubout mode?
+	BNE	60$		;;Yes, we don't need to start it up now
+	BIS	#RUBOUT,DDFLAG(R1) ;;No, set the flag putting us into it
+	CALLX	ASCOUE,R5,TTBACK ;; and announce it with a <\>
+60$:	CALLX	CHOUTE		;;Echo the deleted character
+	BR	110$		;;And get out
+
+70$:	CALL	STOREX		;;TECO scope mode, restore deleted character
+80$:	BIT	#TTTECO!TTTECS,TTMODE(R1) ;Some kind of TECO mode?
+	BEQ	100$		;;No, check for ending hardcopy rubout
+90$:	MOV	#177,R2		;;Set up to store <177>
+	JMP	EKODLM		;;And exit treating it as a delimiter
+
+100$:	BIT	#TTSCOP,TTCHAR(R1) ;;Are we on a hardcopy terminal?
+	BNE	110$		;;No, so all set
+	BIT	#RUBOUT,DDFLAG(R1) ;;Yes, in rubout mode now?
+	BEQ	110$		;;No, all set
+	CALL	ENDRUB		;;Yes, end it now
+	CALLX	GOCRLF		;;And output a <CR><LF>
+110$:	CLC			;;Indicate success
+	RETURN			;;And exit
+
+.DSABL	LSB
+
+.SBTTL	ENDRUB	End rubout mode
+;+
+; ENDRUB - End rubout mode
+;
+; 	R1 -> DDB
+;
+; 	CALL	ENDRUB
+;
+;	R1 unchanged
+;
+; This routine is called to signal and mark the end of a hard copy rubout
+; sequence.
+;-  
+.ENABL	LSB
+
+ENDRUB:	BIC	#RUBOUT,DDFLAG(R1) ;;END THE RUBOUT MODE
+	CALL	ASCOUE,R5,TTBACK ;; AND SIGNAL IT WITH A <\>
+10$:	RETURN			;;NOW EXIT
+
+.DSABL	LSB
+
+.SBTTL	LINEUP	Make sure command lines up
+;+
+; LINEUP - Make sure command lines up
+;
+;	R1 -> DDB
+;
+;	CALL	LINEUP
+;
+;	DDHORZ = position of prompt (PMTPOS)
+;
+; This routine is called after a CTRL/R to line up the command under the 
+; original command.  
+;
+; This routine is also called only from RETCU2, the retype command routine 
+; which is called for one of these reasons:
+;
+;   o After a CTRL/T to redisplay the command line.
+;
+;   o After a broadcast to the terminal, to redisplay the command line after
+;     the broadcast has successfully completed.
+;-
+.ENABL	LSB
+
+LINEUP::MOV	R5,-(SP)	;;Save a register			;016
+10$:	CLR	R5		;;Now clear it				;016
+	BISB	DDHORZ(R1),R5	;;Get current horizontal position	;016
+	CLR	-(SP)		;;Clear a cell on the stack		;016
+	BISB	PMTPOS(R1),(SP)	;;And get prompt position 		;016
+	SUB	(SP)+,R5	;;Get difference between the two	;016
+	BEQ	30$		;;Zero, all done			;020
+	BGT	20$		;; >0, normal case			;020
+				;; <0, must have been a broadcast	;020
+	BIT	#TTECTL!TTCRLF,TTMODE(R1) ;;Echo ctl or supress crlf mode? ;020
+	BNE	30$		;;Yes, just get out			;020
+	CALLX	ASCOUT,R5,CRLF.0 ;;Display a CRLF 			;020
+	CMPB	DDHORZ(R1),DDHORC(R1) ;;Did CRLF make it to terminal?	;021
+	BEQ	10$		;;Yes, compute number spaces to output	;021
+	BR	30$		;;No, just get out			;021
+
+20$:	CALLX	OUTCHR,R5,40	;;Print a space				;016
+	SOB	R5,20$		;;Loop for the entire prompt		;016
+30$:	MOV	(SP)+,R5	;;Restore a register			;016
+	RETURN			;;All done				;016
+
+.DSABL	LSB
+
+GLOBAL	<CRLF.0>
+
+.SBTTL	LMARG	Move cursor around if at left margin
+;+
+; LMARG - Move cursor around if at left margin
+;
+;	R1 -> DDB
+;
+;	CALL	LMARG
+;
+;	C=0 if at left margin and we moved cursor,
+;	C=1 otherwise
+;
+; For scope terminals, hitting DELETE, CTRL/J, or CTRL/U when you are at the 
+; left margin of a multi-line input, the cursor is brought back to the end of
+; the previous line.
+;
+; If a terminal width is set to less than the hardware width, the cursor will
+; end up after the character when a character is displayed in the last column.
+; Otherwise, the cursor will sit on TOP of the character.  To accumodate both 
+; of these situations (and because it would be nearly impossible for us to 
+; know what the terminal width really is in relation to the setting), we get 
+; rid of that last character this way:
+; 
+; 	o Move the cursor up a line
+; 	o Move the cursor on top of the character to delete
+; 	o Print a space to erase that current 
+; 	o Print a CR (without a LF) to go back to left margin
+; 	o Move the cursor to the "terminal width" column
+; 
+; This algorithm works for all kinds of terminals, unless the terminal prints a
+; CRLF when a character (in this case a space) is displayed in the last column.
+;-
+.ENABL	LSB
+
+LMARG:	CMPB	DDHORZ(R1),DDHORC(R1) ;;At left margin?
+	BNE	10$		;;No, nothing to do
+	MOV	R5,-(SP)	;;Save R5				;013
+	CALLX	OUTCSI		;;Output an escape character
+	CALLX	OUTCHR,R5,<'A>	;;Output an A to go up one line
+	CLR	R5		;;Set up to get terminal width+1
+	BISB	DDHORC(R1),R5	;;Get terminal width+1
+	SUB	#2,R5		;;Make it the terminal width-1		;018
+	MOV	R5,-(SP)	;;Save terminal width-1			;018
+	CALLX	CURFWD		;;Move the cursor forward R5 positions	;018
+	CLRB	DDHORZ(R1)	;;Fake position of cursor 		;018
+				;;  (otherwise auto CRLF will occur)	;018
+	CALLX	OUTCHR,R5	;;Then output a space and a CR		;018
+	 .BYTE	40,15		;;  Space, Carriage return		;018
+	MOV	(SP)+,R5	;;Restore terminal width-1		;018
+	CALLX	CURFWD		;;Then go forward again.		;018
+	MOV	(SP)+,R5	;;Restore R5				;013
+	BICB	#ATEND,TTRFLG(R1) ;;Last char of cmd isn't at right marg;023
+	TST	(PC)+		;;Indicate we were at left margin, skip next
+10$:	 SEC			;;Indicate not at left margin
+	RETURN			;;All done
+
+.DSABL	LSB
+
+.SBTTL	LINEDT	Check for line editing allowed
+.SBTTL	CMDREC	Check for command recall allowed
+;+
+; LINEDT - Check for line editing allowed
+; CMDREC - Check for command recall allowed
+;
+;	R1 -> DDB
+;
+;	CALL	LINEDT,PC,<ROUTINE>
+;	CALL	CMDREC,PC,<ROUTINE>
+;   
+; If line editing (or command recall) is enabled, ROUTINE is called, and 
+; control is returned to our caller's caller with C clear. Otherwise, we pop 
+; our return address and make this a normal control character.
+; 
+; THIS ROUTINE NEVER RETURNS TO THE CALLER!  It either executes the ROUTINE and
+; returns to the callers caller, or executes TI$CON and returns to the caller's
+; caller.
+;
+;-
+.ENABL	LSB
+
+LINEDT:	CALLX	EDTOK		;;Line editing allowed?			;006
+	BR	10$		;;Join up
+
+CMDREC:	CALLX	RECOK		;;Command recall allowed?		;006
+10$:	BCS	20$		;;Not allowed, dump routine address
+	MOV	@(SP)+,-(SP)	;;Get routine address on stack
+	CALL	@(SP)+		;;Invoke editing or recall routine	;006
+	CLC			;;Indicate success
+	RETURN			;;And exit to callers caller!
+    
+20$:	TST	(SP)+		;;Dump return address
+	.BR	TI$CON		;;Make this a normal control character
+
+.DSABL	LSB
+
+.SBTTL	TI$CON	Process all control characters without special function
+;+
+; TI$CON - Process all control characters without special function
+;-
+.ENABL	LSB
+
+TI$CON:	BIT	#TTECTL,TTMODE(R1) ;;Using echo control mode?
+	BEQ	10$		;;No, make this a normal character
+	CALLX	OUTCHR,R5,<007>	;;Otherwise ring the bell
+	TST	(PC)+		;;Indicate we processed it
+10$:	 SEC			;;Indicate we didn't process character
+	RETURN			;;All done now
+
+.DSABL	LSB
+
+.SBTTL	TTISJS	Store a delimiter
+;+
+; TTISJS - STORE CHARACTER AND SET JOB STATUS (DELIMITER).
+;
+;	R2 =  Character
+;
+;	CALL	TTISJS
+;
+;	R4 =  Undefined
+;   
+;	C = 0 if character could be stored
+;	C = 1 if character could not be stored
+;-
+.ENABL	LSB
+
+TTISJS:	MOV	R2,-(SP)	;;Save the character
+	CALLX	EDTEOL		;;Go to the end of the line
+	MOV	(SP)+,R2	;;Restore the character
+	BICB	#ATEND,TTRFLG(R1) ;;No longer at end of input line	;016
+	CALL	STOREX		;;Store in the input buffer
+	BCS	10$		;;No room, drop the character
+	BISB	#1,TTDLMC(R1)	;;Indicate a delimiter was found	;012
+	MOV	#40*400,EKOCTW(R1) ;;DEACTIVATE ANY ECHO CONTROL FIELD
+.ASSUME	EKOPNT EQ EKOCTW+1
+	ASLB	TTFLG3(R1)	;;Set up to copy bit 15			;016
+.ASSUME	TTEMOD	EQ 200		;;					;007
+	MOVB	TCHAR2(R1),R3	;;Get terminal characteristic byte	;007
+	ASLB	R3		;;Set C bit if TTIEDT bit set		;007
+.ASSUME	TTIEDT	EQ 200		;;					;007
+	RORB	TTFLG3(R1)	;;Set TTEMOD if bit 15 set in TCHAR2	;016
+	MOVB	DDJBNO(R1),R3	;;GET JOB #				;007
+	BEQ	NEWJOB		;;IF JOB ISN'T DEFINED, DEFINE IT!	
+	.BR	TTIJSB		;;Make the job runnable and indicate goodness
+
+.SBTTL	TTIJSB	Clear clock and make user runnable
+;+
+; TTIJSB - Clear clock and make user runnable
+;
+;	R0 =  Unit # * 2
+;	R1 -> DDB
+;
+;	CALL	TTIJSB
+;
+;	C  =  0, required for .BR above, and also for STOREY routine.
+;	R4 =  Undefined
+;
+; User is made runnable, and timeout is cleared.
+;-
+
+TTIJSB::CALLX	IOFINI,R5,JS.KB	;;Make the user runnable
+	CLR	TIM.KB(R0)	;;Clear any timeouts (and C bit for .BR above)
+10$:	RETURN			;;And exit
+
+.DSABL	LSB
+
+.SBTTL	NEWJOB	Create a new job
+;+
+; NEWJOB - Create a new job
+;
+;	R0 =  Keyboard # * 2
+;	R1 -> DDB
+;
+;	CALL	NEWJOB
+;
+;	C = 0 always
+;
+; This routine attempts to create a new job. If it can't, it will inform
+; the user via an error message.  Other side effects are that CREJOB will
+; clear any delimiter masks, and recount all delimiters in the input
+; buffer.  This causes wierdness for unusual delimiters (like ^E).
+;-
+.ENABL	LSB
+
+NEWJOB::SPLC	5		;;Ensure that we are at PR5 (not interrupt)
+	CALLMI	CREJOB,KBDAP5	;;Try to create the new job
+	BCC	10$		;;Worked, good
+	CALLMI	CLRTIN,KBDAP5	;;Clear input/mode(s)
+	CALLX	ASCOUT,R5,EXCDED ;;And tell him we couldn't do it
+10$:	CLC			;;Indicate success
+	RETURN			;;And exit
+
+.DSABL	LSB
+
+.SBTTL	TI$ESC	Handle Escape, TI$ALT  Handle Alternate Modes (175, 176)
+;+
+; TI$ESC - Process the escape character
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TI$ESC:	CALLX	CHKESC,R5	;;Allowed incoming esc seq's?		;032
+	  BR	20$		;;Nope
+	MOVB	#200,R2		;;Signal start of esc seq
+	MOVB	R2,TTESCC(R1)	;;Set up starting escape seq flag	;005
+	CALL	STOREX		;;Store leading signal in input buffer
+	BCC	10$		;;Character tucked away			;005
+	CLRB	TTESCC(R1)	;;Character dropped, not in esc seq	;005
+	SEC			;;Indicate character not processed	;005
+10$:	RETURN			;;And we're done			;005
+
+;+
+; TI$ALT - Alternate altmodes (175,176).
+;-
+
+TI$ALT:	BIT	#TTESC,TTCHAR(R1) ;;Allowing 175,176 as escape?
+	BNE	40$		;;No, make them normal characters
+20$:	BIT	#LCLCPY,TTCAPB(R1) ;;Local copy?
+	BEQ	30$		;;No
+	CALLX	EDTEOL		;;Yes, go to the end of the line
+	CALLX	ASCOUE,R5,DOLLAR ;;And echo the dollar sign here
+30$:	MOV	#033,R2		;;Set up the escape character
+	JMP	EKODLM		;;Echo this delimiter if allowed
+
+40$:	SEC			;;Indicate that we didn't process character
+	RETURN			;;And get out
+
+.DSABL	LSB
+
+.SBTTL		Immediate input handlers
+;+
+; The immediate input handlers are used to process functions which must 
+; be done whenever a character is received, even if processing of those
+; characters is deferred.
+;-
+
+.SBTTL	TIN$CC	Immediate Input Handler for Control/C
+;+
+; TIN$CC - Immediate input handler for Control/C
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TIN$CC:	BIT	#TTECTL!TTFMS,TTMODE(R1) ;;Echo control or FMS mode?	
+	BNE	50$		;;Yes, process this later on		
+	BITB	#TTCTRC,TTCTRL(R1) ;;Is Control/C enabled now?		
+	BEQ	50$		;;No, make it a normal character	
+	CALLX	CHKDLM		;;Is Control/C the private delimiter?	
+	BCS	60$		;;Yes, process it later on		
+	BISB	#TTCCTP,DDFLAG(R1) ;;Mark that control/C was typed	
+	CALLX	TTWIPE		;;Clear output buff (before doing output) ;013
+	CALLX	EDTEOL		;;Go to the end of the line
+	CALLMI	CLRTTI,KBDAP5	;;CLEAR INPUT BUFFER
+	BIC	#RUBOUT!TTMSG!TTDFIL!NOECHO!TAPE!TTDDT!TTNBIN!TTLFRC,DDFLAG(R1)
+	BIS	#DDSTAT,(R1)	;;NO MODES AND PUT INTO NO OUTPUT MODE
+	CALLX	DOXON		;;ALWAYS DO AN "XON" ON CONTROL/C'S
+	CALLX	XONINP		;; AND ALWAYS ASK FOR MORE INPUT
+	CLR	TIM.KB(R0)	;;Clear any pending timeout		
+	BIT	#TTGARD,TTMODE(R1) ;;Guarded input mode?		
+	BNE	30$		;;Yes, don't mess with the job		
+	CALLX	IOFINI,R5,JSALL	;;TRY VERY HARD TO START JOB
+	MOV	JOBTBL(R4),R3	;;GET JOB DATA ADDRESS
+	BEQ	30$		;;IF NOT A JOB, FORGET ^C
+	TSTB	DDCNT(R1)	;;JUST ASSIGNED?
+	BEQ	30$		;;YES, DON'T ABORT JOB THEN
+	CLR	PMTPOS(R1)	;;Clear prompt position, if established	;025
+	BICB	#PREAD,TTRFLG(R1) ;;Read is no longer pending		;025
+	TST	(R3)+		;;POINT TO JDFLG IN JOB DATA
+	BIT	#JFCC,(R3)	;;ALREADY PENDING ON CONTROL/C?
+	BEQ	20$		;;NOPE
+10$:	BIS	#JF2CC,(R3)	;;IF SO, THEN NOTE WE HAVE 2 ^C 'S
+20$:	BIS	#JFCC!JFGO,(R3)	;;SET CONTROL/C AND FORCED GO
+	MOV	R0,-(SP)	;;Get one work register			
+	MOV	R1,-(SP)	;;And another one			
+	MOV	R4,R0		;;Copy job # * 2			
+	CALLX	MAPJCR	    	;;Map caller's JCR entry
+	BISB	#3,JCPRI(R1)	;;Set control/c run priority		
+	MOV	(SP)+,R1	;;Restore one work register		
+	MOV	(SP)+,R0	;;And another one			
+	MAP	TERAP6,APR=6,DATA ;;Restore mapping to terminal driver	
+30$:	CALLX	ASCLOG,R5,TTICCC ;;Type and log the <^C,CR,LF>		
+	TSTB	DDJBNO(R1)	;;TERMINAL OWNED?
+	BEQ	60$		;;No, dump the Control/C		
+	BIT	#TTGARD,TTMODE(R1) ;;GUARDED TERMINAL MODE?
+	BNE	40$		;;YEP
+	TSTB	DDCNT(R1)	;;JUST ASSIGNED?
+	BNE	60$		;;No, open as well, dump the character	
+40$:	MOV	#'C-100,R2	;;YEP, SET CHAR=3 (CTRL/C)
+50$:	SEC			;;Set to keep the character		
+60$:	RETURN			;;Now exit				
+
+GLOBAL	<JSALL,JOBTBL,TERAP6,TIM.KB,TTICCC>
+
+.DSABL	LSB
+
+.SBTTL	TIN$CE	Immediate input handler for Control/E (Send Answerback)
+;+
+; TIN$CE - Immediate input handler for Control/E (Send Answerback)
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TIN$CE:	TSTB	DDJBNO(R1)	;;DOES SOMEBODY OWN THIS LINE		;002
+	BNE	10$		;;YES, then no answerback		;002
+	BIT	#TTANSB,TTCAPB(R1) ;;Process an answerback request?	;002
+	BEQ	10$		;; NO					;002
+	TST	ANSMSG		;;Is there a message to send?		;002
+	BEQ	10$		;;No, so just giveup			;002
+	CALLX	ASCOU1,R5,ANSMSG ;;Announce with the answerback		;002
+10$:	SEC			;;Make sure we keep the character	;002
+	RETURN			;;all done with special stuff		;002
+
+.DSABL	LSB
+
+GLOBAL	<ANSMSG>							;002
+
+.SBTTL	TIN$CO	Immediate input handler for Control/O (cancel output)
+;+      
+; TIN$CO - Immediate input handler for Control/O (cancel output)
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TIN$CO:	BIT	#TTECTL!TTFMS,TTMODE(R1) ;;Echo control and/or FMS?	
+	BNE	30$		;;Yes, process this later		
+	ADD	#DDSTAT,(R1)	;;Toggle the ^O flag			
+.ASSUME	DDSTAT	EQ	100000
+	BPL	10$		;;User just reenabled output		
+	CALLX	TTWIPE		;;User just disabled output		
+10$:	CALLX	ASCOUE,R5,TTICOC ;;Echo the ^O				
+20$:	TST	(PC)+		;;Indicate we processed it		
+30$:	 SEC			;;Indicate to buffer it for later	
+	RETURN			;; And exit				
+
+.DSABL	LSB
+
+.SBTTL	TIN$CP	Immediate input handler for Control/P (debug system)
+;+
+; TIN$CP - Enter monitor ODT
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TIN$CP:	TST	R0		;;Are we on the console?		
+	BNE	10$		;;No, don't let them enter ODT		
+	CMPB	R2,ENTODT	;;Is ODT entry enabled?			
+	BNE	10$		;;No, forget it				
+	BPT			;;Yes, go enter ODT			
+	TST	(PC)+		;;Now indicate to dump the character	
+10$:	 SEC			;;Indicate that this is data		
+	RETURN			;;And exit				
+
+.DSABL	LSB
+
+GLOBAL	<ENTODT>
+
+.SBTTL	TIN$CQ	Immediate input handler for Control/Q (resume input)
+;+
+; TIN$CQ - Immediate input handler for Control/Q (resume input)
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TIN$CQ:	BIT	#TTSYNC,TTCHAR(R1) ;;Does this terminal support XON/XOFF? 
+	BEQ	TIN$XX		;;No, nothing special to do		
+	CALLX	DOXON		;;Yes, resume the input			
+TI$NUL:	TST	(PC)+		;;And set to dump the character		
+TIN$XX:	 SEC			;;Set to keep the character		
+	RETURN			;;Now exit				
+
+.DSABL	LSB
+
+.SBTTL	TIN$CS	Immediate input handler for Control/S (stop input)
+;+
+; TIN$CS - Immediate input handler for Control/S (stop input)
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TIN$CS:	BIT	#TTSYNC,TTCHAR(R1) ;;Does this terminal support XON/XOFF? 
+	BEQ	TIN$XX		;;No, nothing special to do		
+	CALLX	DOXOFF		;;Yes, resume the input			
+	CLC			;;Indicate goodness			
+	RETURN			;;Now exit				
+
+.DSABL	LSB
+
+.SBTTL	TIN$CT	Immediate input handler for Control/T (mini-systat)
+;+
+; TIN$CT - ^T Handler.
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-      
+.ENABL	LSB
+
+TIN$CT:	BIT	#TTECTL!TTFMS,TTMODE(R1) ;;Using echo control or FMS mode? 
+	BNE	TIN$XX		;;Yes, make this a normal character	
+	CALLX	TTISGL		;;Using DDT or TECO modes?		
+	BNE	TIN$XX		;;Yes, make this a normal character	
+	BITB	#TTCTRT,TTCTRL(R1) ;;Allowing control/T?		
+	BEQ	TIN$XX		;;No, make it a data character		
+	CALLX	CHKDLM		;;Is character the private delimiter?	
+	BCS	TIN$XX		;;Yes, process it later			
+	JMPX	TTSYS$ 		;;Give the mini-systat a try		
+
+.DSABL	LSB
+
+.SBTTL	TIN$CX	Immediate input handler for Control/X (delete type ahead)
+;+
+; TIN$CX  - ^X Handler.
+;
+; Inputs:
+;	R0 =  Unit # * 2 of the terminal
+;	R1 -> DDB
+;	R2 =  character
+;
+; Outputs:
+;	C=0 if the character was processed
+;	C=1 if the character was ignored
+;
+;-
+.ENABL	LSB
+
+TIN$CX:	BIT	#TTFMS!TTECTL,TTMODE(R1) ;;Using FMS or echo control mode? 
+	BNE	TIN$XX		;;Yes, make this a normal character	
+	BITB	#TTCTRX,TTCTRL(R1) ;:Allowing this function?		
+	BEQ	TIN$XX		;;No, make it a data character		
+	CALLX	TTISGL		;;Yes, but in a special mode?		
+	BNE	TIN$XX		;;Yes, make it a data character		
+	CALLX	CHKDLM		;;Is character a private delimiter?	
+	BCS	TIN$XX		;;Yes, process it later			
+	CALLMI	CLRTTI,KBDAP5	;;No, clear out input buffer		
+	CALLX	ASCOUE,R5,TTICXC ;;Announce with "^X"<CR><LF>		
+	CLC			;;Indicate success			
+	RETURN			;;And exit				
+
+.DSABL	LSB
+
+.SBTTL	Input character deferred processing dispatch table
+
+	.WORD	TI$ALT		;Code 175(8) - possible escape
+	.WORD	TI$ALT		;Code 176(8) - possible escape
+	.WORD	TI$RUB		;Rubout
+TTIDSP:	.WORD	TI$NUL		;Null
+	.WORD	TI$CA		;Control A - toggle insert/overstrike	
+	.WORD	TI$CB		;Control B - recall previous line	
+	.WORD	TI$CC		;CONTROL/C
+	.WORD	TI$CD		;Control D - edit pointer left		
+	.WORD	TI$CE		;Control E - go to end of line/answerback
+	.WORD	TI$CF		;Control F - edit pointer right		
+	.WORD	TI$CG		;CONTROL/G
+	.WORD	TI$CH		;Control/H - go to beginning of line	
+	.WORD	TI$CI		;TAB
+	.WORD	TI$CJ		;LINE FEED
+	.WORD	TI$CON		;CONTROL/K
+	.WORD	TI$CL		;FORM FEED
+	.WORD	TI$CM		;CARRIAGE RETURN
+	.WORD	TI$CN		;Control N - recall next line		
+	.WORD	TI$CON		;CONTROL/O				
+	.WORD	TI$CON		;CONTROL/P
+	.WORD	TI$CON		;CONTROL/Q
+	.WORD	TI$CR		;CONTROL/R
+	.WORD	TI$CON		;Control/S				
+	.WORD	TI$CON		;CONTROL/T
+	.WORD	TI$CU		;CONTROL/U
+	.WORD	TI$CON		;CONTROL/V
+	.WORD	TI$CON		;CONTROL/W
+	.WORD	TI$CON		;CONTROL/X				
+	.WORD	TI$CON		;CONTROL/Y
+	.WORD	TI$CZ		;CONTROL/Z
+	.WORD	TI$ESC		;ALTMODE (ESCAPE)
+	.WORD	TI$CON		;FS
+	.WORD	TI$CON		;US
+	.WORD	TI$CON		;GS
+	.WORD	TI$CON		;US
+
+.SBTTL	INPHND	Immediate input handler dispatch table
+
+INPHND:	.WORD	TIN$XX		;Null - nothing special to do
+	.WORD	TIN$XX		;Control A - Nothing special to do
+	.WORD	TIN$XX		;Control B - Nothing special to do
+	.WORD	TIN$CC		;Control C - Interrupt program
+	.WORD	TIN$XX		;Control D - Nothing special to do
+	.WORD	TIN$CE		;Control E - Send Answerback - Maybe	;002
+	.WORD	TIN$XX		;Control F - Nothing special to do
+	.WORD	TIN$XX		;Control G - Nothing special to do
+	.WORD	TIN$XX		;Control H - Nothing special to do
+	.WORD	TIN$XX		;Control I - Nothing special to do
+	.WORD	TIN$XX		;Control J - Nothing special to do
+	.WORD	TIN$XX		;Control K - Nothing special to do
+	.WORD	TIN$XX		;Control L - Nothing special to do
+	.WORD	TIN$XX		;Control M - Nothing special to do
+	.WORD	TIN$XX		;Control N - Nothing special to do
+	.WORD	TIN$CO		;Control O - Toggle output
+	.WORD	TIN$CP		;Control P - Enter ODT if debugging
+	.WORD	TIN$CQ		;Control Q - Resume stalled output
+	.WORD	TIN$XX		;Control R - Nothing special to do
+	.WORD	TIN$CS		;Control S - Stop input
+	.WORD	TIN$CT		;Control T - Give mini-systat
+	.WORD	TIN$XX		;Control U - Nothing special to do
+	.WORD	TIN$XX		;Control V - Nothing special to do
+	.WORD	TIN$XX		;Control W - Nothing special to do
+	.WORD	TIN$CX		;Control X - Cancel type-ahead
+
+INPMAX	=:	<<.-INPHND>-2>/2	;Maximum special-case handler
+
+.SBTTL	Output character strings
+
+TTICOC:	.ASCII	%^O%<15><12><200> ;Control-O announcement string
+
+TTICRC:	.ASCII	%^R%<15><12><200> ;Control-R announcement string
+
+TTICUC:	.ASCII	%^U%<15><12><200> ;Control-U announcement string
+
+TTICXC:	.ASCII	%^X%<15><12><200> ;Control-X announcement string
+
+CR:	.ASCIZ	<15>		;Carriage return string
+
+TTBACK:	.ASCIZ	%\%		;Rubout terminator string
+
+DOLLAR:	.ASCIZ	%$%		;Character for ESCAPE
+
+.ENABL	LC
+
+EXCDED:	.ASCII	<15><12>%?Logins are disabled - please try again later%
+	.ASCII	<15><12><200>
+
+.DSABL	LC
+
+.END
